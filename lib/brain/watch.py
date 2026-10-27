@@ -483,6 +483,10 @@ def watch_failures(inst, nodes, acknowledged, warnings):
         records += _m_host_observations.host_export_runs(inst)
     except (OSError, ValueError, TypeError):
         pass  # unknown host export never suppresses manual records or other source work
+    try:
+        records += _m_worker_failures.failure_notice_records(inst)
+    except (OSError, ValueError):
+        pass  # current failures still get ordinary notices if the inventory is damaged
     for n in nodes:
         rows = _m_jobs.read_jobs(n) or []
         workers = n['local'].get('workers', {})
@@ -496,7 +500,7 @@ def watch_failures(inst, nodes, acknowledged, warnings):
                 continue
             if not record.get('thread'):
                 continue
-            native = record.get('source') == 'native-host'
+            native = record.get('source') in ('native-host', 'recovery-receipt')
             if record.get('discovered') and native:
                 if not any(j['node'] == n['id'] and j['job_key'] == key
                            and j['project'] == record.get('project') and j['branch'] == record.get('branch')
@@ -513,13 +517,14 @@ def watch_failures(inst, nodes, acknowledged, warnings):
             error = str(record.get('error', '')).lower()
             capacity = 'at capacity' in error
             category = 'at capacity' if capacity else ('usage limit' if 'usage limit' in error else 'provider error')
-            if (native and inst.local_of('root').get('host_export') == 'on'
+            if (record.get('source') == 'native-host' and inst.local_of('root').get('host_export') == 'on'
                     and record.get('category') in _m_worker_failures.FAILURE_CATEGORIES[:-1]):
                 try:
-                    if not _m_worker_failures.failure_exhausted(inst, record):
-                        # Exact ownership gaps need attention, rather than suppressing forever.
-                        if _m_worker_failures.failure_owned(inst, record) is not None:
-                            continue
+                    receipt = _m_worker_failures.failure_receipt(inst, record)
+                    if receipt and (len(receipt['attempts']) == 3 or receipt['pending']):
+                        continue  # the origin receipt owns this durable escalation/unknown outcome
+                    if _m_worker_failures.failure_owned(inst, record) is not None:
+                        continue
                 except (OSError, ValueError):
                     pass  # damaged recovery state needs the ordinary actionable notice
             text = _m_nodes.import_text(f"{row['Job']}: worker run failed ({category})", _m_guard.never_terms(n))

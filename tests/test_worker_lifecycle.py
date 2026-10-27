@@ -356,6 +356,8 @@ class WorkerFailureCatch(Scenario):
         self.calls = []
         self.on_pending = lambda: None
         self.unknown = False
+        self.send_status = 'failed'
+        self.on_send = lambda: None
 
     def rpc(self, name, args):
         self.calls.append((name, dict(args)))
@@ -374,9 +376,14 @@ class WorkerFailureCatch(Scenario):
             self.on_pending()
             return {'requestIds': self.pending if args['threadId'] == 'worker' else []}
         if name == 't3_thread_send':
+            self.on_send()
+            run = 'continued-' + str(len(self.sends()))
+            self.thread.update(latestRunId=run, status=self.send_status,
+                               activeRunId=run if self.send_status == 'running' else None)
+            self.error_run = run
             if self.unknown:
                 raise self.m.HostRPCError('fixture unknown outcome')
-            return {'threadId': args['threadId'], 'runId': 'resumed-run', 'delivery': 'started'}
+            return {'threadId': args['threadId'], 'runId': run, 'delivery': 'started'}
         self.fail('unexpected native call ' + name)
 
     def advance(self, seconds):
@@ -424,6 +431,14 @@ class WorkerFailureCatch(Scenario):
         self.assertEqual(self.inbox().count('worker run failed'), 1)
         self.assertEqual({a['threadId'] for a in self.sends()}, {'worker'})
         self.assertEqual(len({a['clientRequestId'] for a in self.sends()}), 3)
+        self.assertEqual({a['mode'] for a in self.sends()}, {'steer'})
+        self.assertEqual({a['message'] for a in self.sends()}, {
+            'resume your task from your state note; the host failed your last turn on at capacity'})
+        receipts = list((self.root / '.brain/wake').glob('failure-*.json'))
+        self.assertEqual(len(receipts), 1)
+        receipt = json.loads(receipts[0].read_text())
+        self.assertEqual([a['run'] for a in receipt['attempts']], ['failed-run', 'continued-1', 'continued-2'])
+        self.assertEqual([a['continuation'] for a in receipt['attempts']], ['continued-1', 'continued-2', 'continued-3'])
         self.assertTrue(all(set(a) == {'threadId', 'mode', 'clientRequestId', 'message'} for a in self.sends()))
         self.assertEqual(self.m.read_jobs(self.n)[0]['Switches'], '')
         self.assertEqual(self.m.read_jobs(self.n)[0].get('Capacity retry', ''), '')
@@ -501,7 +516,8 @@ class WorkerFailureCatch(Scenario):
         self.assertEqual(len(self.sends()), 1)
         self.advance(180)
         self.tick()
-        self.assertEqual(len(self.sends()), 2)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(self.inbox().count('worker run failed'), 1)
 
     def test_discovery_catches_unbound_home_project_branch_and_resumes_same_thread(self):
         self.n['local']['workers'].clear()
@@ -573,7 +589,7 @@ class WorkerFailureCatch(Scenario):
         self.advance(60)
         record = self.m.host_export_runs(self.inst)[0]
         path = self.m.failure_receipt_path(self.inst, record)
-        with path.with_suffix('.lock').open('a+') as lock:
+        with self.m.failure_lock_path(self.inst, record).open('a+') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.m.resume_failure(self.inst, record, rpc=self.rpc)
         self.assertEqual(self.sends(), [])
@@ -595,9 +611,9 @@ class WorkerFailureCatch(Scenario):
                 mock.patch.object(self.m, 'wake_start'):
             self.m.cmd_machine(argparse.Namespace(action='sample'))
             self.advance(60)
-            os.utime(self.root / '.brain/host-observations.json', (0, 0))
             self.m.cmd_machine(argparse.Namespace(action='sample'))
         self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(sum(name == 't3_thread_list' for name, _ in self.calls), 4)
         self.assertNotIn('worker run failed', self.inbox())
 
     def test_sampler_opt_out_does_not_read_or_send(self):
@@ -606,4 +622,108 @@ class WorkerFailureCatch(Scenario):
         with mock.patch.object(self.m, 'host_native_call', side_effect=AssertionError('no host')):
             self.m.host_export_if_enabled(self.inst)
             self.m.resume_failures_if_enabled(self.inst, rpc=self.rpc)
+        self.assertEqual(self.calls, [])
+
+    def test_successful_continuation_stops_recovery_and_old_export_replays_nothing(self):
+        self.tick()
+        original = self.m.host_export_runs(self.inst)[0]
+        self.send_status = 'completed'
+        self.advance(60)
+        self.tick()
+        self.advance(2000)
+        self.tick()
+        self.m.resume_failure(self.inst, original, rpc=self.rpc)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertNotIn('worker run failed', self.inbox())
+
+    def test_third_claim_escalates_after_running_export_and_a_skipped_watcher(self):
+        import fcntl
+        self.tick()
+        for seconds in (60, 180, 600):
+            self.advance(seconds)
+            self.m.host_export(self.inst, rpc=self.rpc)
+            record = self.m.host_export_runs(self.inst)[0]
+            if seconds == 600:
+                self.send_status = 'running'
+            self.m.resume_failure(self.inst, record, rpc=self.rpc)
+        self.assertEqual(len(self.sends()), 3)
+        with (self.root / '.brain/lock').open('a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.m.watch_once(self.inst, quiet=True)
+        self.assertNotIn('worker run failed', self.inbox())
+        self.inst = self.m.Instance(self.root)  # a later sampler/process sees only running host state
+        self.m.host_export(self.inst, rpc=self.rpc)
+        self.assertEqual(self.m.host_export_runs(self.inst), [])
+        with mock.patch.object(self.m, 'wake_start'):
+            self.m.watch_once(self.inst, quiet=True)
+            self.m.watch_once(self.inst, quiet=True)
+        self.assertEqual(self.inbox().count('worker run failed'), 1)
+        self.assertEqual(len(list((self.root / '.brain/wake/root').glob('*.pending'))), 1)
+
+    def test_pending_rpc_run_change_is_seen_by_final_read(self):
+        self.tick()
+        self.advance(60)
+        record = self.m.host_export_runs(self.inst)[0]
+        def start_operator_run():
+            self.thread.update(latestRunId='operator-run', activeRunId='operator-run', status='running')
+        self.on_pending = start_operator_run
+        self.m.resume_failure(self.inst, record, rpc=self.rpc)
+        self.assertEqual(self.sends(), [])
+
+    def test_busy_instance_lock_skips_without_wait_and_send_holds_local_ownership(self):
+        import fcntl
+        self.tick()
+        self.advance(60)
+        record = self.m.host_export_runs(self.inst)[0]
+        owner = self.m._owners['resume_failure']
+        with (self.root / '.brain/lock').open('a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(owner._m_instance.time, 'sleep', side_effect=AssertionError('no blocking wait')):
+                self.m.resume_failure(self.inst, record, rpc=self.rpc)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.m.failure_receipt(self.inst, record)['attempts'], [])
+        def prove_writer_fence():
+            with (self.root / '.brain/lock').open('a+') as other:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.on_send = prove_writer_fence
+        self.m.resume_failure(self.inst, record, rpc=self.rpc)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertIsNone(owner._m_instance._LOCK['fh'])
+
+    def test_directory_sync_failure_after_claim_rename_sends_nothing_and_never_replays(self):
+        import stat
+        self.tick()
+        self.advance(60)
+        record = self.m.host_export_runs(self.inst)[0]
+        path = self.m.failure_receipt_path(self.inst, record)
+        real_sync = os.fsync
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode) and json.loads(path.read_text())['pending']:
+                raise OSError('fixture directory sync failure')
+            return real_sync(fd)
+        with mock.patch.object(os, 'fsync', side_effect=sync):
+            with self.assertRaises(OSError):
+                self.m.resume_failure(self.inst, record, rpc=self.rpc)
+        self.assertEqual(self.sends(), [])
+        self.assertTrue(json.loads(path.read_text())['pending'])
+        self.tick()
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(self.inbox().count('worker run failed'), 1)
+
+    def test_new_receipt_directory_sync_failure_precedes_all_host_calls(self):
+        import shutil
+        import stat
+        self.m.host_export(self.inst, rpc=self.rpc)
+        record = self.m.host_export_runs(self.inst)[0]
+        shutil.rmtree(self.root / '.brain/wake', ignore_errors=True)
+        self.calls.clear()
+        real_sync = os.fsync
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('fixture mkdir directory sync failure')
+            return real_sync(fd)
+        with mock.patch.object(os, 'fsync', side_effect=sync):
+            with self.assertRaises(OSError):
+                self.m.resume_failure(self.inst, record, rpc=self.rpc)
         self.assertEqual(self.calls, [])

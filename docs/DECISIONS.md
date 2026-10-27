@@ -2791,3 +2791,43 @@ enable it on a live instance. The existing 60-second launchd sampler needs no ne
 service or model watchdog turn. The coordinator then reduces the LLM watchdog's
 failure check to a fallback and restores its 20-minute interval. Fake-host checks
 qualify mechanics; they do not attest live provider recovery or transport latency.
+
+## D573: Check then steer recovery follows continuation runs and retains escalation
+
+The coordinator's 2026-10-27 decision supersedes D572's dispatch and receipt details.
+Recovery uses the existing host API and sends in `steer` mode after checking the
+exact failed latestRunId and failed status. The single screened message is:
+`resume your task from your state note; the host failed your last turn on <error>`.
+Here `<error>` is the exported category, so private host error excerpts stay private.
+The idempotency key and durable claim are keyed by thread plus failed run, with
+at most one send for that pair. No queue-only fallback or runtime/model change is
+introduced. A final read follows the pending-question check and nonblocking local
+writer-lock acquisition; the lock stays held through claim, dispatch and receipt
+publication. A local close or rebind cancels the pending action at its ownership
+checks. Busy instance or thread locks skip the step without waiting.
+
+The host has no atomic expected-run send predicate. The explicitly accepted
+residual read-to-send race has a worst case of one extra resume message to a run
+that just started. Check-then-steer does not claim to remove that race. An atomic
+host guard remains a follow-up, not a prerequisite for this narrow implementation.
+
+An episode retains its originating failed run and the continuation run returned
+by each send. A failed continuation inherits the next 180/600-second backoff,
+rather than starting another 60-second sequence; the episode allows at most three
+claimed sends. A completed continuation stops recovery. Unknown send outcomes or
+crashes before recording the continuation retain the claim and require an ordinary
+failure notice; they cannot authorize replay or a fresh episode on that thread/job.
+Receipt creation and replacement use the directory-synced persistence primitives.
+A directory-sync failure prevents dispatch even if the claim's rename is visible.
+
+The third claim itself persists the escalation obligation before dispatch. File-only
+watch reconciles that receipt into the idempotent inbox/coordinator wake path even
+if a later export is running/completed, the process restarts, or a busy lock skipped
+the prior watch pass. It uses the origin failure identity, preventing duplicate
+notices for the continuation run. Work errors still notify without a resume.
+
+The minute timer owns export cadence; an mtime freshness throttle could skip the
+next minute because the previous export finished after its tick began, so it is
+removed. The existing export lock still excludes concurrent publications. Explicit
+`wt add --thread` ownership is rechecked globally under the reacquired writer lock
+before binding, including changes in other nodes during released admission.

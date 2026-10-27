@@ -305,9 +305,8 @@ def host_export_if_enabled(inst):
     if inst.local_of('root').get('host_export') != 'on':
         return
     try:
-        path = inst.root / '.brain/host-observations.json'
-        if path.exists() and 0 <= time.time() - path.stat().st_mtime < 60:
-            return
+        # The minute timer owns cadence; an mtime throttle skips the next tick
+        # because the preceding export finished after that tick began.
         host_export(inst)
     except (Exception, SystemExit):
         print('host export unavailable; previous snapshot retained, host activity unknown')

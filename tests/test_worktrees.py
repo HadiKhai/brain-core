@@ -88,6 +88,29 @@ class Workbench(Scenario):
         self.assertIn('already belongs', result)
         self.assertNotIn('job/invalid', m.Instance(r).local_of('app')['worktrees'])
 
+    def test_wt_add_rechecks_global_thread_ownership_after_released_admission(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'app')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        m = core_loader.SourceFileLoader('wt_admission_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        def bind_elsewhere(*args, **kwargs):
+            fresh = m.Instance(r)
+            fresh.local_of('root')['coordinator'] = 'fixture-worker'
+            fresh.save_local()
+        owner = m._owners['cmd_wt_add']
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(owner._m_machine, 'machine_reasons', return_value=['fixture hold']), \
+                mock.patch.object(owner._m_machine, 'machine_run', return_value=contextlib.nullcontext(None)), \
+                mock.patch.object(owner._m_machine, 'machine_wait', side_effect=bind_elsewhere):
+            with m.brain_lock(inst), self.assertRaisesRegex(SystemExit, 'already belongs'):
+                m.cmd_wt_add(argparse.Namespace(id='app', branch='job/thread', base=None,
+                                                no_setup=True, task_id=None, thread='fixture-worker'))
+        fresh = m.Instance(r)
+        self.assertEqual(fresh.local_of('root')['coordinator'], 'fixture-worker')
+        self.assertEqual(fresh.local_of('app').get('workers', {}), {})
+
     def test_failed_setup_keeps_the_worktree_and_reports_failure(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "code" / "app")
