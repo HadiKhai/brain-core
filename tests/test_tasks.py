@@ -899,12 +899,12 @@ class Tasks(Scenario):
         self.add('MANUAL-1', title='Manual work')
         files = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
         plan = task_reconcile.reconcile(self.inst, [self.n])
-        self.assertEqual(len(plan[0]['changes']), 3)
+        self.assertEqual(len(plan[0]['changes']), 4)
         self.assertEqual(files, {p: p.read_bytes() for p in files})
         task_reconcile.reconcile(self.inst, [self.n], apply=True)
         self.assertTrue(all(p.exists() for p in files))
         rows = tasks.read_records(self.n)
-        self.assertEqual([rows[i]['status'] for i in ('OLD-1', 'OLD-2', 'OLD-3', 'OLD-4', 'MANUAL-1')], ['dropped'] * 3 + ['backlog'] * 2)
+        self.assertEqual([rows[i]['status'] for i in ('OLD-1', 'OLD-2', 'OLD-3', 'OLD-4', 'MANUAL-1')], ['dropped'] * 4 + ['backlog'])
         self.assertEqual(rows['OLD-1']['drop_decision'], 'private:D-task-counts-v1')
         req = tasks.read_records(self.n, 'requirements')['REQ-OLD-1']
         self.assertEqual(req['status'], 'dropped')
@@ -1171,3 +1171,35 @@ class Tasks(Scenario):
         self.assertIn(freshness.MANAGED_INDEX_MARKER, (self.root / 'index.md').read_text())
         snapshot.assert_called_once()
         self.assertEqual(result, {'root': view})
+
+    def test_backlog_decision_and_history_sections_are_not_work_sources(self):
+        from brain import task_reconcile, tasks_backfill
+        (self.root / 'backlog.md').write_text('# Backlog\n## Operator decisions\n- Policy observation\n## Historical queue\n- Historical notice\n## Build order\n- Actual export work\n```text\n- Example command\n```\n')
+        self.legacy_import('OLD-POLICY', origin='backlog.md', quote='- Policy observation')
+        self.legacy_import('OLD-HISTORY', origin='backlog.md', quote='- Historical notice')
+        self.assertEqual([r['title'] for r in tasks_backfill.candidates(self.inst, self.n)], ['Actual export work'])
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        self.assertEqual({r['status'] for r in tasks.read_records(self.n).values()}, {'dropped'})
+
+    def test_stopped_handback_does_not_make_an_unmerged_worktree_live(self):
+        from brain import jobs, task_reconcile, tasks_backfill
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('checkout', '-qb', 'job/example', cwd=self.root)
+        (self.root / 'engine.py').write_text('VALUE = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Undelivered engine', cwd=self.root)
+        self.n['local']['worktrees'] = {'job/example': {'path': str(self.root), 'start': base}}
+        job, row = self.legacy_job()
+        row['status'] = 'in-progress'
+        tasks.save_record(self.n, row)
+        path = jobs.handback_file(self.n, job)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'version': 3, 'job': job['Job'], 'started': job['Started'],
+                                   'state': 'blocked', 'summary': 'Preserved attempt stopped', 'lessons': 'none: fixture',
+                                   'at': self.inst.now(), 'ready': None, 'ready_reasons': []}))
+        self.assertEqual(task_reconcile.job_evidence(self.n, job)['state'], 'stopped')
+        self.assertEqual(tasks_backfill.candidates(self.inst, self.n), [])
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        self.assertEqual(tasks.read_records(self.n)['IMPORTED']['status'], 'parked')
+        self.assertFalse(jobs.read_jobs(self.n)[0]['Ended'])

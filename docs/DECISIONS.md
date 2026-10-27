@@ -2834,8 +2834,9 @@ clear and every strict assertion; production hourly coalescing is unchanged.
 ## D28003: Keep task migration limited to explicit work and retain reconciliation history
 
 Automatic migration imports backlog/build-order entries and open jobs with a matching,
-unmerged local Git worktree. Inbox messages and status history are observations rather
-than work sources. The explicit record reconciliation command defaults to a read-only
+unmerged local Git worktree without a stopped worker signal. Inbox messages, status history, and explicitly labelled decision/history sections
+are observations rather than work sources. Pending inbox requests stay in their
+original delivery lifecycle when their legacy task copies are dropped. The explicit record reconciliation command defaults to a read-only
 plan and retains every task, requirement, source line and ledger row. It records one
 private decision per node for dropped imports. Proven main delivery closes imported
 job tasks with their baseline, delivering commit and changed paths; incomplete proof

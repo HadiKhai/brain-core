@@ -16,6 +16,35 @@ def fingerprint(*parts):
     return hashlib.sha256('\0'.join(parts).encode()).hexdigest()[:16].upper()
 
 
+def nonwork_source_lines(n, filename='backlog.md'):
+    """Explicitly labelled decision/history sections and code examples are not work."""
+    path = n['dir'] / filename
+    if not path.exists():
+        return {}
+    if path.is_symlink() or not path.is_file():
+        raise ValueError('backfill source must be a regular node-local file')
+    excluded, depth, fence = {}, None, None
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        marker = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if marker:
+            if fence is None:
+                fence = marker[1]
+            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+            excluded[number] = line
+            continue
+        heading = re.match(r'^(#{1,6})\s+(.+)', line) if not fence else None
+        if heading:
+            level, title = len(heading[1]), heading[2].strip().casefold()
+            if depth is not None and level <= depth:
+                depth = None
+            if title.startswith('historical ') or title in ('operator decisions', 'decisions'):
+                depth = level
+        if fence or depth is not None:
+            excluded[number] = line
+    return excluded
+
+
 def candidates(inst, n):
     """Import explicit list entries, not narrative paragraphs or generated facts."""
     entries = []
@@ -26,8 +55,11 @@ def candidates(inst, n):
         if path.is_symlink() or not path.is_file():
             raise ValueError('backfill source must be a regular node-local file')
         section, generated = '', False
+        nonwork = nonwork_source_lines(n, filename)
         observed = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc).isoformat()
         for line_no, raw in enumerate(path.read_text().splitlines(), 1):
+            if line_no in nonwork:
+                continue
             if '<!-- brain:facts' in raw:
                 generated = True
             if generated:

@@ -54,6 +54,10 @@ def job_evidence(n, row):
                 # Head itself is a delivering main commit, including fast-forward landings.
                 return {**result, 'state': 'merged', 'merge_sha': head, 'code_paths': paths.stdout.splitlines()}
         if not row.get('Ended') and w.get('path') and tip:
+            signal = _m_jobs.job_signal(_m_instance.Instance(_m_tasks.instance_root(n)), n, row)
+            if signal:
+                return {**result, 'state': 'stopped', 'worker_state': signal['state'],
+                        'worker_at': signal.get('at'), 'worker_ref': str(_m_jobs.handback_file(n, row).relative_to(n['dir']))}
             path = Path(w['path'])
             if path.is_dir():
                 actual = _m_common.git('symbolic-ref', '--quiet', '--short', 'HEAD', cwd=path)
@@ -84,6 +88,14 @@ def nonwork_reason(inst, n, row, requirements, lifecycle):
     origin = source_kind(row)
     if origin == 'status.md':
         return 'Imported status history is not a work item.'
+    if origin in ('backlog.md', 'build-order.md'):
+        from . import tasks_backfill
+        path = n['dir'] / origin
+        excluded = tasks_backfill.nonwork_source_lines(n, origin)
+        active = {line for number, line in enumerate(path.read_text().splitlines(), 1) if number not in excluded} if path.exists() else set()
+        if requirements.get(row.get('requirement'), {}).get('quote') in set(excluded.values()) - active:
+            return 'Imported decision/history section or code example is not a work item.'
+        return None
     if origin != 'inbox.md':
         return None
     req = requirements.get(row.get('requirement'), {})
@@ -104,7 +116,7 @@ def nonwork_reason(inst, n, row, requirements, lifecycle):
         _m_reminders.validate_inbox_episode(n, key, current, lifecycle['answers'])
     if current is not None and current.get('answered') is True:
         return 'Imported inbox question already has an exact retained answer.'
-    return None
+    return 'Legacy inbox import is a routing message, not a standalone work item; source and pending inbox are retained.'
 
 
 def count_node(inst, n):
@@ -134,7 +146,7 @@ def plan_node(inst, n, lifecycle):
     for ident, row in rows.items():
         # Reconciliation owns only legacy imports; human/provider-managed tasks stay intact.
         if row.get('source') != 'local' or source_kind(row) not in (
-                'inbox.md', 'status.md', 'job') or row['status'] in ('dropped', 'done', 'merged'):
+                'inbox.md', 'status.md', 'backlog.md', 'build-order.md', 'job') or row['status'] in ('dropped', 'done', 'merged'):
             continue
         reason = nonwork_reason(inst, n, row, requirements, lifecycle)
         proof = None
