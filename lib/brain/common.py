@@ -474,28 +474,100 @@ def git_read_snapshot():
 def branch_refs(cwd):
     """One branch enumeration per repository in a read snapshot."""
     reads = _GIT_READS.get()
-    key = (str(Path(cwd or Path.cwd()).absolute()), 'branch-ref-snapshot')
+    where = str(Path(cwd or Path.cwd()).absolute())
+    repository = reads.get((where, 'repository'), where) if reads is not None else where
+    key = (repository, 'branch-ref-snapshot')
     if reads is not None and key in reads:
         return reads[key]
-    result = git('for-each-ref', '--format=%(refname)%00%(objectname)%00%(objecttype)',
+    result = git('for-each-ref', '--format=%(refname)%00%(objectname)%00%(objecttype)%00%(committerdate:unix)',
                  'refs/heads/', 'refs/remotes/', cwd=cwd)
-    refs = ({parts[0]: parts[1] for line in result.stdout.splitlines()
-             for parts in [line.split('\0')] if len(parts) == 3 and parts[2] == 'commit'}
-            if not result.returncode else None)
+    fields = [line.split('\0') for line in result.stdout.splitlines()]
+    refs = ({parts[0]: parts[1] for parts in fields if parts[2] == 'commit'}
+            if not result.returncode and all(len(parts) == 4 for parts in fields) else None)
     if reads is not None:
         reads[key] = refs
+        if refs is not None:
+            for name, tip, kind, stamp in fields:
+                if kind == 'commit' and stamp.isdigit():
+                    reads[(repository, 'commit-time', name)] = stamp
         trees = git('worktree', 'list', '--porcelain', '-z', cwd=cwd)
         if not trees.returncode:
-            path = branch = None
+            path = branch = head = None
             for field in trees.stdout.split('\0'):
                 if field.startswith('worktree '):
-                    path, branch = field[len('worktree '):], None
+                    path, branch, head = field[len('worktree '):], None, None
+                elif field.startswith('HEAD '):
+                    head = field[len('HEAD '):]
                 elif field.startswith('branch refs/heads/'):
                     branch = field[len('branch refs/heads/'):]
                 elif not field and path is not None:
-                    reads[(str(Path(path).absolute()), 'worktree-branch')] = branch
+                    tree = str(Path(path).absolute())
+                    reads[(tree, 'repository')] = repository
+                    reads[(tree, 'worktree-branch')] = branch
+                    if head and re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', head) and set(head) != {'0'}:
+                        reads[(tree, 'worktree-head')] = head
                     path = None
     return refs
+
+
+def commit_range_summary(cwd, base, head):
+    """Count reachable commits and flag unfinished titles from one command-local graph."""
+    reads = _GIT_READS.get()
+    if reads is not None:
+        refs = branch_refs(cwd)
+        base, head = (refs or {}).get(base, base), (refs or {}).get(head, head)
+        if (refs is not None and head in refs.values()
+                and re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', base)):
+            where = str(Path(cwd or Path.cwd()).absolute())
+            repository = reads.get((where, 'repository'), where)
+            key = (repository, 'title-graph', base)
+            if key not in reads:
+                try:
+                    # Pin the roots we enumerated: refs may move while the read
+                    # runs, and an old tip must not become an invented empty range.
+                    batch = git('log', '--format=%H%x00%P%x00%s', *sorted(set(refs.values())),
+                                '--not', base, '--', cwd=cwd)
+                except OSError:
+                    batch = None  # e.g. an argument limit; individual reads still work
+                graph = {}
+                valid = batch is not None and not batch.returncode
+                for line in batch.stdout.splitlines() if batch is not None else []:
+                    parts = line.split('\0')
+                    if len(parts) != 3 or not all(re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}', oid)
+                            for oid in [parts[0], *parts[1].split()]):
+                        valid = False
+                        break
+                    graph[parts[0]] = (parts[1].split(), bool(re.match(r'(?:wip|fixup!|squash!)', parts[2], re.I)))
+                reads[key] = graph if valid else None
+            graph = reads[key]
+            if graph is not None:
+                summary_key = (*key, head)
+                if summary_key in reads:
+                    return reads[summary_key]
+                pending, seen = [head], set()
+                unfinished, contains = False, head == base
+                while pending:
+                    tip = pending.pop()
+                    if tip in seen or tip not in graph:
+                        continue
+                    seen.add(tip)
+                    parents, bad_title = graph[tip]
+                    unfinished = unfinished or bad_title
+                    contains = contains or base in parents
+                    pending.extend(parents)
+                reads[summary_key] = len(seen), unfinished, contains
+                return reads[summary_key]
+    return None
+
+
+def unfinished_commit_titles(cwd, base, head):
+    """Batch clean ranges, retaining Git's exact ordering for any findings/errors."""
+    summary = commit_range_summary(cwd, base, head)
+    if summary is not None and not summary[1]:
+        return []
+    result = git('log', '--format=%s', base + '..' + head, cwd=cwd)
+    return ([title for title in result.stdout.splitlines() if re.match(r'(?:wip|fixup!|squash!)', title, re.I)]
+            if not result.returncode else None)
 
 
 def git(*args, cwd=None, check=False, env=None):
@@ -528,6 +600,34 @@ def git(*args, cwd=None, check=False, env=None):
         if refs is not None:
             tip = refs.get(args[3].removesuffix('^{commit}'))
             result = subprocess.CompletedProcess(['git', *args], 0 if tip else 1, (tip + '\n') if tip else '', '')
+            reads[key] = result
+    if result is None and cacheable:
+        repository = reads.get((key[0], 'repository'), key[0])
+        if args in (('rev-parse', '--verify', 'HEAD'), ('rev-parse', '--verify', '--quiet', 'HEAD')):
+            head = reads.get((key[0], 'worktree-head'))
+            if head:
+                result = subprocess.CompletedProcess(['git', *args], 0, head + '\n', '')
+        elif len(args) == 4 and args[:3] == ('log', '-1', '--format=%ct'):
+            branch_refs(cwd)
+            stamp = reads.get((repository, 'commit-time', args[3]))
+            if stamp is not None:
+                signature_key = (key[0], 'log-show-signature')
+                if signature_key not in reads:
+                    config = git('config', '--bool', '--get', 'log.showSignature', cwd=cwd)
+                    reads[signature_key] = (config.returncode == 1 or
+                                            config.returncode == 0 and config.stdout.strip() == 'false')
+                if reads[signature_key]:
+                    result = subprocess.CompletedProcess(['git', *args], 0, stamp + '\n', '')
+        elif len(args) == 3 and args[:2] == ('rev-list', '--count') and args[2].count('..') == 1:
+            base, head = args[2].split('..')
+            summary = commit_range_summary(cwd, base, head)
+            if summary is not None:
+                result = subprocess.CompletedProcess(['git', *args], 0, str(summary[0]) + '\n', '')
+        elif len(args) == 4 and args[:2] == ('merge-base', '--is-ancestor'):
+            summary = commit_range_summary(cwd, *args[2:])
+            if summary is not None:
+                result = subprocess.CompletedProcess(['git', *args], 0 if summary[2] else 1, '', '')
+        if result is not None:
             reads[key] = result
     if result is None:
         result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],

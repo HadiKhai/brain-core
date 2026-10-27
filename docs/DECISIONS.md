@@ -2866,3 +2866,13 @@ job receipts are revalidated by the readiness policy before full verification.
 A receipt still needs a rendered-page observation and three distinct matching
 source comparisons for every URL; recording remains a supplied observation,
 not an automated browser check.
+Read commands share branch tips, commit dates and linked-worktree HEADs from one
+ref/worktree enumeration per repository. Ancestry queries, commit counts and
+clean-title checks share one commit graph per base, with roots pinned to the
+enumerated commit IDs even if refs move during the command. Unfinished-title findings retain the original Git
+log order. Configured signature display retains the native date-log read. These
+derived reads expire at the end of the command, without a time
+limit or persistent authority. Failed or malformed batches fall back to the
+individual Git reads, including local job-state observations. Read-only `ready`
+uses this scope; readiness recording and other write paths keep their existing
+reads and writes.
