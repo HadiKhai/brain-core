@@ -1566,6 +1566,7 @@ class GitReadBatches(Scenario):
         loader.exec_module(module)
         self.common = module._owners['git']
         self.status = module._owners['local_job_state']
+        self.ui = module._owners['ui_worktree']
         self.home = self.repo(self.tmp / 'home é with spaces\nand newline')
         self.base = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
 
@@ -1600,7 +1601,8 @@ class GitReadBatches(Scenario):
         self.assertEqual(sum(any(str(a).startswith('--format=%(refname)') for a in c) for c in commands), 1)
         self.assertEqual(sum(any(str(a).startswith('--contains=') for a in c) for c in commands), 2)
         self.assertEqual(sum('--format=%H%x00%P%x00%s' in c for c in commands), 1)
-        self.assertEqual(len(commands), 5)
+        self.assertEqual(sum('config' in c for c in commands), 1)
+        self.assertEqual(len(commands), 6)
 
     def test_batch_failures_use_individual_reads_and_never_invent_missing_refs(self):
         tree = self.linked()
@@ -1701,6 +1703,23 @@ class GitReadBatches(Scenario):
         with mock.patch.object(subprocess, 'run', side_effect=fail), self.common.git_read_snapshot():
             after = self.common.git('rev-list', '--count', ranges[0], cwd=self.home)
             self.assertEqual((after.returncode, after.stdout), (expected[0].returncode, expected[0].stdout))
+
+    def test_signed_log_output_keeps_native_ui_timestamp_semantics(self):
+        key = self.tmp / 'signing-key'
+        subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)],
+                       check=True, env=self.env, capture_output=True)
+        allowed = self.tmp / 'allowed-signers'
+        allowed.write_text('t@t ' + key.with_suffix('.pub').read_text())
+        for name, value in (('gpg.format', 'ssh'), ('user.signingkey', str(key)),
+                            ('gpg.ssh.allowedSignersFile', str(allowed)), ('log.showSignature', 'true')):
+            self.git('config', name, value, cwd=self.home)
+        self.git('commit', '--allow-empty', '-S', '-qm', 'signed tip', cwd=self.home)
+        record = {'path': str(self.home)}
+        before = self.ui.ui_worktree(None, self.home, 'main', record)
+        self.assertIsNone(before['last'])
+        with self.common.git_read_snapshot():
+            after = self.ui.ui_worktree(None, self.home, 'main', record)
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
