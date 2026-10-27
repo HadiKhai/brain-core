@@ -5,6 +5,12 @@ mutations use the instance lock; reads never migrate or contact a provider.
 """
 import json
 import re
+import contextlib
+import contextvars
+import copy
+import hashlib
+import marshal
+import stat
 from pathlib import Path
 
 from . import common as _m_common
@@ -13,6 +19,82 @@ from . import instance as _m_instance
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 VERSION = 1
+_RECORD_SCAN = contextvars.ContextVar('brain_record_scan', default=None)
+_RECORD_PARSER_CODE = marshal.dumps(_m_common.read_fm.__code__)
+
+
+@contextlib.contextmanager
+def record_scan(inst):
+    """Optional per-source parsing cache for watchers; never cache due decisions."""
+    from . import usage_cache
+    with usage_cache.database(inst) as cache:
+        saved = cache.get('watch-records-v2')
+        root = inst.root.resolve()
+        code = hashlib.sha256(marshal.dumps(read_record.__code__) + _RECORD_PARSER_CODE
+                              + str(VERSION).encode() + _m_common.FRONTMATTER_RE.pattern.encode()).hexdigest()
+        old = (saved['sources'] if isinstance(saved, dict) and saved.get('root') == str(root)
+               and saved.get('code') == code and isinstance(saved.get('sources'), dict) else {})
+        scope = {'root': root, 'old': old, 'sources': {}, 'folders': {}, 'dirty': False}
+        token = _RECORD_SCAN.set(scope)
+        try:
+            yield
+        finally:
+            _RECORD_SCAN.reset(token)
+            if scope['dirty'] or scope['sources'].keys() != old.keys():
+                cache.put('watch-records-v2', {'root': str(root), 'code': code, 'sources': scope['sources']})
+
+
+def record_stamp(path):
+    """Identity and change clocks; only regular, unlinked records are reusable."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def read_record(path, folder):
+    scope = _RECORD_SCAN.get()
+    stamp = record_stamp(path)
+    cacheable = False
+    key = str(path)
+    if scope and stamp:
+        parent = str(path.parent)
+        if parent not in scope['folders']:
+            scope['folders'][parent] = path.parent.resolve().is_relative_to(scope['root'])
+        cacheable = scope['folders'][parent]
+    if cacheable:
+        saved = scope['old'].get(key)
+        if (isinstance(saved, dict) and saved.get('stamp') == list(stamp) and saved.get('folder') == folder
+                and isinstance(saved.get('row'), dict)
+                and isinstance(saved['row'].get('description'), str)
+                and saved['row'].get('version') == VERSION and saved['row'].get('id') == path.stem):
+            scope['sources'][key] = saved
+            return copy.deepcopy(saved['row'])
+    fm, body = _m_common.read_fm(path)
+    row = {}
+    for key, value in fm.items():
+        try:
+            row[key] = json.loads(value)
+        except ValueError:
+            row[key] = value
+    if row.get('version') != VERSION or row.get('id') != path.stem:
+        raise ValueError('unsupported or mismatched record: ' + path.name)
+    row['description'] = body.strip()
+    if folder == 'tasks':
+        for key in ('superseded_by', 'scope', 'aliases', 'unresolved_dependencies'):
+            row.setdefault(key, [])
+        row.setdefault('completion_kind', 'merge')
+        row.setdefault('last_progress_at', row.get('created', row.get('updated', '')))
+    if cacheable and record_stamp(path) == stamp:
+        scope['sources'][str(path)] = {'stamp': list(stamp), 'folder': folder, 'row': copy.deepcopy(row)}
+        scope['dirty'] = True
+    return row
+
+
 STATUSES = ('backlog', 'ready', 'in-progress', 'in-review', 'testing', 'merged', 'done', 'blocked', 'parked', 'dropped')
 KINDS = ('feature', 'bug', 'fix', 'test', 'chore', 'research')
 ID = re.compile(r'[A-Za-z][A-Za-z0-9_-]*\Z')
@@ -45,21 +127,7 @@ def read_records(n, folder='tasks', ident=None):
         if not path.exists():
             continue
         record_path(n, path.stem, folder)
-        fm, body = _m_common.read_fm(path)
-        row = {}
-        for key, value in fm.items():
-            try:
-                row[key] = json.loads(value)
-            except ValueError:
-                row[key] = value
-        if row.get('version') != VERSION or row.get('id') != path.stem:
-            raise ValueError('unsupported or mismatched record: ' + path.name)
-        row['description'] = body.strip()
-        if folder == 'tasks':
-            for key in ('superseded_by', 'scope', 'aliases', 'unresolved_dependencies'):
-                row.setdefault(key, [])
-            row.setdefault('completion_kind', 'merge')
-            row.setdefault('last_progress_at', row.get('created', row.get('updated', '')))
+        row = read_record(path, folder)
         records[row['id']] = row
     return records
 

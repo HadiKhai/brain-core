@@ -1,6 +1,7 @@
 """Task invariants use only isolated fixture records and repositories."""
 import argparse
 import json
+import os
 import sys
 import unittest
 from unittest import mock
@@ -361,6 +362,49 @@ class Tasks(Scenario):
         plan['core_task_operations'][0]['target']['node_identity_sha256'] = task_plan.digest('peer')
         with self.assertRaisesRegex(ValueError, 'outside'):
             task_plan.apply_plan(self.inst, 'root', plan)
+    def test_watch_record_cache_reuses_only_unchanged_sources_and_detaches_rows(self):
+        self.add('APP-1', title='Blue')
+        self.add('APP-2', title='Peer')
+        path = self.n['dir'] / 'tasks/APP-1.md'
+        with tasks.record_scan(self.inst):
+            original = tasks.read_records(self.n)
+        original['APP-1']['aliases'].append('caller mutation')
+        with tasks.record_scan(self.inst), mock.patch.object(tasks._m_common, 'read_fm',
+                side_effect=AssertionError('unchanged source was reparsed')):
+            self.assertEqual(tasks.read_records(self.n)['APP-1']['aliases'], [])
+        stamp = path.stat()
+        path.write_text(path.read_text().replace('Blue', 'Cyan'))
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        read = tasks._m_common.read_fm
+        with tasks.record_scan(self.inst), mock.patch.object(tasks._m_common, 'read_fm', wraps=read) as parser:
+            self.assertEqual(tasks.read_records(self.n)['APP-1']['title'], 'Cyan')
+        self.assertEqual([call.args[0] for call in parser.call_args_list], [path])
+        path.write_text('---\nversion: 1\nid: "WRONG"\n---\n')
+        with tasks.record_scan(self.inst), self.assertRaisesRegex(ValueError, 'mismatched record'):
+            tasks.read_records(self.n)
+
+    def test_watch_record_cache_rechecks_inventory_links_and_time_thresholds(self):
+        import datetime
+        self.add('APP-1', status='ready')
+        path = self.n['dir'] / 'tasks/APP-1.md'
+        with tasks.record_scan(self.inst):
+            tasks.read_records(self.n)
+        self.add('APP-2', title='New source')
+        path.unlink()
+        with tasks.record_scan(self.inst):
+            self.assertEqual(set(tasks.read_records(self.n)), {'APP-2'})
+        path.symlink_to(self.n['dir'] / 'tasks/APP-2.md')
+        with tasks.record_scan(self.inst), self.assertRaisesRegex(ValueError, 'must not be links'):
+            tasks.read_records(self.n)
+        path.unlink()
+        row = tasks.read_records(self.n)['APP-2']
+        now = self.inst.now_dt()
+        row.update(status='in-progress', last_progress_at=now.isoformat())
+        tasks.save_record(self.n, row)
+        with tasks.record_scan(self.inst), mock.patch.object(self.inst, 'now_dt', return_value=now):
+            self.assertNotIn('task-stalled', {i['kind'] for i in tasks.due_tasks(self.inst, self.n)})
+        with tasks.record_scan(self.inst), mock.patch.object(self.inst, 'now_dt', return_value=now + datetime.timedelta(seconds=901)):
+            self.assertIn('task-stalled', {i['kind'] for i in tasks.due_tasks(self.inst, self.n)})
 
     def test_set_survives_unrelated_instance_commit_with_other_completed_tasks(self):
         self.repo(self.root, {'engine.py': 'value = 1\n'})

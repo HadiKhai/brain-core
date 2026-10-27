@@ -58,7 +58,7 @@ def lifecycle_read(inst):
 
 
 @contextlib.contextmanager
-def lifecycle_store(inst, readonly=False, blocking=True):
+def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None):
     """Serialize scans with updates; publishing pins the actual private directory."""
     from . import ui_readmodel
     view = ui_readmodel.projection(inst.root)
@@ -82,9 +82,13 @@ def lifecycle_store(inst, readonly=False, blocking=True):
         # This is only an in-memory change detector; no pickle is read or kept.
         # Most observations do not change receipts, so avoid encoding their
         # entire JSON ledger twice on every job/node observation.
-        before = pickle.dumps(data, protocol=4)
+        # Restart observations can mutate only their own usage record. Comparing
+        # it avoids serializing all inbox/reminder history for every open job.
+        def observed():
+            return data if usage_key is None else data['usage'].get(usage_key)
+        before = pickle.dumps(observed(), protocol=4)
         yield data
-        if before != pickle.dumps(data, protocol=4):
+        if before != pickle.dumps(observed(), protocol=4):
             after = json.dumps(data, sort_keys=True)
             if len(after.encode()) > LIFECYCLE_BYTES:
                 raise ValueError('lifecycle state exceeds its bound; retain history for review')
@@ -102,7 +106,7 @@ def usage_restart_store(inst, key):
             select=lambda data: (data['usage'].get(key, {}), key in data['usage'], len(data['usage'])))
         yield {'usage': {key: record} if present else {}}, count
     else:
-        with lifecycle_store(inst) as data:
+        with lifecycle_store(inst, usage_key=key) as data:
             yield data, len(data['usage'])
 
 

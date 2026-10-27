@@ -163,31 +163,103 @@ def watch_text_identity(item):
 
 
 def watch_source_signature(inst, layout=None):
-    """Recheck scan sources without recomputing transcript/Git projections.
+    """Restat sources once each, rehashing only changed source generations.
 
-    `layout` keeps each home's Git metadata paths for one process's repeated
-    checks; the paths are still restated every time, and new homes are added.
-    State files are compared by identity and change clocks, not by their bytes.
+    Directory entries supply their own stat data; overlapping task/Git/resource
+    inventories share it. Never use a directory's mtime to infer its children's
+    contents: an in-place rewrite leaves that mtime unchanged.
     """
     from . import events
+    inst._load_local()  # malformed binding evidence must still fail closed
     nodes = list(inst.nodes())
-    paths = [n['dir'] / name for n in nodes for name in ('tasks', 'requirements')]
+    paths = [inst.root / 'instance.md', inst.root / '.brain/local.json']
+    paths += [n['dir'] / name for n in nodes for name in ('node.md', 'never-name.txt', 'tasks', 'requirements')]
     layout = {} if layout is None else layout
+    homes = []
     for n in nodes:
         if n.get('external') and n.get('home_path'):
-            # A retargeted home or .git link resolves elsewhere and rediscovers its Git layout.
-            home = (str(n['home_path']), str(n['home_path'].resolve()), str((n['home_path'] / '.git').resolve()))
-            if home not in layout:
-                layout[home] = _m_instance.git_state_paths(n['home_path'])
-            paths.extend(layout[home])
+            home = n['home_path']
+            paths.extend(_m_instance.git_state_paths(home))
+            # Fence the logical home and marker even when Git resolves both to
+            # the same metadata directory. Never descend into the repository.
+            homes.append([str(home), str(home.resolve()), str((home / '.git').resolve())])
     paths += [inst.root / '.brain' / name for name in (
         'communications.json', 'worker-runs.json', 'host-observations.json',
         'host-tasks.json', 'machine.json', 'rotation')]
     paths.append(_m_machine.machine_dir() / 'machine-care.json')
-    # resources includes ledgers, inbox/status, handbacks/attempts and legacy
-    # ready packets. It deliberately excludes transcripts, Git objects and caches.
-    return (_m_instance.state_signature(inst, nodes, extra=paths),
-            _m_jobs.digest(events.resources(inst, content=False)))
+    paths.append(inst.root / '.brain/inbox-seen.json')
+    generations = {}
+    old = layout.get('sources', {})
+    current = {}
+
+    def observe(path, info=None):
+        key = os.fspath(path)
+        if key in generations:
+            return
+        try:
+            info = info or os.lstat(key)
+            stamp = (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                     info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            if stat.S_ISLNK(info.st_mode):
+                stamp += (os.readlink(key),)
+                try:
+                    target = os.stat(key)
+                    stamp += (target.st_dev, target.st_ino, target.st_mode, target.st_nlink,
+                              target.st_size, target.st_mtime_ns, target.st_ctime_ns)
+                except (FileNotFoundError, NotADirectoryError):
+                    stamp += (None,)
+        except (FileNotFoundError, NotADirectoryError):
+            stamp = None
+        cached = old.get(key)
+        digest = cached[1] if cached and cached[0] == stamp else watch_digest([key, stamp])
+        generations[key] = digest
+        current[key] = (stamp, digest)
+
+    visited = set()
+    def tree(folder):
+        key = os.fspath(folder)
+        if key in visited:
+            return
+        visited.add(key)
+        observe(folder)
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    observe(entry.path, entry.stat(follow_symlinks=False))
+                    if entry.is_dir(follow_symlinks=False):
+                        tree(entry.path)
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+
+    def resources(folder, deep=False):
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name == 'nodes':
+                        with os.scandir(entry.path) as children:
+                            for child in children:
+                                if child.is_dir(follow_symlinks=False) and os.path.isfile(os.path.join(child.path, 'node.md')):
+                                    resources(child.path)
+                    elif deep or entry.name in events.STATE_DIRS:
+                        resources(entry.path, True)
+                elif entry.is_file() and os.path.splitext(entry.name)[1] in ('.md', '.json', '.txt', '.sh'):
+                    observe(entry.path, entry.stat(follow_symlinks=False))
+
+    # The ordinary resource set excludes transcripts, objects, reports and caches.
+    resources(inst.root)
+    for n in nodes:
+        wb = n['local'].get('workbench')
+        if wb:
+            folder = Path(wb).expanduser() / 'scratch/ready'
+            if folder.is_dir():
+                for path in folder.glob('*.json'):
+                    observe(path)
+    for path in paths:
+        observe(path)
+        if path.is_dir() and not path.is_symlink():
+            tree(path)
+    layout['sources'] = current
+    return watch_digest([homes, sorted(generations.items())])
 
 
 def watch_untracked(groups, generation=None):
@@ -709,7 +781,8 @@ def watch_groups(inst, nodes=None):
     # needs its own scope, including fallback after a failed first observation;
     # cached old reads must never acquire the fallback's newer source signature.
     def scan():
-        with command_reads.snapshot():
+        from . import tasks
+        with command_reads.snapshot(), tasks.record_scan(inst):
             return watch_scan(inst, nodes)
     try:
         groups = watch_due_episodes(inst, scan)
@@ -724,10 +797,11 @@ def watch_groups(inst, nodes=None):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
         _m_status.due_once_forget()  # the fallback's due inventory follows its own generation
-        generation = watch_source_signature(inst)
+        layout = {}
+        generation = watch_source_signature(inst, layout)
         groups = scan()
-        if watch_source_signature(inst) != generation:
-            return WatchGroups({}, None, generation, stale=True)
+        if watch_source_signature(inst, layout) != generation:
+            return WatchGroups({}, None, generation, stale=True, layout=layout)
         return watch_untracked(groups, generation)
 
 

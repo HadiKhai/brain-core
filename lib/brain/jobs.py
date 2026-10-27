@@ -837,6 +837,12 @@ def job_inputs(n, row):
 
 def inputs_overlap(left, right, root=""):
     """Only * and ? are patterns; brackets and the home prefix stay literal."""
+    return _inputs_overlap(tuple(sorted(left)), tuple(sorted(right)), root)
+
+
+@functools.lru_cache(maxsize=8192)
+def _inputs_overlap(left, right, root):
+    """Pure value comparison; changed source inputs cannot reuse an old answer."""
     def matches(path, pattern):
         prefix = root if root and pattern.startswith(root.rstrip("/") + "/") else ""
         tail = pattern[len(prefix):]

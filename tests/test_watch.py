@@ -310,6 +310,32 @@ class Watcher(Scenario):
             self.assertFalse(m.request_wake(inst, root, 'overdue:' + 'a' * 64))
         start.assert_not_called()
         self.assertFalse(list(m.wake_directory(inst, root).glob('*.pending')))
+    def test_incremental_signature_restats_task_contents_and_excludes_git_objects(self):
+        m, inst = self.m, self.inst
+        folder = inst.root / 'tasks'
+        folder.mkdir(exist_ok=True)
+        source = folder / 'TASK-1.md'
+        source.write_text('blue')
+        layout = {}
+        before = m.watch_source_signature(inst, layout)
+        directory_clock = folder.stat().st_mtime_ns
+        stamp = source.stat()
+        source.write_text('cyan')
+        os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertEqual(folder.stat().st_mtime_ns, directory_clock)
+        self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+        before = m.watch_source_signature(inst, layout)
+        home = self.repo(self.tmp / 'fixture-external')
+        external = {**inst.node('root'), 'id': 'fixture-external', 'parent': None,
+                    'external': True, 'home_path': home}
+        nodes = list(inst.nodes()) + [external]
+        with mock.patch.object(type(inst), 'nodes', return_value=nodes):
+            before = m.watch_source_signature(inst, layout)
+            (home / '.git/objects/fixture-irrelevant').write_text('immutable object')
+            self.assertEqual(m.watch_source_signature(inst, layout), before)
+        (inst.root / '.brain/local.json').write_text('{broken')
+        with self.assertRaises(ValueError):
+            m.watch_source_signature(inst, layout)
 
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
