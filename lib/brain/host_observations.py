@@ -10,6 +10,7 @@ from . import hosts as _m_hosts
 from . import host_instances as _m_host_instances
 from . import jobs as _m_jobs
 from . import nodes as _m_nodes
+from . import worker_failures as _m_failures
 
 
 HOST_SNAPSHOT_SECONDS = 180
@@ -47,6 +48,58 @@ def host_native_call(name, arguments):
     return host_rpc.call(name, arguments)
 
 
+def host_failure_jobs(inst):
+    """Project/branch ownership for workers launched outside the binding path."""
+    result = []
+    for n in inst.nodes():
+        project = n['local'].get('home_project') or n['local'].get('host_project')
+        if n['archived'] or not project:
+            continue
+        for row in _m_jobs.read_jobs(n) or []:
+            if not row['Ended']:
+                result.append({'node': n['id'], 'job_key': _m_jobs.job_key(row),
+                               'project': project, 'branch': row['Job']})
+    if len(result) > 128:
+        raise ValueError('failure export exceeds job bound')
+    return sorted(result, key=lambda r: (r['node'], r['job_key']))
+
+
+def host_failure_detail(call, identity):
+    detail = call('t3_thread_read', {'threadId': identity, 'limit': 1, 'runLimit': 1})
+    thread = detail.get('thread')
+    if not isinstance(thread, dict) or thread.get('threadId') != identity:
+        raise ValueError('invalid failed thread detail')
+    return detail
+
+
+def host_failure_category(call, detail, run):
+    """Native error items expose failure.message as text; never classify prose.
+
+    The host read schema exposes no run error field. Read a bounded activity tail
+    using itemCount; long/incomplete/unknown tails safely become work notices.
+    """
+    thread = detail['thread']
+    count = thread.get('itemCount')
+    if type(count) is not int or count < 0:
+        return 'work error'
+    tail = call('t3_thread_read', {'threadId': thread['threadId'], 'view': 'activity',
+                **({'afterPosition': count - 101} if count > 100 else {}), 'limit': 100, 'runLimit': 1,
+                'maxCharsPerItem': 4096})
+    current = tail.get('thread')
+    if (not isinstance(current, dict) or current.get('threadId') != thread['threadId']
+            or current.get('latestRunId') != run or current.get('status') != 'failed'):
+        raise ValueError('failed activity changed during export; previous snapshot retained')
+    if tail.get('hasMore') is not False:
+        return 'work error'
+    errors = [item for item in tail.get('items', []) if isinstance(item, dict)
+              and item.get('type') == 'error' and item.get('sourceThreadId') == thread['threadId']
+              and item.get('runId') == run and item.get('visibility') == 'local']
+    if not errors or any(item.get('textTruncated') is not False for item in errors):
+        return 'work error'
+    categories = [_m_failures.failure_category(item.get('text')) for item in errors]
+    return categories[-1] if all(c != 'work error' for c in categories) else 'work error'
+
+
 def host_export(inst, rpc=None):
     path = inst.root / '.brain/host-export.lock'
     _m_common.safe_target(path)
@@ -66,7 +119,9 @@ def _host_export(inst, rpc=None):
     if inst.cfg.get('host') != 't3' or _m_common.outward_links(inst.root):
         raise ValueError('host export requires a safe t3 instance')
     bindings = host_bindings(inst)
-    guards = [_m_host_instances.routed_host_rpc(inst, nid, lambda *_: None) for nid in {b['node'] for b in bindings}]
+    jobs = host_failure_jobs(inst)
+    guards = [_m_host_instances.routed_host_rpc(inst, nid, lambda *_: None)
+              for nid in {b['node'] for b in bindings + jobs}]
     observed, threads = inst.now_dt().isoformat(), {}
     deadline = HOST_EXPORT_CLOCK.monotonic() + 60
     def call(name, arguments):
@@ -78,7 +133,7 @@ def _host_export(inst, rpc=None):
         if not isinstance(value, dict):
             raise ValueError('invalid native host response')
         return value
-    for project in sorted({b['project'] for b in bindings}):
+    for project in sorted({b['project'] for b in bindings + jobs}):
         cursor, cursors = None, set()
         for _ in range(10):
             value = call('t3_thread_list', {'projectId': project, 'includeSubagents': True,
@@ -98,8 +153,28 @@ def _host_export(inst, rpc=None):
             cursors.add(cursor)
         else:
             raise ValueError('thread export exceeds page bound')
+    # Branch is available on thread detail, not the list schema. Inspect only
+    # failed threads in projects with open jobs, with the same bounded deadline.
+    details, discovered = {}, []
+    for (project, identity), row in threads.items():
+        candidates = [j for j in jobs if j['project'] == project]
+        if row.get('status') != 'failed' or not candidates:
+            continue
+        if len(details) >= 128:
+            raise ValueError('failed thread export exceeds bound')
+        detail = host_failure_detail(call, identity)
+        details[(project, identity)] = detail
+        thread = detail['thread']
+        matches = [j for j in candidates if j['branch'] == thread.get('branch')]
+        if len(matches) == 1 and not any(b['project'] == project and b['thread'] == identity for b in bindings):
+            if thread.get('projectId') != project or thread.get('latestRunId') != row.get('latestRunId'):
+                raise ValueError('failed discovery changed during export')
+            discovered.append({**matches[0], 'thread': identity, 'role': 'worker', 'discovered': True})
+    for binding in discovered:
+        binding['ambiguous'] = sum((d['node'], d['job_key']) == (binding['node'], binding['job_key'])
+                                   for d in discovered) > 1
     records = []
-    for binding in bindings:
+    for binding in bindings + discovered:
         row = threads.get((binding['project'], binding['thread']))
         if row is None or row.get('status') not in HOST_STATUSES or not (
                 row.get('latestRunId') is None or isinstance(row.get('latestRunId'), str)):
@@ -126,13 +201,22 @@ def _host_export(inst, rpc=None):
                 # Native timestamps include their zone. Never infer one for host evidence.
                 if parsed and re.search(r'(Z|[+-][0-9]{2}:[0-9]{2})$', at) and parsed <= inst.parse_time(observed):
                     active_run, started_at = active, at
-        records.append({**binding, 'status': row['status'], 'run': row.get('latestRunId'),
+        category = None
+        if binding['role'] == 'worker' and row['status'] == 'failed' and row.get('latestRunId'):
+            detail = details.get((binding['project'], binding['thread'])) or host_failure_detail(call, binding['thread'])
+            if (detail['thread'].get('latestRunId') != row['latestRunId']
+                    or detail['thread'].get('status') != 'failed'):
+                raise ValueError('failed run changed during export; previous snapshot retained')
+            category = host_failure_category(call, detail, row['latestRunId'])
+        records.append({**binding, 'status': row['status'], 'run': row.get('latestRunId'), 'category': category,
                         'active_run': active_run, 'started_at': started_at,
                         'pending': sorted({_m_hosts.wake_binding(json.dumps([binding['thread'], p])) for p in pending})})
     # Rebinding while reads were in flight cannot publish stale ownership as fresh.
-    if host_bindings(inst.__class__(inst.root)) != bindings:
+    fresh = inst.__class__(inst.root)
+    if host_bindings(fresh) != bindings or host_failure_jobs(fresh) != jobs:
         raise ValueError('host bindings changed during export; previous snapshot retained')
-    snapshot = {'version': 1, 'observed_at': observed, 'bindings': _m_jobs.digest(bindings), 'records': records}
+    snapshot = {'version': 1, 'observed_at': observed, 'bindings': _m_jobs.digest(bindings),
+                'jobs': _m_jobs.digest(jobs), 'records': records}
     path = inst.root / '.brain/host-observations.json'
     _m_common.safe_target(path)
     _m_common.atomic_write(path, json.dumps(snapshot, sort_keys=True) + '\n', private=True)
@@ -147,29 +231,45 @@ def host_snapshot(inst):
     value = json.loads(path.read_text())
     at = inst.parse_time(value.get('observed_at', '')) if isinstance(value, dict) else None
     if (not at or value.get('version') != 1 or not 0 <= (inst.now_dt() - at).total_seconds() <= HOST_SNAPSHOT_SECONDS
-            or value.get('bindings') != _m_jobs.digest(host_bindings(inst)) or not isinstance(value.get('records'), list)):
+            or value.get('bindings') != _m_jobs.digest(host_bindings(inst))
+            or value.get('jobs') != _m_jobs.digest(host_failure_jobs(inst)) or not isinstance(value.get('records'), list)):
         return None
     bindings = host_bindings(inst)
     identities = {(b['node'], b['thread'], b['role']): b for b in bindings}
-    if len(value['records']) != len(bindings):
+    if len(value['records']) < len(bindings) or len(value['records']) > len(bindings) + 128:
         raise ValueError('incomplete host observation records')
     observed = set()
     for record in value['records']:
         if (not isinstance(record, dict) or record.get('status') not in HOST_STATUSES or
+                record.get('category') not in (None,) + _m_failures.FAILURE_CATEGORIES or
                 not isinstance(record.get('pending'), list) or
                 any(not isinstance(key, str) or not re.fullmatch('[0-9a-f]{64}', key) for key in record['pending'])):
             raise ValueError('invalid host observation record')
         key = (record.get('node'), record.get('thread'), record.get('role'))
         binding = identities.get(key)
+        if record.get('discovered') is True:
+            candidates = [j for j in host_failure_jobs(inst) if all(record.get(k) == v for k, v in j.items())]
+            if (binding or len(candidates) != 1 or record.get('role') != 'worker'
+                    or record.get('status') != 'failed' or not isinstance(record.get('thread'), str)
+                    or not record['thread']):
+                raise ValueError('invalid discovered failure ownership')
+            ambiguous = sum(r.get('discovered') is True and (r.get('node'), r.get('job_key')) ==
+                            (record['node'], record['job_key']) for r in value['records']) > 1
+            if record.get('ambiguous') is not ambiguous:
+                raise ValueError('invalid discovered failure ambiguity')
+            binding = {**candidates[0], 'thread': record['thread'], 'role': 'worker', 'discovered': True,
+                       'ambiguous': ambiguous}
         if not binding or key in observed or any(record.get(k) != v for k, v in binding.items()):
             raise ValueError('host observation ownership mismatch')
         observed.add(key)
+    if not set(identities).issubset(observed):
+        raise ValueError('incomplete host observation records')
     return value
 
 
 def host_export_runs(inst):
     value = host_snapshot(inst)
-    return [{**r, 'error': 'host run failed'} for r in value['records']
+    return [{**r, 'source': 'native-host', 'error': r.get('category') or 'host run failed'} for r in value['records']
             if r['role'] == 'worker' and r['status'] == 'failed' and r['run']] if value else []
 
 

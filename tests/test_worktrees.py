@@ -74,6 +74,20 @@ class Workbench(Scenario):
                 self.assertIn(f"runtime: {runtime}", brief)
                 self.assertIn(f"model: {model}", brief)
 
+    def test_wt_add_records_explicit_builder_thread_and_rejects_coordinator(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'app')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(r, 'wt', 'add', 'app', 'job/thread', '--thread', 'fixture-worker', '--no-setup')
+        m = core_loader.SourceFileLoader('wt_binding_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        row = m.open_job(m.read_jobs(inst.node('app')), 'job/thread')
+        self.assertEqual(inst.local_of('app')['workers'][m.job_key(row)], 'fixture-worker')
+        self.b(r, 'set', 'app', 'coordinator=fixture-coordinator')
+        result = self.b(r, 'wt', 'add', 'app', 'job/invalid', '--thread', 'fixture-coordinator', ok=False)
+        self.assertIn('already belongs', result)
+        self.assertNotIn('job/invalid', m.Instance(r).local_of('app')['worktrees'])
+
     def test_failed_setup_keeps_the_worktree_and_reports_failure(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "code" / "app")

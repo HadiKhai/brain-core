@@ -206,6 +206,15 @@ def reuse_submodules(home, path, seen=None):
 def cmd_wt_add(a):
     inst = _m_nodes.load()
     n, home = git_home(inst, a.id)
+    thread = getattr(a, 'thread', None)
+    if thread is not None:
+        if (not isinstance(thread, str) or not thread or thread != thread.strip()
+                or any(c.isspace() for c in thread) or _m_jobs.thread_reference_ids(thread) != {thread}):
+            _m_common.die('wt add --thread requires one exact thread id')
+        for node in inst.nodes():
+            refs = [node['local'].get('coordinator', '')] + list(node['local'].get('workers', {}).values())
+            if any(thread in _m_jobs.thread_reference_ids(ref) for ref in refs):
+                _m_common.die('wt add --thread already belongs to a coordinator or job')
     if _m_guard.find_terms(a.branch, _m_guard.never_terms(n)):
         _m_common.die(f"that branch name contains {', '.join(_m_guard.find_terms(a.branch, _m_guard.never_terms(n)))}: pick another")
     for warning in _m_status.code_setup_warnings(inst, n):
@@ -251,6 +260,12 @@ def cmd_wt_add(a):
     inst.local_of(n["id"]).setdefault("workbench", str(wb))
     inst.save_local()
     _m_jobs.job_started(inst, n, a.branch, runtime, task_id=getattr(a, "task_id", None))
+    if thread:
+        row = _m_jobs.open_job(_m_jobs.read_jobs(inst.node(a.id)) or [], a.branch)
+        if row is None:
+            _m_common.die('wt add --thread needs an open ledger job')
+        inst.local_of(a.id).setdefault('workers', {})[_m_jobs.job_key(row)] = thread
+        inst.save_local()
     print(f"worktree: {_m_common.tilde(path)}\n  branch {a.branch}{'' if exists else ' (new, from ' + base + ')'}  ·  "
           f"{port_text(port, count)}")
     setup = n["dir"] / SETUP_FILE

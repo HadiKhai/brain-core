@@ -561,6 +561,7 @@ class Watcher(Scenario):
     def test_child_local_work_never_wakes_root_but_questions_and_failures_do(self):
         self.b(self.root, 'new', 'sample', '--title', 'Sample')
         self.inst = self.m.Instance(self.root)
+        self.inst.local_of('sample')
         child, root = self.inst.node('sample'), self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/closed',
                'Started': '2020-01-01T10:00Z', 'Ended': '2020-01-01T11:00Z', 'Outcome': 'closed'}
@@ -576,6 +577,7 @@ class Watcher(Scenario):
             budget = {**row, 'Job': 'import:budget', 'Ended': '', 'Outcome': ''}
             self.m.write_jobs(self.inst, child, [row, budget])
             self.inst.local_of('sample')['worktrees'] = {budget['Job']: {'path': str(self.root)}}
+            self.inst.save_local()
             contract = self.m.contract_file(child, budget)
             contract.parent.mkdir(exist_ok=True)
             contract.write_text('## Budget\n\n1 h\n')
@@ -587,9 +589,12 @@ class Watcher(Scenario):
             self.assertEqual(self.since(), [])
             # A child with a coordinator receives its own settlement work.
             self.inst.local_of('sample').update(coordinator='fixture-child', wake='fixture-send')
+            self.inst.save_local()
+            child = self.inst.node('sample')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.assertTrue(list(self.m.wake_directory(self.inst, child).glob('*.pending')))
             self.inst.local_of('sample').pop('coordinator')
+            self.inst.save_local()
             line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: Choose blue <!-- host-question:abc -->'
             (child['dir'] / 'inbox.md').write_text(line + '\n')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
@@ -1109,7 +1114,7 @@ class Watcher(Scenario):
         self.watch()
         self.assertEqual(json.loads((self.root / '.brain/watch.json').read_text())['seen'], [])
 
-    def test_failed_run_bound_open_job_capacity_retry_once_and_protected_classes(self):
+    def test_failed_runs_never_propose_runtime_switch_even_when_fallback_is_allowed(self):
         n = self.inst.node('root')
         row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/build', 'Started': '2026-01-01T10:00Z', 'Class': 'build'}
         self.m.write_jobs(self.inst, n, [row])
@@ -1119,23 +1124,23 @@ class Watcher(Scenario):
                'status': 'failed', 'runtime': 'codex', 'error': 'model at capacity secret=unpublished'}
         path = self.root / '.brain/worker-runs.json'
         path.write_text(json.dumps({'runs': [run]}))
-        # Exercise the retry mechanism independently of the no-auto-fallback policy.
+        # Failure recovery must not consult a permissive fallback policy.
         with mock.patch.object(self.m._owners['watch_run']._m_usage, 'class_allows_fallback', return_value=True), \
                 mock.patch.object(self.m, 'wake_start'):
             self.watch()
             self.watch()
             inbox = (self.root / 'inbox.md').read_text()
             self.assertEqual(inbox.count('worker run failed'), 1)
-            self.assertIn('brain brief root --branch job/build --runtime claude', inbox)
+            self.assertNotIn('--runtime claude', inbox)
             self.assertNotIn('unpublished', inbox)
-            self.assertEqual(self.m.read_jobs(n)[0]['Switches'].count('at capacity'), 1)
+            self.assertEqual(self.m.read_jobs(n)[0]['Switches'], '')
             run['run'] = 'run-two'
             run['runtime'] = 'claude'
             path.write_text(json.dumps({'runs': [run]}))
             self.watch()
             lines = (self.root / 'inbox.md').read_text().splitlines()
             self.assertNotIn('relaunch', lines[-1])
-            self.assertEqual(self.m.read_jobs(n)[0]['Switches'].count('at capacity'), 1)
+            self.assertEqual(self.m.read_jobs(n)[0]['Switches'], '')
         for klass in ('review', 'diagnose'):
             row.update({'Switches': '', 'Capacity retry': '', 'Class': klass})
             self.m.write_jobs(self.inst, n, [row])
@@ -1215,31 +1220,14 @@ class Watcher(Scenario):
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
         self.assertEqual(sentinel.read_text(), 'sentinel')
 
-    def test_router_interface_uses_cached_readings_and_respects_its_result(self):
-        n = self.inst.node('root')
-        row = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'import:fixture', 'Started': '2026-01-01T10:00Z'}
-        self.m.write_jobs(self.inst, n, [row])
-        key = self.m.job_key(row)
-        self.inst.local_of('root')['workers'] = {key: 'fixture-thread'}
-        run = {'node': 'root', 'job_key': key, 'thread': 'fixture-thread', 'run': 'run-one',
-               'status': 'failed', 'runtime': 'codex', 'error': 'at capacity'}
-        path = self.root / '.brain/worker-runs.json'
-        path.write_text(json.dumps({'runs': [run]}))
+    def test_failure_recovery_does_not_consult_runtime_router(self):
+        n, row, run = self.failure_fixture()
         owner = self.m._owners['watch_run']
-        with mock.patch.object(owner._m_jobs, 'job_class', create=True, return_value='build') as klass, \
-                mock.patch.object(owner._m_usage, 'class_allows_fallback', create=True, return_value=True) as allowed, \
-                mock.patch.object(owner._m_usage, 'class_route', create=True, return_value=('codex', None, 'pin wins')) as route, \
+        with mock.patch.object(owner._m_usage, 'class_route', side_effect=AssertionError('no runtime switching')), \
                 mock.patch.object(self.m, 'wake_start'):
             self.watch()
-            klass.assert_called_once()
-            allowed.assert_called_once_with('build')
-            route.assert_called_once_with(self.inst, 'build', runtime='claude', cached_only=True)
-            self.assertEqual(self.m.read_jobs(n)[0]['Switches'], '')
-            run['run'] = 'run-two'
-            path.write_text(json.dumps({'runs': [run]}))
-            route.return_value = ('claude', None, 'cached route')
-            self.watch()
-            self.assertIn('codex -> claude: at capacity', self.m.read_jobs(n)[0]['Switches'])
+        self.assertEqual(self.m.read_jobs(n)[0]['Switches'], '')
+        self.assertIn('worker run failed', (self.root / 'inbox.md').read_text())
 
     def test_ten_nodes_observed_no_host_network_or_model_calls(self):
         for i in range(9):
@@ -1287,9 +1275,9 @@ class Watcher(Scenario):
         self.assertIn('unrelated fabricated question', (self.root / 'inbox.md').read_text())
         self.assertEqual(self.m.read_jobs(n)[0]['Switches'], '')
         self.assertTrue((self.root / '.brain/watch.json').exists())
-        self.assertEqual(len(list(self.m.wake_directory(self.inst, n).glob('*.pending'))), 1)
+        self.assertEqual(len(list(self.m.wake_directory(self.inst, n).glob('*.pending'))), 2)
 
-    def test_bad_route_configuration_disables_only_one_automatic_retry(self):
+    def test_bad_route_configuration_cannot_prevent_failure_notices(self):
         n, row, run = self.failure_fixture()
         owner = self.m._owners['watch_run']
         for index, exc in enumerate((SystemExit('bad cap'), OSError('fixture'), ValueError('bad cap'))):
@@ -1299,7 +1287,7 @@ class Watcher(Scenario):
                     mock.patch.object(owner._m_usage, 'class_route', side_effect=exc) as route, \
                     mock.patch.object(self.m, 'wake_start'):
                 self.watch()
-                route.assert_called_once()
+                route.assert_not_called()
             self.assertEqual(self.m.read_jobs(n)[0]['Switches'], '')
         self.assertEqual((self.root / 'inbox.md').read_text().count('worker run failed'), 3)
 
@@ -1319,14 +1307,14 @@ class Watcher(Scenario):
         with mock.patch.object(self.m, 'wake_start'):
             self.watch()
 
-    def test_capacity_switch_commits_cleanly_without_waiting_on_own_flock(self):
+    def test_capacity_notice_commits_cleanly_without_waiting_on_own_flock(self):
         n, row, run = self.failure_fixture()
         self.inst.commit([n['dir'] / self.m.JOBS_FILE], 'fixture initial job')
         with mock.patch.object(self.m._owners['watch_run']._m_usage, 'class_allows_fallback', return_value=True), \
                 mock.patch.object(self.m, 'LOCK_WAIT', 0), mock.patch.object(self.m, 'wake_start'):
             self.watch()
         self.assertEqual(self.git('status', '--porcelain', cwd=self.root), '')
-        self.assertIn('runtime switch at capacity', self.git('log', '-1', '--format=%s', cwd=self.root))
+        self.assertIn('worker failure notice', self.git('log', '-1', '--format=%s', cwd=self.root))
         self.assertIsNone(self.m._owners['watch_run']._m_instance._LOCK['fh'])
         self.assertNotIn('BRAIN_LOCK_HELD', os.environ)
 

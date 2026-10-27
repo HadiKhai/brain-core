@@ -1,4 +1,4 @@
-"""File-only actionable-work watcher; no host queries, provider calls or model turns."""
+"""File-only actionable-work watcher; sampler-owned recovery is a separate path."""
 import hashlib
 import contextlib
 import json
@@ -23,12 +23,13 @@ from . import transitions as _m_transitions
 from . import usage as _m_usage
 from . import upgrade as _m_upgrade
 from . import verify as _m_verify
+from . import worker_failures as _m_worker_failures
 
 
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
 
 
-WATCH_DECISION_KINDS = ('coordinator-queue', 'coordinator-busy', 'delegated-completion', 'question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'job-restart', 'rotate',
+WATCH_DECISION_KINDS = ('worker-failure', 'coordinator-queue', 'coordinator-busy', 'delegated-completion', 'question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'job-restart', 'rotate',
                         'overdue-question')
 
 
@@ -267,7 +268,7 @@ def watch_items(inst, n):
         direct_reason = None
         handback_episode = None
         if item['kind'] == 'inbox':
-            marker = re.search(r'<!-- (?:host-question|handback):[^>]+ -->', item['text'])
+            marker = re.search(r'<!-- (?:host-question|handback|worker-failure):[^>]+ -->', item['text'])
             direct_reason = marker.group() if marker else None
             episode = re.search(r'<!-- wake:([0-9a-f]{32}) -->', item['text'])
             if episode and marker:
@@ -317,6 +318,8 @@ def watch_items(inst, n):
         semantic = _m_reminders.semantic_item_key(item)
         entry = {'id': watch_digest(semantic if semantic is not None else [n['id'], item['kind'], identity]),
                  'kind': item['kind'], 'text': text}
+        if direct_reason and direct_reason.startswith('<!-- worker-failure:'):
+            entry['kind'] = 'worker-failure'
         if item['kind'] == 'handback':
             entry['state'] = item.get('state')
         if direct_reason:
@@ -462,36 +465,6 @@ def watch_completion_target(inst, item):
     return target if target['local'].get('wake_policy') == 'visible' else inst.node('root')
 
 
-def watch_route_allows_switch(reason):
-    # TODO(router): replace prose compatibility with the requested structured eligibility flag.
-    return 'Stop starting jobs' not in reason
-
-
-def watch_retry(inst, n, row, record, marker):
-    old = record.get('runtime')
-    new = next((r for r in inst.runtimes if r != old and r in ('codex', 'claude')), None)
-    # A node pin is an explicit operator choice, never silently overridden for recovery.
-    pin = n['fm'].get('runtime')
-    if old not in ('codex', 'claude') or not new or (pin and pin != new):
-        return ''
-    klass = _m_jobs.job_class(n, row)
-    if not _m_usage.class_allows_fallback(klass):
-        return ''
-    # The retry mechanism is reachable only if class_allows_fallback is enabled.
-    selected, subscription, reason = _m_usage.class_route(inst, klass, runtime=new, cached_only=True)
-    if selected != new or not watch_route_allows_switch(reason):
-        return ''
-    if (not row.get('Capacity retry')
-            and not re.search(r' -> [^:;]+: at capacity(?:;|$)', row.get('Switches', ''))):
-        switch = f'{old} -> {new}: at capacity'
-        row['Switches'] = '; '.join(filter(None, [row.get('Switches'), _m_jobs.stamp(inst) + ' ' + switch]))
-        row['Capacity retry'] = marker
-    if row.get('Capacity retry') != marker:
-        return ''
-    command = 'brain brief ' + shlex.quote(n['id']) + ' --branch ' + shlex.quote(row['Job']) + ' --runtime ' + shlex.quote(new)
-    return '; one retry recorded; coordinator: relaunch through host in existing worktree after `' + command + '`'
-
-
 def watch_failures(inst, nodes, acknowledged, warnings):
     """Untrusted host input cannot suppress unrelated actionable work."""
     try:
@@ -521,7 +494,15 @@ def watch_failures(inst, nodes, acknowledged, warnings):
             key = record.get('job_key')
             if not isinstance(key, str) or not isinstance(record.get('run'), str) or not record['run']:
                 continue
-            if not record.get('thread') or workers.get(key) != record['thread']:
+            if not record.get('thread'):
+                continue
+            native = record.get('source') == 'native-host'
+            if record.get('discovered') and native:
+                if not any(j['node'] == n['id'] and j['job_key'] == key
+                           and j['project'] == record.get('project') and j['branch'] == record.get('branch')
+                           for j in _m_host_observations.host_failure_jobs(inst)):
+                    continue
+            elif workers.get(key) != record['thread']:
                 continue
             row = next((r for r in rows if not r['Ended'] and _m_jobs.job_key(r) == key), None)
             if row is None:
@@ -532,21 +513,18 @@ def watch_failures(inst, nodes, acknowledged, warnings):
             error = str(record.get('error', '')).lower()
             capacity = 'at capacity' in error
             category = 'at capacity' if capacity else ('usage limit' if 'usage limit' in error else 'provider error')
-            retry = ''
-            previous = dict(row)
-            try:
-                if capacity:
-                    retry = watch_retry(inst, n, row, record, marker)
-            except (SystemExit, OSError, ValueError):
-                row.clear()
-                row.update(previous)  # invalid routing disables only this automatic switch
-            if row != previous:
-                _m_jobs.write_jobs(inst, n, rows)
-            text = _m_nodes.import_text(f"{row['Job']}: worker run failed ({category}){retry}", _m_guard.never_terms(n))
+            if (native and inst.local_of('root').get('host_export') == 'on'
+                    and record.get('category') in _m_worker_failures.FAILURE_CATEGORIES[:-1]):
+                try:
+                    if not _m_worker_failures.failure_exhausted(inst, record):
+                        # Exact ownership gaps need attention, rather than suppressing forever.
+                        if _m_worker_failures.failure_owned(inst, record) is not None:
+                            continue
+                except (OSError, ValueError):
+                    pass  # damaged recovery state needs the ordinary actionable notice
+            text = _m_nodes.import_text(f"{row['Job']}: worker run failed ({category})", _m_guard.never_terms(n))
             _m_transitions.inbox_append(n['dir'], f'- {inst.now()} from watcher: {text} {marker}\n', marker)
-            # Persist the switch and its actionable notice together; other dirty files stay untouched.
-            inst.commit([n['dir'] / _m_jobs.JOBS_FILE, n['dir'] / 'inbox.md'],
-                        f"{n['id']}: " + ('runtime switch at capacity' if retry else 'worker failure notice'))
+            inst.commit([n['dir'] / 'inbox.md'], f"{n['id']}: worker failure notice")
             acknowledged.add(marker)
 
 

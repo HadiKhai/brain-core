@@ -2755,3 +2755,39 @@ Inbox acknowledgement publication errors retain the already-flushed delivery
 and warning, then propagate the original error with a nonzero exit. They never
 report successful persistence. A stale-generation no-op may still repeat later
 without overwriting a newer acknowledgement or resolution.
+
+## D572: The minute sampler resumes failed workers in the same thread
+
+The existing `machine sample` hook exports bounded native failures, then performs
+same-thread recovery before the file-only watcher. Provider failures recognized
+from native local `error` activity items for the exact latest failed run are
+at capacity, overloaded, rate limit/429 and disconnected streams. Conversation
+prose, inherited items, old runs and truncated/unknown evidence never authorize a
+resume. Private snapshots retain only screened categories, never error excerpts.
+
+Each thread/run pair owns a durable recovery receipt. Detection starts a 60-second
+backoff; subsequent attempts wait 180 and 600 seconds after the prior claim.
+Attempts are claimed and synced before sending with stable host idempotency keys.
+Replay, concurrent samplers and unknown send outcomes cannot repeat a claimed step.
+At most three sends are attempted for that run. Before each send the sampler checks
+fresh failed-run identity, no active run or pending question, local host routing,
+and open-job ownership. A closed, handed-back, retired or rebound worker is retained.
+The third claim produces a worker-failure inbox notice and coordinator wake through
+the ordinary durable queue. Work/unknown errors go directly to that path. Recovery
+state corruption also produces a notice instead of hiding the failure indefinitely.
+Failure handling never proposes a runtime/model switch, even if fallback routing is
+permissive. Root's question-only wake policy also admits typed worker failures.
+
+`wt add --thread <id>` binds an explicitly supplied builder to its open job before
+setup. When a thread does not exist yet, the native launch path records the returned
+thread, including a worker that already failed before launch confirmation. Export
+also checks failed threads in open jobs' home projects and attributes a unique
+matching branch without rewriting bindings. Discovery can resume an unbound job,
+but cannot resume a retired worker or one superseded by another bound worker.
+
+After these changes land, the coordinator enables root machine-local
+`host_export=on` (for example `brain set root host_export=on`). This worker does not
+enable it on a live instance. The existing 60-second launchd sampler needs no new
+service or model watchdog turn. The coordinator then reduces the LLM watchdog's
+failure check to a fallback and restores its 20-minute interval. Fake-host checks
+qualify mechanics; they do not attest live provider recovery or transport latency.

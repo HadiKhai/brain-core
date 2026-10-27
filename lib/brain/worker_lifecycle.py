@@ -290,7 +290,7 @@ def _restart_worker(inst, n, key, rpc):
         if (replacement.get('worktreePath') != receipt['workspace'] or replacement.get('branch') != row['Job']
                 or replacement.get('providerInstanceId') != receipt['modelSelection']['instanceId']
                 or replacement.get('model') != receipt['modelSelection']['model']
-                or replacement.get('status') not in ('preparing', 'queued', 'starting', 'running', 'completed')):
+                or replacement.get('status') not in ('preparing', 'queued', 'starting', 'running', 'completed', 'failed')):
             raise ValueError('replacement workspace/model binding not confirmed; old ownership retained')
         if receipt['phase'] == 'launched':
             with _m_instance.brain_lock(inst):
@@ -408,7 +408,7 @@ def launch_worker(inst, n, key, rpc=None):
             if (replacement.get('worktreePath') != workspace or replacement.get('branch') != row['Job']
                     or replacement.get('providerInstanceId') != receipt['modelSelection']['instanceId']
                     or replacement.get('model') != receipt['modelSelection']['model']
-                    or replacement.get('status') not in ('preparing', 'queued', 'starting', 'running', 'completed')):
+                    or replacement.get('status') not in ('preparing', 'queued', 'starting', 'running', 'completed', 'failed')):
                 raise ValueError('initial worker workspace/model binding is not confirmed')
             with _m_instance.brain_lock(inst):
                 latest, bound, live = restart_source(inst, n['id'], key)
