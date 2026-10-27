@@ -3453,7 +3453,9 @@ mtime. Other undated lines require an explicit handling receipt.
 Archival reuses the native append lock and source/archive generation fences.
 It publishes exact retained source bytes and episode metadata before replacing
 the active inbox, persists episode identities before removal, and commits all
-changed inbox/archive pairs together once per batch. Weekly sweeps and dashboard
+successfully published inbox/archive pairs together once per batch, including
+when a later node refuses publication. Terminal delivery expiry is scoped to
+the owning reporter; an ancestor read cannot consume a child notice. Weekly sweeps and dashboard
 reads do not archive; dashboard inbox counts include only open asks.
 
 A coordinator can inspect IDs with `brain inbox <node> --json`, then record an

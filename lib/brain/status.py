@@ -733,7 +733,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         if machine_transition_line(n, line):
             continue  # legacy autonomous transitions are informational, never coordinator work
         else:
-            add("inbox", line[2:], informational=_m_docker_leftovers.leftover_report_line(line))
+            from . import inbox_notices
+            add("inbox", line[2:], informational=inbox_notices.informational_notice(line))
     if include_advice:
         for advice in runaway_jobs(inst, n, structured=True):
             if isinstance(advice, str):  # legacy callers supplying display-only advice
@@ -1308,7 +1309,7 @@ def cmd_inbox(a):
     sys.stdout.flush()
     if not weekly:
         from . import inbox_notices
-        notices = [i for i in items if i['kind'] == 'inbox' and
+        notices = [i for i in items if i['kind'] == 'inbox' and i['node'] == reporter and
                    inbox_notices.terminal_notice('- ' + i['text'].removeprefix('inbox: '))]
         delivered = {i['id'] for i in notices}
         if delivered:

@@ -61,6 +61,8 @@ def automatic_expiry(inst, n, line, record, seen):
     if acted or (stamp is not None and (now - stamp).total_seconds() > 86400):
         record.update(expired=True, seen_at=record.get('seen_at') or inst.now(),
                       expiry_rule='owner-inbox-seen-v1' if acted else 'routine-notice-24h-v1')
+        return True
+    return False
 
 
 def notice_pending(line, record):
@@ -112,7 +114,9 @@ def archive_plan(inst, n, data, automatic=False, seen=None):
         line = raw.rstrip('\r\n')
         record = current.get(_m_reminders.inbox_source_id(n, line)) if line.startswith('- ') else None
         if record is not None and automatic and not record['answered']:
-            automatic_expiry(inst, n, line, record, seen or {})
+            if not automatic_expiry(inst, n, line, record, seen or {}):
+                kept.append(raw)
+                continue
         if record is None or notice_pending(line, record):
             kept.append(raw)
             continue
@@ -177,14 +181,18 @@ def autoarchive(inst, nodes):
                     data.update(plan['lifecycle'])
                     plans.append((n, plan))
         paths = []
-        for n, plan in plans:
-            publish_archive(plan)
-            paths.extend([plan['source'], plan['archive']])
-            with _m_reminders.lifecycle_store(inst) as data:
-                _m_reminders.reconcile_requests(inst, n,
-                    [line for line in plan['inbox_text'].splitlines() if line.startswith('- ')], data)
-        if paths:
-            inst.commit_settings_batch(paths, 'Archive handled inbox notices')
+        try:
+            for n, plan in plans:
+                publish_archive(plan)
+                paths.extend([plan['source'], plan['archive']])
+                with _m_reminders.lifecycle_store(inst) as data:
+                    _m_reminders.reconcile_requests(inst, n,
+                        [line for line in plan['inbox_text'].splitlines() if line.startswith('- ')], data)
+        finally:
+            # A later node's refusal must not strand earlier durable removals
+            # outside Git. Commit only successfully published node pairs.
+            if paths:
+                inst.commit_settings_batch(paths, 'Archive handled inbox notices')
         return sum(len(plan['episodes']) for _, plan in plans)
 
 
