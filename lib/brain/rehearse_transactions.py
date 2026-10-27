@@ -9,6 +9,7 @@ import copy
 import contextvars
 import functools
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -30,6 +31,87 @@ def require(condition):
 
 def digest(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def capture_timing(root):
+    """Exact private telemetry operands; unknown shapes grant no write authority."""
+    result = {}
+    try:
+        brain = os.open(str(Path(root) / '.brain'), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return result
+    try:
+        try:
+            directory = os.open('timings', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=brain)
+        except FileNotFoundError:
+            return result
+        try:
+            info = os.fstat(directory)
+            require(stat.S_IMODE(info.st_mode) == 0o700 and info.st_uid == os.getuid())
+            entries = sorted(os.listdir(directory))
+            result['timings'] = dict(directory=True, mode=info.st_mode, uid=info.st_uid,
+                                     dev=info.st_dev, ino=info.st_ino, entries=entries)
+            if 'events.jsonl' in entries:
+                fd = os.open('events.jsonl', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                try:
+                    before = os.fstat(fd)
+                    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and
+                            stat.S_IMODE(before.st_mode) == 0o600 and before.st_uid == os.getuid()
+                            and before.st_size <= 32 * 1024 * 1024)
+                    payload = os.pread(fd, 32 * 1024 * 1024 + 1, 0)
+                    def stable(st):
+                        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                                st.st_ctime_ns, st.st_mode, st.st_nlink, st.st_uid)
+                    require(len(payload) == before.st_size and stable(before) == stable(os.fstat(fd)) and
+                            stable(before) == stable(os.stat('events.jsonl', dir_fd=directory, follow_symlinks=False)))
+                    result['timings/events.jsonl'] = dict(hex=payload.hex(), dev=before.st_dev, ino=before.st_ino,
+                        mtime=before.st_mtime_ns, mode=before.st_mode, uid=before.st_uid)
+                finally:
+                    os.close(fd)
+            current = os.stat('timings', dir_fd=brain, follow_symlinks=False)
+            require((info.st_dev, info.st_ino, info.st_mode, info.st_uid) ==
+                    (current.st_dev, current.st_ino, current.st_mode, current.st_uid) and
+                    result['timings']['entries'] == sorted(os.listdir(directory)))
+        finally:
+            os.close(directory)
+        return result
+    finally:
+        os.close(brain)
+
+
+def validate_timing(before, after, observations, owner_pid, command):
+    """Grant only an actually observed native append, never a timing path exemption."""
+    names = {'timings', 'timings/events.jsonl'}
+    old, new = ({k: v for k, v in snapshot.items() if k in names} for snapshot in (before, after))
+    rows = [row for row in observations if row.get('type') == 'telemetry']
+    if old == new:
+        require(not rows)
+        return set()
+    require(len(rows) == 1)
+    row = rows[0]
+    require(row['pid'] == owner_pid and row['before'] == old and row['after'] == new)
+    require(set(new) == names and set(old) <= names)
+    directory = new['timings']
+    require(directory['directory'] is True and stat.S_IMODE(directory['mode']) == 0o700
+            and directory['uid'] == os.getuid())
+    if 'timings' in old:
+        require(all(old['timings'][k] == directory[k] for k in ('directory', 'mode', 'uid', 'dev', 'ino')))
+        require(directory['entries'] == sorted(set(old['timings']['entries']) | {'events.jsonl'}))
+    else:
+        require(directory['entries'] == ['events.jsonl'])
+    current = new['timings/events.jsonl']
+    require(stat.S_ISREG(current['mode']) and stat.S_IMODE(current['mode']) == 0o600
+            and current['uid'] == os.getuid())
+    if 'timings/events.jsonl' in old:
+        prior = old['timings/events.jsonl']
+        require(all(prior[k] == current[k] for k in ('dev', 'ino', 'mode', 'uid')))
+    record = row['record']
+    require(record['kind'] == 'timing' and record['actor'] == 'brain' and
+            record['data']['command'] == command)
+    payload = (json.dumps(record, ensure_ascii=False, separators=(',', ':'), sort_keys=True) + '\n').encode()
+    require(len(payload) <= 16 * 1024)
+    require(blob(new, 'timings/events.jsonl') == blob(old, 'timings/events.jsonl') + payload)
+    return {'timings/events.jsonl'} | ({'timings'} if 'timings' not in old else set())
 
 
 def capture(root, diagnostics=None):
@@ -69,6 +151,7 @@ def capture(root, diagnostics=None):
                                     mtime=st.st_mtime_ns, mode=st.st_mode)
             finally:
                 os.close(fd)
+        result.update(capture_timing(root))
         current = os.stat(str(Path(root) / '.brain'), follow_symlinks=False)
         require((initial.st_dev, initial.st_ino) == (current.st_dev, current.st_ino))
         return result
@@ -311,7 +394,8 @@ def _validate(before, after, observations, owner_pid, command, now, diagnostics=
     """Return only proven changed operands. Unknown evidence grants nothing.
 
     A failed command with partial writes is recognized as an unresolved native
-    operation, and remains unexpected. No product path is authorized here.
+    operation, and remains unexpected. Telemetry requires its separate exact
+    native append observation; no general product path is authorized here.
     """
     from . import events
     checkpoint = 'capture-inputs'
@@ -319,13 +403,16 @@ def _validate(before, after, observations, owner_pid, command, now, diagnostics=
         require(before is not None and after is not None and isinstance(observations, list))
         checkpoint = 'history-preservation'
         require(set(before) <= set(after))
-        known = {'events-leases', 'events.jsonl', 'events-index.json', 'events-compare.jsonl', 'events-compare-index.json'}
+        known = {'events-leases', 'events.jsonl', 'events-index.json', 'events-compare.jsonl', 'events-compare-index.json',
+                 'timings', 'timings/events.jsonl'}
         require(all(n in known or re.fullmatch(r'events-\d{4}-\d{2}\.jsonl', n) for n in set(before) | set(after)))
         for snapshot in (before, after):
             if 'events-leases' in snapshot:
                 require(snapshot['events-leases'].get('directory') is True and
                         snapshot['events-leases'].get('entries') == [])
         for name in before:
+            if name in ('timings', 'timings/events.jsonl'):
+                continue  # exact append and private metadata checked against the native observation below
             if name == 'events-leases':
                 require(before[name] == after[name])
                 continue
@@ -348,10 +435,14 @@ def _validate(before, after, observations, owner_pid, command, now, diagnostics=
         checkpoint = 'comparison-after'
         new_comparisons = check_comparisons(after, now)
         require(new_comparisons[:len(old_comparisons)] == old_comparisons)
+        checkpoint = 'telemetry'
+        timing_paths = validate_timing(before, after, observations, owner_pid, command)
         scopes, observed_events, observed_comparisons = {}, [], []
         for observation in observations:
             checkpoint = 'lifecycle.' + str(observation.get('type', 'unknown'))
             require(observation['pid'] == owner_pid)
+            if observation['type'] == 'telemetry':
+                continue
             key, kind = observation['scope'], observation['type']
             if kind == 'enter':
                 require(key not in scopes and observation['command'] == command)
@@ -468,6 +559,9 @@ def _validate(before, after, observations, owner_pid, command, now, diagnostics=
         checkpoint = 'index-after'
         check_index(after, final_state, required=bool(added))
         changed = {name for name in set(before) | set(after) if before.get(name) != after.get(name)}
+        if 'timings' in before and 'timings' in after:
+            changed.discard('timings')  # an existing directory gains no write grant for its entry listing
+        require(changed & {'timings', 'timings/events.jsonl'} == timing_paths)
         # The derived cache alone never constitutes an owned operation.
         require(added)
         if diagnostics is not None:
@@ -488,6 +582,53 @@ def install_observer(events, root, trace):
     sequence = [0]
     lock_sequence, lock_anchor = [0], [None]
     native_instance = events.instance
+    timing_active = [False]
+
+    def write_observation(record):
+        with events.common.directory_target(Path(trace), private=True) as target:
+            with os.fdopen(target.open(os.O_WRONLY | os.O_APPEND | os.O_CREAT), 'a') as stream:
+                stream.write(json.dumps(record, sort_keys=True) + '\n')
+
+    # Observe the exact operand at the native timing producer's append call.
+    # This runs after the operational transaction, so it has no journal scope.
+    timing_module = events.__package__ + '.timings'
+    try:
+        timings = importlib.import_module(timing_module)
+    except ModuleNotFoundError as error:
+        if error.name != timing_module:
+            raise
+        timings = None  # Older cores have no telemetry producer to observe.
+    original_publish = timings.publish if timings is not None else None
+    original_line = events.append_line
+
+    def timing_publish(*args, **kwargs):
+        previous = timing_active[0]
+        timing_active[0] = True
+        try:
+            return original_publish(*args, **kwargs)
+        finally:
+            timing_active[0] = previous
+
+    def timing_line(path, value):
+        owned = timing_active[0] and Path(path) == Path(root) / '.brain/timings/events.jsonl'
+        before = None
+        if owned:
+            try:
+                before = capture_timing(root)
+                record = copy.deepcopy(value)
+            except (OSError, ValueError):
+                pass
+        result = original_line(path, value)
+        if owned and before is not None:
+            try:
+                write_observation(dict(type='telemetry', pid=os.getpid(), before=before,
+                                       after=capture_timing(root), record=record))
+            except (OSError, ValueError):
+                pass  # unavailable evidence grants nothing; preserve the native outcome
+        return result
+
+    if timings is not None:
+        timings.publish, events.append_line = timing_publish, timing_line
     def owner():
         op = active_ops[-1]
         fh = native_instance._LOCK['fh']
@@ -519,9 +660,7 @@ def install_observer(events, root, trace):
                 (fd.st_dev, fd.st_ino) == (path.st_dev, path.st_ino) and events.lease_live(op.inst, op.ref))
     def emit(kind, **data):
         if stack:
-            with events.common.directory_target(Path(trace), private=True) as target:
-                with os.fdopen(target.open(os.O_WRONLY | os.O_APPEND | os.O_CREAT), 'a') as stream:
-                    stream.write(json.dumps(dict(type=kind, scope=stack[-1], pid=os.getpid(), **data), sort_keys=True) + '\n')
+            write_observation(dict(type=kind, scope=stack[-1], pid=os.getpid(), **data))
     def observe(kind, inst=None, **data):
         try:
             if inst is not None:

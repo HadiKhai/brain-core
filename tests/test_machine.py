@@ -1544,9 +1544,13 @@ class DockerLeftoverHooks(unittest.TestCase):
 
     def test_due_tick_calls_one_shared_node_check_before_due_evidence(self):
         order = []
-        self.inst.nodes.return_value = [self.node]
+        (self.folder / 'instance.md').write_text('---\nname: fixture\ntimezone: UTC\n---\n')
+        self.inst = self.m.UIInstance(self.folder)
+        self.inst.save_local()
+        self.inst._nodes = [{**self.node, 'id': 'root', 'archived': True}, self.node]
         args = argparse.Namespace(id='maple', quiet=False, json=True)
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'watch_items', return_value=[]), \
                 mock.patch.object(self.m, 'auto_upgrade', return_value=None), \
                 mock.patch.object(self.m, 'wake_target', return_value=(self.node, None)), \
                 mock.patch.object(self.m, 'wake_diagnostic', return_value=None), \

@@ -520,8 +520,7 @@ def due_evidence(inst, n):
              "job-handbacks", "job-attempts", "handback-queue"]
     paths = [str((n["dir"] / name).relative_to(inst.root)) for name in names]
     previous = facts_meta(n)
-    last = ("" if previous else
-            _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip())
+    last = _m_common.git("log", "-1", "--format=%H %cI", "--", *paths, cwd=inst.root).stdout.strip()
     # Hash exactly the generated display, apart from its refresh time and metadata. Retain
     # the last refresh's merge baseline so its "since previous" snapshot stays comparable.
     lines, _ = status_facts(inst, n, state, previous.get("merged_before", []), metadata_only=True)
@@ -838,7 +837,7 @@ def unsettled_thread_items(inst, n):
 
 
 def cmd_due(a):
-    inst = _m_ui.UIInstance(_m_nodes.load().root)
+    inst = _m_ui.UIInstance.from_instance(_m_nodes.load())
     if getattr(a, "synthesis_seen", None):
         if not a.id or a.quiet or a.json or a.machine or getattr(a, 'defer', None) or getattr(a, 'ack', None):
             _m_common.die("--synthesis-seen needs one node id and no display/reminder options")
@@ -884,6 +883,10 @@ def cmd_due(a):
         else:
             print(f"root: {upgraded}")
         return
+    # Docker observations precede every due evidence computation, including the
+    # watcher scan, and are shared by all nodes selected for this tick.
+    _m_docker_cleanup.docker_cleanup_nodes(inst, nodes)
+    _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     # Root's explicit tick also sees descendant escalations, without exposing their text.
     escalation_nodes = inst.nodes() if a.id == "root" else nodes
     from . import watch as _m_watch
@@ -916,8 +919,6 @@ def cmd_due(a):
                 wake_views.append((n, value))
                 consumed.append({'node': n['id'], 'kind': 'wake-reasons',
                                  'text': _m_hosts.wake_reason_summary(value['items'])})
-    _m_docker_cleanup.docker_cleanup_nodes(inst, nodes)
-    _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
     state = _m_machine.machine_state(inst)
     items = coordinator_due_items(inst, nodes, include_handled=getattr(a, 'handled', False))
     from . import communication as _m_communication
@@ -1260,7 +1261,7 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
 
 
 def cmd_inbox(a):
-    inst = _m_ui.UIInstance(_m_nodes.load().root)
+    inst = _m_ui.UIInstance.from_instance(_m_nodes.load())
     if getattr(a, "add", None):
         n = inst.node(a.id or "root")
         text = _m_nodes.import_text(" ".join(a.add.split()), _m_guard.never_terms(n))

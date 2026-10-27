@@ -1,22 +1,26 @@
-"""Always-on command and phase measurements; automatic metadata-only slow profiles."""
+"""Command-effect-scoped measurements and bounded metadata-only slow profiles."""
 import contextlib
 import contextvars
 import cProfile
 import functools
 import json
 import pstats
+import re
 import time
 import uuid
 from pathlib import Path
 
 SLOW_SECONDS = 5.0
+MAX_RECORD_BYTES = 16 * 1024
 _CURRENT = contextvars.ContextVar('brain_command_timing', default=None)
 _LABEL = contextvars.ContextVar('brain_command_label', default='invalid')
+_PERSIST = contextvars.ContextVar('brain_command_timing_persist', default=True)
 
 
-def select_command(name):
+def select_command(name, persist=True):
     """Called only after the CLI has selected and validated a registered command."""
     _LABEL.set(name)
+    _PERSIST.set(persist)
 
 
 def record(name, seconds):
@@ -45,12 +49,13 @@ def timed(name):
 
 
 @contextlib.contextmanager
-def command():
+def command(persist=True):
     from . import usage_cache
     start = time.perf_counter()
     phases = {}
     token = _CURRENT.set(phases)
     label_token = _LABEL.set('invalid')
+    persist_token = _PERSIST.set(persist)
     # Function totals are sufficient for top-N diagnostics. Omitting caller
     # edges and individual C builtins keeps ordinary read commands inexpensive.
     profiler = cProfile.Profile(subcalls=False, builtins=False)
@@ -69,15 +74,17 @@ def command():
         _CURRENT.reset(token)
         # Telemetry never changes the command's outcome, even on damaged storage.
         try:
-            publish(elapsed, phases, profiler, success)
+            if _PERSIST.get():
+                publish(elapsed, phases, profiler, success)
         except (Exception, SystemExit):
             pass
         finally:
             _LABEL.reset(label_token)
+            _PERSIST.reset(persist_token)
 
 
 def publish(elapsed, phases, profiler, success):
-    from . import common, events, guard, instance, nodes
+    from . import events, guard, instance, nodes
     root = nodes.try_find_root()
     if root is None:
         return
@@ -87,7 +94,7 @@ def publish(elapsed, phases, profiler, success):
     identity = uuid.uuid4().hex
     data = dict(command=name, elapsed_s=round(elapsed, 6), slow=elapsed > SLOW_SECONDS,
                 lock_wait_s=round(phases.get('lock_wait', 0.0), 6),
-                success=success, phases={k: round(v, 6) for k, v in phases.items()})
+                success=success, phases={k[:64]: round(v, 6) for k, v in sorted(phases.items())[:32]})
     if elapsed > SLOW_SECONDS:
         # Filenames alone (no absolute source paths, arguments, locals or callers).
         rows = sorted(pstats.Stats(profiler).stats.items(), key=lambda row: row[1][3], reverse=True)[:30]
@@ -95,15 +102,18 @@ def publish(elapsed, phases, profiler, success):
                     calls=v[1], self_s=round(v[2], 6), cumulative_s=round(v[3], 6)) for k, v in rows]
         terms = [t for n in inst.nodes() for t in guard.never_terms(n)]
         for row in top:
-            row['function'] = nodes.import_text(row['function'], terms, metadata=True)
+            row['function'] = nodes.import_text(row['function'], terms, metadata=True)[:256]
         profile = {'command': name, 'elapsed_s': data['elapsed_s'], 'top': top}
-        filename = identity + '.json'
-        common.atomic_write(inst.root / '.brain/timings' / filename,
-                            json.dumps(profile, indent=2) + '\n', private=True, create=True)
-        data['profile'] = filename
-    events.append_line(inst.root / '.brain/timings/events.jsonl',
-                       dict(ts=inst.now(), node=events.node_ref('root'), kind='timing',
-                            actor='brain', ref=identity, data=data))
+        data['profile'] = profile
+    record = dict(ts=inst.now(), node=events.node_ref('root'), kind='timing', actor='brain', ref=identity, data=data)
+    def size():
+        return len((json.dumps(record, ensure_ascii=False, separators=(',', ':'), sort_keys=True) + '\n').encode())
+    while size() > MAX_RECORD_BYTES and data.get('profile', {}).get('top'):
+        data['profile']['top'].pop()
+        data['profile']['truncated'] = True
+    if size() > MAX_RECORD_BYTES:
+        return  # optional diagnostics never publish an oversized record
+    events.append_line(inst.root / '.brain/timings/events.jsonl', record)
 
 
 def cmd_timings(a):
@@ -122,7 +132,16 @@ def cmd_timings(a):
                                 and isinstance(data.get('elapsed_s'), (int, float))
                                 and (not a.slow or data.get('slow'))
                                 and (not a.command or data.get('command') == a.command)):
-                            records.append(dict(ts=row.get('ts'), **data))
+                            item = dict(ts=row.get('ts'), **data)
+                            legacy = item.get('profile')
+                            if isinstance(legacy, str) and re.fullmatch(r'[0-9a-f]{32}\.json', legacy):
+                                try:
+                                    profile = json.loads(events.private_read(inst.root / '.brain/timings' / legacy))
+                                    if isinstance(profile, dict) and isinstance(profile.get('top'), list):
+                                        item['profile'] = profile
+                                except (OSError, ValueError, SystemExit):
+                                    pass  # retained legacy reference remains visible when unavailable
+                            records.append(item)
                     except (ValueError, TypeError, AttributeError):
                         continue
         except (OSError, ValueError, SystemExit):
@@ -138,4 +157,6 @@ def cmd_timings(a):
                                if isinstance(v, (int, float)))
             print(f"{row['ts']} {row.get('command', '?')}: {row['elapsed_s']:.3f}s" +
                   (' slow' if row.get('slow') else '') + ('; ' + phases if phases else '') +
-                  ('; profile .brain/timings/' + row['profile'] if row.get('profile') else ''))
+                  (('; profile: ' + str(len(row['profile'].get('top', []))) + ' functions'
+                    if isinstance(row.get('profile'), dict) else '; profile .brain/timings/' + row['profile'])
+                   if row.get('profile') else ''))

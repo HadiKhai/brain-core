@@ -777,6 +777,16 @@ class QuestionWake(Scenario):
 
     def test_root_due_escalates_without_question_text_and_live_shows_age(self):
         self.inst.local_of('root').update(coordinator='synthetic-root', wake=self.command)
+        self.inst.save_local()
+        self.root_due_escalation()
+
+    def test_due_retains_loaded_ui_instance_state(self):
+        self.inst = self.module.UIInstance(self.inst.root)
+        self.inst.local_of('root').update(coordinator='synthetic-root', wake=self.command)
+        # Deliberately not persisted: cmd_due must retain its explicit loaded view.
+        self.root_due_escalation()
+
+    def root_due_escalation(self):
         old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
         (self.n["dir"] / "inbox.md").write_text("- " + old +
             " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")

@@ -1233,6 +1233,20 @@ class RehearsalCloneCaches(Scenario):
             self.assertEqual((set(), 'unproven'), validate(packet['after'], []))
             self.assertEqual((set(), 'unproven'), validate(packet['after'], packet['observations'],
                                                           packet['owner_pid'] + 100000))
+            timing = 'timings/events.jsonl'
+            self.assertIn(timing, packet['after'])
+            self.assertTrue(any(o['type'] == 'telemetry' for o in packet['observations']))
+            for payload in (bytes.fromhex(packet['after'][timing]['hex']) + b'x',
+                            b'x' + bytes.fromhex(packet['after'][timing]['hex'])[1:]):
+                damaged = copy.deepcopy(packet['after'])
+                damaged[timing]['hex'] = payload.hex()
+                self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+            self.assertEqual((set(), 'unproven'), validate(packet['after'],
+                [o for o in packet['observations'] if o['type'] != 'telemetry']))
+            for name, mode in ((timing, 0o100644), ('timings', 0o40755)):
+                damaged = copy.deepcopy(packet['after'])
+                damaged[name]['mode'] = mode
+                self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
             for name in ('events-index.json', 'events-compare-index.json'):
                 damaged = copy.deepcopy(packet['after'])
                 self.assertIn(name, damaged)
@@ -1361,7 +1375,7 @@ class RehearsalSandbox(Scenario):
         trace = None
         try:
             self.start_native_evidence()
-            from brain import events, instance, rehearse_transactions as transactions
+            from brain import events, instance, timings, rehearse_transactions as transactions
             self.update_native_evidence(stage='helper-initialization',
                                         observer_path=str(Path(transactions.__file__).resolve()))
             root = self.tmp / ('transaction-' + (failure or 'success'))
@@ -1384,6 +1398,7 @@ class RehearsalSandbox(Scenario):
                                     (events.Command, 'finish'), (events.Command, 'close_lease'),
                                     (events.Journal, 'append'), (events, 'comparison'),
                                     (events, 'snapshot_view'), (events, 'detect_gaps'),
+                                    (events, 'append_line'), (timings, 'publish'),
                                     (instance.brain_lock, '__enter__'), (instance.brain_lock, '__exit__')):
                     restore.callback(setattr, owner, name, getattr(owner, name))
                 transactions.install_observer(events, root, trace)

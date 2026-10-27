@@ -129,9 +129,14 @@ def ui_json_build(inst, scan, code, cache=True):
     return record  # --wait can deliver a fresh observation even if the optional cache is unwritable
 
 
-def ui_json_read(inst, scan, wait=False):
+def ui_json_read(inst, scan, wait=False, cache=True):
     from . import ui, ui_server
     code = ui_server.ui_code_version()
+    if not cache:
+        record = ui_json_build(inst, scan, code, cache=False)
+        if record is None:
+            _m_common.die('UI visibility changed during fill; retry')
+        return ui_json_source(record['state'], record, origin='fresh-full')
     if wait:
         stack, cache = contextlib.ExitStack(), True
         try:

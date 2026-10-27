@@ -51,10 +51,12 @@ def history_dates(inst, source, needle):
     """Introduction dates are immutable at a pinned Git head; keep only their dates."""
     from . import common, jobs, spend, usage_cache
     relative = source.relative_to(inst.root).as_posix()
-    head = common.git('rev-parse', '--verify', '--quiet', 'HEAD', cwd=inst.root)
     def recount():
         result = common.git('log', '--reverse', '--format=%cI', '-S', needle, '--', relative, cwd=inst.root)
         return result.stdout.splitlines() if not result.returncode else []
+    if _VALUES.get() is None:
+        return recount()
+    head = common.git('rev-parse', '--verify', '--quiet', 'HEAD', cwd=inst.root)
     if head.returncode:
         return recount()
     key = 'history:' + jobs.digest([head.stdout.strip(), relative, needle])

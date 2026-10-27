@@ -207,8 +207,16 @@ def writes(a):
 
 
 def main():
-    with _m_timings.command(), _m_timings.phase('dispatch'):
+    with _m_timings.command(persist=False), _m_timings.phase('dispatch'):
         _main()
+
+
+def command_read(a):
+    """Commands whose declared read effect includes a private observation snapshot."""
+    name = a.f.__name__
+    return (name in ('cmd_due', 'cmd_inbox', 'cmd_status', 'cmd_jobs') or
+            (name == 'cmd_ui' and getattr(a, 'json', False) and not getattr(a, 'scan', None))) and (
+            not writes(a) or (name == 'cmd_inbox' and not getattr(a, 'add', None)))
 
 
 def _main():
@@ -673,7 +681,9 @@ def _main():
             a.paths.extend(extra)
         else:
             ap.error("unrecognized arguments: " + " ".join(extra))
-    _m_timings.select_command(a.cmd or 'dashboard')
+    handler = getattr(a, 'f', None)
+    _m_timings.select_command(a.cmd or 'dashboard', persist=bool(handler) and
+                             (writes(a) or handler.__name__ not in READ_ONLY or command_read(a)))
     if not getattr(a, "f", None):
         if a.cmd in ("item", "specialist", "wt", "hook"):
             sub.choices[a.cmd].print_help()
@@ -695,9 +705,7 @@ def _main():
     if a.f == _m_machine.cmd_machine and a.action == "sample":
         a.f(a)  # sampler and watcher each take a short nonblocking instance lock
         return
-    if (a.f.__name__ in ("cmd_due", "cmd_inbox", "cmd_status", "cmd_jobs") or
-            (a.f.__name__ == 'cmd_ui' and getattr(a, 'json', False))) and (
-            not writes(a) or (a.f.__name__ == "cmd_inbox" and not getattr(a, "add", None))):
+    if command_read(a):
         handler = a.f
         def read_handler(args):
             with _m_command_reads.snapshot(), _m_timings.phase("compute"):

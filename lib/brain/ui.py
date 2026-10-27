@@ -1,6 +1,7 @@
 """Ui mechanics for Brain."""
 import argparse
 import contextlib
+import datetime
 import json
 import math
 import os
@@ -272,6 +273,16 @@ class UIInstance(_m_instance.Instance):
     def __init__(self, root):
         super().__init__(root)
         self._nodes, self._items = None, None
+
+    @classmethod
+    def from_instance(cls, inst):
+        """Retain the loaded configuration and local state in this command's view."""
+        if isinstance(inst, cls):
+            return inst
+        view = cls.__new__(cls)
+        view.__dict__.update(inst.__dict__)
+        view._nodes, view._items = None, None
+        return view
 
     def nodes(self):
         if self._nodes is None:
@@ -1208,7 +1219,8 @@ def cmd_ui(a):
     if a.json:
         from . import ui_json
         with _m_common.git_read_snapshot():
-            print(json.dumps(ui_json.ui_json_read(inst, scan, wait=getattr(a, 'wait', False)), indent=1))
+            print(json.dumps(ui_json.ui_json_read(inst, scan, wait=getattr(a, 'wait', False),
+                                                  cache=not bool(a.scan)), indent=1))
         return
     version = _m_ui_server.ui_code_version()
     if a.open:
@@ -1256,6 +1268,16 @@ def cmd_ui(a):
                 else:
                     brain['filling_in'] = True
                 st = {**st, 'brain': brain}
+            # Live and detached JSON expose the same observation envelope. Live
+            # usage may still be filling after the metadata observation is ready.
+            built = time.time()
+            st = {**st, 'loading': {**ui_loading(box),
+                                    'filling_in': not _m_ui_fill.complete(st)},
+                  'source': {'kind': 'live', 'built_at': datetime.datetime.fromtimestamp(
+                      built, datetime.timezone.utc).isoformat(), 'age_seconds': 0,
+                             'observation_only': True},
+                  'readiness': ('recorded snapshot; use brain ready for current readiness'
+                                if box['metadata_ready'] else 'unknown')}
             box.update(state=st, json=json.dumps(st, sort_keys=True).encode(), version=box['version'] + 1)
             if box['metadata_ready']:
                 box['partial'] = not _m_ui_fill.complete(st)

@@ -656,7 +656,7 @@ class AutonomyInbox(Scenario):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['lock_wait_s'], 0.125)
         self.assertGreaterEqual(rows[0]['phases']['fixture'], 0)
-        profile = json.loads((root / '.brain/timings' / rows[0]['profile']).read_text())
+        profile = rows[0]['profile']
         self.assertTrue(profile['top'])
         self.assertLessEqual(len(profile['top']), 30)
         self.assertNotIn(str(self.tmp), json.dumps(profile))
@@ -666,6 +666,41 @@ class AutonomyInbox(Scenario):
             with tm.command():
                 pass  # optional telemetry cannot turn a successful read into failure
         self.assertEqual(m.pending(m.read(m.Instance(root))), {})
+
+    def test_slow_command_appends_one_bounded_record_and_reads_legacy_profiles(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('bounded_timing_fixture', str(CORE / 'bin/brain')).load_module()
+        tm = m._owners['cmd_timings']
+        folder = root / '.brain/timings'
+        before_names = {p.name for p in folder.glob('*')}
+        before = (folder / 'events.jsonl').read_bytes() if (folder / 'events.jsonl').exists() else b''
+        clock = mock.Mock()
+        clock.perf_counter.side_effect = [0.0, 6.0]
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(tm, 'time', clock), \
+                mock.patch.object(tm.pstats, 'Stats') as stats:
+            stats.return_value.stats = {('fixture.py', i, 'λ' * 5000 + str(i)): (1, 1, 0.01, 0.02, {})
+                                        for i in range(40)}
+            with tm.command():
+                tm.select_command('status')
+                tm.record('fixture', 6)
+        after = (folder / 'events.jsonl').read_bytes()
+        self.assertTrue(after.startswith(before))
+        appended = after[len(before):]
+        self.assertEqual(len(appended.splitlines()), 1)
+        self.assertLessEqual(len(appended), tm.MAX_RECORD_BYTES)
+        self.assertEqual(before_names | {'events.jsonl'}, {p.name for p in folder.iterdir()})
+        self.assertTrue(json.loads(appended)['data']['slow'])
+        self.assertIsInstance(json.loads(appended)['data']['profile'], dict)
+        self.assertTrue(json.loads(appended)['data']['profile']['truncated'])
+        legacy = {'command': 'legacy', 'elapsed_s': 6, 'top': [{'function': 'fixture:1:read'}]}
+        filename = 'a' * 32 + '.json'
+        m.atomic_write(folder / filename, json.dumps(legacy), private=True)
+        row = json.loads(appended)
+        row['data'].update(command='legacy', profile=filename)
+        m.append_line(folder / 'events.jsonl', row)
+        rows = json.loads(self.b(root, 'timings', '--command', 'legacy', '--json'))
+        self.assertEqual(rows[0]['profile'], legacy)
 
     def test_timed_writes_keep_operational_commit_and_abort_as_last_rows(self):
         root = self.init('demo')
@@ -684,16 +719,14 @@ class AutonomyInbox(Scenario):
         (root / 'never-name.txt').write_text('Orchid\n')
         m = core_loader.SourceFileLoader('rejected_timing_fixture', str(CORE / 'bin/brain')).load_module()
         tm = m._owners['cmd_timings']
+        before = {p.name: p.read_bytes() for p in (root / '.brain/timings').glob('*') if p.is_file()}
         with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
                 mock.patch.object(sys, 'argv', ['brain', 'orchid-private']), \
                 mock.patch.object(tm, 'SLOW_SECONDS', 0), contextlib.redirect_stderr(io.StringIO()), \
                 self.assertRaises(SystemExit) as rejected:
             m.main()
         self.assertEqual(rejected.exception.code, 2)
-        row = json.loads((root / '.brain/timings/events.jsonl').read_text().splitlines()[-1])['data']
-        self.assertEqual(row['command'], 'invalid')
-        self.assertFalse(row['success'])
-        self.assertTrue(row['profile'])
+        self.assertEqual(before, {p.name: p.read_bytes() for p in (root / '.brain/timings').glob('*') if p.is_file()})
         for path in (root / '.brain/timings').glob('*.json*'):
             self.assertNotIn('orchid', path.read_text().lower())
 

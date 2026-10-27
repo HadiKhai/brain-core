@@ -2755,3 +2755,26 @@ Inbox acknowledgement publication errors retain the already-flushed delivery
 and warning, then propagate the original error with a nonzero exit. They never
 report successful persistence. A stale-generation no-op may still repeat later
 without overwriting a newer acknowledgement or resolution.
+
+## D40006: Preserve strict read effects and native telemetry evidence
+
+Telemetry follows the selected command's declared effect. Mutations and the
+explicit command-read snapshot paths retain it; pure reads, rejected commands,
+and explicit UI discovery scans publish no telemetry or detached UI cache.
+This narrows D40005's invocation-wide publication rule. Slow profiles now live
+inside the append-only timing record, with at most 30 sanitized functions and
+a hard 16 KiB UTF-8 limit including the newline. Existing profile files remain
+readable; new commands create no separate profile file.
+
+Rehearsal observes the native timing producer's exact append operand and its
+before/after bytes and private metadata. Only an observed append to
+`.brain/timings/events.jsonl`, plus its directory on first creation, can be
+proven. Missing observations, rewritten or extra bytes, and unsafe modes refuse
+proof. General write permissions and the strict zero-residual assertions stay
+unchanged.
+
+Read projections retain the configuration and local state of their loaded
+instance. Due's Docker observations precede watcher and display evidence.
+Introduction-date caching is scoped to an explicit command snapshot, and Git
+commit freshness evidence remains present after status metadata is generated.
+Live and detached UI observations expose the same top-level metadata fields.
