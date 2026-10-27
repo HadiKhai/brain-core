@@ -16,6 +16,9 @@ import core_loader
 from scenario import CORE, Scenario
 
 
+# Process start/wait budget, not a behaviour bound: fixed 3 s/5 s limits passed 12/20 at -n8 under load.
+PROCESS_BUDGET = 30
+
 class HandbackLifecycle(Scenario):
     def test_many_scoped_refs_only_query_git_for_loose_symbolic_targets(self):
         m, inst, n, row = self.fixture()
@@ -919,7 +922,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                 child.stdin.write('\n'); child.stdin.flush()
             ids = []
             for child in children:
-                out, err = child.communicate(timeout=5)
+                out, err = child.communicate(timeout=PROCESS_BUDGET)
                 self.assertEqual(child.returncode, 0, err)
                 ids.append(out.strip())
             self.assertEqual(len(set(ids)), 2)
@@ -967,7 +970,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
             self.assertEqual([p.stdout.readline().strip() for p in children], ['binding', 'binding'])
             ids = []
             for child in children:
-                out, err = child.communicate(input='\n', timeout=5)
+                out, err = child.communicate(input='\n', timeout=PROCESS_BUDGET)
                 self.assertEqual(child.returncode, 0, err)
                 ids.append(out.strip())
             self.assertEqual(len(set(ids)), 2)
@@ -1193,7 +1196,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         m, inst, n, row = self.fixture()
         base = [sys.executable,str(CORE / 'bin/brain'),'handback','root','--branch',row['Job'],'--state','question']
         for extra in ([],['--summary','Synthetic result'],['--summary','bad\nsummary','--question','Choose?']):
-            result = subprocess.run(base+extra,cwd=inst.root,env=self.env,capture_output=True,text=True,timeout=3)
+            result = subprocess.run(base+extra,cwd=inst.root,env=self.env,capture_output=True,text=True,timeout=PROCESS_BUDGET)
             self.assertNotEqual(result.returncode,0)
             self.assertFalse(m.attempt_path(n,row).exists())
             self.assertFalse(m.handback_file(n,row).exists())
@@ -1205,7 +1208,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         path.write_text(json.dumps(dict(job=row['Job'],started=row['Started'],state='done',summary='Historical result')))
         def cli(*args,ok=True):
             result = subprocess.run([sys.executable,str(CORE / 'bin/brain'),*args],cwd=inst.root,
-                                    env=self.env,capture_output=True,text=True,timeout=3)
+                                    env=self.env,capture_output=True,text=True,timeout=PROCESS_BUDGET)
             self.assertEqual(result.returncode==0,ok,result.stdout+result.stderr)
             return result.stdout
         fd = m.intent_lease(inst)
@@ -1231,7 +1234,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         m, inst, n, row = self.fixture()
         def dispatch():
             result=subprocess.run([sys.executable,str(CORE / 'bin/brain'),'dispatch','--limit','1'],
-                                  cwd=inst.root,env=self.env,capture_output=True,text=True,timeout=3)
+                                  cwd=inst.root,env=self.env,capture_output=True,text=True,timeout=PROCESS_BUDGET)
             self.assertEqual(result.returncode,0,result.stderr)
             return result.stdout
         self.assertEqual(dispatch(),'')
@@ -1445,7 +1448,9 @@ with q.claim_handback(inst,n,sys.argv[3]) as request:
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
                 m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
-            foreign = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], env=self.env)
+            # Lives until this test terminates it; EOF on its stdin ends it if the test dies.
+            foreign = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'], env=self.env,
+                                       stdin=subprocess.PIPE)
             control_read, control_write = os.pipe()
             runner = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE/'lib'),
                                        str(inst.root), request['id'], str(control_read)], env=self.env,
@@ -1456,13 +1461,13 @@ with q.claim_handback(inst,n,sys.argv[3]) as request:
             try:
                 # Child inherits no stdout pipe, so the crashed runner can be reaped.
                 import select
-                ready, _, _ = select.select([runner.stdout], [], [], 5)
+                ready, _, _ = select.select([runner.stdout], [], [], PROCESS_BUDGET)
                 self.assertTrue(ready, 'runner never published child ownership')
                 line = runner.stdout.readline()
                 if not line:
                     self.fail(runner.stderr.read())
                 owner, child = json.loads(line)
-                self.assertEqual(runner.wait(timeout=5), 0)
+                self.assertEqual(runner.wait(timeout=PROCESS_BUDGET), 0)
                 data = m.read_queue_request(n, request['id'])
                 self.assertEqual(data['owner'][0], owner)
                 self.assertEqual(data['run']['processes'][0][0], child)
@@ -1479,7 +1484,7 @@ with q.claim_handback(inst,n,sys.argv[3]) as request:
                 os.close(control_write)
                 control_write = None
                 import time
-                deadline = time.monotonic() + 5
+                deadline = time.monotonic() + PROCESS_BUDGET
                 while m.process_stamp(child) is not None and time.monotonic() < deadline:
                     time.sleep(.02)
                 self.assertIsNone(m.process_stamp(child))
@@ -1492,9 +1497,10 @@ with q.claim_handback(inst,n,sys.argv[3]) as request:
                 # broad kill or cleanup of any process belonging to another run.
                 if runner.poll() is None:
                     runner.terminate()
-                    runner.wait(timeout=5)
+                    runner.wait(timeout=PROCESS_BUDGET)
                 foreign.terminate()
-                foreign.wait(timeout=5)
+                foreign.wait(timeout=PROCESS_BUDGET)
+                foreign.stdin.close()
                 if control_write is not None:
                     os.close(control_write)  # releases only this test child's pipe
                 runner.stdout.close()
@@ -1512,7 +1518,7 @@ with q.claim_handback(inst,n,sys.argv[3]) as request:
                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
             try:
                 import select
-                self.assertTrue(select.select([holder.stdout], [], [], 5)[0])
+                self.assertTrue(select.select([holder.stdout], [], [], PROCESS_BUDGET)[0])
                 self.assertEqual(holder.stdout.readline().strip(), 'locked')
                 before = m.queue_path(n, identity).read_bytes()
                 with mock.patch('os.kill') as signal:
@@ -1523,7 +1529,7 @@ with q.claim_handback(inst,n,sys.argv[3]) as request:
             finally:
                 holder.stdin.write('x')
                 holder.stdin.flush()
-                holder.wait(timeout=5)
+                holder.wait(timeout=PROCESS_BUDGET)
                 holder.stdin.close()
                 holder.stdout.close()
 
