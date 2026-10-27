@@ -311,3 +311,4 @@ class InboxNoise(Scenario):
                 self.assertFalse(notices.terminal_notice(line + ' <!-- host-question:protected -->'))
         held = '- 2026-10-25T15:40:29+00:00 from machine: heavy example held since 2026-10-25T15:00Z: pressure; clears when resources clear <!-- machine-wait:' + 'a' * 32 + ':coordinator -->'
         self.assertFalse(notices.terminal_notice(held))
+        self.assertFalse(notices.terminal_notice(held.replace(':coordinator -->', ':completed -->')))
