@@ -304,6 +304,8 @@ def cmd_task(a):
                 changes['owner'] = a.owner
             rows = [mutate(inst, n, a.task_id, changes, create=a.action == 'add')]
             _m_instance.unlock()
+            # A new open task does not change the ledger/status fact projection.
+            a._open_task_added = a.action == 'add' and rows[0]['status'] in ('backlog', 'ready')
         else:
             rows = projection(n)
             if a.action == 'show':

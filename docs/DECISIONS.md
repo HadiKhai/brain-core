@@ -2850,3 +2850,7 @@ New task creation validates the new record and its outgoing reachable local depe
 subgraph, with direct requirement lookups. Existing-record edits and explicit task
 checks retain whole-graph validation. This avoids repeatedly parsing every requirement
 for every existing task while holding the instance lock for a single unrelated add.
+
+For a successful new backlog/ready task whose native operation changes no ledger/status
+resources, retain the native command journal and skip the unrelated status/usage
+projection. Resource changes and other transitions retain normal maintenance.

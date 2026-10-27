@@ -1100,3 +1100,24 @@ class Tasks(Scenario):
         with self.assertRaisesRegex(ValueError, 'cycle'):
             self.add('NEW', depends_on=['PROVIDER'])
         self.assertFalse((self.root / 'tasks/NEW.md').exists())
+
+    def test_native_open_task_add_keeps_journal_without_global_usage_or_task_scan(self):
+        import contextlib
+        import io
+        from brain import events, nodes
+        self.add('UNRELATED')
+        args = argparse.Namespace(f=tasks.cmd_task, action='add', node='root', task_id='NEW',
+                                  title='New independent work', status=None, owner='sample', fields=[], json=False)
+        with mock.patch.object(nodes, 'load', return_value=self.inst), \
+                mock.patch.object(events, 'snapshot_view', side_effect=AssertionError('unrelated status render')) as snapshot, \
+                mock.patch.object(tasks, 'read_records', wraps=tasks.read_records) as reads, \
+                contextlib.redirect_stdout(io.StringIO()):
+            with events.Command(self.root, args):
+                tasks.cmd_task(args)
+        snapshot.assert_not_called()
+        self.assertTrue(all(call.kwargs.get('ident') is not None or len(call.args) == 3 for call in reads.call_args_list))
+        self.assertEqual(tasks.read_records(self.n)['NEW']['status'], 'backlog')
+        records = events.read(self.inst)
+        self.assertTrue(any(e['kind'] == 'begin' and e['data']['command'] == 'task' for e in records))
+        self.assertTrue(any(e['kind'] == 'commit' and e['data']['command'] == 'task' for e in records))
+        self.assertEqual(events.pending(records), {})
