@@ -39,7 +39,7 @@ def fixture():
     return {"brain":{"name":"meadow-demo","title":"Meadow workspace","root":"~/demo/meadow","machine":"Studio laptop","tz":"UTC","now":iso(NOW),"fallback":["codex","claudeAgent"],"others":["Sandbox"]},
         "nodes":[root,app,site],"attention":[{"node":"field-guide","kind":"inbox","text":"Navigation review needs a decision"}],
         "inbox":[{"id":"synthetic-question-one","node":"field-guide","kind":"inbox","from":"worker","recipient":"operator","options":["Keep open", "Collapse"],"recommendation":"Keep open","text":"2026-10-20 10:00 +00:00 from worker: question: Keep the compact navigation open on tablets?","first_seen":iso(NOW-3600)},
-                 {"id":"synthetic-blocked-one","node":"observatory","kind":"blocked","from":"","text":"Waiting on copy from Demo reviewer: the launch note needs a final read","first_seen":iso(NOW-30*3600)}],
+                 {"id":"synthetic-blocked-one","node":"observatory","kind":"blocked","from":"","recipient":"operator","options":["Read now", "Defer"],"recommendation":"Read now","text":"question: Should the launch note get a final read from Demo reviewer?","first_seen":iso(NOW-30*3600)}],
         "due":[{"node":"field-guide","kind":"handback","branch":"job/navigation","job":"a1b2c3d4e5f6a7b8c9d0e1f2","text":"job/navigation: ready to merge; review the report and record the next step","ready":True},{"node":"observatory","kind":"stale-status","text":"facts differ from current files; update judgement sections, then `brain status observatory --refresh`"}],
         "commits":[{"sha":str(i),"subject":t,"node":"field-guide","where":"home","t":NOW-i*1400} for i,t in enumerate(["Refine the narrow navigation","Preserve the active project context","Add keyboard navigation checks","Improve the review hand-back"])],
         "commits_24h":18,"commits_total":42,"hours":72,"activity":{"start":NOW-72*3600,"counts":{"field-guide":[i%7 if i%4==0 else 0 for i in range(72)],"observatory":[i%5 if i%3==0 else 0 for i in range(72)]}},
@@ -99,7 +99,8 @@ def seed_extreme(state, scenario):
                     if key in ('title', 'label') and isinstance(item, str):
                         value[key] = rtl if scenario == 'rtl' else title if scenario == 'longtitle' else item
                     elif key in ('text', 'task', 'body', 'said', 'readme', 'note', 'Cause', 'Lessons') and isinstance(item, str) and item:
-                        value[key] = rtl * 12 if scenario == 'rtl' else prose if scenario == 'longtext' else item
+                        # Replacing prose must retain the request's question marker.
+                        value[key] = ('question: ' if 'question:' in item else '') + rtl * 12 if scenario == 'rtl' else prose if scenario == 'longtext' else item
                     else: walk(item)
             elif isinstance(value, list):
                 for item in value: walk(item)

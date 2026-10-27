@@ -88,6 +88,14 @@ test("blocked status distinguishes an operator wait from recorded failure eviden
   await expect(work).toContainText("30 h waiting");
   await expect(work).toContainText("Blocked by fault");
   await expect(work).toContainText("9 h waiting");
+  const waiting = work.getByRole("region", { name: "Waiting on you", exact: true });
+  const blocked = work.getByRole("region", { name: "Blocked", exact: true });
+  await expect(waiting).toContainText("Review the proposed launch knowledge");
+  await expect(waiting).not.toContainText("Recover the failed build");
+  await expect(blocked).toContainText("Recover the failed build");
+  await expect(blocked).not.toContainText("Review the proposed launch knowledge");
+  await expect(page.locator('[data-page=project] .kpi-value').first()).toHaveText("1");
+  await expect(work.getByRole("tab", { name: "Needs you 1", exact: true })).toBeVisible();
 });
 
 test("ledger-only imports show stale age and current fault evidence without a thread row", async ({ page, request, state }) => {

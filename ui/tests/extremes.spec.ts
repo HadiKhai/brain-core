@@ -71,13 +71,13 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
 test("one thousand requests stay reachable and have conversation feedback", async ({ page, context }) => {
   await page.goto("/?k=thousand");
   await expect(page.locator('[data-page=overview] .row.request')).toHaveCount(5);
-  await expect(page.locator('[data-page=overview]')).toContainText("Showing 5 of 1000 requests");
+  await expect(page.locator('[data-page=overview]')).toContainText("Showing 5 of 1000 decisions");
   await page.locator('[data-page=overview]').getByRole("button",{name:"View all",exact:true}).first().click();
   const inbox = page.locator('[data-page=inbox]');
   await expect(inbox.locator(".row.request")).toHaveCount(10);
-  await expect(inbox.locator(".table-footer")).toContainText("1–10 of 1000 requests");
+  await expect(inbox.locator(".table-footer")).toContainText("1–10 of 1000 decisions");
   await inbox.getByRole("button",{name:"Next",exact:true}).click();
-  await expect(inbox.locator(".table-footer")).toContainText("11–20 of 1000 requests");
+  await expect(inbox.locator(".table-footer")).toContainText("11–20 of 1000 decisions");
   await page.getByRole("textbox",{name:"Search inbox"}).fill("no matching synthetic question");
   await expect(inbox).toContainText("Nothing matches these filters.");
   await inbox.getByRole("button",{name:"Clear filters"}).click();
@@ -124,7 +124,7 @@ test("long hire briefs, proposal decisions and overflowing specialist options ha
 
 test("unknown attention kinds keep generic actions and optional advice stays readable", async ({page}) => {
   const state = await (await page.request.get('/api/state?k=demo')).json();
-  state.inbox = [{...state.inbox[0], kind:'blocked-overdue', escalated:true, age_hours:49, since:'2026-10-19T09:00:00Z', recommendation:'Discuss a smaller next step.', default:'Keep open for review', text:'Review report /opt/demo/HANDOFF.md for job/synthetic-review. Check the ready packet.'}];
+  state.inbox = [{...state.inbox[0], kind:'blocked-overdue', question:true, escalated:true, age_hours:49, since:'2026-10-19T09:00:00Z', recommendation:'Discuss a smaller next step.', default:'Keep open for review', text:'Review report /opt/demo/HANDOFF.md for job/synthetic-review. Check the ready packet.'}];
   await page.addInitScript(s => {(window as any).__STATE__=s;},state);
   await page.goto('/?k=demo#view=inbox');
   const inbox = page.locator('[data-page=inbox]');
@@ -210,6 +210,8 @@ test("selecting a project thread from the tree reveals it after paging", async (
   node.work = Array.from({ length: 30 }, (_, i) => ({
     ...node.work[0], branch: `job/selection-${i}`, thread: `synthetic-thread-${i}`,
   }));
+  node.jobs.open = node.work.map((w: { branch: string }) => ({ ...node.jobs.open[0], Job: w.branch }));
+  node.jobs.rows = [...node.jobs.open];
   node.worktrees = [];
   await page.addInitScript((s) => { (window as any).__STATE__ = s; }, state);
   await page.goto("/?k=demo#view=project&node=field-guide&tab=threads");

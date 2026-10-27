@@ -8,7 +8,7 @@ import { ThreadRow } from "./agents";
 import { list, needsView, needAsk, count, time, flight, threads, sidebarThreads, jobTitle, closed, safeHref, nowOf, within, type RecordData } from "./model";
 import { ThreadLink } from "./thread-link";
 import { ReaderRow } from "./detail-panel";
-import { WorkStatus } from "./work-status";
+import { WorkStatus, workStatus } from "./work-status";
 import { Tasks } from "./tasks";
 import { visibleTaskCount } from "./task-model";
 import type { Route } from "./routes";
@@ -27,6 +27,12 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
   if (!n) return <section className="surface"><Empty text="Project unavailable in this reading." action="Choose a project in the sidebar, or refresh the workspace." /></section>;
   const now = nowOf(s);
   const { decisions: needs } = needsView(s, n.id);
+  const blockers: RecordData[] = (Array.isArray(n.blocked) ? n.blocked : []).map((text: string, i: number) => ({
+    ...list(n.blocked_metadata)[i], text, node: n.id, kind: "blocked",
+  }));
+  const waiting = blockers.filter((item: RecordData) => workStatus(item, s).kind === "Waiting on you");
+  const blocked = blockers.filter((item: RecordData) => !waiting.includes(item));
+  const waitingItems = [...needs, ...waiting];
   const observed = flight([n]), selected = route.thread && sidebarThreads([n], true).find(f => f.job.branch === route.thread);
   const work = selected && !observed.some(f => f.job.branch === selected.job.branch) ? [selected, ...observed] : observed;
   const open = threads([n]), rows = [...list(n.jobs?.rows)].reverse();
@@ -51,13 +57,22 @@ export function Project({ s, route, go, active }: { s: RecordData; route: Route;
         </div>
       </section>
       <section className="surface" aria-label="Work">
-        <SectionTabs value={route.tab && ["needs", "threads", "jobs", "activity", "tasks"].includes(route.tab) ? route.tab : needs.length ? "needs" : "threads"}
+        <SectionTabs value={route.tab && ["needs", "threads", "jobs", "activity", "tasks"].includes(route.tab) ? route.tab : needs.length || blockers.length ? "needs" : "threads"}
           onValue={(tab) => go({ view: "project", node: n.id, tab })}
           tabs={[
-            { id: "needs", label: "Needs you", count: needs.length, body: needs.length ? <PagedRows items={needs} noun="item" render={(a: RecordData, i) =>
-                a.kind === "blocked" && !a.id && typeof a.text === "string" && !("first_seen" in a)
-                  ? <BlockedRow key={"b" + i} item={a} s={s} />
-                  : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} compact /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} /> : <Empty text="Nothing needs you here." action="Open questions and decisions waiting on you arrive here." /> },
+            { id: "needs", label: "Needs you", count: needs.length, body: <>
+              <section aria-label="Waiting on you">
+                <div className="section-heading"><h3>Waiting on you</h3></div>
+                {waitingItems.length ? <PagedRows items={waitingItems} noun="item" render={(a: RecordData, i) =>
+                  waiting.includes(a) ? <BlockedRow key={"b" + i} item={a} s={s} />
+                    : "first_seen" in a ? <RequestRow key={a.id || i} s={s} item={a} go={go} showProject={false} compact /> : <DueRow key={"d" + i} s={s} item={a} go={go} showProject={false} />} />
+                  : <Empty text="Nothing needs you here." action="Open questions and decisions waiting on you arrive here." />}
+              </section>
+              {blocked.length > 0 && <section aria-label="Blocked">
+                <div className="section-heading"><h3>Blocked</h3></div>
+                <PagedRows items={blocked} noun="blocked item" render={(item: RecordData, i) => <BlockedRow key={i} item={item} s={s} />} />
+              </section>}
+            </> },
             { id: "threads", label: "Threads", count: work.length, body: work.length ? <PagedRows resetKey={route.thread || ""} items={[...work].sort((a, b) => Number(b.job.branch === route.thread) - Number(a.job.branch === route.thread))} noun="thread" render={(f, i) => <ThreadRow key={f.job.branch + i} s={s} f={f} go={go} showProject={false} highlight={route.thread === f.job.branch} />} />
                 : <Empty text="No threads in flight." action="Start a job from this project's coordinator." /> },
             { id: "tasks", label: "Tasks", count: visibleTaskCount(list(n.tasks?.rows)), body: <Tasks s={s} go={go} node={n.id} /> },
