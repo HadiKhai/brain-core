@@ -3002,3 +3002,18 @@ Projected restart advice also detaches only its selected usage record. The
 projection carries the original ledger entry count separately, so selecting a
 small record cannot bypass the global capacity bound. Explicit restart writes
 retain the ordinary whole-ledger lock and publication path.
+
+## Retain private source-bound session discovery for dashboard rebuilds
+
+Dashboard fills retain canonical session-discovery digests beside their usage
+aggregates. Metadata reuse requires the current parser version and complete
+file identity, and opens the current source descriptor before accepting a UI
+cache hit. A changed descriptor is incomplete; malformed records and older
+versions trigger native source discovery. Records contain opaque identifiers,
+location digests and numeric identities only. Current allowed/forbidden source
+roots are checked independently on each discovery pass.
+
+Disabling optional dashboard storage now applies to nested usage and discovery
+publication as well as the final snapshot. Nested scopes cannot re-enable
+publication denied by an outer read-only scope. Ordinary accounting storage
+and explicit accounting commands retain their existing behavior.

@@ -10,6 +10,70 @@ from scenario import CORE, Scenario
 
 
 class UsageCache(Scenario):
+    def discovery_fixture(self):
+        path = self.cfg / 'sessions' / 'rollout-space λ\nfile.jsonl'
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'type': 'session_meta', 'payload': {
+            'id': '11111111-cached', 'cwd': str(self.wt)}}) + '\n')
+        model = self.m.ReadModel(self.inst, 'fixture')
+        def read(forbidden=None):
+            with model.usage_scope():
+                return self.m.codex_index(self.inst, self.cfg, {self.cfg}, forbidden or set())
+        return path, model, read
+
+    def test_ui_discovery_cache_reuses_headers_and_invalidates_restored_mtime(self):
+        path, model, read = self.discovery_fixture()
+        first = read()
+        self.assertEqual(len(first), 1)
+        module = self.m._owners['codex_index']
+        with mock.patch.object(module, 'codex_discovery_source', side_effect=AssertionError('unchanged header')):
+            self.assertEqual(read(), first)
+        cache = next(model.folder.glob('discovery-*.json'))
+        self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
+        for private in ('11111111-cached', str(path), str(self.wt)):
+            self.assertNotIn(private, cache.read_text())
+        self.assertFalse((self.root / '.brain/usage.sqlite').exists())
+        stamp = path.stat()
+        path.write_bytes(path.read_bytes().replace(b'11111111-cached', b'22222222-cached'))
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        changed = read()
+        self.assertNotEqual(changed[0][1]['id'], first[0][1]['id'])
+        self.assertEqual(read({self.cfg}), [])
+
+    def test_ui_discovery_malformed_and_old_version_cache_recomputes_current_source(self):
+        path, model, read = self.discovery_fixture()
+        expected = read()
+        cache = next(model.folder.glob('discovery-*.json'))
+        original = json.loads(cache.read_text())
+        module = self.m._owners['codex_index']
+        for bad in ({**original, 'version': self.m.SPEND_VERSION - 1},
+                    {**original, 'job': '\ud800'}, {**original, 'places': ['raw source text']}):
+            cache.write_text(json.dumps(bad))
+            with mock.patch.object(module, 'codex_discovery_source', wraps=module.codex_discovery_source) as source:
+                self.assertEqual(read(), expected)
+                self.assertEqual(source.call_count, 1)
+
+    def test_ui_discovery_changed_descriptor_after_cache_lookup_is_incomplete(self):
+        path, model, read = self.discovery_fixture()
+        read()
+        original = model.read
+        def changed(name):
+            value = original(name)
+            path.write_bytes(path.read_bytes() + b'\n')
+            return value
+        with mock.patch.object(model, 'read', side_effect=changed):
+            with self.assertRaises(self.m.DiscoveryIncomplete):
+                read()
+
+    def test_disabled_ui_cache_scope_reads_current_headers_without_publication(self):
+        path, model, read = self.discovery_fixture()
+        module = self.m._owners['cache_writes']
+        with module.cache_writes(False), module.cache_writes(True):
+            self.assertEqual(len(read()), 1)
+        self.assertFalse(model.folder.exists())
+        self.assertEqual(len(read()), 1)
+        self.assertTrue(model.folder.is_dir())
+
     def setUp(self):
         super().setUp()
         env = mock.patch.dict(os.environ, self.env, clear=True)

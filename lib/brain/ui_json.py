@@ -115,7 +115,8 @@ def ui_json_build(inst, scan, code, cache=True):
     before = ui_json_privacy_key(inst, code)
     # The full guard/check and recorded readiness observations stay unchanged.
     # No exclusive instance lock surrounds this computation or cache publication.
-    state = ui.ui_state(inst, len(check.collect_problems(inst)[0]), scan, spend_budget=None)
+    with _m_ui_readmodel.cache_writes(cache):
+        state = ui.ui_state(inst, len(check.collect_problems(inst)[0]), scan, spend_budget=None)
     current = ui.UIInstance(inst.root)
     if before != ui_json_privacy_key(current, code):
         return None  # do not publish text observed under an obsolete visibility policy

@@ -751,6 +751,10 @@ def codex_discovery_source(path, allowed, forbidden):
 @ui_discovery
 def codex_index(inst, cfg, allowed, forbidden):
     """One metadata scan per command; persist only opaque session/location identities."""
+    from . import ui_readmodel
+    display = ui_readmodel.usage_cache()
+    if display is not None and display.inst.root.resolve() != inst.root.resolve():
+        display = None
     out = []
     with _m_usage_cache.database(inst, readonly=_SPEND_READ_ONLY.get()) as cache:
         for root in (cfg / 'sessions', cfg / 'archived_sessions'):
@@ -766,9 +770,21 @@ def codex_index(inst, cfg, allowed, forbidden):
                              st.st_mode, st.st_nlink]
                     key = 'discovery:' + opaque(str(path))
                     saved = cache.get(key)
-                    if not (isinstance(saved, dict) and saved.get('version') == SPEND_VERSION
-                            and saved.get('stamp') == stamp and isinstance(saved.get('places'), list)
-                            and all(isinstance(saved.get(k), str) for k in ('id', 'parent', 'job'))):
+                    display_key = 'discovery-' + opaque(str(path))
+                    if display is not None and not valid_discovery(saved, stamp):
+                        candidate = display.read(display_key)
+                        if valid_discovery(candidate, stamp):
+                            fh, _ = _m_history.history_open(path, allowed, forbidden)
+                            if fh is not None:
+                                with fh:
+                                    current = os.fstat(fh.fileno())
+                                    identity = [current.st_dev, current.st_ino, current.st_size,
+                                                current.st_mtime_ns, current.st_ctime_ns,
+                                                current.st_mode, current.st_nlink]
+                                    if identity != stamp:
+                                        raise DiscoveryIncomplete('session discovery changed during lookup')
+                                    saved = candidate
+                    if not valid_discovery(saved, stamp):
                         for attempt in range(3):
                             try:
                                 observed = codex_discovery_source(path, allowed, forbidden)
@@ -790,12 +806,28 @@ def codex_index(inst, cfg, allowed, forbidden):
                                      parent=opaque(parent) if parent else '', places=places,
                                      job=job)
                         cache.put(key, saved)
+                        if display is not None:
+                            display.write(display_key, saved)
                     out.append((path, saved, st.st_mtime))
                 except DiscoveryIncomplete:
                     raise  # never turn an incomplete permitted source into an absent session
                 except (OSError, ValueError, RuntimeError):
                     continue
     return out
+
+
+def valid_discovery(value, stamp):
+    """Private UI discovery records contain only canonical digests and identities."""
+    def digest(text):
+        return isinstance(text, str) and re.fullmatch('[0-9a-f]{16}', text) is not None
+    return (isinstance(value, dict) and set(value) == {'version', 'stamp', 'id', 'parent', 'places', 'job'}
+            and type(value['version']) is int and value['version'] == SPEND_VERSION
+            and isinstance(value['stamp'], list) and all(type(item) is int for item in value['stamp'])
+            and value['stamp'] == stamp and digest(value['id'])
+            and (value['parent'] == '' or digest(value['parent']))
+            and isinstance(value['places'], list) and all(digest(item) for item in value['places'])
+            and isinstance(value['job'], str) and (value['job'] == '' or re.fullmatch(
+                '[0-9a-f]{24}', value['job']) is not None))
 
 
 def job_window(inst, row):
