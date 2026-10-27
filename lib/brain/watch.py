@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shlex
+import time
 from pathlib import Path
 
 from . import briefs as _m_briefs
@@ -817,13 +818,23 @@ def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
     folder = inst.root / '.brain'
     if _m_common.outward_links(inst.root):
         _m_common.die('watch: unsafe instance links; no wake sent')
+    if _m_instance._LOCK['fh'] is not None:
+        if not quiet:
+            print('watch: skipped; instance busy')
+        return
+    generation = _m_instance.state_signature(inst, list(inst.nodes()))
+    if groups is None:
+        from . import command_reads
+        with command_reads.snapshot(), _m_timings.phase('watch_compute'):
+            groups = watch_groups(inst)
     _m_common.safe_target(folder / 'lock')
     fd = os.open(folder / 'lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'r+') as stream:
         if os.fstat(stream.fileno()).st_nlink != 1:
             _m_common.die('watch: instance lock is hard-linked')
         try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with _m_timings.phase('lock_wait'):
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             if not quiet:
                 print('watch: skipped; instance busy')
@@ -833,8 +844,11 @@ def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
         stream.write(str(os.getpid()))
         stream.flush()
         _m_instance._LOCK['fh'], _m_instance._LOCK['depth'] = stream, 1
+        _m_instance._LOCK['hold_started'] = time.perf_counter()
         os.environ['BRAIN_LOCK_HELD'] = f'{inst.root.resolve()}|{os.getpid()}'
         try:
+            if _m_instance.state_signature(inst, list(inst.nodes())) != generation:
+                return  # changed routing/configuration cannot authorize the old scan
             with _m_timings.phase('watch_write'):
                 watch_run(inst, kinds=kinds, quiet=quiet, sources=sources, groups=groups)
         finally:

@@ -2755,3 +2755,24 @@ Inbox acknowledgement publication errors retain the already-flushed delivery
 and warning, then propagate the original error with a nonzero exit. They never
 report successful persistence. A stale-generation no-op may still repeat later
 without overwriting a newer acknowledgement or resolution.
+
+## Short writer holds for sampling and worker completion
+
+Machine sampling collects and reduces a reading before attempting its nonblocking
+publication lock. Publication compares the observed state and current policy;
+a concurrent replacement wins and the old sample is skipped. Pending episode
+transitions remain recoverable across interrupted publication.
+
+Worker completion releases the CLI lock before readiness setup and accounting.
+Attempt bindings are fingerprinted outside the lock, with node, ledger, attempt,
+Git-ref and selected-input generations checked again before publication. Native
+readiness facts and attempt writes release their physical holds before the next
+computation, even inside a suspended outer CLI scope. Terminal status projection
+also computes outside the lock; concurrent source changes invalidate that view
+without undoing the durable handback.
+
+Wake drains retain their destination and delivery fences without acquiring the
+instance lock for projection, rate waits or transport. A changed coordinator or
+transport generation after projection leaves requests pending for the current
+binding. Command timings separately report physical instance-lock hold and wait
+seconds; nested scopes count each physical hold once and exclude released work.

@@ -1284,7 +1284,17 @@ def maintain(op, changed):
             known = status.facts_meta(n).get('merged_before', [])
         else:
             known = status.facts_meta(n).get('merged', [])
-        view = snapshot_view(op.inst, n, known)
+        if op.command == 'handback':
+            # Status projection can scan worker transcripts. It grants no action
+            # authority, and must not hold up writers after terminal publication.
+            # A concurrent source change refuses this generated view; the normal
+            # maintenance-failure path invalidates it for an explicit refresh.
+            with instance.released(op.inst, list(op.inst.nodes()),
+                    extra=lambda: [op.inst.root / path for path in resources(op.inst)
+                                   if not path.startswith('@ready/')]):
+                view = snapshot_view(op.inst, n, known)
+        else:
+            view = snapshot_view(op.inst, n, known)
         # During comparison, files supply new facts. After switching, a write materializes its
         # own new metadata projection; a refresh alone must use the committed event view.
         if source(op.inst, n) == 'events' and op.command == 'status':

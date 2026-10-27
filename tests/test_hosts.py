@@ -33,6 +33,126 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 class LockHotfix(Scenario):
     job = _test_verify.WorkerReadyPackets.job
 
+    def assert_compute_allows_writer(self, site, drift=False):
+        if site.startswith('handback'):
+            root, _, wt = self.job()
+            args = ['handback', 'a', '--branch', 'job', '--state', 'done',
+                    '--reviews', '1', '--summary', 'Synthetic result', '--lessons', 'none: fixture']
+        else:
+            root = self.init('fixture')
+            wt = None
+            args = ['machine', 'sample'] if site.startswith('sample') else ['wake', 'root', '--drain']
+            if site == 'wake':
+                self.b(root, 'set', 'root', 'coordinator=old-owner', 'wake=exit 0')
+                m = core_loader.SourceFileLoader('compute_wake', str(CORE / 'bin/brain')).load_module()
+                inst = m.Instance(root)
+                with mock.patch.object(m, 'wake_start'):
+                    m.request_wake(inst, inst.node('root'), 'fixture')
+        self.b(root, 'new', 'other', '--title', 'Other')
+        marker, release = self.tmp / 'computing', self.tmp / 'release'
+        script = '''import sys,time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from brain import cli, instance, ui, job_attempts, verify, spend, hosts, watch, events
+site, marker, release = sys.argv[2:5]
+owner, name = {'sample': (ui, 'machine_load'), 'sample_watcher': (watch, 'watch_scan'),
+               'handback_binding': (job_attempts, 'attempt_binding'),
+               'handback_preflight': (verify, 'record_ready'), 'handback_accounting': (spend, 'live_usage'),
+               'handback_projection': (events, 'snapshot_view'),
+               'handback_publication': (job_attempts, 'attempt_matches'),
+               'wake': (hosts, 'wake_snapshot')}[site]
+original, fired = getattr(owner, name), False
+def slow(*args, **kwargs):
+    global fired
+    if not fired:
+        fired = True
+        assert instance._LOCK['fh'] is None, site + ' computed under the instance lock'
+        Path(marker).touch()
+        deadline = time.monotonic() + 15
+        while not Path(release).exists():
+            if time.monotonic() > deadline: raise RuntimeError('compute barrier timed out')
+            time.sleep(.01)
+    return original(*args, **kwargs)
+setattr(owner, name, slow)
+if site != 'sample_watcher': watch.watch_once = lambda inst: None
+sys.argv = ['brain', *sys.argv[5:]]
+cli.main()
+'''
+        env = {**self.env, 'BRAIN_ROOT': str(root)}
+        child = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), site,
+                                  str(marker), str(release), *args], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stale = None
+        try:
+            self.wait_file(marker, child)
+            writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'set', 'other',
+                                     'stack=concurrent'], env=env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
+            self.assertIsNone(child.poll(), 'writer must finish while computation is paused')
+            if drift and site == 'sample':
+                stale = b'{"samples": [], "episode": false, "newer": true}\n'
+                (root / '.brain/machine.json').write_bytes(stale)
+            elif drift and site == 'wake':
+                self.b(root, 'set', 'root', 'coordinator=new-owner')
+            elif drift:
+                self.b(root, 'set', 'a', 'verify=exit 1')
+        finally:
+            release.touch()
+            try:
+                out, err = child.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                out, err = child.communicate()
+                self.fail('compute worker failed to finish: ' + out + err)
+        if drift and site.startswith('handback'):
+            self.assertNotEqual(child.returncode, 0, out + err)
+            self.assertFalse(list((root / 'nodes/a/job-handbacks').glob('*.json')))
+        else:
+            self.assertEqual(child.returncode, 0, out + err)
+        if stale is not None:
+            self.assertEqual((root / '.brain/machine.json').read_bytes(), stale)
+            self.assertIn('state changed', out)
+        if site == 'wake' and drift:
+            directory = root / '.brain/wake/root'
+            self.assertTrue(list(directory.glob('*.pending')))
+            self.assertFalse(list(directory.glob('*.sent')))
+            self.assertFalse((directory / 'last').exists())
+        rows = json.loads(self.b(root, 'timings', '--command', args[0], '--json'))
+        self.assertGreaterEqual(rows[-1]['lock_wait_s'], 0)
+        self.assertGreaterEqual(rows[-1]['lock_hold_s'], 0)
+        if site == 'wake':
+            self.assertEqual(rows[-1]['lock_hold_s'], 0)
+        print('lock-measurement: ' + json.dumps({'site': site, 'drift': drift,
+              **{key: rows[-1][key] for key in ('elapsed_s', 'lock_wait_s', 'lock_hold_s', 'success')}}))
+        return rows[-1]
+
+    def test_sampler_collection_allows_writer_and_rejects_stale_publication(self):
+        self.assert_compute_allows_writer('sample', drift=True)
+
+    def test_sampler_watcher_scan_allows_writer(self):
+        self.assert_compute_allows_writer('sample_watcher')
+
+    def test_handback_binding_allows_writer(self):
+        self.assert_compute_allows_writer('handback_binding')
+
+    def test_handback_preflight_allows_writer(self):
+        self.assert_compute_allows_writer('handback_preflight')
+
+    def test_handback_accounting_allows_writer(self):
+        self.assert_compute_allows_writer('handback_accounting')
+
+    def test_handback_terminal_projection_allows_writer(self):
+        self.assert_compute_allows_writer('handback_projection')
+
+    def test_handback_binding_drift_refuses_publication(self):
+        self.assert_compute_allows_writer('handback_binding', drift=True)
+
+    def test_handback_publication_binding_allows_writer_and_refuses_drift(self):
+        self.assert_compute_allows_writer('handback_publication', drift=True)
+
+    def test_wake_projection_allows_writer_and_rechecks_coordinator(self):
+        self.assert_compute_allows_writer('wake', drift=True)
+
     def copy_brain(self, root):
         copy = root.with_name(root.name + "-copy")
         subprocess.run(["cp", "-R", str(root), str(copy)], check=True)
@@ -47,6 +167,9 @@ class LockHotfix(Scenario):
         deadline = time.monotonic() + timeout
         while not path.exists() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.02)
+        if not path.exists() and process.poll() is not None:
+            out, err = process.communicate()
+            self.fail('worker never reached its slow step: ' + out + err)
         self.assertTrue(path.exists(), "worker never reached its slow step")
 
     def responsive(self, root):
@@ -777,6 +900,7 @@ class QuestionWake(Scenario):
 
     def test_root_due_escalates_without_question_text_and_live_shows_age(self):
         self.inst.local_of('root').update(coordinator='synthetic-root', wake=self.command)
+        self.inst.save_local()  # due constructs a fresh UIInstance from persisted bindings
         old = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11)).isoformat()
         (self.n["dir"] / "inbox.md").write_text("- " + old +
             " from runtime: Host question: Choose blue? <!-- host-question:abc -->\n")

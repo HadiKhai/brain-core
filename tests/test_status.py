@@ -648,6 +648,7 @@ class AutonomyInbox(Scenario):
             with tm.command():
                 tm.select_command('now')
                 tm.record('lock_wait', 0.125)
+                tm.record('lock_hold', 0.25)
                 with tm.phase('fixture'):
                     sum(range(100))
         self.assertEqual(journal.read_bytes() if journal.exists() else None, before)
@@ -655,6 +656,7 @@ class AutonomyInbox(Scenario):
         rows = json.loads(self.b(root, 'timings', '--slow', '--command', 'now', '--json'))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['lock_wait_s'], 0.125)
+        self.assertEqual(rows[0]['lock_hold_s'], 0.25)
         self.assertGreaterEqual(rows[0]['phases']['fixture'], 0)
         profile = json.loads((root / '.brain/timings' / rows[0]['profile']).read_text())
         self.assertTrue(profile['top'])
@@ -666,6 +668,28 @@ class AutonomyInbox(Scenario):
             with tm.command():
                 pass  # optional telemetry cannot turn a successful read into failure
         self.assertEqual(m.pending(m.read(m.Instance(root))), {})
+
+    def test_lock_hold_counts_physical_ownership_once_across_release(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('physical_lock_timing', str(CORE / 'bin/brain')).load_module()
+        tm = m._owners['cmd_timings']
+        phases, clock = {}, [0.0]
+        token = tm._CURRENT.set(phases)
+        try:
+            with mock.patch.object(tm.time, 'perf_counter', side_effect=lambda: clock[0]):
+                with m.brain_lock(m.Instance(root)):
+                    clock[0] = 1
+                    with m.brain_lock(m.Instance(root)):
+                        clock[0] = 2
+                    clock[0] = 4
+                    m.unlock()
+                    clock[0] = 100  # unlocked computation is excluded
+                    with m.brain_lock(m.Instance(root)):
+                        clock[0] = 103
+                    m.unlock()
+            self.assertEqual(phases['lock_hold'], 7)
+        finally:
+            tm._CURRENT.reset(token)
 
     def test_timed_writes_keep_operational_commit_and_abort_as_last_rows(self):
         root = self.init('demo')

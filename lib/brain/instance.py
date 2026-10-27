@@ -280,6 +280,7 @@ class brain_lock:
             fh.write(str(os.getpid()))
             fh.flush()
             _LOCK["fh"] = fh
+            _LOCK["hold_started"] = time.perf_counter()
             os.environ["BRAIN_LOCK_HELD"] = f"{self.key}|{os.getpid()}"
         _LOCK["depth"] += 1
         return self
@@ -300,6 +301,9 @@ def unlock():
         fh.close()
         _LOCK["fh"] = None
         os.environ.pop("BRAIN_LOCK_HELD", None)
+        started = _LOCK.pop("hold_started", None)
+        if started is not None:
+            _m_timings.record("lock_hold", time.perf_counter() - started)
 
 
 def state_signature(inst, node=None, extra=(), local_keys=()):

@@ -22,6 +22,7 @@ from . import instance as _m_instance
 from . import nodes as _m_nodes
 from . import schedules as _m_schedules
 from . import ui as _m_ui
+from . import timings as _m_timings
 
 
 MACHINE_DEFAULTS = {"load5_per_cpu": 0.8, "memory_free_gb": 8, "disk_free_gb": 40,
@@ -254,8 +255,13 @@ def machine_publish(inst, path, text):
 
 
 def machine_sample_once(inst):
-    # Sampling must not queue behind long instance mutations or scan the whole brain.
-    # It shares the ordinary instance lock; a busy minute is skipped, with live fallback.
+    return machine_sample(inst)
+
+
+@contextlib.contextmanager
+def machine_sample_lock(inst):
+    # A busy publication is skipped, with live fallback. Collection and planning
+    # have already completed; never wait for another instance writer here.
     import fcntl
     folder = inst.root / ".brain"
     _m_common.safe_target(folder / "lock")
@@ -266,9 +272,11 @@ def machine_sample_once(inst):
             if os.fstat(fd).st_nlink != 1:
                 _m_common.die("machine sampler: instance lock is hard-linked")
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with _m_timings.phase('lock_wait'):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 print("machine sample: skipped; instance busy")
+                yield False
                 return
             stream = os.fdopen(fd, "r+")
             fd = None
@@ -277,9 +285,10 @@ def machine_sample_once(inst):
             stream.write(str(os.getpid()))
             stream.flush()
             _m_instance._LOCK["fh"], _m_instance._LOCK["depth"] = stream, 1
+            _m_instance._LOCK['hold_started'] = time.perf_counter()
             os.environ["BRAIN_LOCK_HELD"] = f"{inst.root.resolve()}|{os.getpid()}"
             try:
-                machine_sample(inst)
+                yield True
             finally:
                 _m_instance._LOCK["depth"] = 0
                 _m_instance.unlock()
@@ -332,11 +341,10 @@ def machine_commit_check(inst):
                     _m_common.die("machine sampler: linked Git object directory; notice remains pending")
 
 
-def machine_notice(inst, data):
+def machine_notice_data(data):
     pending = data.get("pending_notice")
     if not pending:
         return data
-    machine_commit_check(inst)
     rows = machine_transitions(data)
     state = 'open' if data['episode'] else 'close'
     if not rows or (rows[-1]['episode'], rows[-1]['state']) != (data['episode_id'], state):
@@ -344,19 +352,32 @@ def machine_notice(inst, data):
         rows.append({'at': at if machine_timestamp(at) else time.time(),
                      'episode': data['episode_id'], 'state': state})
     # Machine care acts autonomously. Transitions never append to an inbox or wake a model.
-    data = {**data, 'transitions': rows[-100:], 'pending_notice': None, 'pending_at': None}
+    return {**data, 'transitions': rows[-100:], 'pending_notice': None, 'pending_at': None}
+
+
+def machine_notice(inst, data, checked=False):
+    if not data.get('pending_notice'):
+        return data
+    if not checked:
+        machine_commit_check(inst)
+    data = machine_notice_data(data)
     machine_publish(inst, inst.root / ".brain/machine.json", json.dumps(data) + "\n")
     return data
 
 
-def machine_sample(inst):
+def machine_sample_plan(inst):
     path = inst.root / ".brain/machine.json"
     try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
+        before = path.read_bytes()
+    except FileNotFoundError:
+        before = None
+    try:
+        data = json.loads(before) if before is not None else {}
+    except (ValueError, UnicodeError):
         data = {}
     if not isinstance(data, dict):
         data = {}
+    notice_required = False
     prior = data.get("heat_reasons", [])
     metadata_ok = (type(data.get("episode", False)) is bool and isinstance(prior, list)
                    and all(machine_heat_reason(r) for r in prior)
@@ -371,7 +392,9 @@ def machine_sample(inst):
                 'alert_open': False, 'alert_id': None, 'episode_started': None}
     if (data.get("pending_notice") and isinstance(data.get("pending_notice"), str) and
             re.fullmatch(r"[0-9a-f]{24}", str(data.get("episode_id", "")))):
-        data = machine_notice(inst, data)  # deliver old transition before it can be superseded
+        notice_required = True
+        data = machine_notice_data(data)  # retain the old transition before superseding it
+    reading = _m_ui.machine_load()
     now = time.time()
     old = data.get("samples", [])
     old = old if isinstance(old, list) else []
@@ -379,7 +402,7 @@ def machine_sample(inst):
                      key=lambda s: s["at"])
     if samples and int(samples[-1]["at"] // 60) == int(now // 60):
         samples.pop()  # at most one reading per minute, even with repeated invocations
-    samples.append({"at": now, "reading": _m_ui.machine_load()})
+    samples.append({"at": now, "reading": reading})
     samples = samples[-1440:]
     policy = machine_policy()
     reasons = machine_sustained(samples, policy)
@@ -415,10 +438,44 @@ def machine_sample(inst):
               "episode_started": started, "alert_open": alert_open, "alert_id": alert_id if alert_open else None,
               "pending_notice": pending, "pending_at": now if pending else None,
               "transitions": machine_transitions(data), "heat_reasons": heat}
-    machine_publish(inst, path, json.dumps(result) + "\n")
-    if pending:
-        machine_notice(inst, result)
-    print(f"machine sample: {len(samples)} readings; " + ("; ".join(heat) if active else "no sustained heat"))
+    return before, result, policy, notice_required
+
+
+def machine_sample(inst):
+    if _m_instance._LOCK['fh'] is not None:
+        print('machine sample: skipped; instance busy')
+        return
+    with _m_timings.phase('sample_compute'):
+        before, result, policy, recovering_notice = machine_sample_plan(inst)
+        refusal = None
+        if result['pending_notice'] or recovering_notice:
+            try:
+                machine_commit_check(inst)
+            except (OSError, SystemExit) as error:
+                refusal = error
+    path = inst.root / '.brain/machine.json'
+    with machine_sample_lock(inst) as acquired:
+        if not acquired:
+            return
+        try:
+            current = path.read_bytes()
+        except FileNotFoundError:
+            current = None
+        if current != before or machine_policy() != policy:
+            print('machine sample: skipped; state changed during collection')
+            return
+        if refusal is not None:
+            # Keep a newly observed transition pending even when its safety
+            # check refuses acknowledgement. An older pending notice retains
+            # its original bytes until that check succeeds on a later tick.
+            if not recovering_notice:
+                machine_publish(inst, path, json.dumps(result) + '\n')
+            raise refusal
+        machine_publish(inst, path, json.dumps(result) + '\n')
+        if result['pending_notice']:
+            machine_notice(inst, result, checked=True)
+    print(f"machine sample: {len(result['samples'])} readings; " +
+          ('; '.join(result['heat_reasons']) if result['episode'] else 'no sustained heat'))
 
 
 def machine_cron_quote(value):
