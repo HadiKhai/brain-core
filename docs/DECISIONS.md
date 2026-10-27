@@ -2961,3 +2961,11 @@ adding a worktree. A minute boundary can otherwise refresh root's generated
 `Facts refreshed` timestamp without committing it, leaving setup dirty before
 the handback under test. This fixture correction retains the pre-handback stamp
 clear and every strict assertion; production hourly coalescing is unchanged.
+## Rehearsal preparation does not probe delivery
+
+Copied webhook bindings never authorize delivery during rehearsal preparation.
+Do not seed command copies with a live probe or a fabricated successful status:
+retain the captured cache, leave delivery results empty, and record
+`delivery not probed (rehearsal)` in diagnostic warnings. Command execution keeps
+its existing OS network boundary and strict comparison rules; a passing rehearsal
+does not certify webhook delivery.

@@ -2111,12 +2111,8 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         accounting = _m_rehearse_external.freeze_accounting(
             frozen_inst, frozen_now, folder / 'rehearse-accounting.json')
         diagnostic_ids.extend(job_ids)
-        # Seed the same real delivery result into both command copies. Otherwise
-        # a new check's cache miss would POST inside the network-denying sandbox.
-        delivery_source = folder / 'delivery-source'
-        delivery_source.mkdir()
-        delivery_inst = isolated_probe_instance(frozen_inst, delivery_source)
-        delivery = probe_delivery(delivery_inst, delivery_inst.nodes(), frozen_inst)
+        # Preparation must never probe the copied live webhook bindings. Command
+        # copies keep their captured cache; their OS sandbox denies network.
         expected = expected_change_notices(frozen_inst, nodes, baseline, candidate)
         original = snapshot(frozen)
         captured_external = snapshot(folder / 'external')
@@ -2150,7 +2146,7 @@ def rehearse(inst, n, branch, local_diff_dir=None):
             flags.append('frozen brain changed during rehearsal; evidence refused')
         if snapshot(folder / 'external') != captured_external:
             flags.append('captured external inputs changed during rehearsal; evidence refused')
-        warnings, diagnostics = [], []
+        warnings, diagnostics = ['delivery not probed (rehearsal)'], []
         for key, result in old.items():
             if key in ('check', 'fix') and not baseline_conditions(key, result) and not drift_comparisons:
                 added = added_check_errors(result, new[key])
@@ -2167,7 +2163,6 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         if (_m_verify.ready_refs(n, branch) != (head, main)
                 or _m_verify.integration_parent(n, main) != integration_base):
             flags.append('candidate or integration main moved during rehearsal')
-        flags.extend(delivery_regressions(delivery))
         normalized_differences = []
         for key in old:
             before_tokens, after_tokens = (row.get('normalization_tokens', {}) for row in (old[key], new[key]))
@@ -2201,7 +2196,7 @@ def rehearse(inst, n, branch, local_diff_dir=None):
                 'normalized_differences': normalized_differences,
                 'commands': len(commands), 'changed_outputs': sum(old[k]['text'] != new[k]['text'] for k in old),
                 'hook_seconds': new['hook']['seconds'],
-                'delivery': delivery,
+                'delivery': [],
                 'output_digests': {k: hashlib.sha256(new[k]['text'].encode()).hexdigest() for k in new}}
         copies.record(comparison=dict(passed=result['passed'], commands=result['commands'],
                                       regressions=list(flags), output_digests=result['output_digests']))
