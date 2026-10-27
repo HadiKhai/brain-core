@@ -78,11 +78,12 @@ export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: 
   const nodes = list(s.nodes), title = (id: string) => nodes.find((n) => n.id === id)?.title || "";
   const match = (a: RecordData) => (!project || a.node === project.id) && `${readable(a.text)} ${a.branch || ""} ${title(a.node)}`.toLowerCase().includes(query.toLowerCase());
   const needs = needsView(s);
+  const decisions = needs.decisions.filter(match);
   const requests = needs.inbox.filter(match), steps = needs.due.filter(match).sort((a, b) => Number(!!b.ready) - Number(!!a.ready));
-  const current = tab === "due" ? "due" : "inbox", rows = current === "due" ? steps : requests;
+  const current = tab === "due" ? "due" : tab === "decisions" ? "decisions" : "inbox", rows = current === "due" ? steps : current === "decisions" ? decisions : requests;
   const { page, size, setPage, setSize, start, end } = usePage(rows.length, JSON.stringify([current, query, project?.id]));
   const shown = rows.slice(start, end);
-  const next = requests[0], conversation = next && (next.link || nodes.find((n) => n.id === next.node)?.coordinator);
+  const next = (current === "decisions" ? decisions : requests)[0], conversation = next && (next.link || nodes.find((n) => n.id === next.node)?.coordinator);
   // The primary action follows the tab: the next request, or the next coordinator step.
   const step = steps[0];
   const stepLink = step && nodes.find((n) => n.id === step.node)?.coordinator;
@@ -98,12 +99,13 @@ export function InboxView({ s, go, tab, active }: { s: RecordData; go: Go; tab: 
           <RecordPicker s={s} kind="node" label="Inbox project" hideLabel value={project} onChange={(v) => { setProject(v); setPage(0); }} allLabel="All projects" placeholder="Search projects" />
           <Button variant="outline" disabled={!query && !project} onClick={reset}>Clear filters</Button>
         </FilterToolbar>
-        <SectionTabs value={current} onValue={(v) => { go({ view: "inbox", tab: v === "due" ? "due" : null }); setPage(0); }}
+        <SectionTabs value={current} onValue={(v) => { go({ view: "inbox", tab: v === "inbox" ? null : v }); setPage(0); }}
           tabs={[
+            { id: "decisions", label: "Open decisions", count: decisions.length, body: null },
             { id: "inbox", label: "Requests", count: requests.length, body: null },
             { id: "due", label: "Coordinator steps", count: steps.length, body: null },
           ]} />
-        <ListFrame total={rows.length} page={page} size={size} onPage={setPage} onSize={setSize} noun={current === "due" ? "step" : "request"}>
+        <ListFrame total={rows.length} page={page} size={size} onPage={setPage} onSize={setSize} noun={current === "due" ? "step" : current === "decisions" ? "decision" : "request"}>
         <div className="rows">{shown.map((a, i) => current === "due" ? <DueRow key={i} s={s} item={a} go={go} /> : <RequestRow key={a.id || i} s={s} item={a} go={go} />)}</div>
         {!rows.length && <Empty text={query || project ? "Nothing matches these filters." : current === "due" ? "All caught up." : "Nothing waiting here."} action={query || project ? "Clear the filters to see every item." : "Questions and review requests arrive here."} />}
         </ListFrame>

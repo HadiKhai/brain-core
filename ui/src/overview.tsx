@@ -18,9 +18,9 @@ export const greeting = (s: RecordData) => {
 };
 // One sentence of what needs the operator, built from counts, never from prose.
 export function overviewSummary(s: RecordData) {
-  const { inbox, due } = needsView(s), ready = due.filter((d) => d.ready), questions = inbox.filter((i) => /question|\?/i.test(i.text || "")).length;
+  const { decisions, due } = needsView(s), ready = due.filter((d) => d.ready);
   const parts = [
-    inbox.length ? `${count(inbox.length, "item")} wait for you${questions ? `, ${questions} of them questions` : ""}.` : "Nothing waits for you.",
+    decisions.length ? `${count(decisions.length, "open decision")} wait for you.` : "Nothing waits for you.",
     ready.length ? `${count(ready.length, "job")} ${ready.length === 1 ? "is" : "are"} ready to merge.` : "",
     `${count(threads(list(s.nodes)).length, "thread")} in flight across ${count(list(s.nodes).filter((n) => !n.archived).length, "project")}.`,
   ];
@@ -29,18 +29,18 @@ export function overviewSummary(s: RecordData) {
 
 export function Overview({ s, go, onAdd, active }: { s: RecordData; go: (r: Partial<Route> & { view: string }) => void; onAdd: () => void; active: boolean }) {
   const nodes = list(s.nodes), now = nowOf(s);
-  const { inbox, due } = needsView(s);
+  const { decisions, due } = needsView(s);
   const open = threads(nodes), ready = due.filter((d) => d.ready);
   const jobs = allJobs(nodes);
   const merged = (from: number, to: number) => jobs.filter((r) => /merged/i.test(r.Outcome || "") && stamp(r.Ended) <= now - from * 3600_000 && stamp(r.Ended) > now - to * 3600_000).length;
   const mergedToday = merged(0, 24), mergedYesterday = merged(24, 48);
   const order = (f: { job: RecordData; wt?: RecordData }) => ["blocked", "ready", "review", "working", "idle"].indexOf(tone(f, due));
-  const fresh = inbox.filter((i) => within(i.first_seen, now, 24)).length;
+  const fresh = decisions.filter((i) => within(i.first_seen, now, 24)).length;
   const started = jobs.filter((r) => r._open && within(r.Started, now, 24)).length;
   const marks: Mark[] = open.map((f) => ({ key: f.node.id + f.job.branch, tone: tone(f, due), label: `${f.node.title || "Project"} · ${jobTitle(f.job.branch)} · ${jobState(f.job.state).kind}` }));
   const proposals = learningRows(s).filter((r) => r.state === "proposed" && !r.specialist);
   const candidates = list(s.scan).filter(adoptable);
-  const nextInbox = inbox[0], conversation = nextInbox && (nextInbox.link || nodes.find((n) => n.id === nextInbox.node)?.coordinator);
+  const nextInbox = decisions[0], conversation = nextInbox && (nextInbox.link || nodes.find((n) => n.id === nextInbox.node)?.coordinator);
   return (
     <div className="page-stack overview">
       <ScreenAction active={active}>
@@ -49,7 +49,7 @@ export function Overview({ s, go, onAdd, active }: { s: RecordData; go: (r: Part
           : <Button onClick={() => go({ view: "inbox" })}>Open Inbox</Button>}
       </ScreenAction>
       <section className="surface kpi-band" aria-label="Today at a glance">
-        <Kpi big label="Needs you" value={inbox.length + due.length} note={`${count(inbox.length, "request")} · ${count(due.length, "coordinator step")}`} trend={{ delta: fresh, text: `${fresh} new today`, good: "down" }} />
+        <Kpi big label="Needs you" value={decisions.length} note={count(decisions.length, "open decision")} trend={{ delta: fresh, text: `${fresh} new today`, good: "down" }} />
         <div className="kpi-rest">
           <div className="kpi-row">
             <Kpi label="Merges today" value={mergedToday} trend={{ delta: mergedToday - mergedYesterday, text: `${mergedToday - mergedYesterday >= 0 ? "+" : ""}${mergedToday - mergedYesterday} vs yesterday` }} />
@@ -66,9 +66,9 @@ export function Overview({ s, go, onAdd, active }: { s: RecordData; go: (r: Part
         <section className="surface needs" aria-label="Needs you" data-needs-action>
           <SectionTabs
             tabs={[
-              { id: "inbox", label: "Inbox", count: inbox.length, body: inbox.length ? <>
-                  <div className="rows">{inbox.slice(0, 5).map((a, i) => <RequestRow key={a.id || i} s={s} item={a} go={go} compact />)}</div>
-                  <ListFooter shown={Math.min(5, inbox.length)} total={inbox.length} noun="requests" action={<Button variant="ghost" size="sm" onClick={() => go({ view: "inbox" })}>View all <ChevronRight size={14} /></Button>} />
+              { id: "decisions", label: "Open decisions", count: decisions.length, body: decisions.length ? <>
+                  <div className="rows">{decisions.slice(0, 5).map((a, i) => <RequestRow key={a.id || i} s={s} item={a} go={go} compact />)}</div>
+                  <ListFooter shown={Math.min(5, decisions.length)} total={decisions.length} noun="decisions" action={<Button variant="ghost" size="sm" onClick={() => go({ view: "inbox", tab: "decisions" })}>View all <ChevronRight size={14} /></Button>} />
                 </> : <Empty text="Nothing waits for you." action="Questions from your projects arrive here." /> },
               { id: "due", label: "Coordinator steps", count: due.length, body: due.length ? <>
                   <div className="rows">{[...due].sort((a, b) => Number(!!b.ready) - Number(!!a.ready)).slice(0, 5).map((d, i) => <DueRow key={i} s={s} item={d} go={go} />)}</div>
