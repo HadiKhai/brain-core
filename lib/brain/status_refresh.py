@@ -332,6 +332,42 @@ def membership_paths(inst, selected):
     return tuple(sorted(set(paths)))
 
 
+GIT_DRIFT = ('status refresh inputs changed during computation',
+             'status refresh Git inputs kept changing during validation',
+             'status refresh Git dependency bindings changed')
+HELD_BUILDS = 3
+
+
+def held_compute(inst, n, build):
+    """The contended last attempt computes under the held lock.
+
+    No Brain writer can publish beside it, but worktree commits still can, so
+    Git answers stay fenced: drift rebuilds under the lock. The last build
+    publishes the state it observed rather than refuse the refresh.
+    """
+    with instance.brain_lock(inst), timings.phase('refresh_compute'):
+        for build_index in range(HELD_BUILDS):
+            last = build_index == HELD_BUILDS - 1
+            current = instance.Instance(inst.root)
+            git_inputs = None if last else GitInputs()
+            token = _ACTIVE.set(True)
+            observer = common._GIT_OBSERVER.set(None if last else git_inputs.observe)
+            reads = common._GIT_READS.set(None)
+            try:
+                result = build(current, current.node(n['id']))
+                if not last:
+                    git_inputs.validate()
+                    git_inputs.final_check()
+                return result
+            except SystemExit as error:
+                if last or not any(text in str(error.code) for text in GIT_DRIFT):
+                    raise
+            finally:
+                common._GIT_OBSERVER.reset(observer)
+                common._GIT_READS.reset(reads)
+                _ACTIVE.reset(token)
+
+
 def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     """Release physical ownership, prepare once, then refuse relevant drift.
 
@@ -343,15 +379,7 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     if active():
         return build(inst, n)
     if instance.holding():
-        # The contended last attempt computes under the held lock: no writer can
-        # publish beside it, so it needs no drift fence and cannot refuse one.
-        with instance.brain_lock(inst), timings.phase('refresh_compute'):
-            current = instance.Instance(inst.root)
-            token = _ACTIVE.set(True)
-            try:
-                return build(current, current.node(n['id']))
-            finally:
-                _ACTIVE.reset(token)
+        return held_compute(inst, n, build)
     git_inputs = GitInputs()
     with instance.brain_lock(inst):
         current = instance.Instance(inst.root)

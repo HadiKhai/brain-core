@@ -88,6 +88,13 @@ class JournalError(ValueError):
 
 _KINDS = {'begin', 'commit', 'abort', 'hook', 'reconcile', 'explain', 'damage', 'fact', 'record', 'record_applied'}
 _JOURNALS = {}
+# Views this process's own failed refresh attempts invalidated, beside those
+# already invalid before its first attempt (a real repair condition).
+_REFRESH_INVALID = {}
+
+
+def _refresh_invalid(inst):
+    return _REFRESH_INVALID.setdefault(str(inst.root.resolve()), {'before': None, 'own': set()})
 
 
 def _payload(data):
@@ -672,6 +679,8 @@ class Command:
             os.fsync(self.lease)
             os.fsync(self.lease_target.fd)
             data = {"command": self.command}
+            if self.command == 'status' and _refresh_invalid(self.inst)['before'] is None:
+                _refresh_invalid(self.inst)['before'] = set(journal(self.inst).state['invalid'])
             if not journal(self.inst).positions:
                 data["baseline"] = resource_list(self.inst, self.before)
             append(self.inst, self.node, "begin", self.ref, data)
@@ -792,6 +801,8 @@ class Command:
                         'maintenance_ok': False,
                         'invalidate': [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]}
             append(self.inst, self.node, 'commit', self.ref, data, scrub=False)
+            if self.command == 'status':
+                _refresh_invalid(self.inst)['own'].update(data.get('invalidate', []))
             if self.command == 'status' and not data.get('maintenance_ok'):
                 reason = f'; cause: {maintenance_error}' if maintenance_error is not None else ''
                 common.die('status refresh maintenance refused; generated view needs repair; retry from fresh state' + reason)
@@ -965,6 +976,12 @@ def comparison(inst, n, current=None, record=True, prepared=None):
     return result
 
 
+def retry_invalid_only(inst):
+    """Only this process's earlier refresh attempts invalidated views."""
+    seen = _refresh_invalid(inst)
+    return set(journal(inst).state['invalid']) <= seen['own'] - (seen['before'] or set())
+
+
 def reconcile(inst, node=None, snapshot=False):
     state, _, opened = replay(inst)
     dead = [ref for ref in opened if not lease_live(inst, ref)]
@@ -996,11 +1013,14 @@ def reconcile(inst, node=None, snapshot=False):
                 and all(r.get('scope') in scopes for r in changed)):
             return
         if node is not None and instance.holding():
-            # The final contended refresh holds the lock: reconciling now would
-            # adopt that writer's pending bytes, so leave it to a later refresh.
-            print('brain: another write is active; its reconciliation is left to a later refresh',
-                  file=__import__('sys').stderr)
-            return
+            if not dead and not journal(inst).state['faults'] and retry_invalid_only(inst):
+                # The final contended refresh holds the lock: reconciling now would
+                # adopt that writer's pending bytes, so leave it to a later refresh.
+                print('brain: another write is active; its reconciliation is left to a later refresh',
+                      file=__import__('sys').stderr)
+                return
+            common.die('an interrupted write, stream damage or invalid view needs reconciliation, '
+                       'and another write is active; refresh again after it finishes')
         common.die("another write is active; cannot reconcile its snapshot")
     with contextlib.ExitStack() as stack:
         leases = {ref: stack.enter_context(dead_lease(inst, ref)) for ref in dead}
@@ -1191,8 +1211,13 @@ def cmd_events(a):
 def events_view_without_current(inst, n):
     active = {op.ref for op in _CURRENT}
     _, views, opened = replay(inst)
-    if set(opened) - active:
+    others = set(opened) - active
+    if any(not lease_live(inst, ref) for ref in others) or (others and journal(inst).state['faults']):
         common.die('events view unavailable: another interrupted or active write needs reconciliation')
+    if others and not instance.holding():
+        common.die('events view unavailable: another write is active; cannot reconcile its snapshot')
+    # Held final refresh: a live writer cannot commit beside it, and its
+    # pending bytes are not in the committed views rendered here.
     if n['id'] not in views:
         common.die('events view unavailable: no recorded view; refresh while files are authoritative')
     return views[n['id']]

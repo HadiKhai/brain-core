@@ -22,6 +22,7 @@ from . import messages as _m_messages
 from . import machine as _m_machine
 from . import nodes as _m_nodes
 from . import status as _m_status
+from . import status_refresh as _m_status_refresh
 from . import tasks as _m_tasks
 from . import ui as _m_ui
 from . import timings as _m_timings
@@ -765,10 +766,7 @@ REFRESH_TRIES = 5
 # Plain contention: another writer moved inputs or held a lease during this
 # refresh. Any other refusal, including a repair's own cause, stays final.
 CONTENTION = ('another write is active; cannot reconcile its snapshot',
-              'state changed during the unlocked step',
-              'status refresh inputs changed during computation',
-              'status refresh Git inputs kept changing during validation',
-              'status refresh Git dependency bindings changed')
+              'state changed during the unlocked step', *_m_status_refresh.GIT_DRIFT)
 
 
 def contended(error):

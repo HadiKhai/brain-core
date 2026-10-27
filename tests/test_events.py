@@ -937,6 +937,24 @@ class EventViews(Scenario):
                 self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
                 self.assertTrue(events.lease_live(inst, op.ref))
 
+    def test_held_refresh_renders_committed_events_view_beside_a_live_writer(self):
+        r = self.init('demo')
+        for nid in ('app', 'other'):
+            self.b(r, 'new', nid, '--title', nid)
+        self.b(r, 'status', 'app', '--refresh')
+        inst = instance.Instance(r)
+        view = events.replay(inst)[1]['app']
+        with instance.brain_lock(r):
+            with events.Command(r, command='fixture', node='other'):
+                with mock.patch.object(events, '_CURRENT', []):
+                    with self.assertRaisesRegex(SystemExit, 'another write is active; cannot reconcile'):
+                        events.events_view_without_current(inst, inst.node('app'))
+                    with instance.held():
+                        self.assertEqual(events.events_view_without_current(inst, inst.node('app')), view)
+                        events.append(inst, 'other', 'begin', 'c' * 32, {'command': 'interrupted'})
+                        with self.assertRaisesRegex(SystemExit, 'interrupted or active write needs reconciliation'):
+                            events.events_view_without_current(inst, inst.node('app'))
+
     def test_snapshot_refresh_does_not_hide_partial_or_damaged_operations_beside_live_writer(self):
         for fault in ('partial', 'damage', 'invalid'):
             with self.subTest(fault=fault):
@@ -959,6 +977,8 @@ class EventViews(Scenario):
                         pending = events.pending(events.read(inst))
                         with mock.patch.object(events, '_CURRENT', []):
                             with self.assertRaisesRegex(SystemExit, 'another write is active'):
+                                events.reconcile(inst, node=inst.node('other'), snapshot=True)
+                            with instance.held(), self.assertRaisesRegex(SystemExit, 'needs reconciliation'):
                                 events.reconcile(inst, node=inst.node('other'), snapshot=True)
                             self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
                             self.assertEqual(events.pending(events.read(inst)), pending)

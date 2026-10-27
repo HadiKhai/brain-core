@@ -815,6 +815,28 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             refresh.compute(inst, node, changed)
         self.assertEqual((node['dir'] / 'status.md').read_bytes(), original)
 
+    def test_held_refresh_rebuilds_after_a_changed_job_ref(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_held_git_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        builds = []
+        def changed(current, target):
+            self.assertTrue(refresh.instance.holding() and refresh.instance._LOCK['fh'] is not None)
+            head = refresh.common.git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
+            if not builds:  # a worker commit lands in its worktree during the held build
+                (wt / 'concurrent.txt').write_text('relevant branch change\n')
+                self.git('add', 'concurrent.txt', cwd=wt)
+                self.git('commit', '-qm', 'relevant branch change', cwd=wt)
+            builds.append(head)
+            return head
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+            result = refresh.compute(inst, inst.node('app'), changed)
+        self.assertEqual(len(builds), 2)
+        self.assertEqual(result, self.git('rev-parse', 'HEAD', cwd=wt).strip())
+        self.assertNotEqual(builds[0], result)
+
     def test_refresh_fences_complete_ref_names(self):
         root, home, wt = self.project()
         loader = core_loader.SourceFileLoader('refresh_complete_refs', str(CORE / 'bin/brain'))
