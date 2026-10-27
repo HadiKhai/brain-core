@@ -162,7 +162,7 @@ def autoarchive(inst, nodes):
     from . import instance, status
     with instance.brain_lock(inst):
         if common.outward_links(inst.root):
-            raise ValueError('inbox autoarchive refuses outward links')
+            return  # Never read or move lines while outward links exist; the inbox read itself still works.
         saved, _ = status.inbox_seen_snapshot(inst)
         if not isinstance(saved, dict):
             raise ValueError('invalid inbox seen state')
