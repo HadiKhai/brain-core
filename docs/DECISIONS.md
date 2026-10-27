@@ -3024,3 +3024,15 @@ and explicit accounting commands retain their existing behavior.
 An authenticated browser startup may seed its first response from the existing private full JSON snapshot only after the existing code, instance, scan selection, word policy and allowed-source privacy binding validates. Explicitly partial/unavailable-format records fall back to the file-only startup. The displayed capture timestamp and age stay attached to that reading; a background rebuild replaces it only after usage and metadata are complete. Cached deliveries revalidate the stored snapshot and current privacy policy. Browser full rebuilds persist a complete snapshot under their original privacy fence. A changed core version intentionally invalidates the old snapshot, so installation needs one complete fill under the new version before this warm startup path is available.
 
 Concurrent explicit JSON waiters first attempt the fill lock without blocking. A follower joins the existing owner, then consumes its newly published validated complete generation. It never queues another rebuild; failed or unpublished owners fail closed for the follower. The source-bound input-index work is parked separately while this urgent 7.3a change is reviewed.
+
+## 2026-10-27: Allow overlapping handback attempt creation
+
+Creating a handback attempt fingerprints its refs and verification inputs without
+holding the instance writer lock. It fences the ledger, policy, local bindings,
+Git metadata and selected inputs across that read, then writes the replacement
+attempt under the retaken lock. The previous attempt is an output being replaced,
+not a binding input: another enqueue may replace it during the unlocked read
+without invalidating creation. Both queue requests remain durable; the last
+attempt published owns the current job, and an older queued attempt still fails
+the runner's identity check. Completion publication continues to fence the exact
+attempt, and lease ownership and PID birth-stamp checks remain unchanged.
