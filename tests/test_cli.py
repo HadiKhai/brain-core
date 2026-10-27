@@ -763,3 +763,72 @@ class GitReadLocks(Scenario):
             self.assertIsNotNone(state['wrote'])
             (root / 'README.md').write_text('tracked work\n')
             self.assertIn('uncommitted changes', self.m.core_revision())
+
+    def test_retention_diagnostic_diff_keeps_the_source_index_unchanged(self):
+        root = self.repo(self.tmp / 'diagnostic source')
+        names = ('bin/brain', 'lib/brain/rehearse.py', 'lib/brain/rehearse_transactions.py',
+                 'lib/brain/events.py', 'lib/brain/instance.py', 'tests/scenario.py',
+                 'tests/test_rehearse.py', 'tests/nightly_rehearse.py')
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('synthetic diagnostic source\n')
+        self.git('add', '-A', cwd=root)
+        self.git('commit', '-qm', 'diagnostic fixture', cwd=root)
+        original = (root / 'README.md').stat()
+        os.utime(root / 'README.md', ns=(original.st_atime_ns, original.st_mtime_ns + 2_000_000_000))
+        index = root / '.git/index'
+        before = index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()
+        owned, evidence = self.tmp / 'owned', self.tmp / 'evidence'
+        owned.mkdir()
+        evidence.mkdir(mode=0o700)
+        module = self.m._owners['NativeRetention']
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_REHEARSAL_EVIDENCE_DIR': str(evidence)}, clear=True), \
+                mock.patch.object(module, '__file__', str(root / 'lib/brain/rehearse.py')):
+            retention = module.NativeRetention(owned, 'fixture')
+        self.assertEqual(retention.packet['retention_errors'], [])
+        self.assertEqual(retention.packet['source_binding']['head'], self.git('rev-parse', 'HEAD', cwd=root).strip())
+        self.assertTrue(list(evidence.glob('native-retention-*.json')))
+        self.assertEqual((index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()), before)
+
+    def test_diff_against_head_preserves_the_source_index(self):
+        root = self.repo(self.tmp / 'diff café\nwith spaces')
+        index = root / '.git/index'
+        path = root / 'README.md'
+        stamp = path.stat()
+        os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
+        before = index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for prefix in ((), ('--no-optional-locks',), ('-c', 'diff.autoRefreshIndex=true')):
+                with self.subTest(prefix=prefix):
+                    result = self.common.git(*prefix, 'diff', '--binary', 'HEAD', cwd=root, check=True)
+                    self.assertEqual(result.stdout, '')
+                    self.assertEqual((index.stat().st_ino, index.stat().st_mtime_ns, index.read_bytes()), before)
+
+    def test_diff_keeps_raw_output_exit_codes_and_custom_split_indexes(self):
+        root = self.repo(self.tmp / 'split source', files={'same.txt': 'same\n', 'changed.txt': 'before\n'})
+        self.git('update-index', '--split-index', cwd=root)
+        custom = root / '.git/custom index\n雪'
+        shutil.copyfile(root / '.git/index', custom)
+        env = {**self.env, 'GIT_INDEX_FILE': str(custom), 'GIT_OPTIONAL_LOCKS': '1'}
+        (root / 'changed.txt').write_text('after\n')
+        stamp = (root / 'same.txt').stat()
+        os.utime(root / 'same.txt', ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
+        before = custom.stat().st_ino, custom.stat().st_mtime_ns, custom.read_bytes()
+        foreign = Path(str(custom) + '.lock')
+        foreign.write_bytes(b'foreign index lock')
+        modes = [('--name-only', '-z'), ('--name-status', '-z'), ('--raw', '-z'),
+                 ('--binary', 'HEAD'), ('--numstat', '-z'), ('--quiet',),
+                 ('--exit-code', '--name-only'), ('--name-only', 'missing-ref')]
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for mode in modes:
+                with self.subTest(mode=mode):
+                    expected = subprocess.run(['git', '--no-optional-locks', '-C', str(root), 'diff', *mode],
+                                              env=env, capture_output=True, text=True, errors='replace')
+                    actual = self.common.git('diff', *mode, cwd=root, env=env)
+                    self.assertEqual((actual.returncode, actual.stdout, actual.stderr),
+                                     (expected.returncode, expected.stdout, expected.stderr))
+                    self.assertEqual((custom.stat().st_ino, custom.stat().st_mtime_ns, custom.read_bytes()), before)
+        self.assertEqual(env['GIT_INDEX_FILE'], str(custom))
+        self.assertEqual(env['GIT_OPTIONAL_LOCKS'], '1')
+        self.assertEqual(foreign.read_bytes(), b'foreign index lock')

@@ -2766,3 +2766,8 @@ protection and source cleanliness continue to include untracked files. The core
 revision label uses `status -uno`: it describes tracked code changes and already
 excluded untracked files. Tests cover stale index metadata, an existing index
 lock, explicit environment overrides, and paths with spaces, Unicode or newlines.
+Git diff can refresh stale index metadata even with optional locks disabled.
+Shared diff calls therefore use a disposable private index, preserving normal
+name-only/raw output; disabling automatic refresh would expose stat-only changes.
+The separate retention diagnostic emits a binary patch and can safely disable
+`diff.autoRefreshIndex` along with optional locks.

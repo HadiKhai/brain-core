@@ -498,6 +498,27 @@ def branch_refs(cwd):
     return refs
 
 
+@contextlib.contextmanager
+def git_diff_index(cwd, env):
+    """Let Git refresh a private index while preserving its normal diff output.
+
+    Disabling diff.autoRefreshIndex changes name-only/raw output for stat-only
+    changes. Git versions that ignore optional locks during diff must therefore
+    refresh a disposable copy instead of the caller's index.
+    """
+    location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
+    source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
+    if source is None or not source.is_file():
+        yield env  # no repository/index to refresh; preserve Git's own verdict
+        return
+    with tempfile.TemporaryDirectory(prefix='brain-diff-index-') as temporary:
+        private = Path(temporary) / 'index'
+        shutil.copyfile(source, private)
+        for shared in source.parent.glob('sharedindex.*'):
+            shutil.copyfile(shared, Path(temporary) / shared.name)
+        yield {**env, 'GIT_INDEX_FILE': str(private)}
+
+
 def git(*args, cwd=None, check=False, env=None):
     reads = _GIT_READS.get()
     key = (str(Path(cwd or Path.cwd()).absolute()), args)
@@ -543,8 +564,10 @@ def git(*args, cwd=None, check=False, env=None):
                 break
         if lock_query and lock_query[0] in ('status', 'diff'):
             env = {**(os.environ if env is None else env), 'GIT_OPTIONAL_LOCKS': '0'}
-        result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
-                                capture_output=True, text=True, errors="replace", check=False, env=env)
+        index = git_diff_index(cwd, env) if lock_query and lock_query[0] == 'diff' else contextlib.nullcontext(env)
+        with index as child_env:
+            result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
+                                    capture_output=True, text=True, errors="replace", check=False, env=child_env)
         if cacheable:
             reads[key] = result
     if check:

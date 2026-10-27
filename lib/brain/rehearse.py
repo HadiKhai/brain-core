@@ -75,7 +75,8 @@ class NativeRetention:
             source = Path(__file__).resolve().parents[2]
             if 'source_binding' not in self.packet:
                 def git(*args):
-                    return subprocess.run(['git', '-C', str(source), *args], check=True,
+                    return subprocess.run(['git', '--no-optional-locks', '-c', 'diff.autoRefreshIndex=false',
+                                           '-C', str(source), *args], check=True,
                                           capture_output=True, timeout=5).stdout
                 names = ('bin/brain', 'lib/brain/rehearse.py', 'lib/brain/rehearse_transactions.py',
                          'lib/brain/events.py', 'lib/brain/instance.py', 'tests/scenario.py',
