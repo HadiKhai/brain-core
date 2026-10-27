@@ -1851,12 +1851,26 @@ class AckAllShown(Scenario):
             write('b')  # same size, rewritten in place: the contents decide, not file metadata
             self.assertEqual(m.wake_shown(self.inst, n), {'b' * 64})
             self.assertEqual(parsed.call_count, 2)
-            torn, info = history.read_bytes().replace(b'"items"', b'"itemz"'), history.stat()
-            history.write_bytes(torn)  # same size and restored mtime: corrupt bytes never reuse old rows
-            os.utime(history, ns=(info.st_atime_ns, info.st_mtime_ns))
-            self.assertEqual(m.wake_shown(self.inst, n), set())
-            with self.assertRaises(ValueError):
-                m.wake_history(history.parent)
+            # A same-size rewrite within one timestamp tick: every stat field is unchanged.
+            info, stat, fstat = history.stat(), os.stat, os.fstat
+            def frozen(real):
+                def call(*args, **kwargs):
+                    result = real(*args, **kwargs)
+                    return info if (result.st_dev, result.st_ino) == (info.st_dev, info.st_ino) else result
+                return call
+            torn = history.read_bytes().replace(b'"items"', b'"itemz"')
+            with mock.patch('os.stat', side_effect=frozen(stat)), mock.patch('os.fstat', side_effect=frozen(fstat)):
+                history.write_bytes(torn)
+                self.assertEqual(os.stat(history), info)
+                self.assertEqual(m.wake_shown(self.inst, n), set())
+                with self.assertRaises(ValueError):
+                    m.wake_history(history.parent)
+            for encoding in ('utf-8-sig', 'utf-16'):  # json.loads(bytes) would accept these
+                write('c')
+                history.write_bytes(history.read_text().encode(encoding))
+                self.assertEqual(m.wake_shown(self.inst, n), set())
+                with self.assertRaises(ValueError):
+                    m.wake_history(history.parent)
             write('b')
             history.write_text('{"version": 1, "deliveries": [{}]}')
             self.assertEqual(m.wake_shown(self.inst, n), set())

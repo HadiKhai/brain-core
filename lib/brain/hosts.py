@@ -2,6 +2,7 @@
 import contextlib
 import datetime
 import hashlib
+import io
 import json
 import math
 import os
@@ -306,7 +307,9 @@ def wake_history_entry(directory):
     if entry and entry[0] == digest:
         return entry
     _WAKE_HISTORY_CACHE.pop(str(path), None)
-    entry = (digest, tuple(wake_history_parse(data)), {})
+    # Decode as Path.read_text did, so encodings it rejected stay invalid.
+    text = io.TextIOWrapper(io.BytesIO(data)).read()
+    entry = (digest, tuple(wake_history_parse(text)), {})
     _WAKE_HISTORY_CACHE[str(path)] = entry
     return entry
 
