@@ -1260,7 +1260,11 @@ class RehearsalCloneCaches(Scenario):
                         damaged['ui-cache']['entries'].append('unobserved.json')
                         self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
                 if args[0] == 'ui':
-                    usage = json.loads(raw[0]['stdout'])['spend']
+                    ui = json.loads(raw[0]['stdout'])
+                    self.assertEqual(datetime.datetime.fromisoformat(clock).astimezone(
+                        datetime.timezone.utc).isoformat(), ui['source']['built_at'])
+                    self.assertEqual(0, ui['source']['age_seconds'])
+                    usage = ui['spend']
                     self.assertFalse(usage['complete'])
                     self.assertIsNone(usage['since_week'])
 

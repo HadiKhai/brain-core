@@ -772,7 +772,7 @@ OUTPUT_NORMALIZATION_PATTERNS = {
 
 # These modules read wall time as data (cache ages, activity, policy windows).
 # Instance lock deadlines retain real time; all monotonic/elapsed timers do too.
-FROZEN_WALL_CLOCK_MODULES = ('check', 'hosts', 'jobs', 'machine', 'spend', 'ui', 'upgrade', 'usage')
+FROZEN_WALL_CLOCK_MODULES = ('check', 'hosts', 'jobs', 'machine', 'spend', 'ui', 'ui_json', 'upgrade', 'usage')
 
 # Only these live numeric observations and the exact spans below are volatile.
 # Presence, types, policy thresholds, reason membership and other values compare.

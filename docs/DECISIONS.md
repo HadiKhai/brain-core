@@ -2984,3 +2984,5 @@ journal proofs and zero-residual assertions remain unchanged. UI privacy keys us
 a provider-permission signature separately from transcript discovery, allowing a
 frozen accounting adapter to bind the captured aggregate identity without opening
 provider roots or interpreting unavailable measurements as zero.
+The UI JSON cache producer shares the frozen wall clock with the rendered view,
+so observation dates and ages compare without discarding those fields.
