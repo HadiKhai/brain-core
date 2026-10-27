@@ -3204,3 +3204,23 @@ an active attempt/provider turn. Focused checks cover the accepted last-moment
 race and replay as well as failed continuation IDs, backoff, success, unknown
 outcomes, durable escalation, directory-sync faults and local lock/rebind fences.
 These fake-host checks do not attest live bridge, provider or launchd latency.
+
+## Read Git status and diffs without refreshing the index
+
+The shared Git helper supplies `GIT_OPTIONAL_LOCKS=0` only to status/diff child
+processes, including reads with per-command configuration or explicit environments.
+This prevents optional index refresh writes without changing Git writers or the
+parent environment. Worktree activity, cleanup, review readiness, configuration
+protection and source cleanliness continue to include untracked files. The core
+revision label uses `status -uno`: it describes tracked code changes and already
+excluded untracked files. Tests cover stale index metadata, an existing index
+lock, explicit environment overrides, and paths with spaces, Unicode or newlines.
+Git diff can refresh stale index metadata even with optional locks disabled.
+Shared diff calls and the binary retention diagnostic therefore use a disposable
+private index, preserving normal name-only/raw output; disabling automatic refresh
+would expose stat-only changes. Copies preserve the source descriptor's mtime for
+racy-clean detection. Split-index status/diff reads first flatten the copied index in a scratch
+repository with no objects, refs or inherited Git configuration. The actual read
+retains its original Git directory and configuration, including matching and
+nonmatching conditional includes. Restoring the original index mtime after
+conversion preserves racy-clean detection. Writers stay unchanged.
