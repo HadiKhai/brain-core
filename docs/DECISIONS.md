@@ -2755,3 +2755,13 @@ Inbox acknowledgement publication errors retain the already-flushed delivery
 and warning, then propagate the original error with a nonzero exit. They never
 report successful persistence. A stale-generation no-op may still repeat later
 without overwriting a newer acknowledgement or resolution.
+
+Read commands share branch tips, commit dates and linked-worktree HEADs from one
+ref/worktree enumeration per repository. Ancestry queries use one ref-containment
+enumeration per ancestor. Commit counts and clean-title checks share one commit
+graph per integration base; unfinished-title findings retain the original Git
+log order. These derived reads expire at the end of the command, without a time
+limit or persistent authority. Failed or malformed batches fall back to the
+individual Git reads, including local job-state observations. Read-only `ready`
+uses this scope; readiness recording and other write paths keep their existing
+reads and writes.
