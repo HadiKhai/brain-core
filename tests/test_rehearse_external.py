@@ -50,12 +50,13 @@ class OwnedCopyLifecycle(unittest.TestCase):
         self.assertEqual(hashlib.sha256(original).hexdigest(), entry['evidence']['sha256'])
         with contextlib.ExitStack() as restore:
             for name in ('job_usage', 'live_usage', '_live_usage', '_read_live_usage',
-                         'spend_machine', 'spend_input_signature', 'spend_sources'):
+                         'spend_machine', 'spend_input_signature', 'spend_sources', 'coordinator_measure'):
                 restore.callback(setattr, spend, name, getattr(spend, name))
             with mock.patch.object(spend, 'spend_terms', return_value=[]):
                 rehearse_external.install_accounting(target, binding['sha256'], packet['frozen_now'])
                 self.assertEqual(usage, spend.live_usage(inst, node, row))
                 self.assertIsNone(spend.live_usage(inst, node, missing))
+                self.assertIsNone(spend.coordinator_measure(inst, node))
                 self.assertFalse(spend.spend_machine(inst)['complete'])
                 self.assertIsNone(spend.spend_machine(inst)['since_week'])
                 self.assertIn(binding['sha256'], spend.spend_input_signature(inst))

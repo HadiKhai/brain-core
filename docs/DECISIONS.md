@@ -68,6 +68,16 @@ Outward aliases, replaced physical ancestors and shared files remain refused.
 Each sync failure propagates; no multi-file transaction, namespace lock or
 physical power-loss guarantee is implied.
 
+## D40007: Keep unavailable coordinator measurements unknown in rehearsal
+
+Coordinator context and turn counts have no authorized Brain-owned aggregate in
+this rehearsal contract. The frozen read adapter returns the native unknown
+value for that API and continues to refuse provider discovery. A coordinator
+session binding must not turn an otherwise read-only measurement into a provider
+scan or strand a leased refresh. The control covers due, UI and native refresh
+with a fabricated coordinator session; raw discovery remains refused.
+
+
 ## D40006: Exclude provider installation routes from aggregate-only rehearsal
 
 The machine-local `global` map records runtime installation directories used to

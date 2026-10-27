@@ -1155,14 +1155,18 @@ class RehearsalCloneCaches(Scenario):
         lane.mkdir()
         rehearsal.copy_brain(source, lane / 'brain', self.tmp)
         inst = instance.Instance(lane / 'brain')
+        inst.local.setdefault('nodes', {}).setdefault('root', {}).update(
+            coordinator='thread', coordinator_sessions=['11111111-1111-4111-8111-111111111111'])
+        (lane / 'brain/.brain/local.json').write_text(json.dumps(inst.local))
         clock = inst.now_dt().isoformat()
         (lane / 'rehearse-clock').write_text(clock)
         rehearsal.freeze_machine_inputs(inst, clock)
         accounting = rehearse_external.freeze_accounting(inst, clock, self.tmp / 'accounting.json')
-        for args in (['due', '--json'], ['ui', '--json']):
+        for args in (['due', '--json'], ['ui', '--json'], ['status', 'root', '--refresh']):
             with self.subTest(args=args):
                 raw = []
-                row = rehearsal.run_command(lane / 'brain/core', lane, args, 'read', [],
+                kind = 'refresh' if args[0] == 'status' else 'read'
+                row = rehearsal.run_command(lane / 'brain/core', lane, args, kind, [],
                                             raw_output=raw, accounting=accounting)
                 self.assertEqual(0, row['code'], raw[0]['stderr'])
                 self.assertEqual(0, row['unexpected'])
