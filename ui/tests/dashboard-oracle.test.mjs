@@ -13,7 +13,7 @@ const model = await import('data:text/javascript;base64,' + Buffer.from(source).
 const oracle = createDashboardOracle(model);
 const state = { brain: { now: '2026-01-01T12:00:00Z', tz: 'UTC' }, machine: {},
   nodes: [{ id: 'demo', title: 'Notebook', jobs: { rows: [], open: [] }, work: [], worktrees: [] }],
-  inbox: [{ id: 'request', node: 'demo', kind: 'inbox', text: 'Choose a cover?' }],
+  inbox: [{ id: 'request', node: 'demo', kind: 'question', text: 'Choose a cover?' }],
   due: [{ id: 'step', node: 'demo', kind: 'handback', branch: 'job/cover', text: 'job/cover: review the cover', ready: true }] };
 const request = oracle.request(state, state.inbox[0]);
 const step = oracle.step(state, state.due[0]);
@@ -43,7 +43,7 @@ test('all overview labels and values must agree with the backend', () => {
   const rows = oracle.overview(state);
   assert.equal(oracle.compareOverview(state, rows), 5);
   assert.deepEqual(rows.map(row => [row.label, row.value]), [
-    ['Needs you', '2'], ['Merges today', '0'], ['Threads live', '0'], ['Ready to merge', '1'], ['Verify queue', '—']]);
+    ['Needs you', '1'], ['Merges today', '0'], ['Threads live', '0'], ['Ready to merge', '1'], ['Verify queue', '—']]);
   for (let i = 0; i < rows.length; i++) {
     const changed = structuredClone(rows); changed[i].value = '999';
     assert.throws(() => oracle.compareOverview(state, changed), /Wrong overview KPI/);
