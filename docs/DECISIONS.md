@@ -2859,6 +2859,11 @@ append lock through source replacement. An appender verifies its opened inode af
 locking; a replaced inode is retried or reported busy to the hook's durable queue.
 The instance lock alone cannot fence nonblocking hook question delivery.
 
+Mixed backlog sections can contain policy history as well as work. Exclude standalone
+authority announcements, review-independence rules, spent allowances and resume
+conditions using their explicit forms, without dropping ordinary work or manual tasks.
+Cleared preview bindings are missing job evidence, never proof of abandonment.
+
 Unlinked new task creation validates only the new record, with direct requirement
 lookups. Linked additions, existing-record edits and explicit task checks retain
 whole-graph validation, including qualified and cross-node return edges. This avoids repeatedly parsing every requirement

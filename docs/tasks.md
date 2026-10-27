@@ -148,3 +148,8 @@ and active holds stay in the inbox. No task, requirement, answer or archive is d
 Publication shares the native inbox append lock and refuses a changed planning
 snapshot. Appenders that opened a replaced inbox retry its current inode; nonblocking
 hooks report contention so their existing question queue retains the message.
+
+Backlog imports also exclude standalone policy announcements, review-independence
+rules, spent repair allowances and resume-approval conditions, even when mixed into
+a features section. These are constraints on work rather than separate tasks.
+Explicit unchecked task boxes and actionable backlog entries remain commitments.

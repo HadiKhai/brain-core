@@ -880,8 +880,13 @@ class Tasks(Scenario):
                  '- 2026-10-25T15:40:29.767005+00:00 from machine: held step exited: command exited with status 1 <!-- machine-wait:f9cec7da7d8f792d8f883d2a33d1c3e7:exited -->\n'
                  '- 2026-10-25 15:42 +00:00 from worker: FYI report attached\n'
                  '- 2026-10-25 15:43 +00:00 from root: Answered question\n')
+        history = ('- 2026-10-25 12:38 +0200: **HADI LIMITED UNPAUSE, nine fixes ONLY:** retained authority announcement\n'
+                   '- REVIEW INDEPENDENCE, superseded by the latest reviewer policy\n'
+                   '- Add70 ends repair allowance: **no source repair or retry**\n'
+                   '- Resume requires **separate root approval** of a changed contract\n')
+        inbox += history
         (self.root / 'inbox.md').write_text(inbox)
-        (self.root / 'status.md').write_text('## Next\n- Historical promise\n## Build order\n1. Historical order\n')
+        (self.root / 'status.md').write_text('## Next\n- Historical promise\n' + history + '## Build order\n1. Historical order\n')
         (self.root / 'backlog.md').write_text('- Export current work\n')
         (self.root / 'build-order.md').write_text('1. Add native report\n')
         rows = tasks_backfill.migrate(self.inst, [self.n])
@@ -889,6 +894,35 @@ class Tasks(Scenario):
         self.assertEqual({r['title'] for r in tasks.read_records(self.n).values()}, {'Export current work', 'Add native report'})
         self.assertEqual(len(tasks.read_records(self.n, 'requirements')), 2)
         self.assertEqual((self.root / 'inbox.md').read_text(), inbox)
+
+    def test_migration_and_reconcile_exclude_policy_shapes_mixed_with_real_backlog(self):
+        from brain import task_reconcile, tasks_backfill
+        policies = [
+            '- 2026-10-25 12:38 +0200: **HADI LIMITED UNPAUSE, nine fixes ONLY:** retained authority announcement',
+            '- REVIEW INDEPENDENCE, superseded by the latest reviewer policy',
+            '- Add70 ends repair allowance: **no source repair or retry**',
+            '- Resume requires **separate root approval** of a changed contract',
+        ]
+        work = ['- Export current work', '- Implement review independence receipts',
+                '- Resume the interrupted export', '- Add70 repairs an export bug',
+                '- 2026-10-25 12:38 +0200: Fix the export',
+                '- [ ] Resume requires an explicit tracked approval task']
+        text = '# Backlog\n## Discussed features, not built\n' + '\n'.join(policies + work) + '\n'
+        (self.root / 'backlog.md').write_text(text)
+        for i, quote in enumerate(policies):
+            self.legacy_import('POLICY-' + str(i), 'backlog.md', quote)
+        self.add('MANUAL-POLICY', title=policies[0][2:])
+        before = {p for folder in ('tasks', 'requirements') for p in (self.root / folder).glob('*.md')}
+        result = task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        self.assertEqual(len(result[0]['changes']), 4)
+        rows = tasks.read_records(self.n)
+        self.assertEqual([rows['POLICY-' + str(i)]['status'] for i in range(4)], ['dropped'] * 4)
+        self.assertEqual(rows['MANUAL-POLICY']['status'], 'backlog')
+        self.assertTrue(all(p.exists() for p in before))
+        self.assertEqual((self.root / 'backlog.md').read_text(), text)
+        self.assertEqual(task_reconcile.reconcile(self.inst, [self.n], apply=True)[0]['changes'], [])
+        candidates = tasks_backfill.candidates(self.inst, self.n)
+        self.assertEqual({row['title'] for row in candidates}, {line.removeprefix('- ').removeprefix('[ ] ') for line in work})
 
     def test_reconcile_drops_nonwork_with_one_decision_and_retains_every_file(self):
         from brain import task_reconcile

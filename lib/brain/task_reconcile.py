@@ -94,7 +94,7 @@ def nonwork_reason(inst, n, row, requirements, lifecycle):
         excluded = tasks_backfill.nonwork_source_lines(n, origin)
         active = {line for number, line in enumerate(path.read_text().splitlines(), 1) if number not in excluded} if path.exists() else set()
         if requirements.get(row.get('requirement'), {}).get('quote') in set(excluded.values()) - active:
-            return 'Imported decision/history section or code example is not a work item.'
+            return 'Imported decision/history, authority rule, resume condition or code example is not a work item.'
         return None
     if origin != 'inbox.md':
         return None

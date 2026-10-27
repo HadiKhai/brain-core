@@ -16,8 +16,25 @@ def fingerprint(*parts):
     return hashlib.sha256('\0'.join(parts).encode()).hexdigest()[:16].upper()
 
 
+def policy_bullet(line):
+    """Authority announcements and resume conditions are not standalone work items."""
+    match = re.match(r'^(?:[-*] |\d+[.)] )(.+)$', line)
+    if not match or re.match(r'\[[ xX]\] ', match[1]):
+        return False  # An explicit task checkbox remains an explicit commitment.
+    text = re.sub(r'[*_`]', '', match[1]).strip()
+    if re.match(r'REVIEW INDEPENDENCE(?:\s*[:,]|\s+supersed)', text, re.I):
+        return True
+    if re.match(r'Add\d+\s+ends\s+(?:the\s+)?(?:repair|execution|review|gate|runtime)\s+allowance\b', text, re.I):
+        return True
+    if re.match(r'Resume\s+requires\b', text, re.I):
+        return True
+    dated = re.match(r'^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\s*[+-]\d{2}:?\d{2}|Z)?\s*:\s*(.+)', text)
+    return bool(dated and re.match(
+        r'^[A-Z][A-Z0-9 /-]*\b(?:UNPAUSE|PAUSE|FIXES[- ]ONLY|OVERRIDE|POLICY)\b', dated[1]))
+
+
 def nonwork_source_lines(n, filename='backlog.md'):
-    """Explicitly labelled decision/history sections and code examples are not work."""
+    """Explicit history, code examples and standalone authority rules are not work."""
     path = n['dir'] / filename
     if not path.exists():
         return {}
@@ -40,7 +57,7 @@ def nonwork_source_lines(n, filename='backlog.md'):
                 depth = None
             if title.startswith('historical ') or title in ('operator decisions', 'decisions'):
                 depth = level
-        if fence or depth is not None:
+        if fence or depth is not None or policy_bullet(line):
             excluded[number] = line
     return excluded
 
