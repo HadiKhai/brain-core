@@ -469,8 +469,9 @@ def resources(inst, content=True, *, paths_only=False):
             return None
         if content:
             return digest(private_read(path) if private else path.read_bytes())
-        st = os.stat(path, follow_symlinks=False)
-        return [st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+        # An allowed internal link is compared by itself and by what it leads to.
+        return [[st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+                for st in (os.stat(path, follow_symlinks=False), os.stat(path))]
     def walk(folder, deep=False):
         for p in sorted(folder.iterdir()):
             if p.is_dir() and not p.is_symlink():

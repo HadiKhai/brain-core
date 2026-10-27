@@ -218,13 +218,24 @@ def watch_receipt_revision(inst):
             return target.generation(os.fstat(stream.fileno()))
 
 
+def watch_receipt_observed(inst):
+    """The receipt generation before a scan: None when absent, False when unreadable."""
+    try:
+        return watch_receipt_revision(inst)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, SystemExit):
+        return False
+
+
 def watch_due_episodes(inst, scan):
     """Persist opaque receipts while ordinary due needs remain open.
 
     The source scan runs before the receipt lock; only reconciliation holds it.
-    Each receipt records when its scan started, so an older scan finishing after
-    a newer one is stale and cannot erase a newer receipt. A scan closes absent
-    needs. Machine and direct producer episodes already have their own receipts.
+    A scan reconciles only if the receipt it observed before scanning is still
+    current, so overlapping scans serialize as if each ran alone; one that lost
+    is stale and cannot erase a newer receipt. A scan closes absent needs.
+    Machine and direct producer episodes already have their own receipts.
     """
     import fcntl
     path = inst.root / '.brain/wake/due-episodes.json'
@@ -233,7 +244,7 @@ def watch_due_episodes(inst, scan):
         raise ValueError('unsafe due episode state')
     path.parent.mkdir(exist_ok=True)
     _m_common.safe_target(lock)
-    started = time.time_ns()
+    observed = watch_receipt_observed(inst)
     layout = {}
     generation = watch_source_signature(inst, layout)
     groups = scan()
@@ -253,16 +264,14 @@ def watch_due_episodes(inst, scan):
             data = watch_read(path, {'version': 1, 'open': {}})
             if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
                     or type(data.get('overdue_episodes', False)) is not bool
-                    or type(data.get('scanned', 0)) is not int
                     or any(not re.fullmatch(r'[0-9a-f]{64}', k)
                            or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
                            for k, v in data['open'].items())):
                 raise ValueError('invalid due episode state')
         except (OSError, ValueError):
             return watch_untracked(groups, generation)  # preserve evidence and fail open until repaired
-        # A receipt from a scan that started later already reflects newer sources.
-        # A start in the future means the clock moved back; it cannot fence forever.
-        if started < data.get('scanned', 0) <= time.time_ns():
+        # Another reconciliation since this scan's observation may reflect newer sources.
+        if observed is False or watch_receipt_observed(inst) != observed:
             return WatchGroups({}, None, generation, stale=True, layout=layout)
         # Preserve pre-upgrade acknowledgements rather than replaying the backlog.
         try:
@@ -286,7 +295,7 @@ def watch_due_episodes(inst, scan):
             # Atomic replacement supplies a new generation even for an unchanged
             # scan, without extending the existing receipt schema.
             _m_machine.machine_publish(inst, path, json.dumps(
-                {'version': 1, 'open': current, 'overdue_episodes': True, 'scanned': started}, sort_keys=True) + '\n')
+                {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
             revision = watch_receipt_revision(inst)
         except OSError:
             return watch_untracked(groups, generation)  # unpublished identities cannot prove resolution

@@ -206,7 +206,20 @@ class Watcher(Scenario):
         self.assertIsNone(older.receipt_revision)
         current = newer['groups']['root']['items'][0]['id']
         receipt = json.loads((inst.root / '.brain/wake/due-episodes.json').read_text())
-        self.assertEqual(list(receipt['open'].values()), [current], 'an older scan must not close a newer receipt')
+        self.assertEqual(list(receipt['open'].values()), [current], 'a scan overtaken by another reconciliation must not close its receipt')
+
+    def test_source_signature_sees_change_behind_internal_link(self):
+        m, inst = self.m, self.inst
+        target = inst.root / '.brain/fixture-inbox.txt'
+        target.write_text('- Choose blue\n')
+        inbox = inst.root / 'inbox.md'
+        inbox.unlink(missing_ok=True)
+        inbox.symlink_to(target)
+        self.assertFalse(m.outward_links(inst.root))
+        layout = {}
+        before = m.watch_source_signature(inst, layout)
+        target.write_text('- Choose cyan\n')  # same size; only the referent changes
+        self.assertNotEqual(m.watch_source_signature(inst, layout), before)
 
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
