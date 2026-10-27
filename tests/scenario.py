@@ -315,6 +315,12 @@ class Scenario(unittest.TestCase):
         self.env['PYTHONPYCACHEPREFIX'] = str(fixture_runtime_cache(CORE))
         self.env['PYTHONDONTWRITEBYTECODE'] = '1'
 
+        # Direct API calls need the same disposable HOME/config as CLI children.
+        # Otherwise session/account discovery scans the worker's real profiles.
+        environment = mock.patch.dict(os.environ, self.env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def tearDown(self):
         # Diagnostic finalizers must run before removal, not in addCleanup.
         retainers = getattr(self, '_before_fixture_delete', ())

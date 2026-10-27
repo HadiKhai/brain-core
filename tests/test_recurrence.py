@@ -9,6 +9,7 @@ from scenario import CORE, Scenario
 
 
 class LessonRecurrence(Scenario):
+    cli_in_process = True
     fixture_templates = True
     fixture_init_in_process = True
 

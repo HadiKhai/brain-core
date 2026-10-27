@@ -79,12 +79,40 @@ def main_notice(n):
         print(f"main: {short} (cached); local {name} is missing")
 
 
+def _commit_refs(home, refs):
+    """Resolve a small ref set in one fresh Git observation, without a cache.
+
+    Unusual names, non-commit objects and unreadable inventories retain Git's
+    original recursive commit-peeling query. Exact names prevent prefix matches
+    from substituting a sibling ref. This never spans a verifier or publication.
+    """
+    refs = tuple(dict.fromkeys(refs))
+    ordinary = all(re.fullmatch(r'refs/(?:heads|remotes)/[^~^: ?*\[\]\\\x00-\x20]+', ref)
+                   for ref in refs)
+    if ordinary:
+        result = _m_common.git('for-each-ref', '--format=%(refname)%00%(objectname)%00%(objecttype)',
+                               '--', *refs, cwd=home, env=dict(os.environ))
+        if not result.returncode and not result.stderr.strip():
+            values = {}
+            for line in result.stdout.splitlines():
+                parts = line.split('\0')
+                if (len(parts) != 3 or parts[2] != 'commit'
+                        or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', parts[1])):
+                    break
+                values[parts[0]] = parts[1]
+            else:
+                return {ref: values.get(ref, '') for ref in refs}
+    return {ref: _m_common.git('rev-parse', '--verify', '--quiet', ref + '^{commit}',
+                               cwd=home, env=dict(os.environ)).stdout.strip() for ref in refs}
+
+
 def ready_refs(n, branch, integration=None):
     home = n["home_path"]
     if integration is None:
         integration = integration_ref(home)
-    return tuple(_m_common.git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home).stdout.strip()
-                 for ref in ("refs/heads/" + branch, integration))
+    names = ('refs/heads/' + branch, integration)
+    values = _commit_refs(home, names)
+    return tuple(values[name] for name in names)
 
 
 def ready_preflight(n, branch, base=None):
@@ -93,12 +121,19 @@ def ready_preflight(n, branch, base=None):
     if not n["external"] or not n["home_path"] or not n["home_path"].exists():
         return ["an external git home on this machine is required"], "", ""
     ref = integration_ref(n["home_path"])
-    head, main = ready_refs(n, branch, integration=ref)
+    local_ref = ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
+    names = ['refs/heads/' + branch, ref]
+    if base is not None:
+        names.append('refs/heads/main')
+    if n['fm'].get('merge', 'local') != 'pr' and ref.startswith('refs/remotes/origin/'):
+        names.append(local_ref)
+    commits = _commit_refs(n['home_path'], names)
+    head, main = (commits[name] for name in names[:2])
     remote_main = main
     if not head or not main:
         return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
     if base is not None:
-        local_main = _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}", cwd=n["home_path"]).stdout.strip()
+        local_main = commits['refs/heads/main']
         if (n["fm"].get("merge", "local") == "pr" or not isinstance(base, str)
                 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base)
                 or not local_main or _m_common.git("merge-base", "--is-ancestor", base, local_main, cwd=n["home_path"]).returncode):
@@ -119,8 +154,7 @@ def ready_preflight(n, branch, base=None):
             reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
     # A local merge integrates with unpublished local work too; PR mode integrates on the host.
     if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
-        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
-        local = _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
+        local = commits[local_ref]
         if not local:
             reasons.append("local integration branch is missing; configure merge=pr for host merges")
         elif _m_common.git("merge-base", "--is-ancestor", remote_main, local, cwd=n["home_path"]).returncode:

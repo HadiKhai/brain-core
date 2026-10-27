@@ -2990,3 +2990,26 @@ verification children or publication boundaries. Later verification and train
 checks still obtain fresh Git state, and changed refs between preflights must be
 observed. Keep all existing refusal conditions, Git subprocesses and dirty-state
 checks on the remaining reads.
+
+
+## D40009: Measure worker costs and isolate direct scenario APIs
+
+A scenario's direct API calls use its disposable HOME and configuration for the
+whole fixture lifetime, as its CLI children already do. Restore the caller's
+environment through unittest cleanup, including setup failures. Synthetic session
+files and configured subscriptions remain real inputs; host transcripts are not
+fixture data. Keep process, concurrency, retention and launcher assertions native.
+The audited text adapter additionally covers Connections, EventViews,
+LessonRecurrence, NodeHygiene, RenderedFingerprint and Spend by exact-class opt-in.
+
+CLI invocations record their own command schemas, then create argparse parsers
+only along the selected command path. Top-level choices, descriptions, aliases,
+required flags, help and errors still use argparse. No initialized parser or
+namespace is shared across invocations.
+
+Readiness resolves its small set of commit refs with one exact-name Git
+inventory per preflight; malformed inventories and non-commit objects retain
+recursive rev-parse fallback. Publication fences read worktree and common Git
+metadata locations together, with the original two queries as an old-Git fallback.
+These queries bypass display caching and remain fresh on each recheck. Keep every
+ancestry, title, dirty-state, post-child and publication check unchanged.

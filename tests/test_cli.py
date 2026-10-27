@@ -29,6 +29,52 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_direct_api_discovery_uses_owned_home_and_restores_parent_environment(self):
+        from scenario import Scenario as Base
+        outside = self.tmp / 'outside-home'
+        foreign = outside / '.codex/sessions/rollout-foreign.jsonl'
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text('foreign sentinel\n')
+        m = core_loader.SourceFileLoader('ambient_home_proof', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, {'HOME': str(outside), 'CODEX_HOME': str(outside / '.codex'),
+                                         'CLAUDE_CONFIG_DIR': str(outside / '.claude'),
+                                         'BRAIN_CONFIG': str(outside / 'brains.json')}):
+            before = dict(os.environ)
+            case = Base()
+            case.setUp()
+            try:
+                self.assertEqual(Path.home(), case.tmp)
+                own = case.tmp / '.codex/sessions/rollout-own.jsonl'
+                own.parent.mkdir(parents=True)
+                own.write_text('owned sentinel\n')
+                with mock.patch.object(m.usage_config.__globals__['shutil'], 'which', return_value='/fixture/runtime'):
+                    sources = m.usage_config()['subscriptions']
+                self.assertEqual({Path(sub['config_dir']) for sub in sources},
+                                 {case.tmp / '.codex', case.tmp / '.claude'})
+                discovered = [p for sub in sources for p in m.history_files(sub)]
+                self.assertEqual(discovered, [own])
+                self.assertEqual(foreign.read_text(), 'foreign sentinel\n')
+            finally:
+                case.tearDown()
+                case.doCleanups()
+            self.assertEqual(dict(os.environ), before)
+
+    def test_ambient_home_restores_when_subclass_setup_raises(self):
+        class Broken(Scenario):
+            def setUp(inner):
+                super().setUp()
+                raise RuntimeError('fixture setup failure')
+            def runTest(inner):
+                raise AssertionError('must not run')
+        before = dict(os.environ)
+        case = Broken()
+        result = unittest.TestResult()
+        case.run(result)
+        self.addCleanup(shutil.rmtree, case.tmp, ignore_errors=True)
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn('fixture setup failure', result.errors[0][1])
+        self.assertEqual(dict(os.environ), before)
+
     def test_runtime_core_preserves_assets_native_writes_and_independent_installations(self):
         class Runtime(Scenario):
             fixture_init_in_process = fixture_templates = fixture_runtime_only_core = True
@@ -887,3 +933,73 @@ class EntryPoints(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeferredParsing(unittest.TestCase):
+    def core(self):
+        return core_loader.SourceFileLoader('deferred_parser_proof', str(CORE / 'bin/brain')).load_module()
+
+    def schema(self, factory):
+        parser = argparse.ArgumentParser(prog='proof')
+        parser.add_argument('--verbose', action='store_true')
+        choices = parser.add_subparsers(dest='command', parser_class=factory)
+        task = choices.add_parser('task', help='tasks', aliases=['t'])
+        task.set_defaults(owner='task')
+        flags = task.add_argument_group('Gate options')
+        mode = flags.add_mutually_exclusive_group()
+        mode.add_argument('--train', action='store_true')
+        mode.add_argument('--nightly', action='store_true')
+        actions = task.add_subparsers(dest='action', required=True)
+        add = actions.add_parser('add', help='add one', aliases=['a'])
+        add.add_argument('node')
+        add.add_argument('--count', type=int, choices=[1, 2], default=1)
+        add.add_argument('--title', required=True)
+        add.set_defaults(handler='add')
+        unused = choices.add_parser('unused', help='another command')
+        unused.add_argument('--other', required=True)
+        unused.set_defaults(handler='unused')
+        return parser, choices, task, unused
+
+    def capture(self, parser, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                namespace, extra = parser.parse_known_args(argv)
+                result = (vars(namespace), extra)
+            except SystemExit as error:
+                result = ('exit', error.code)
+        return result, out.getvalue(), err.getvalue()
+
+    def test_selected_nested_commands_match_eager_help_errors_aliases_and_defaults(self):
+        m = self.core()
+        cases = [[], ['--help'], ['bad'], ['task'], ['task', '--help'],
+                 ['task', 'bad'], ['task', 'add'], ['task', 'add', 'root', '--title', 'Work'],
+                 ['--verbose', 't', 'a', 'root', '--count', '2', '--title', 'Work'],
+                 ['task', 'add', 'root', '--count', '3', '--title', 'Work'],
+                 ['task', 'add', '--help'], ['task', 'add', 'root', '--title', 'Work', '--unknown'],
+                 ['unused', '--other', 'value'],
+                 ['task', '--train', 'add', 'root', '--title', 'Work'],
+                 ['task', '--nightly', 'add', 'root', '--title', 'Work'],
+                 ['task', '--train', '--nightly', 'add', 'root', '--title', 'Work']]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                eager, *_ = self.schema(argparse.ArgumentParser)
+                lazy, *_ = self.schema(m._DeferredParser)
+                self.assertEqual(self.capture(lazy, argv), self.capture(eager, argv))
+
+    def test_unselected_schemas_stay_deferred_and_invocations_have_fresh_defaults(self):
+        m = self.core()
+        parser, choices, task, unused = self.schema(m._DeferredParser)
+        self.capture(parser, ['task', 'add', 'root', '--title', 'One'])
+        self.assertIsNotNone(task.parser)
+        self.assertIsNone(unused.parser)
+        task.parser.set_defaults(owner='changed')
+        fresh, _, fresh_task, _ = self.schema(m._DeferredParser)
+        result, _, _ = self.capture(fresh, ['task', 'add', 'root', '--title', 'Two'])
+        self.assertEqual(result[0]['owner'], 'task')
+        self.assertIsNot(fresh_task.parser, task.parser)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            choices.choices['unused'].print_help()
+        self.assertIn('--other', out.getvalue())
+        self.assertIsNotNone(unused.parser)
