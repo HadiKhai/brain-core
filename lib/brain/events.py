@@ -1450,7 +1450,8 @@ def maintain(op, changed):
             known = status.facts_meta(n).get('merged', [])
         if op.command == 'status':
             view = prepared[n['id']][0]
-        elif op.command in ('set', 'handback', 'task', 'review', 'preview_receipt'):
+        elif op.command in ('set', 'handback', 'task', 'review', 'preview_receipt',
+                            'report', 'workbench', 'wt_add', 'wt_setup', 'wt_rm', 'wt_prune'):
             # Status projection can scan worker transcripts. It grants no action
             # authority, and must not hold up writers after terminal publication.
             # A concurrent source change refuses this generated view; the normal

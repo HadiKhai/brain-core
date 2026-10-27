@@ -30,6 +30,105 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 class Workbench(Scenario):
     fixture_init_in_process = True
+
+    def projection_race(self, command, change=None):
+        root = self.init('projection-race')
+        home = self.repo(self.tmp / 'app')
+        self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+        marker, release = self.tmp / 'computed', self.tmp / 'release'
+        # A separate process is essential: brain_lock is process-reentrant.
+        script = '''import json, os, sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1] + '/lib')
+from brain import cli, events, instance
+original = events.snapshot_view
+marker, release = Path(sys.argv[2]), Path(sys.argv[3])
+def paused(inst, node, *args):
+    view = original(inst, node, *args)
+    if node['id'] == 'app':
+        assert instance._LOCK['fh'] is None, 'projection retained writer lock'
+        marker.write_text('computed')
+        deadline = time.monotonic() + 20
+        while not release.exists():
+            if time.monotonic() > deadline: raise AssertionError('release missing')
+            time.sleep(.02)
+    return view
+events.snapshot_view = paused
+args = json.loads(sys.argv[4])
+sys.argv = [sys.argv[0], *args]
+cli.main()
+'''
+        env = {**self.env, 'BRAIN_ROOT': str(root)}
+        child = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE),
+                                  str(marker), str(release), json.dumps(command)],
+                                 cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 20
+            while not marker.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists(), 'command did not compute its view unlocked')
+            before = (root / 'nodes/app/status.md').read_bytes()
+            if change == 'source':
+                # This real writer must finish while projection remains paused.
+                writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'),
+                                         'inbox', 'app', '--add', 'concurrent question'],
+                                        cwd=root, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
+                before = (root / 'nodes/app/status.md').read_bytes()
+            elif change == 'binding':
+                writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'),
+                                         'set', 'app', 'preview=none'],
+                                        cwd=root, env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
+            elif change == 'git':
+                self.git('commit', '--allow-empty', '-qm', 'concurrent integration', cwd=home)
+            release.write_text('continue')
+            out, err = child.communicate(timeout=20)
+            self.assertEqual(child.returncode, 0, out + err)
+        finally:
+            release.touch()
+            if child.poll() is None:
+                child.terminate()
+                child.communicate(timeout=10)
+        rows = [json.loads(line) for line in (root / '.brain/events.jsonl').read_text().splitlines()]
+        commits = [row for row in rows if row['kind'] == 'commit']
+        last = commits[-1]['data']
+        self.assertEqual(last['maintenance_ok'], change is None, out + err)
+        self.assertEqual(last['command'], {'report': 'report', 'workbench': 'workbench', 'wt': 'wt_add'}[command[0]])
+        if change:
+            self.assertEqual((root / 'nodes/app/status.md').read_bytes(), before)
+            self.assertEqual(last['views'], {})
+            self.assertTrue(last['invalidate'])
+        else:
+            self.assertTrue(last['views'])
+        # The operation's own primary mutation still completed exactly once.
+        wb = self.tmp / 'app-work'
+        if command[0] == 'report':
+            self.assertEqual(len(list((wb / 'reports').glob('*/index.md'))), 1)
+        elif command[0] == 'workbench':
+            self.assertTrue((wb / 'scripts').is_dir())
+        else:
+            self.assertTrue((wb / 'worktrees/job-race').is_dir())
+        self.assertFalse(list((root / '.brain/events-leases').glob('*')))
+
+    def test_report_publishes_after_unlocked_projection(self):
+        self.projection_race(['report', 'app', 'race'])
+
+    def test_workbench_publishes_after_unlocked_projection(self):
+        self.projection_race(['workbench', 'app', '--path'])
+
+    def test_wt_publishes_after_unlocked_projection(self):
+        self.projection_race(['wt', 'add', 'app', 'job-race', '--no-setup'])
+
+    def test_report_refuses_stale_projection_after_concurrent_source_write(self):
+        self.projection_race(['report', 'app', 'race'], 'source')
+
+    def test_workbench_refuses_stale_projection_after_binding_write(self):
+        self.projection_race(['workbench', 'app', '--path'], 'binding')
+
+    def test_wt_refuses_stale_projection_after_integration_moves(self):
+        self.projection_race(['wt', 'add', 'app', 'job-race', '--no-setup'], 'git')
+
     def test_first_ledger_runtime_matches_worker_route_before_brief(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "app")
