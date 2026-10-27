@@ -39,12 +39,14 @@ def adopt_full_receipt(inst, n, branch, identity, head, main, inputs, port_conte
             or packet.get('head') != head or packet.get('verified_head') != head
             or packet.get('main') != main or not _m_verify.packet_main_matches(n, packet, main)
             or packet.get('verify_command') != n['fm'].get('verify', '').strip()
+            or not _m_verify.verification_config_valid(n, packet)
+            or packet.get('verify_scope') == 'change'
             or type(packet.get('verify_result')) is not int or packet['verify_result'] != 0
             or packet.get('verify_cheap', '') != n['fm'].get('verify_cheap', '').strip()
             or packet.get('inputs') != inputs or packet.get('verify_port_context') != port_context
             or not inst.parse_time(packet.get('checked_at'))):
         raise ValueError('full receipt is stale, failed or bound to another candidate')
-    if bool(snap) != bool(packet.get('verify_lanes')) or (snap and not _m_verify.lane_packet_valid(packet, snap)):
+    if packet.get('verify_scope') != 'full' and (bool(snap) != bool(packet.get('verify_lanes')) or (snap and not _m_verify.lane_packet_valid(packet, snap))):
         raise ValueError('full receipt lane evidence changed')
     logs = [r['log'] for r in packet.get('verify_lanes', [])] if snap else [packet['verify_log']]
     if data.get('logs') != {p: log_digest(p) for p in logs}:
@@ -60,7 +62,7 @@ def cmd_full_run(a):
     if not row:
         _m_common.die('full-run requires an open job')
     key = _m_jobs.job_key(row)
-    packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, reverify=False)
+    packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews, reverify=False, full=True)
     if not packet or reasons or type(packet.get('verify_result')) is not int or packet['verify_result'] != 0:
         _m_common.die('full-run failed: ' + '; '.join(reasons))
     current = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch)
@@ -77,3 +79,17 @@ def cmd_full_run(a):
     except (OSError, ValueError, KeyError):
         _m_common.die('full receipt could not be recorded; no readiness published')
     print('full-run: passed; full receipt ' + identity + '; no hand-back published')
+
+
+def cmd_gate(a):
+    """Run the readiness policy without publishing a worker completion."""
+    if a.train or a.nightly:
+        return cmd_full_run(a)
+    inst = _m_nodes.load()
+    n = inst.node(a.id)
+    if not _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch):
+        _m_common.die('gate requires an open job')
+    packet, reasons = _m_verify.record_ready(inst, n, a.branch, a.reviews)
+    if not packet or reasons or type(packet.get('verify_result')) is not int or packet['verify_result'] != 0:
+        _m_common.die('gate failed: ' + '; '.join(reasons))
+    print('gate: passed; no hand-back or full receipt published')

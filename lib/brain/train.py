@@ -485,6 +485,7 @@ def run_train(inst, n, home, verify, a):
     port = _m_worktrees.free_port(inst, count)
     w = {"path": str(stage), "port": port, "ports": count}
     env = _m_verify.verify_env(n, batch, w)
+    env['BRAIN_VERIFY_SCOPE'] = 'full'  # Batch verification cannot inherit change selection.
     env["WORKBENCH"] = str(wb)
     added = _m_common.git("worktree", "add", "-b", batch, str(stage), main, cwd=home)
     if added.returncode:
