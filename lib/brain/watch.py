@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shlex
+import stat
 import time
 from pathlib import Path
 
@@ -874,6 +875,12 @@ def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
             if not quiet:
                 print('watch: skipped; instance busy')
             return
+        held = os.fstat(stream.fileno())
+        current = os.stat(folder / 'lock', follow_symlinks=False)
+        if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)):
+            _m_common.die('watch: instance lock changed')
+        os.fchmod(stream.fileno(), 0o600)
         stream.seek(0)
         stream.truncate()
         stream.write(str(os.getpid()))
