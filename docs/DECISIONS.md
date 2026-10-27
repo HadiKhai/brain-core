@@ -3126,26 +3126,6 @@ retains its original Git directory and configuration, including matching and
 nonmatching conditional includes. Restoring the original index mtime after
 conversion preserves racy-clean detection. Writers stay unchanged.
 
-Read commands share branch tips, commit dates and linked-worktree HEADs from one
-ref/worktree enumeration per repository. Ancestry queries, commit counts and
-clean-title checks share one commit graph per base, with roots pinned to the
-enumerated commit IDs even if refs move during the command. Unfinished-title findings retain the original Git
-log order. Configured signature display retains the native date-log read. These
-derived reads expire at the end of the command, without a time
-limit or persistent authority. Failed or malformed batches fall back to the
-individual Git reads, including local job-state observations. Read-only `ready`
-uses this scope; readiness recording and other write paths keep their existing
-reads and writes.
-
-Git read snapshots never memoize `status`, `diff` or `ls-files`. A configured
-lane-map command can edit the worktree or index during a read command, so these
-observations must come from native Git each time; index and HEAD fingerprints
-alone cannot detect unstaged edits. Ref and commit-graph batching remains scoped
-to the command. Readiness retains its strict dirty-worktree evidence after a
-dynamic map runs. Index-consuming revision expressions also bypass the cache.
-Configured external lane-map execution clears the enclosing Git snapshot even
-on failure, so its post-map checks observe changed refs and graph roots too.
-
 ## Reuse term-scan observations within a command
 
 Mechanical checks share term-scan results across nodes and the two fix passes.

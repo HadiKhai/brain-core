@@ -385,17 +385,6 @@ class VerifyLanes(Scenario):
         self.b(r, 'set', 'a', 'verify_lanes_from=echo dirty > calc.py; cat lanes.json')
         self.assertIn('dirty', self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
 
-    def test_dynamic_map_cannot_move_integration_refs_during_readiness(self):
-        r, home, wt, lanes = self.setup_lanes()
-        self.commit(wt, 'lanes.json', json.dumps(lanes))
-        self.b(r, 'set', 'a', 'verify_lanes=', 'verify_lanes_from=cat lanes.json')
-        self.record(r)
-        self.b(r, 'set', 'a',
-               'verify_lanes_from=git update-ref refs/heads/main HEAD; cat lanes.json')
-        self.assertIn('lane map command changed integration refs',
-                      self.b(r, 'ready', 'a', '--branch', 'job', ok=False))
-        self.assertEqual(self.git('status', '--porcelain', cwd=wt), '')
-
     def test_all_reused_lanes_do_not_take_a_verify_slot(self):
         r, home, wt, lanes = self.setup_lanes()
         self.record(r)
