@@ -989,7 +989,8 @@ raise SystemExit(result)
             self.assertEqual(shlex.split(cron_command(m.machine_cron_quote(value).replace("%", r"\%"))), [value])
         def service(args, **kw):
             return subprocess.CompletedProcess(args, 0, "", "")
-        with mock.patch.object(m.sys, "platform", "darwin"), \
+        with mock.patch.dict(os.environ, {"BRAIN_MACHINE_TESTING": "0"}), \
+                mock.patch.object(m.sys, "platform", "darwin"), \
                 mock.patch.object(m.subprocess, "run", side_effect=service) as run, \
                 contextlib.redirect_stdout(io.StringIO()):
             m.machine_service(inst, "install", True)
@@ -998,6 +999,18 @@ raise SystemExit(result)
         self.assertEqual([call.args[0][1] for call in run.call_args_list],
                          ["print", "bootout", "bootstrap"] * 2 + ["print", "bootout"])
         self.assertEqual(list((self.tmp / "Library/LaunchAgents").glob("*.plist")), [])
+
+    def test_fixture_mode_never_installs_or_removes_real_services(self):
+        root = self.init("demo")
+        inst = self.m.Instance(root)
+        with mock.patch.object(self.m.subprocess, "run", side_effect=AssertionError("OS service call")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            for platform in ("darwin", "linux"):
+                for action in ("install", "uninstall"):
+                    with self.subTest(platform=platform, action=action), \
+                            mock.patch.object(self.m.sys, "platform", platform), self.assertRaises(SystemExit):
+                        self.m.machine_service(inst, action, True)
+        self.assertFalse((self.tmp / "Library/LaunchAgents").exists())
 
     def test_queue_rejects_links_and_preserves_on_interrupted_publication(self):
         m = self.m

@@ -491,6 +491,8 @@ def machine_cron_quote(value):
 def machine_service(inst, action, yes=False):
     """Dry by default. No network, privilege escalation, shell setup or installs."""
     import plistlib
+    if yes and os.environ.get("BRAIN_MACHINE_TESTING") == "1":
+        _m_common.die("machine sampler: fixture mode cannot change OS services")
     label = "org.brain.machine." + hashlib.sha256(str(inst.root).encode()).hexdigest()[:16]
     args = [sys.executable, str(_m_common.CORE / "bin/brain"), "machine", "sample"]
     service_env = {"BRAIN_NO_REEXEC": "1", "BRAIN_CONFIG": str(_m_instance.brains_file())}

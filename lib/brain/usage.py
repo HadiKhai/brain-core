@@ -78,12 +78,51 @@ def usage_cache():
     return data
 
 
+def usage_claude_credentials_exist(folder):
+    """Discover logins by existence only; never request credential values."""
+    if (folder / ".credentials.json").is_file():
+        return True
+    if sys.platform != "darwin" or os.environ.get("BRAIN_USAGE_TESTING"):
+        return False
+    import getpass
+    for service in usage_keychain_services(str(folder)):
+        try:
+            result = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", service,
+                                     "-a", os.environ.get("USER") or getpass.getuser()],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    stdin=subprocess.DEVNULL, timeout=2)
+            if result.returncode == 0:
+                return True
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return False
+
+
+def usage_defaults():
+    subs = []
+    if shutil.which("claude"):
+        primary = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser().absolute()
+        folders = [primary]
+        for folder in sorted(Path.home().glob(".claude*")):
+            if folder.is_dir() and folder.resolve() not in {p.resolve() for p in folders} and \
+                    usage_claude_credentials_exist(folder):
+                folders.append(folder)
+        ids = set()
+        for folder in folders:
+            name = "claude" if folder == primary else folder.name.lstrip(".")
+            if name in ids:
+                name += "-" + hashlib.sha256(str(folder).encode()).hexdigest()[:8]
+            ids.add(name)
+            subs.append({"id": name, "runtime": "claude", "config_dir": str(folder), "brains": ["*"]})
+    if shutil.which("codex"):
+        subs.append({"id": "codex", "runtime": "codex",
+                     "config_dir": os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"), "brains": ["*"]})
+    return {"subscriptions": subs}
+
+
 def usage_config():
     path = usage_file("subscriptions.json")
-    data = usage_json(path) if path.exists() else {"subscriptions": [
-        {"id": rt, "runtime": rt, "config_dir": os.environ.get(env) or str(Path.home() / ("." + rt)),
-         "brains": ["*"]} for rt, env in (("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME"))
-        if shutil.which(rt)]}
+    data = usage_json(path) if path.exists() else usage_defaults()
     if isinstance(data, list):
         data = {"subscriptions": data}
     if not isinstance(data, dict) or not isinstance(data.get("subscriptions"), list):
@@ -621,7 +660,10 @@ def usage_rows(inst=None, refresh=False, before_launch=False, node=None, extra=(
         if inst and not usage_allowed(sub, brain):
             config["other_subscriptions"] += 1
             continue
-        prior = next((s for s in cache.get("subscriptions", []) if all(s.get(k) == v for k, v in sub.items() if k != "stop_percent")), {})
+        # Display/routing declarations may change while the machine poller is asleep.
+        # Readings belong to the runtime folder; current declarations still gate access.
+        prior = next((s for s in cache.get("subscriptions", []) if all(
+            s.get(k) == sub[k] for k in ("runtime", "config_dir"))), {})
         r = cache.get("accounts", {}).get(prior.get("account_key"), {})
         stamp = r.get("read_at")
         age = max(0, time.time() - stamp) if usage_number(stamp) else None
@@ -778,11 +820,12 @@ def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, n
     return selected, f"Subscription: {selected['label']} ({selected['id']}) · host instance: {host} · {reason}."
 
 
-def usage_ui(inst):
-    try:
-        rows, _ = usage_rows(inst)  # UI reads the file; it never polls runtimes.
-    except (OSError, ValueError):
-        return []
+def usage_ui(inst, rows=None):
+    if rows is None:
+        try:
+            rows, _ = usage_rows(inst)  # UI reads the file; it never polls runtimes.
+        except (OSError, ValueError):
+            return []
     terms = [term for n in inst.nodes() for term in _m_guard.never_terms(n)]
     def hide(value):
         if isinstance(value, str):
@@ -794,6 +837,19 @@ def usage_ui(inst):
         return value
     rows = [{k: v for k, v in r.items() if k != "config_dir"} for r in rows]
     return hide(rows) if terms else rows
+
+
+def usage_ui_state(inst):
+    """Refresh subscription meters independently of cached dashboard metadata."""
+    try:
+        rows, policy = usage_rows(inst)
+    except (OSError, ValueError):
+        return {"usage": [], "usage_policy": {"stop_percent": None, "max_age_seconds": USAGE_MAX_AGE},
+                "usage_routing_policy": {}, "usage_other_subscriptions": 0}
+    return {"usage": usage_ui(inst, rows),
+            "usage_policy": {k: policy[k] for k in ("stop_percent", "max_age_seconds")},
+            "usage_routing_policy": {k: policy[k] for k in ("pacing_margin", "autodetected")},
+            "usage_other_subscriptions": policy["other_subscriptions"]}
 
 
 def usage_other_count(inst):

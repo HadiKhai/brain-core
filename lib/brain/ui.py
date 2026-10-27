@@ -110,7 +110,7 @@ def ui_meters(inst, state, cache):
                 key, old = cache.worktrees[job]
                 cache.worktrees[job] = (key, {**old, 'listening': w['listening']})
     return {**state, 'nodes': nodes, 'brain': {**state['brain'], 'now': now.isoformat(timespec='seconds')},
-            'machine': _m_machine.machine_state(inst)}
+            'machine': _m_machine.machine_state(inst), **_m_usage.usage_ui_state(inst)}
 
 
 def ui_worktree(inst, home, branch, w, n=None):
@@ -432,11 +432,11 @@ def ui_node(inst, n, since, cache=None, partial=False):
 
 @_m_ui_readmodel.read_view
 def ui_initial_state(inst, scan=None):
-    """A file-only first reading; repository, readiness and usage fill in afterwards."""
+    """A file-only first reading; repository and readiness fill in afterwards."""
     nodes = inst.nodes()
     return _ui_observation({
         'review': {'enabled': False}, 'due': [], 'scan': scan or [],
-        'usage_policy': {'stop_percent': None, 'max_age_seconds': 120}, 'usage_routing_policy': {},
+        **_m_usage.usage_ui_state(inst),
         'brain': {'name': _m_nodes.brain_name(inst.root), 'title': nodes[0]['fm'].get('title', 'Brain'),
                   'root': _m_common.tilde(inst.root), 'machine': inst.local.get('machine', ''),
                   'tz': str(inst.zone() or ''), 'fallback': inst.local.get('fallback', []),
@@ -446,7 +446,7 @@ def ui_initial_state(inst, scan=None):
         'activity': {'start': (int(time.time()) // 3600 - UI_HOURS + 1) * 3600, 'counts': {}},
         'commits_24h': 0, 'commits_total': 0, 'specialists': [],
         'items': {'count': 0, 'all': [], 'recent': []}, 'schedules': [],
-        'machine': {}, 'spend': None, 'usage': [], 'usage_other_subscriptions': 0, 'problems': None,
+        'machine': {}, 'spend': None, 'problems': None,
     }, partial=True)
 
 
@@ -551,13 +551,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
                                  "lessons": _m_knowledge.parse_lessons(lesson_path) if lesson_path.exists() else [],
                                  "jobs": [r for r in inst.local.get("hires", [])
                                           if r.get("specialist") == sp["id"] and r.get("at") == sp["node"]["id"]]}))
-    try:
-        policy = _m_usage.usage_rows(inst)[1]
-        usage_policy = {k: policy[k] for k in ("stop_percent", "max_age_seconds")}
-        usage_routing_policy = {k: policy[k] for k in ("pacing_margin", "autodetected")}
-    except (OSError, ValueError):
-        usage_policy = {"stop_percent": None, "max_age_seconds": 120}
-        usage_routing_policy = {}
+    usage = _m_usage.usage_ui_state(inst)
     machine = _m_machine.machine_state(inst)
     # The CLI's read-only projection includes routed completion notices. Copy
     # its items before adding display fields so their durable identities stay intact.
@@ -593,8 +587,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
         "review": {"enabled": False},
         "due": safe(due + machine_due),
         "scan": safe(scan or []),
-        "usage_policy": usage_policy,
-        "usage_routing_policy": usage_routing_policy,
+        **usage,
         "brain": {"name": _m_nodes.brain_name(inst.root), "title": nodes[0]["fm"].get("title", "Brain"),
                   "root": _m_common.tilde(inst.root), "machine": inst.local.get("machine", ""), "tz": str(inst.zone() or ""),
                   "fallback": inst.local.get("fallback", []),
@@ -616,8 +609,6 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
                        "here": x["id"] in inst.local.get("schedules", {})} for x in _m_schedules.read_schedules(inst)],
         "machine": machine,
         "spend": machine_spend if machine_spend is not None else _m_spend.spend_machine(inst, budget=spend_budget),
-        "usage": _m_usage.usage_ui(inst),
-        "usage_other_subscriptions": _m_usage.usage_other_count(inst),
         "problems": problems,
     }
 
@@ -1551,7 +1542,7 @@ def cmd_ui(a):
         st = ui_initial_state(inst, scan)
         publish(st)
     else:
-        st = ui_json.ui_json_source(seed['state'], seed, refreshing=True)
+        st = ui_json.ui_json_source(seed['state'], seed, refreshing=True, inst=inst)
         publish(st)
         box.update(cached=True, metadata_ready=True, partial=False, built_at=seed['built_at'], building=True)
 

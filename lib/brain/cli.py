@@ -131,6 +131,8 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
 def writes(a):
     """Does this command, with these options, change anything in the instance?"""
     name = a.f.__name__
+    if name == "cmd_spend" and getattr(a, "add_source", None):
+        return False  # local source registration owns a short lock; no node/event writes
     if name == "cmd_host_instance":
         return a.action in ("remember", "route")
     if name == "cmd_events":
@@ -334,6 +336,8 @@ def _main():
         opt("--since", help="from this date (YYYY-MM-DD)"), opt("--machine", action="store_true",
                                                                help="every session on this machine, per runtime"),
         opt("--also", action="append", metavar="FOLDER", help="also sessions run in this folder (repeatable)"),
+        opt("--add-source", action="append", metavar="RUNTIME=FOLDER",
+            help="register an already permitted subscription folder in local sources; no instruction-file edits"),
         opt("--json", action="store_true"))
     cmd('preview', _Command("reports", "cmd_preview"), 'record/check source-bound local screenshot-tour evidence', 'id',
         opt('--record', metavar='RECEIPT_JSON'), opt('--json', action='store_true'))
@@ -696,7 +700,9 @@ def _main():
         else:
             ap.error("unrecognized arguments: " + " ".join(extra))
     handler = getattr(a, 'f', None)
+    local_source_registration = handler and handler.__name__ == 'cmd_spend' and a.add_source
     _m_timings.select_command(a.cmd or 'dashboard', persist=bool(handler) and
+                             not local_source_registration and
                              (writes(a) or handler.__name__ not in READ_ONLY or command_read(a)))
     if not getattr(a, "f", None):
         if a.cmd in ("item", "specialist", "wt", "hook"):

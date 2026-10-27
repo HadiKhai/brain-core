@@ -135,7 +135,7 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
                   />
                 ))}
               <div className="row-actions">
-                <Reader title={row.label || "Subscription reading"} trigger="Inspect reading" text={[row.note || "", `Read ${time(row.read_at, s.brain?.tz)} · ${row.source || "source unknown"}`, `Brains: ${(row.brains || []).join(", ") || "Not recorded"} · ${Number.isFinite(usageStopPercent(row, p)) ? `stop at ${usageStopPercent(row, p)}%` : "stop line unknown"}`, ...Object.entries(row.windows || {}).map(([name, w]: any) => `${name === "five_hour" ? "5-hour" : "Weekly"}${w.models ? " · " + w.models.join(", ") : ""}: ${w.used_percent ?? "Unknown"}% · ${windowState(w, row, p).state} · resets ${time(w.resets_at, s.brain?.tz)}`)].filter(Boolean).join("\n\n")} />
+                <Reader title={row.label || "Subscription reading"} trigger="Inspect reading" text={[row.note || "", `Read ${time(row.read_at, s.brain?.tz)} · ${row.source || "source unknown"}`, `Brains: ${(row.brains || []).join(", ") || "Not recorded"} · ${Number.isFinite(usageStopPercent(row, p)) ? `stop at ${usageStopPercent(row, p)}%` : "stop line unknown"}`, ...Object.entries(row.windows || {}).map(([name, w]: any) => `${name === "five_hour" ? "5-hour" : "Weekly"}${w.models ? " · " + w.models.join(", ") : ""}: ${w.absent ? "None" : `${w.used_percent ?? "Unknown"}%`} · ${windowState(w, row, p).state} · resets ${time(w.resets_at, s.brain?.tz)}`)].filter(Boolean).join("\n\n")} />
               </div>
             </article>
           ))}</PagedCollection>

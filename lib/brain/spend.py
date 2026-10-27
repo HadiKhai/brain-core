@@ -1648,10 +1648,45 @@ def spend_lines(title, u, terms=()):
     return lines
 
 
+def spend_add_sources(inst, targets):
+    """Append local folder bindings without granting subscription access or editing pointers."""
+    with _m_instance.brain_lock(inst.root):
+        inst = _m_instance.Instance(inst.root)
+        sources, _, _ = _m_history.history_sources(inst)
+        permitted = {(s["runtime"], Path(s["config_dir"]).resolve()) for s in sources}
+        chosen = []
+        for target in targets:
+            runtime, sep, folder = target.partition("=")
+            if not sep or not folder or runtime not in _m_usage.USAGE_RUNTIMES:
+                _m_common.die("--add-source expects claude=FOLDER or codex=FOLDER")
+            path = Path(folder).expanduser().resolve()
+            if (runtime, path) not in permitted or not path.is_dir():
+                _m_common.die("spend source must be an existing subscription folder allowed for this brain")
+            chosen.append((runtime, path))
+        saved = inst.local.setdefault("global", {})
+        if not isinstance(saved, dict) or any(not isinstance(dirs, list) or any(not isinstance(d, str) for d in dirs)
+                                               for dirs in saved.values()):
+            _m_common.die("invalid local source folders")
+        changed = False
+        for runtime, path in chosen:
+            dirs = saved.setdefault(runtime, [])
+            if path not in {Path(d).expanduser().resolve() for d in dirs}:
+                dirs.append(_m_common.tilde(path))
+                changed = True
+        if changed:
+            inst.save_local()
+    print("spend sources updated" if changed else "spend sources already registered")
+
+
 def cmd_spend(a):
     """Time and tokens from this machine's transcripts: a node's past sessions (opt-in, like history), or every
     session here (--machine). Aggregates only, kept in .brain/spend/, never committed."""
     inst = _m_nodes.load()
+    if getattr(a, "add_source", None):
+        if a.id or a.machine or a.since or a.also or a.json:
+            _m_common.die("--add-source cannot be combined with spend queries")
+        spend_add_sources(inst, a.add_source)
+        return
     since = None
     if a.since:
         try:

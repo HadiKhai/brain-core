@@ -3,6 +3,7 @@
 Every test builds instances in a throwaway folder that is also $HOME, so nothing real is touched.
 """
 import json
+import hashlib
 import re
 import datetime
 import importlib.util
@@ -31,6 +32,33 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 class Spend(Scenario):
     """Time and tokens per job from the runtimes' own transcripts: counted once, attributed to the right job."""
     fixture_init_in_process = True
+
+    def test_add_spend_source_preserves_bindings_and_only_changes_local_config(self):
+        self.claude.mkdir(exist_ok=True)
+        local = self.r / ".brain/local.json"
+        data = json.loads(local.read_text())
+        data["global"] = {"claude": [str(self.tmp / "previous")], "codex": [str(self.codex)]}
+        local.write_text(json.dumps(data))
+        def files():
+            return {str(p.relative_to(self.r)): hashlib.sha256(p.read_bytes()).hexdigest() for p in self.r.rglob("*")
+                    if p.is_file() and ".git" not in p.relative_to(self.r).parts
+                    and p != local and p != self.r / ".brain/lock"}
+        before = files()
+        self.b(self.r, "spend", "--add-source", "claude=" + str(self.claude))
+        after = json.loads(local.read_text())
+        self.assertEqual(after["global"]["claude"], data["global"]["claude"] + [str(self.claude).replace(str(self.tmp), "~", 1)])
+        self.assertEqual(after["global"]["codex"], data["global"]["codex"])
+        self.assertEqual(files(), before)
+        saved = local.read_bytes()
+        self.b(self.r, "spend", "--add-source", "claude=" + str(self.claude))
+        self.assertEqual(local.read_bytes(), saved)
+        self.other.mkdir(exist_ok=True)
+        result = self.b(self.r, "spend", "--add-source", "claude=" + str(self.other), ok=False)
+        self.assertIn("allowed for this brain", result)
+        self.assertEqual(local.read_bytes(), saved)
+        self.assertIn("cannot be combined", self.b(self.r, "spend", "--machine", "--add-source",
+                                                 "claude=" + str(self.claude), ok=False))
+        self.assertEqual(files(), before)
 
     def test_timestamp_fast_path_preserves_utc_calendar_normalization(self):
         import calendar

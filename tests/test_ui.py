@@ -471,6 +471,50 @@ ui_json.ui_json_background(root, '[]')
             with mock.patch.object(other, 'read', return_value=record):
                 self.assertIsNone(other.metadata([('source', 1)]))
 
+    def test_subscription_meters_overlay_current_machine_cache_on_initial_cached_and_tick_views(self):
+        root = self.init('alice')
+        cfg = Path(self.env['BRAIN_CONFIG']).parent
+        cfg.mkdir(exist_ok=True)
+        sub = {'id': 'one', 'runtime': 'codex', 'config_dir': str(self.tmp / '.codex'), 'brains': ['alice']}
+        (cfg / 'subscriptions.json').write_text(json.dumps({'subscriptions': [sub]}))
+        config = self.m.usage_config()
+        def reading(percent):
+            stamp = time.time()
+            windows = {'five_hour': {'used_percent': percent, 'read_at': stamp, 'source': 'lookup'},
+                       'seven_day': {'used_percent': 58, 'read_at': stamp, 'source': 'lookup'}}
+            self.m.usage_atomic(cfg / 'usage.json', {**config, 'poll_interval_seconds': 300,
+                'subscriptions': [{**config['subscriptions'][0], 'account_key': 'key'}],
+                'accounts': {'key': {'windows': windows, 'read_at': stamp, 'source': 'lookup', 'note': ''}}})
+        reading(5)
+        inst = self.m.UIInstance(root)
+        old = self.m.ui_initial_state(inst)
+        self.assertEqual(old['usage'][0]['windows']['five_hour']['used_percent'], 5)
+        code = self.m.ui_code_version()
+        record = {'version': 1, 'privacy': self.m.ui_json_privacy_key(inst, code), 'built_at': time.time(),
+                  'selection': self.m.hashlib.sha256(json.dumps([], sort_keys=True).encode()).hexdigest(), 'state': old}
+        self.assertTrue(self.m.ReadModel(inst, code).write('json-snapshot', record))
+        reading(22)
+        with mock.patch.object(self.m, 'usage_refresh', side_effect=AssertionError('provider lookup')), \
+                mock.patch.object(self.m, 'ui_json_request_fill', return_value=False):
+            cli = json.loads(self.b(root, 'usage', '--json'))['subscriptions']
+            views = [self.m.ui_initial_state(inst), self.m.ui_meters(inst, old, self.m.UIStateCache()),
+                     self.m.ui_json_read(inst, [])]
+        for view in views:
+            row = view['usage'][0]
+            self.assertEqual(row['windows'], cli[0]['windows'])
+            self.assertEqual((row['read_at'], row['source']), (cli[0]['read_at'], cli[0]['source']))
+            self.assertNotIn('config_dir', row)
+            self.assertEqual(view['usage_policy']['max_age_seconds'], 600)
+        # An explicit provider absence remains distinct from an unknown or zero reading.
+        data = json.loads((cfg / 'usage.json').read_text())
+        data['accounts']['key']['windows']['five_hour'] = {'absent': True, 'read_at': time.time(), 'source': 'lookup'}
+        self.m.usage_atomic(cfg / 'usage.json', data)
+        absent = self.m.ui_meters(inst, old, self.m.UIStateCache())['usage'][0]['windows']['five_hour']
+        self.assertTrue(absent['absent'])
+        self.assertNotIn('used_percent', absent)
+        (cfg / 'usage.json').write_text('invalid')
+        self.assertEqual(self.m.ui_json_read(inst, [])['usage'][0]['windows'], {})
+
     def test_usage_cache_reopens_authorized_source_and_rejects_replaced_file(self):
         ReadModel = self.m.ReadModel
         root = self.init('demo')

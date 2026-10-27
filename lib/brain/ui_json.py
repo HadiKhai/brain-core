@@ -106,11 +106,13 @@ def ui_json_load(inst, code, scan):
     return record
 
 
-def ui_json_source(state, record=None, refreshing=False, failed=False, origin=None):
+def ui_json_source(state, record=None, refreshing=False, failed=False, origin=None, inst=None):
     now = time.time()
     built = record['built_at'] if record else None
     age = max(0, now - built) if built is not None else None
     state = {**state, 'brain': {**state['brain']}, 'review': {'enabled': False}}
+    if inst is not None:
+        state.update(_m_usage.usage_ui_state(inst))
     state['brain']['filling_in'] = record is None
     state['loading'] = {'filling_in': record is None, 'age_seconds': age,
                         'refreshing': refreshing, 'failed': failed, 'version': 1}
@@ -176,7 +178,7 @@ def ui_json_read(inst, scan, wait=False, cache=True):
         record = ui_json_build(inst, scan, code, cache=False)
         if record is None:
             _m_common.die('UI visibility changed during fill; retry')
-        return ui_json_source(record['state'], record, origin='fresh-full')
+        return ui_json_source(record['state'], record, origin='fresh-full', inst=inst)
     if wait:
         stack, cache = contextlib.ExitStack(), True
         previous = _m_ui_readmodel.ReadModel(inst, code).read('json-snapshot')
@@ -189,7 +191,7 @@ def ui_json_read(inst, scan, wait=False, cache=True):
             if cache and acquired:
                 latest = ui_json_last_complete(ui.UIInstance(inst.root), code, scan)
                 if latest is not None and latest.get('generation') and latest['generation'] != generation:
-                    return ui_json_source(latest['state'], latest, origin='fresh-full')
+                    return ui_json_source(latest['state'], latest, origin='fresh-full', inst=inst)
             if cache and not acquired:
                 stack.close()
                 # Join the owner once. Never queue a redundant full rebuild.
@@ -197,7 +199,7 @@ def ui_json_read(inst, scan, wait=False, cache=True):
                 joined = ui_json_last_complete(ui.UIInstance(inst.root), code, scan)
                 if joined is None or not joined.get('generation') or joined['generation'] == generation:
                     _m_common.die('UI fill did not publish a validated complete snapshot; retry --wait')
-                return ui_json_source(joined['state'], joined, origin='fresh-full')
+                return ui_json_source(joined['state'], joined, origin='fresh-full', inst=inst)
             # Build failures remain failures; only optional lock/storage errors fall back.
             record = ui_json_build(inst, scan, code, cache=cache)
         finally:
@@ -206,7 +208,7 @@ def ui_json_read(inst, scan, wait=False, cache=True):
             except (OSError, ValueError, SystemExit):
                 pass
         if record is not None:
-            return ui_json_source(record['state'], record, origin='fresh-full')
+            return ui_json_source(record['state'], record, origin='fresh-full', inst=inst)
         _m_common.die('UI visibility changed during fill; retry --wait')
     else:
         try:
@@ -216,7 +218,7 @@ def ui_json_read(inst, scan, wait=False, cache=True):
         if record is not None:
             stale = time.time() - record['built_at'] >= 60
             refreshing = ui_json_request_fill(inst, scan) if stale else False
-            return ui_json_source(record['state'], record, refreshing, ui_json_fill_failed(inst, code))
+            return ui_json_source(record['state'], record, refreshing, ui_json_fill_failed(inst, code), inst=inst)
     partial = ui.ui_initial_state(inst, scan)
     terms = list({term for n in inst.nodes() for term in _m_guard.never_terms(n)})
     def screen(value):
@@ -228,7 +230,7 @@ def ui_json_read(inst, scan, wait=False, cache=True):
             return {k: screen(v) for k, v in value.items()}
         return value
     refreshing = ui_json_request_fill(inst, scan)
-    result = ui_json_source(screen(partial), refreshing=refreshing)
+    result = ui_json_source(screen(partial), refreshing=refreshing, inst=inst)
     result['loading']['failed'] = not refreshing or ui_json_fill_failed(inst, code)
     return result
 

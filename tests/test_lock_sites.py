@@ -112,6 +112,9 @@ def lock_worker(spec_path):
         if helper:
             stack.enter_context(mock.patch.object(m, helper, side_effect=delayed(getattr(m, helper))))
         if site.startswith("machine_"):
+            # OS commands above are intercepted; exercise production service logic
+            # without permitting a fixture to reach the real service manager.
+            stack.enter_context(mock.patch.dict(os.environ, {"BRAIN_MACHINE_TESTING": "0"}))
             stack.enter_context(mock.patch.object(m.sys, "platform", "linux"))
         if spec.get("hold"):
             if site.startswith("machine_") or site == "handback_accounting":

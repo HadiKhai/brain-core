@@ -766,6 +766,59 @@ for line in sys.stdin:
         (self.cfg / "subscriptions.json").write_text("malformed")
         with self.assertRaises(ValueError): self.m.usage_config()
 
+    def test_default_subscriptions_discover_all_credential_folders_without_reading_them(self):
+        for name in (".claude", ".claude-extra", ".claude-empty"):
+            (self.tmp / name).mkdir()
+        credentials = [self.tmp / name / ".credentials.json" for name in (".claude", ".claude-extra")]
+        for path in credentials:
+            path.write_text("credential contents must never be opened")
+        (self.tmp / ".claude-alias").symlink_to(self.tmp / ".claude-extra", target_is_directory=True)
+        read = Path.read_text
+        def no_credentials(path, *args, **kwargs):
+            self.assertNotIn(path, credentials)
+            return read(path, *args, **kwargs)
+        with mock.patch.object(Path, "read_text", no_credentials), \
+                mock.patch.object(self.m.shutil, "which", return_value="installed"):
+            config = self.m.usage_config()
+        claude = [s for s in config["subscriptions"] if s["runtime"] == "claude"]
+        self.assertEqual({Path(s["config_dir"]).resolve() for s in claude},
+                         {self.tmp / ".claude", self.tmp / ".claude-extra"})
+        self.assertEqual(len(claude), 2)
+        self.assertEqual(len({s["id"] for s in config["subscriptions"]}), 3)
+        self.assertFalse((self.cfg / "subscriptions.json").exists())
+        explicit = self.subscription(runtime="claude")
+        self.assertEqual(len(self.declare(explicit)["subscriptions"]), 1)
+
+    def test_default_subscriptions_keychain_discovery_requests_only_existence(self):
+        folder = self.tmp / ".claude-keychain"
+        folder.mkdir()
+        with mock.patch.dict(os.environ, {"BRAIN_USAGE_TESTING": ""}), \
+                mock.patch.object(self.m.sys, "platform", "darwin"), \
+                mock.patch.object(self.m.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertTrue(self.m.usage_claude_credentials_exist(folder))
+        args = run.call_args.args[0]
+        self.assertNotIn("-w", args)
+        self.assertNotIn("-g", args)
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+
+    def test_machine_readings_survive_subscription_display_changes_but_obey_current_access(self):
+        root = self.init("alice")
+        sub = self.subscription()
+        config = self.declare(sub)
+        self.cache(config, [self.reading(22)])
+        renamed = {**sub, "id": "renamed", "label": "New display", "host_provider_instance_id": "new-host"}
+        self.declare(renamed)
+        inst = self.m.Instance(root)
+        with mock.patch.object(self.m, "usage_refresh", side_effect=AssertionError("passive provider lookup")):
+            row = self.m.usage_ui_state(inst)["usage"][0]
+        self.assertEqual(row["windows"]["five_hour"]["used_percent"], 22)
+        self.assertEqual((row["label"], row["host_provider_instance_id"]), ("New display", "new-host"))
+        self.declare({**renamed, "brains": ["other"]})
+        state = self.m.usage_ui_state(inst)
+        self.assertEqual(state["usage"], [])
+        self.assertEqual(state["usage_other_subscriptions"], 1)
+
     def test_usage_real_codex_protocol_and_account_deduplication(self):
         self.codex_stub()
         one, two = self.subscription(), self.subscription("two", brains=["work"])

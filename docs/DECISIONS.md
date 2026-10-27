@@ -3543,3 +3543,26 @@ journal facts and pending intents remain durable for interruption recovery.
 Nested commits defer their paths rather than staging unrelated work. Read-only
 planning does not enter the batch. Board and canvas match/attempt totals exclude
 dropped records until the explicit Show dropped toggle includes them.
+
+## 2026-10-27: Read subscription meters independently of dashboard snapshots
+
+Initial, cached JSON and periodic dashboard readings overlay the machine usage
+cache through the same subscription reader as the CLI. Current subscription
+permissions still filter every row, and display or host-binding edits do not
+invalidate a reading bound to the same runtime folder. Window observations keep
+their original timestamps and sources. A provider's explicit absence of a
+five-hour limit remains distinct from unknown usage and is displayed as None.
+
+With no explicit subscription declarations, Claude discovery includes every
+credential-bearing configuration folder under the user's `.claude*` directories
+alongside the configured default. Discovery checks credential-file or Keychain
+item existence only; it never requests credential values. Explicit declarations
+remain authoritative and discovery deduplicates folder aliases.
+
+`spend --add-source RUNTIME=FOLDER` appends an already permitted subscription
+folder to the local source bindings without editing runtime instruction files.
+It owns a short local lock and emits no instance event or timing records. Spend
+continues to count the allowed subscription folders, so registering an already
+allowed folder cannot double-count it or grant access to another subscription.
+Fixture-mode machine service installation and removal refuse before invoking
+an OS service manager; service tests explicitly intercept the production calls.
