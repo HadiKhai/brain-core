@@ -288,27 +288,25 @@ def wake_log_refs(refs):
     return [{'id': i['id'], 'kind': i['kind']} for i in refs]
 
 
-# Validated delivery history by path and file identity. Every publication replaces
-# the file (atomic_write), so a changed inode or ctime marks each new generation.
+# Validated delivery history by path, reused only for byte-identical contents:
+# file metadata can survive a same-size rewrite, so the digest is the key.
 _WAKE_HISTORY_CACHE = {}
 
 
 def wake_history_entry(directory):
-    """(fingerprint, validated rows, acknowledged ids by binding); rows are shared, never mutated."""
+    """(digest, validated rows, acknowledged ids by binding); rows are shared, never mutated."""
     path = directory / 'history.json'
     try:
-        stream = path.open('rb')
+        data = path.read_bytes()
     except FileNotFoundError:
         _WAKE_HISTORY_CACHE.pop(str(path), None)
         return None, (), {}
-    with stream:
-        info = os.fstat(stream.fileno())
-        fingerprint = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-        entry = _WAKE_HISTORY_CACHE.get(str(path))
-        if entry and entry[0] == fingerprint:
-            return entry
-        _WAKE_HISTORY_CACHE.pop(str(path), None)
-        entry = (fingerprint, tuple(wake_history_parse(stream.read())), {})
+    digest = hashlib.sha256(data).digest()
+    entry = _WAKE_HISTORY_CACHE.get(str(path))
+    if entry and entry[0] == digest:
+        return entry
+    _WAKE_HISTORY_CACHE.pop(str(path), None)
+    entry = (digest, tuple(wake_history_parse(data)), {})
     _WAKE_HISTORY_CACHE[str(path)] = entry
     return entry
 

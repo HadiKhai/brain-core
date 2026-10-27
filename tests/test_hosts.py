@@ -1848,9 +1848,16 @@ class AckAllShown(Scenario):
             m.wake_history(history.parent).append('caller-owned copy')
             self.assertEqual(len(m.wake_history(history.parent)), 1)
             self.assertEqual(parsed.call_count, 1)
-            write('b')  # same size, rewritten in place: change clocks still miss
+            write('b')  # same size, rewritten in place: the contents decide, not file metadata
             self.assertEqual(m.wake_shown(self.inst, n), {'b' * 64})
             self.assertEqual(parsed.call_count, 2)
+            torn, info = history.read_bytes().replace(b'"items"', b'"itemz"'), history.stat()
+            history.write_bytes(torn)  # same size and restored mtime: corrupt bytes never reuse old rows
+            os.utime(history, ns=(info.st_atime_ns, info.st_mtime_ns))
+            self.assertEqual(m.wake_shown(self.inst, n), set())
+            with self.assertRaises(ValueError):
+                m.wake_history(history.parent)
+            write('b')
             history.write_text('{"version": 1, "deliveries": [{}]}')
             self.assertEqual(m.wake_shown(self.inst, n), set())
             with self.assertRaises(ValueError):
