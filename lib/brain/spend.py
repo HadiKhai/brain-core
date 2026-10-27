@@ -30,7 +30,7 @@ from . import command_reads as _m_command_reads
 # then incrementally: transcripts only grow, so the next read starts where the last one stopped.
 
 SPEND_IDLE_MIN = 5  # a gap between two events of more than this many minutes is idle time
-SPEND_VERSION = 8  # rebuild aggregates whose rotated-source metadata skipped usage records
+SPEND_VERSION = 9  # rebuild job totals that treated unstable discovery as absence
 SPEND_FIELDS = ("events", "fresh", "cache_read", "cache_write", "output", "reasoning", "tools")
 SPEND_TOKENS = ("fresh", "cache_read", "cache_write", "output", "reasoning")  # reasoning is part of output
 JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts are found again by it
@@ -716,6 +716,10 @@ def codex_mark_reader(fh, start=0):
     return ""
 
 
+class DiscoveryIncomplete(RuntimeError):
+    """A permitted source changed while its discovery fields were observed."""
+
+
 def codex_discovery_source(path, allowed, forbidden):
     """Bind both discovery fields and their stamp to one authorized descriptor."""
     fh, _ = _m_history.history_open(path, allowed, forbidden)
@@ -730,8 +734,10 @@ def codex_discovery_source(path, allowed, forbidden):
                 meta, job = codex_meta_reader(reader), codex_mark_reader(reader, start=1)
         else:
             meta, job = codex_meta_reader(fh), codex_mark_reader(fh, start=1)
-        if not meta or _m_common.DirectoryTarget.generation(before) != _m_common.DirectoryTarget.generation(os.fstat(fh.fileno())):
-            return None  # an unstable generation is not a persistent discovery observation
+        if _m_common.DirectoryTarget.generation(before) != _m_common.DirectoryTarget.generation(os.fstat(fh.fileno())):
+            raise DiscoveryIncomplete('session discovery changed during read')
+        if not meta:
+            return None
         return meta, job, before
 
 
@@ -756,7 +762,13 @@ def codex_index(inst, cfg, allowed, forbidden):
                     if not (isinstance(saved, dict) and saved.get('version') == SPEND_VERSION
                             and saved.get('stamp') == stamp and isinstance(saved.get('places'), list)
                             and all(isinstance(saved.get(k), str) for k in ('id', 'parent', 'job'))):
-                        observed = codex_discovery_source(path, allowed, forbidden)
+                        for attempt in range(3):
+                            try:
+                                observed = codex_discovery_source(path, allowed, forbidden)
+                                break
+                            except DiscoveryIncomplete:
+                                if attempt == 2:
+                                    raise
                         if not observed:
                             continue
                         meta, job, st = observed
@@ -772,6 +784,8 @@ def codex_index(inst, cfg, allowed, forbidden):
                                      job=job)
                         cache.put(key, saved)
                     out.append((path, saved, st.st_mtime))
+                except DiscoveryIncomplete:
+                    raise  # never turn an incomplete permitted source into an absent session
                 except (OSError, ValueError, RuntimeError):
                     continue
     return out
@@ -919,7 +933,11 @@ def job_usage(inst, n, row, worktree=None):
     _, allowed, forbidden = spend_sources(inst)
     hi = end if row.get("Ended") else float("inf")
     exact = []
-    for a in job_sessions(inst, n, row, worktree):
+    try:
+        sessions = job_sessions(inst, n, row, worktree)
+    except DiscoveryIncomplete:
+        return None  # unavailable, never a complete zero/partial job aggregate
+    for a in sessions:
         if (a.get("first_at") is not None and a["first_at"] < start) or (a.get("last_at") or 0) > hi:
             # The session ran before the job began (a reused worktree), or after it ended: read again, counting
             # only what happened while the job was open, to the second.
@@ -1355,9 +1373,12 @@ def spend_machine(inst, budget=2.0):
     if hit and hit["complete"] and time.monotonic() - hit["at"] < 60:
         return hit["value"]
     sources, allowed, forbidden = spend_sources(inst)
-    hints = ({str(path): meta for runtime, cfg in sources if runtime == 'codex'
-              for path, meta, changed in codex_index(inst, cfg, allowed, forbidden)}
-             if budget is None else {})  # bounded views must not bootstrap an unbounded discovery first
+    try:
+        hints = ({str(path): meta for runtime, cfg in sources if runtime == 'codex'
+                  for path, meta, changed in codex_index(inst, cfg, allowed, forbidden)}
+                 if budget is None else {})  # bounded views must not bootstrap unbounded discovery
+    except DiscoveryIncomplete:
+        hints = {}  # optional hints failed; the full source walk still accounts for every file
     token = _SPEND_SESSION_HINTS.set(hints)
     try:
         aggs, total, done = spend_all(inst, budget=budget)

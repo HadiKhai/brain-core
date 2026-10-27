@@ -858,6 +858,58 @@ class Spend(Scenario):
             for sid in (first, second, third, fourth):
                 self.assertNotIn(sid.encode(), (self.r / '.brain/usage.sqlite').read_bytes())
 
+    def test_append_during_discovery_retries_or_reports_unavailable_without_partial_job_cache(self):
+        (self.wt / 'progress.txt').write_text('fabricated worker progress\n')
+        self.git('add', 'progress.txt', cwd=self.wt)
+        self.git('commit', '-qm', 'fixture work', cwd=self.wt)
+        sid = '11111111-live'
+        path = self.cx(self.wt, sid, [(1, *self.record(sid, 'r1', 40, 0, 10))])
+        m = core_loader.SourceFileLoader('append_discovery_fixture', str(CORE / 'bin/brain')).load_module()
+        snapshot = m._owners['spend_file']._m_command_reads.snapshot
+        row = self.row()
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(self.r)}):
+            inst, count = m.Instance(self.r), [0]
+            node = inst.node('app')
+            original = m.codex_mark_reader
+            def append_after_marker(*args, **kwargs):
+                result = original(*args, **kwargs)
+                count[0] += 1
+                self.jsonl(path, [{'timestamp': self.at(2), 'type': 'token_usage_record',
+                                   'payload': self.record(sid, 'race-' + str(count[0]), 10, 0, 0)[1]}])
+                return result
+            def append_once(*args, **kwargs):
+                return append_after_marker(*args, **kwargs) if not count[0] else original(*args, **kwargs)
+            with snapshot(), mock.patch.object(m, 'codex_mark_reader', side_effect=append_once):
+                used = m.job_usage(inst, node, row)
+            self.assertEqual(used['processed'], 60)
+            self.assertEqual(used['source'], 'transcripts: 1 session')
+            cache = next((self.r / '.brain/spend/jobs').glob('*.json'))
+            self.assertEqual(json.loads(cache.read_text())['usage']['processed'], 60)
+            with mock.patch.object(m, 'job_budget', return_value={'tokens': 40, 'hours': None}):
+                self.assertTrue(any('40-token budget' in x for x in m.runaway_jobs(inst, node)))
+            before = cache.read_bytes()
+            self.jsonl(path, [{'timestamp': self.at(3), 'type': 'token_usage_record',
+                               'payload': self.record(sid, 'next', 10, 0, 0)[1]}])
+            m._SPEND_MEM.clear()
+            with snapshot(), mock.patch.object(m, 'codex_mark_reader', side_effect=append_after_marker):
+                self.assertIsNone(m.job_usage(inst, node, row), 'continued churn must be unavailable, not zero')
+            self.assertEqual(cache.read_bytes(), before, 'incomplete discovery must not publish a partial job total')
+            m._MACHINE.clear()
+            with snapshot(), mock.patch.object(m, 'codex_mark_reader', side_effect=append_after_marker):
+                machine = m.spend_machine(inst, budget=None)
+            raw = m.spend_new('codex', path)
+            with path.open('rb') as stream:
+                m.spend_read(raw, stream)
+            expected = m.spend_sum([raw])['processed']
+            self.assertTrue(machine['complete'])
+            self.assertEqual(machine['since_week']['processed'], expected)
+            m._LIVE.clear()
+            with snapshot():
+                self.assertEqual(m.job_usage(inst, node, row)['processed'], expected)
+            self.assertEqual(json.loads(cache.read_text())['usage']['processed'], expected)
+            with mock.patch.object(m, 'job_budget', return_value={'tokens': 40, 'hours': None}):
+                self.assertTrue(any('40-token budget' in x for x in m.runaway_jobs(inst, node)))
+
     def test_finished_usage_uses_the_recorded_final_ledger_counts(self):
         m = core_loader.SourceFileLoader('speed_finished_fixture', str(CORE / 'bin/brain')).load_module()
         row = {**self.row(), 'Ended': self.at(10), 'Outcome': 'merged',
