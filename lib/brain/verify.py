@@ -955,7 +955,9 @@ def verification_config_valid(n, packet):
 
 def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_receipt=None, full=False):
     reasons, head, main = ready_preflight(n, branch)
-    reasons.extend(ready_policy_reasons(inst, n, branch, head, previous))
+    integration_base = integration_parent(n, main) if head and main else main
+    preview_context = {'integration_base': integration_base}
+    reasons.extend(ready_policy_reasons(inst, n, branch, head, preview_context))
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)
     verify = n["fm"].get("verify", "").strip()
@@ -965,10 +967,11 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
         reasons.append("--record requires --reviews N completed review rounds (at least one)")
     if reasons:
         return None, reasons
+    from . import preview_evidence as _m_preview
+    preview_scope = _m_preview.preview_requirement(inst, n, branch, head, preview_context)
     w = n["local"]["worktrees"][branch]
     input_files = verify_input_files(n, w)
     inputs = verify_inputs(n, w, input_files)
-    integration_base = integration_parent(n, main)
     if previous and previous.get("integration_base", previous.get("main")) != integration_base:
         reverify = True
     env = verify_env(n, branch, w)
@@ -999,7 +1002,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
                                                    inputs, port_context, snap, reviews)
         except (OSError, ValueError, KeyError, TypeError):
             return None, ['full receipt missing, changed, failed or stale; run full-run on this exact candidate']
-        return packet, []
+        return {**packet, 'preview_scope': preview_scope}, []
     reuse = None if full or reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
     # Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
@@ -1022,6 +1025,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
                 "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": 0, "verified_head": base, "verify_reused": True,
                 "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"), "rehearsal": rehearsal,
                 "verify_port_context": port_context,
+                "preview_scope": preview_scope,
                 "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst)}, []
     _m_instance.unlock()  # verification belongs to this worker, not the instance-wide lock
     lane_evidence = run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, reverify) if snap else None
@@ -1051,11 +1055,17 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
                       + "); commit or discard what it changed, then hand back again"]
     if input_reasons:
         return None, input_reasons
+    if _m_preview.preview_requirement(inst, n, branch, head, preview_context) != preview_scope:
+        return None, ['preview classification changed during verify; hand back again']
+    policy_after = ready_policy_reasons(inst, n, branch, head, preview_context)
+    if policy_after:
+        return None, policy_after
     input_ref = write_verify_input_files(inst, n, branch, inputs, input_files, log_path)
     packet = {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
               "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst), "rehearsal": rehearsal}
     packet['verify_port_context'] = port_context
+    packet['preview_scope'] = preview_scope
     if full or change:
         packet.update(verify_scope='change' if change else 'full',
                       verify_config_hash=_m_lanes.lane_config_hash(n))

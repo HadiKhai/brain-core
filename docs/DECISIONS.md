@@ -3566,3 +3566,17 @@ continues to count the allowed subscription folders, so registering an already
 allowed folder cannot double-count it or grant access to another subscription.
 Fixture-mode machine service installation and removal refuse before invoking
 an OS service manager; service tests explicitly intercept the production calls.
+## Scope preview evidence to the exact rendered-input diff
+
+A bound preview requires an exact-head observation when the integration diff
+changes rendered inputs, or when that classification is uncertain. A node may
+explicitly declare `ui_globs` (JSON strings or comma-separated globs); otherwise
+`ui`/`rendered` verify lanes supply inputs, strict inputs and transitive lane
+dependencies. Unsupported or absent declarations, failed maps and unreadable
+Git data retain the receipt requirement. Rename endpoints and deleted inputs
+are both classified. Supplied receipts retain all existing validation even for
+backend-only changes. Gate packets record the base, head, changed paths,
+declarations and applicability, and readiness recomputes the decision rather
+than accepting a cached exemption. Classification changes during verification
+refuse publication. A retained train base must precede the current integration
+base, so it cannot narrow away rendered changes.
