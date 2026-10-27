@@ -60,6 +60,19 @@ def gate_write_metadata(fd, row):
 
 
 @contextlib.contextmanager
+def gate_state_lock(inst):
+    """Release a newly acquired physical lock even inside a suspended CLI scope."""
+    with _PHASE_LOCK:
+        already_held = _m_instance._LOCK['fh'] is not None
+        try:
+            with _m_instance.brain_lock(inst):
+                yield
+        finally:
+            if not already_held:
+                _m_instance.unlock()
+
+
+@contextlib.contextmanager
 def gate_admission(inst, node):
     """Only the first admission can be idle; later lane waits retain running ownership."""
     active = ACTIVE_GATE.get()
@@ -70,7 +83,7 @@ def gate_admission(inst, node):
         return
     # Serialize phase changes with upgrade's instance lock. Never hold it while
     # waiting for admission. A running phase is sticky across nested commands.
-    with _PHASE_LOCK, _m_instance.brain_lock(inst):
+    with gate_state_lock(inst):
         row = gate_metadata(fd)
         if row.get('phase') == 'starting':
             row.update(phase='waiting-for-admission',
@@ -83,7 +96,7 @@ def gate_admission(inst, node):
     try:
         yield
     finally:
-        with _PHASE_LOCK, _m_instance.brain_lock(inst):
+        with gate_state_lock(inst):
             row = gate_metadata(fd)
             if row.get('phase') == 'waiting-for-admission':
                 row.update(phase='running')
@@ -177,7 +190,7 @@ def gate_acquire(inst, node, env, label):
                 (opened.st_dev, opened.st_ino) != (target.st_dev, target.st_ino) or
                 os.fstat(fd).st_nlink != 1):
             _m_common.die('gate-lock: lock path changed while waiting')
-        with _PHASE_LOCK, _m_instance.brain_lock(inst):
+        with gate_state_lock(inst):
             holder = gate_metadata(fd)
             if gate_stale_holder(holder):
                 print('gate-lock: stale holder pid ' + str(holder['pid']) +

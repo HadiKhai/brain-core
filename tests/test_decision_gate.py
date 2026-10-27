@@ -180,6 +180,25 @@ sys.stdin.readline()
             self.assertEqual(json.loads(self.gate_path().read_text())['phase'], 'running')
             self.assertIn(('root', 'in-flight node gate'), self.m.open_jobs_anywhere(self.inst))
 
+    def test_suspended_outer_writer_scope_never_retains_lock_during_admission(self):
+        import fcntl
+        m, inst = self.m, self.inst
+        def assert_writer_released():
+            self.assertIsNone(m.unlock.__globals__['_LOCK']['fh'])
+            with (self.root / '.brain/lock').open('r+') as probe:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Native readiness releases the physical lock while its CLI context's
+        # logical depth remains nonzero until the command returns.
+        with m.brain_lock(inst):
+            m.unlock()
+            with m.node_gate(inst, self.n, self.env, 'suspended-cli'):
+                assert_writer_released()
+                with m.gate_admission(inst, 'root'):
+                    assert_writer_released()
+                    self.assertEqual(m.open_jobs_anywhere(inst), [])
+                assert_writer_released()
+                self.assertIn(('root', 'in-flight node gate'), m.open_jobs_anywhere(inst))
+
     def test_dead_holder_is_reported_and_reclaimed_without_replacing_inode(self):
         dead = subprocess.Popen([sys.executable, '-c', 'pass'], env=self.env)
         dead.wait(timeout=5)

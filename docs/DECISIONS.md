@@ -3588,3 +3588,5 @@ unlocked stale file is idle and reused in place; a stale PID with a still-held
 descriptor remains busy because a surviving child may own the gate. Controlled
 process barriers cover admission, upgrade refusal, same-node competitors, inode
 continuity, failed admission and dead reporters without generating machine load.
+Short writes also release a newly acquired physical instance lock when native
+readiness has suspended an outer CLI scope with nonzero logical lock depth.
