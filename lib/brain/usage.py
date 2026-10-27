@@ -460,14 +460,20 @@ class usage_lock:
 
     def __enter__(self):
         import fcntl
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fh = self.path.open("a+")
+        with _m_common.directory_target(self.path, create=True, private=True) as target:
+            self.fh = os.fdopen(target.open(os.O_RDWR | os.O_CREAT), "a+")
         try:
             fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             self.fh.close()
             self.fh = None
             return False
+        try:
+            os.fchmod(self.fh.fileno(), 0o600)
+        except OSError:
+            self.fh.close()
+            self.fh = None
+            raise
         self.fh.seek(0)
         self.fh.truncate()
         self.fh.write(str(os.getpid()))

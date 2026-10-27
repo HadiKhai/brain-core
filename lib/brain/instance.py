@@ -251,8 +251,8 @@ class brain_lock:
         if _LOCK["fh"] is None and not self.owner_is_running_us():
             import fcntl
             import time
-            self.path.parent.mkdir(exist_ok=True)
-            fh = open(self.path, "a+")
+            with _m_common.directory_target(self.path, create=True, private=True) as target:
+                fh = os.fdopen(target.open(os.O_RDWR | os.O_CREAT), "a+")
             if os.fstat(fh.fileno()).st_nlink > 1 or self.path.is_symlink():
                 fh.close()
                 _m_common.die(f"{_m_common.tilde(self.path)} is linked to another file; brain won't write it (remove it)")
@@ -267,6 +267,11 @@ class brain_lock:
                         _m_common.die(f"another brain command has held this instance's lock for {LOCK_WAIT // 60} minutes; "
                             f"try again (lock: {_m_common.tilde(self.path)})")
                     time.sleep(0.05)
+            try:
+                os.fchmod(fh.fileno(), 0o600)
+            except OSError:
+                fh.close()
+                raise
             fh.seek(0)
             fh.truncate()
             fh.write(str(os.getpid()))
@@ -428,8 +433,7 @@ def read_brains():
 
 def write_brains(data):
     f = brains_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    _m_common.atomic_write(f, json.dumps(data, indent=2, sort_keys=True) + "\n", private=True, create=True)
 
 
 def brains_here():

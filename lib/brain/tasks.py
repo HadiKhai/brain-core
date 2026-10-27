@@ -622,7 +622,7 @@ def provider_pull_on_wake(inst, n):
         state = 'unknown'
         print('! External task sync failed; retained mirror and pending state need repair')
     path = n['dir'] / 'task-sync.json'
-    _m_common.atomic_write(path, json.dumps({'version': 1, 'state': state, 'at': inst.now()}) + '\n', private=True)
+    _m_common.atomic_write(path, json.dumps({'version': 1, 'state': state, 'at': inst.now()}) + '\n')
     _m_common.touch(path)
     inst.commit([], n['id'] + ': task provider reading')
     return state == 'synced'

@@ -665,6 +665,18 @@ class Tasks(Scenario):
         snapshot = tasks.ui_tasks(self.inst, self.n)
         self.assertEqual(snapshot['rows'][0]['delivery_state'], 'unproven')
 
+    def test_shared_task_sync_keeps_public_default_and_existing_mode(self):
+        from brain import task_linear
+        self.linear_config()
+        path = self.root / 'task-sync.json'
+        with mock.patch.object(task_linear, 'sync'):
+            self.assertTrue(tasks.provider_pull_on_wake(self.inst, self.n))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            path.chmod(0o640)
+            self.assertTrue(tasks.provider_pull_on_wake(self.inst, self.n))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(json.loads(path.read_text())['state'], 'synced')
+
     def test_failed_provider_sync_retains_unknown_hold_without_leaking_error(self):
         from brain import task_linear, task_flow
         self.linear_config()

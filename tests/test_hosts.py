@@ -822,6 +822,21 @@ class QuestionWake(Scenario):
 
 class StopHook(Scenario):
     fixture_init_in_process = True
+
+    def test_hook_log_append_tightens_existing_mode_and_preserves_contents(self):
+        r = self.init('alice')
+        time.sleep(1.1)
+        (r / 'brief.md').write_text((r / 'brief.md').read_text() + '\nChanged fixture notes\n')
+        log = r / '.brain/hooks.log'
+        log.write_text('earlier fixture\n')
+        log.chmod(0o644)
+        inode = log.stat().st_ino
+        self.assertEqual(self.hook(r, r, 'mode-session')['decision'], 'block')
+        self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(log.stat().st_ino, inode)
+        self.assertTrue(log.read_text().startswith('earlier fixture\n'))
+        self.assertIn('mode-session', log.read_text())
+
     def test_relay_only_exit_captures_questions_but_skips_note_reminders(self):
         r = self.init("alice")
         (r / "brief.md").write_text("Changed notes\n")

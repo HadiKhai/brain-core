@@ -303,6 +303,8 @@ class DirectoryTarget:
             after = os.fstat(fd)
             if before and (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                 raise OSError('publication file changed')
+            if self.private and flags & (os.O_WRONLY | os.O_RDWR):
+                os.fchmod(fd, 0o600)
             if flags & os.O_TRUNC:
                 os.ftruncate(fd, 0)
             return fd

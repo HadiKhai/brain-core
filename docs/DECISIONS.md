@@ -2689,6 +2689,8 @@ Atomic file publication writes and fsyncs at 0600, then applies and fsyncs the e
 
 Private local bindings, host/wake state, inventories, caches and execution receipts explicitly select private publication (0600), including durable-directory and metadata-recovery writers; generic shared content retains existing destination modes and its public default.
 
+Committed synthesis acknowledgements and task-sync state retain shared modes; private writable opens, inventories, hook logs, content locks, rehearsal state/traces and model manifests enforce 0600 before content writes, while read-only opens never change permissions.
+
 ## D28002: Measure dashboard acceptance on real serving code and source files
 
 Qualify complete warm fill with an isolated synthetic instance, real transcript records
