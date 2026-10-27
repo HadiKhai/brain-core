@@ -584,6 +584,7 @@ def fill(text, values):
 
 
 _GIT_READS = contextvars.ContextVar('brain_git_reads', default=None)
+_GIT_OBSERVER = contextvars.ContextVar('brain_git_observer', default=None)
 
 
 @contextlib.contextmanager
@@ -630,6 +631,8 @@ def git(*args, cwd=None, check=False, env=None):
     reads = _GIT_READS.get()
     key = (str(Path(cwd or Path.cwd()).absolute()), args)
     query = args
+    if query[:1] == ('--no-optional-locks',):
+        query = query[1:]
     while len(query) >= 2 and query[0] == '-c':
         query = query[2:]
     read_only = (query and (query[0] in
@@ -664,6 +667,9 @@ def git(*args, cwd=None, check=False, env=None):
             reads[key] = result
     if check:
         result.check_returncode()
+    observer = _GIT_OBSERVER.get()
+    if observer is not None and read_only:
+        observer(args, cwd, env, result)
     return result
 
 

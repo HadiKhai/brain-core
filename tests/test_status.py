@@ -393,6 +393,75 @@ class AutonomyDue(AutonomyProject):
 
 
 class AutonomyFacts(AutonomyProject):
+    def test_refresh_computes_unlocked_beside_a_real_background_commit(self):
+        root = self.init('alice')
+        (root / 'unrelated.bin').write_bytes(b'before')
+        self.git('add', 'unrelated.bin', cwd=root)
+        self.git('commit', '-qm', 'unrelated source', cwd=root)
+        marker, release = self.tmp / 'refresh-compute', self.tmp / 'refresh-release'
+        script = '''import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from brain import cli, status, instance
+marker, release = map(Path, sys.argv[2:4])
+original = status.status_facts
+def slow(*args, **kwargs):
+    assert instance._LOCK['fh'] is None, 'refresh projection holds the instance lock'
+    marker.write_text('computing')
+    deadline = time.monotonic() + 15
+    while not release.exists():
+        if time.monotonic() > deadline:
+            raise RuntimeError('refresh was never released')
+        time.sleep(.01)
+    return original(*args, **kwargs)
+status.status_facts = slow
+sys.argv = ['brain', 'status', 'root', '--refresh']
+cli.main()
+'''
+        env = {**self.env, 'BRAIN_ROOT': str(root)}
+        reader = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(marker), str(release)],
+                                  env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 8
+            while not marker.exists() and reader.poll() is None and time.monotonic() < deadline:
+                time.sleep(.01)
+            if not marker.exists():
+                stdout, stderr = reader.communicate(timeout=3)
+                self.fail('refresh did not reach unlocked projection: ' + stdout + stderr)
+            writer = subprocess.run([sys.executable, '-B', '-c', '''import sys
+sys.path.insert(0, sys.argv[1])
+from brain import instance
+with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2]))):
+    (__import__('pathlib').Path(sys.argv[2]) / 'unrelated.bin').write_bytes(b'after')
+    __import__('subprocess').run(['git', 'commit', '-qam', 'background commit'], cwd=sys.argv[2], check=True)
+''', str(CORE / 'lib'), str(root)], env=env, capture_output=True, text=True, timeout=3)
+            self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
+            self.assertIsNone(reader.poll())
+        finally:
+            release.write_text('continue')
+            try:
+                stdout, stderr = reader.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                reader.kill(); stdout, stderr = reader.communicate()
+        self.assertEqual(reader.returncode, 0, stdout + stderr)
+
+    def test_refresh_refuses_relevant_change_without_overwriting_it(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_relevant_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        status_refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst, path = m.Instance(root), root / 'status.md'
+        original = path.read_text()
+        def changed(current, node):
+            self.assertIsNone(status_refresh.instance._LOCK['fh'])
+            prepared = m.refreshed_text(current, node)
+            path.write_text(original + '\nConcurrent coordinator judgement.\n')
+            return prepared
+        with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+            status_refresh.compute(inst, inst.node('root'), changed)
+        self.assertEqual(path.read_text(), original + '\nConcurrent coordinator judgement.\n')
+
+
     def test_refresh_preserves_judgement_bytes_and_separates_timestamps(self):
         r, home, wt = self.project()
         st = r / 'nodes/app/status.md'

@@ -423,6 +423,9 @@ def local_job_snapshot(values=None, keys=None):
 def local_job_state(n, branch, w):
     """Only files and local git refs. Unlike worktree_state, never asks gh or a remote."""
     scope = _LOCAL_JOB_SNAPSHOT.get()
+    from . import status_refresh
+    if status_refresh.active():
+        scope = None  # refresh fences selected branch answers, never all refs
     if scope is not None:
         values, keys, repositories = scope
         job = (n['id'], branch)
@@ -1129,7 +1132,7 @@ def facts_block(inst, n, view=None):
     return "\n".join(lines)
 
 
-def refresh_status(inst, n, view=None):
+def refreshed_text(inst, n, view=None):
     f = n["dir"] / "status.md"
     text = ""
     if f.exists():
@@ -1152,6 +1155,14 @@ def refresh_status(inst, n, view=None):
     while at < len(text) and text[at] in "\r\n":
         at += 1
     text = text[:at] + block + "\n\n" + text[at:]
+    return text
+
+
+def refresh_status(inst, n, view=None):
+    from . import status_refresh
+    text = (status_refresh.compute(inst, n, lambda current, node: refreshed_text(current, node, view))
+            if status_refresh.requested(inst) else refreshed_text(inst, n, view))
+    f = n['dir'] / 'status.md'
     _m_common.atomic_write(f, text)
     _m_common.touch(f)
 

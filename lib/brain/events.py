@@ -780,6 +780,9 @@ def cmd_backlog(a):
 # Views store generated metadata only. Human prose stays in snapshot files.
 def snapshot_view(inst, n, known_merges=None):
     from . import jobs, status
+    from . import status_refresh
+    if not status_refresh.active() and status_refresh.requested(inst):
+        return status_refresh.compute(inst, n, lambda current, node: snapshot_view(current, node, known_merges))
     state = status.file_state(inst, n)
     known = status.facts_meta(n).get('merged_before', []) if known_merges is None else known_merges
     lines, merged = status.status_facts(inst, n, state, known, metadata_only=True)
