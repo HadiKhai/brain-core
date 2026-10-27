@@ -2847,4 +2847,6 @@ lane-map command can edit the worktree or index during a read command, so these
 observations must come from native Git each time; index and HEAD fingerprints
 alone cannot detect unstaged edits. Ref and commit-graph batching remains scoped
 to the command. Readiness retains its strict dirty-worktree evidence after a
-dynamic map runs.
+dynamic map runs. Index-consuming revision expressions also bypass the cache.
+Configured external lane-map execution clears the enclosing Git snapshot even
+on failure, so its post-map checks observe changed refs and graph roots too.

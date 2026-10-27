@@ -119,7 +119,8 @@ def lane_map(n, w, env):
     if not inline and not source:
         return [], ''
     if source:
-        raw = map_output(source, w, env)
+        with _m_common.git_read_uncached():
+            raw = map_output(source, w, env)
         data = json.loads(raw)
     elif inline.startswith('['):
         raw, data = inline, json.loads(inline)

@@ -471,6 +471,19 @@ def git_read_snapshot():
         _GIT_READS.reset(token)
 
 
+@contextlib.contextmanager
+def git_read_uncached():
+    """Fence a step that can mutate Git state, including through external tools."""
+    reads = _GIT_READS.get()
+    token = _GIT_READS.set(None)
+    try:
+        yield
+    finally:
+        if reads is not None:
+            reads.clear()
+        _GIT_READS.reset(token)
+
+
 def branch_refs(cwd):
     """One branch enumeration per repository in a read snapshot."""
     reads = _GIT_READS.get()
@@ -585,6 +598,8 @@ def git(*args, cwd=None, check=False, env=None):
                  or (query[0] == 'symbolic-ref' and len([x for x in query[1:] if not x.startswith('-')]) == 1
                      and all(not x.startswith('-') or x in ('--short', '--quiet', '-q') for x in query[1:]))))
     cacheable = (reads is not None and read_only and env is None
+                 and not any(str(a).startswith(':') or a in
+                             ('--indexed-objects', '--merge', '--shared-index-path') for a in query[1:])
                  and not any(str(a).startswith('--output') for a in args))
     result = reads.get(key) if cacheable else None
     tree_key = (key[0], 'worktree-branch')

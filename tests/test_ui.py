@@ -1584,7 +1584,9 @@ class GitReadBatches(Scenario):
         queries = [('status', '--porcelain'), ('diff', '--name-only'),
                    ('diff', '--cached', '--name-only'), ('ls-files', '--stage'),
                    ('ls-files', '--others', '--exclude-standard'),
-                   ('-c', 'core.quotepath=false', 'status', '--porcelain')]
+                   ('-c', 'core.quotepath=false', 'status', '--porcelain'),
+                   ('rev-parse', '--verify', ':tracked.txt'),
+                   ('rev-list', '--objects', '--indexed-objects', 'HEAD')]
 
         def observe():
             return [(r.returncode, r.stdout, r.stderr) for args in queries
@@ -1604,6 +1606,8 @@ class GitReadBatches(Scenario):
             self.assertEqual(staged[1][1], '')
             self.assertIn('tracked.txt', staged[2][1])
             self.assertNotEqual(staged[3], before[3])
+            self.assertNotEqual(staged[6], before[6])
+            self.assertNotEqual(staged[7], before[7])
         # Compare every result with native uncached Git on the final state.
         self.assertEqual(staged, observe())
 
