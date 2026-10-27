@@ -226,6 +226,86 @@ class FrozenInputs(RehearsalFixture):
                 self.assertFalse(list(dest.glob('.rehearse-copy-*')))
                 self.assertEqual(rehearsal.snapshot(source), original)
 
+    def test_private_tree_copy_refuses_fifo_without_blocking(self):
+        source = self.tmp / 'fifo-source'
+        (source / '.brain').mkdir(parents=True)
+        (source / '.brain/local.json').write_text('{}')
+        os.mkfifo(source / 'pipe')
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); from brain import rehearse\n"
+                "from pathlib import Path\n"
+                "try: rehearse.copy_tree(Path(sys.argv[2]), Path(sys.argv[3]))\n"
+                "except OSError as error: print(str(error))\n"
+                "else: raise SystemExit('FIFO unexpectedly copied')\n")
+        child = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', code,
+                                str(CORE / 'lib'), str(source), str(self.tmp / 'fifo-copy')],
+                               capture_output=True, text=True, timeout=5)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertIn('not a regular file', child.stdout)
+        self.assertTrue(stat.S_ISFIFO((source / 'pipe').stat().st_mode))
+
+    def test_probe_copy_protects_private_sources_and_preserves_shared_modes(self):
+        source = self.tmp / 'probe-copy-source'
+        source.mkdir()
+        (source / 'instance.md').write_text('---\nname: fixture\n---\n')
+        (source / 'node.md').write_text('---\nid: root\n---\n')
+        inst = SimpleNamespace(root=source, nodes=lambda: [dict(dir=source)], local={})
+        copy = shutil.copyfileobj
+        for index, (mode, linked) in enumerate(((0o600, False), (0o640, False), (0o600, True))):
+            if linked:
+                for name in ('instance.md', 'node.md'):
+                    (source / name).rename(source / (name + '.real'))
+                    (source / name).symlink_to(name + '.real')
+            for path in source.iterdir():
+                path.chmod(mode)
+            original = rehearsal.snapshot(source)
+            dest = self.tmp / ('probe-copy-' + str(index))
+            dest.mkdir()
+            seen = []
+            def copying(incoming, outgoing, *args, **kwargs):
+                self.assertEqual(stat.S_IMODE(os.fstat(outgoing.fileno()).st_mode), 0o600)
+                seen.append(True)
+                return copy(incoming, outgoing, *args, **kwargs)
+            with mock.patch.object(rehearsal.shutil, 'copyfileobj', side_effect=copying):
+                rehearsal.isolated_probe_instance(inst, dest)
+            self.assertEqual(len(seen), 2)
+            for name in ('instance.md', 'node.md'):
+                self.assertEqual((dest / name).read_bytes(), (source / name).read_bytes())
+                self.assertEqual(stat.S_IMODE((dest / name).stat().st_mode), mode)
+            self.assertEqual(rehearsal.snapshot(source), original)
+
+    def test_detached_git_copies_tighten_existing_targets_before_content(self):
+        source = self.tmp / 'private-metadata-worktree'
+        self.git('worktree', 'add', '-q', '-b', 'private-metadata', str(source), cwd=self.root)
+        own = Path(self.git('rev-parse', '--path-format=absolute', '--git-dir', cwd=source).strip())
+        for name in ('HEAD', 'index'):
+            (own / name).chmod(0o600)
+            (self.root / '.git' / name).chmod(0o644)
+        original = rehearsal.snapshot(self.root)
+        dest = self.tmp / 'detached-metadata-copy'
+        copy, regular = shutil.copyfileobj, rehearsal.copy_regular_file
+        overwrites, writes = [], []
+        def copying(incoming, outgoing, *args, **kwargs):
+            self.assertEqual(stat.S_IMODE(os.fstat(outgoing.fileno()).st_mode), 0o600)
+            writes.append(True)
+            return copy(incoming, outgoing, *args, **kwargs)
+        def classified(src, dst, **kwargs):
+            if kwargs.get('overwrite'):
+                self.assertEqual(stat.S_IMODE(Path(dst).stat().st_mode), 0o644)
+                overwrites.append(Path(src).name)
+            return regular(src, dst, **kwargs)
+        with mock.patch.object(rehearsal.shutil, 'copyfileobj', side_effect=copying), \
+                mock.patch.object(rehearsal, 'copy_regular_file', side_effect=classified):
+            rehearsal.copy_tree(source, dest)  # capture_gitfiles overwrites common HEAD/index
+            self.assertEqual(overwrites, ['HEAD', 'index'])
+            rehearsal.materialize_git(source, dest)
+        self.assertEqual(overwrites, ['HEAD', 'index', 'HEAD', 'index'])
+        self.assertGreaterEqual(len(writes), 4)
+        for name in ('HEAD', 'index'):
+            self.assertEqual((dest / '.git' / name).read_bytes(), (own / name).read_bytes())
+            self.assertEqual(stat.S_IMODE((dest / '.git' / name).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE((dest / '.git/config').stat().st_mode), 0o644)
+        self.assertEqual(rehearsal.snapshot(self.root), original)
+
     def ui(self):
         def job(branch, ready):
             return dict(branch=branch, ready=dict(ready=ready, reasons=[] if ready else ['held']))
