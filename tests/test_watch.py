@@ -79,6 +79,27 @@ class Watcher(Scenario):
         self.assertEqual(groups, {})
         self.assertEqual(m.inbox_lines(root), ['- Choose green'])
 
+    def test_direct_watch_fallback_discards_failed_scan_reads_before_new_source_fence(self):
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('- Choose blue\n')
+        observations = []
+        def scan(*args):
+            lines = m.inbox_lines(root)
+            observations.append(lines)
+            if len(observations) == 1:
+                inbox.write_text('- Choose green\n')
+                raise OSError('transient fixture scan failure')
+            return {'root': {'node': root, 'items': [{'id': m.watch_digest(['green']),
+                            'kind': 'inbox', 'node': 'root', 'text': lines[0]}],
+                            'command': 'fixture-send'}}
+        with mock.patch.object(m, 'watch_scan', side_effect=scan):
+            groups = m.watch_groups(inst)
+        self.assertEqual(observations, [['- Choose blue'], ['- Choose green']])
+        self.assertFalse(groups['root']['episodes_known'])
+        self.assertEqual(groups['root']['items'][0]['text'], '- Choose green')
+
     def test_corrupt_episode_receipts_still_enqueue_current_questions(self):
         directory = self.root / '.brain/wake'
         directory.mkdir(exist_ok=True)
