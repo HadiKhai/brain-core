@@ -376,9 +376,14 @@ def wake_reason_items(inst, n, reason):
     from . import watch as _m_watch
     target, _ = wake_target(inst, n)
     try:
-        items = _m_watch.watch_groups(inst).get(target['id'], {}).get('items', [])
+        groups = _m_watch.watch_groups(inst)
     except (Exception, SystemExit):
-        items = []  # best-effort identity capture cannot suppress the direct wake
+        groups = {}  # best-effort identity capture cannot suppress the direct wake
+    if getattr(groups, 'stale', False):
+        # Unknown identities would publish a request the watcher later repeats;
+        # the request fails open and the durable source is retried.
+        raise ValueError('due identities unknown')
+    items = groups.get(target['id'], {}).get('items', [])
     return wake_item_refs(i for i in items
                           if i.get('source', target['id']) == n['id']
                           and reason in (i.get('reason'), i.get('legacy_reason')))

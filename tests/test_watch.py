@@ -66,17 +66,22 @@ class Watcher(Scenario):
         root = inst.node('root')
         inbox = self.root / 'inbox.md'
         inbox.write_text('- Choose blue\n')
+        attempts = []
         def scan(*args):
-            self.assertEqual(m.inbox_lines(root), ['- Choose blue'])
-            inbox.write_text('- Choose green\n')
-            self.assertEqual(m.inbox_lines(root), ['- Choose blue'])
-            return {'root': {'node': root, 'items': [{'id': m.watch_digest(['blue']),
-                            'kind': 'inbox', 'node': 'root', 'text': 'Choose blue'}],
+            attempts.append(m.inbox_lines(root))
+            if len(attempts) == 1:
+                inbox.write_text('- Choose green\n')
+                self.assertEqual(m.inbox_lines(root), ['- Choose blue'])  # this scan's reads stay cached
+            text = attempts[-1][0][2:]
+            return {'root': {'node': root, 'items': [{'id': m.watch_digest([text]),
+                            'kind': 'inbox', 'node': 'root', 'text': text}],
                             'command': 'fixture-send'}}
         with mock.patch.object(m, 'watch_scan', side_effect=scan):
             groups = m.watch_groups(inst)
-        self.assertTrue(groups.stale)
-        self.assertEqual(groups, {})
+        # The changed first scan is never publishable; only the fresh rescan is.
+        self.assertEqual(attempts, [['- Choose blue'], ['- Choose green']])
+        self.assertFalse(groups.stale)
+        self.assertEqual([i['text'] for i in groups['root']['items']], ['Choose green'])
         self.assertEqual(m.inbox_lines(root), ['- Choose green'])
 
     def test_direct_watch_fallback_discards_failed_scan_reads_before_new_source_fence(self):
@@ -239,6 +244,14 @@ class Watcher(Scenario):
             link.unlink()
             link.symlink_to(homes / 'b')
             self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+            plain = homes / 'plain'
+            plain.mkdir()
+            (plain / '.git').symlink_to(homes / 'a' / '.git')
+            external['home_path'] = plain
+            before = m.watch_source_signature(inst, layout)
+            (plain / '.git').unlink()
+            (plain / '.git').symlink_to(homes / 'b' / '.git')
+            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
 
     def test_dispatcher_defers_on_stale_scan_instead_of_fallback_identity(self):
         m, inst = self.m, self.inst
@@ -250,6 +263,16 @@ class Watcher(Scenario):
             result = dispatcher.dispatch_run(inst)
         request.assert_not_called()
         self.assertTrue(result.get('busy'))
+
+    def test_direct_overdue_wake_fails_open_on_stale_identities(self):
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        stale = m.WatchGroups({}, None, None, stale=True)
+        with mock.patch.object(m._owners['watch_groups'], 'watch_groups', return_value=stale), \
+                mock.patch.object(m, 'wake_start') as start:
+            self.assertFalse(m.request_wake(inst, root, 'overdue:' + 'a' * 64))
+        start.assert_not_called()
+        self.assertFalse(list(m.wake_directory(inst, root).glob('*.pending')))
 
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
