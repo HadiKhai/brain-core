@@ -470,6 +470,78 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             status_refresh.compute(inst, inst.node('root'), changed)
         self.assertEqual(path.read_text(), original + '\nConcurrent coordinator judgement.\n')
 
+    def test_refresh_refuses_changed_build_order(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_backlog_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        backlog = root / 'backlog.md'
+        backlog.write_text('# Backlog\n\n## Build order\n\n- [ ] Ship the fixture\n')
+        original = (root / 'status.md').read_bytes()
+        def changed(current, node):
+            self.assertTrue(m.runnable_work(node, m.read_jobs(node)))
+            text = m.refreshed_text(current, node)
+            backlog.write_text(backlog.read_text().replace('[ ]', '[x]'))
+            return text
+        with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+            refresh.compute(inst, inst.node('root'), changed)
+        self.assertEqual((root / 'status.md').read_bytes(), original)
+        self.assertIn('[x]', backlog.read_text())
+
+    def test_refresh_refuses_hook_question_during_git_validation(self):
+        root = self.init('alice')
+        self.git('branch', 'validation-probe', cwd=root)
+        loader = core_loader.SourceFileLoader('refresh_hook_validation', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        original = (root / 'status.md').read_bytes()
+        reread, changed = refresh.GitInputs.reread, []
+        def interleave(observer, args, cwd, env, paths):
+            result = reread(observer, args, cwd, env, paths)
+            if args[-1] == 'validation-probe' and not changed:
+                changed.append(True)
+                with (root / 'inbox.md').open('a') as stream:
+                    stream.write('- Hook question arriving during validation.\n')
+            return result
+        def prepare(current, node):
+            text = m.refreshed_text(current, node)
+            refresh.common.git('rev-parse', '--verify', 'validation-probe', cwd=root)
+            return text
+        with mock.patch.object(refresh.GitInputs, 'reread', interleave):
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                refresh.compute(inst, inst.node('root'), prepare)
+        self.assertTrue(changed)
+        self.assertEqual((root / 'status.md').read_bytes(), original)
+        self.assertIn('Hook question arriving', (root / 'inbox.md').read_text())
+
+    def test_refresh_discovers_dynamic_inputs_unlocked_and_fences_the_set(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_dynamic_input_set', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        binding, first, second = [root / name for name in ('binding.txt', 'first.txt', 'second.txt')]
+        binding.write_text(first.name)
+        first.write_text('first source')
+        second.write_text('second source')
+        calls = []
+        def inputs():
+            self.assertIsNone(refresh.instance._LOCK['fh'])
+            selected = root / binding.read_text()
+            if not calls:
+                binding.write_text(second.name)
+            calls.append(True)
+            return [binding, selected]
+        def prepare(current, node):
+            answer = (root / binding.read_text()).read_text()
+            second.write_text('concurrent second source')
+            return answer
+        with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+            refresh.compute(inst, inst.node('root'), prepare, extra=inputs)
+        self.assertEqual(second.read_text(), 'concurrent second source')
+
     def test_refresh_refuses_a_changed_job_ref(self):
         root, home, wt = self.project()
         loader = core_loader.SourceFileLoader('refresh_git_fence', str(CORE / 'bin/brain'))

@@ -1347,7 +1347,8 @@ def maintain(op, changed):
                 result[nid] = (view, status.refreshed_text(current, target, view))
             return result
         prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
-                                          targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',))
+                                          targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)
+                                          if any(source(op.inst, n) == 'events' for n in selected.values()) else ())
     for n in selected.values():
         if materialize and op.command != 'status':
             cap_now(op.inst, n)

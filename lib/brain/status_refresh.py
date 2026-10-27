@@ -3,6 +3,7 @@ import os
 import hashlib
 import json
 import re
+import stat
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -26,14 +27,14 @@ def generation(paths):
     def visit(path):
         try:
             st = path.lstat()
-            if path.name == '.git' and path.is_dir() and not path.is_symlink():
+            if path.name == '.git' and stat.S_ISDIR(st.st_mode):
                 result.append((str(path), st.st_dev, st.st_ino, st.st_mode))
                 return  # metadata marker identity, never the object store
             result.append((str(path), st.st_dev, st.st_ino, st.st_mode, st.st_size,
                            st.st_mtime_ns, st.st_ctime_ns))
-            if path.is_symlink():
+            if stat.S_ISLNK(st.st_mode):
                 visit(path.resolve())
-            elif path.is_dir():
+            elif stat.S_ISDIR(st.st_mode):
                 for child in sorted(path.iterdir()):
                     visit(child)
         except FileNotFoundError:
@@ -222,6 +223,11 @@ class GitInputs:
                     common.die('status refresh inputs changed during computation; retry from fresh state')
         if any(generation(item[3]) != item[4] for item in validated):
             common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
+        self.validated = validated
+
+    def final_check(self):
+        if any(generation(item[3]) != item[4] for item in self.validated):
+            common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
 
 
 def input_paths(inst, n):
@@ -232,14 +238,21 @@ def input_paths(inst, n):
     fence repository HEAD, refs directories, transcript telemetry or caches.
     """
     paths = [inst.local_path, inst.root / '.brain/communications.json',
-             inst.root / '.brain/wake/lifecycle.json', inst.root / '.brain/teaching']
+             inst.root / '.brain/wake/lifecycle.json']
+    paths.extend((inst.root / '.brain/teaching').glob('*.json'))
+    paths.extend(item['path'] for item in inst.items())
     for node in inst.nodes():
-        paths.extend(node['dir'] / name for name in ('node.md', 'never-name.txt', 'library', 'specialists'))
+        paths.extend(node['dir'] / name for name in ('node.md', 'never-name.txt'))
+        paths.extend((node['dir'] / 'specialists').glob('*/role.md'))
     paths.extend(n['dir'] / name for name in (
-        'status.md', 'brief.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md', 'job-handbacks',
+        'status.md', 'brief.md', 'backlog.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md', 'job-handbacks',
         'job-attempts', 'job-contracts', 'job-trains', 'handback-queue', 'sources/import-proposals.md',
         'direction.md', 'role.md', 'standards.md', 'lessons.md', 'synthesis.json', 'feedback.md'))
     from . import rotation, status, reports, tasks, task_flow, verify, watch, jobs, job_attempts, machine
+    from . import recurrence, hosts
+    for target in recurrence.synthesis_targets(inst, n):
+        if 'error' not in target:
+            paths.extend(target['dir'] / name for name in ('direction.md', 'role.md', 'standards.md', 'lessons.md', 'synthesis.json'))
     paths.extend((rotation.rotation_file(inst, n), status.hook_question_queue(n),
                   reports.preview_receipt_file(inst, n), inst.root / '.brain/worker-runs.json'))
     for family in ('review-receipts', 'review-findings', 'preview-receipts'):
@@ -255,7 +268,15 @@ def input_paths(inst, n):
         pass  # the display retains an invalid/missing preview verdict
     paths.append(inst.root / '.brain/wake' / ('job-stalls-' + watch.watch_digest(n['id']) + '.json'))
     if n['id'] == 'root':
-        paths.extend((inst.root / '.brain/coordinator-runs.json', inst.root / '.brain/core-remote.json'))
+        paths.extend((inst.root / '.brain/coordinator-runs.json', inst.root / '.brain/core-remote.json',
+                      inst.root / '.brain/host-observations.json'))
+        paths.append(common.CORE / 'adapters/hosts' / (inst.cfg.get('host', '') + '.env'))
+        for peer in inst.nodes():
+            if not peer['archived'] and peer['local'].get('coordinator'):
+                target, _ = hosts.wake_target(inst, peer)
+                directory = hosts.wake_directory(inst, target)
+                paths.append(directory / 'turn.json')
+                paths.extend(directory.glob('*.pending'))
     if any(job_attempts.current_attempt(n, row, strict=False) for row in jobs.read_jobs(n) or []):
         paths.extend(machine.machine_dir() / name for name in ('machine-care-queue.json', 'machine-care.json'))
     # Only task nodes reached by the projection's dependency checks are read.
@@ -310,20 +331,31 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
                     for target in selected for w in target['local'].get('worktrees', {}).values()]
         def paths():
             return [path for target in selected for path in input_paths(current, target)] + list(extra() if callable(extra) else extra)
-        with instance.released(inst, list(current.nodes()), extra=paths):
+        with instance.released(inst, list(current.nodes())):
             token = _ACTIVE.set(True)
             observer = common._GIT_OBSERVER.set(git_inputs.observe)
             reads = common._GIT_READS.set(None)
             try:
-                from . import ui_readmodel, spend
-                with ui_readmodel.observe(current), spend.spend_read_only(), timings.phase('refresh_compute'):
+                from . import ui_readmodel, spend, status
+                with ui_readmodel.observe(current), spend.spend_read_only(), status.machine_alert_snapshot() as alerts, timings.phase('refresh_compute'):
+                    before_paths = tuple(sorted(set(paths())))
+                    before = generation(before_paths)
                     result = build(current, node)
+                    final_paths = tuple(sorted(set(paths())))
+                    expected = generation(final_paths)
+                    if before_paths != final_paths or before != expected or not status.machine_alerts_current(current, alerts):
+                        common.die('state changed during the unlocked step; retry from fresh state')
             finally:
                 common._GIT_OBSERVER.reset(observer)
                 common._GIT_READS.reset(reads)
                 _ACTIVE.reset(token)
         with timings.phase('refresh_revalidate'):
+            if generation(final_paths) != expected:
+                common.die('state changed during the unlocked step; retry from fresh state')
             if any(path.is_dir() != existed for path, existed in bindings):
                 common.die('status refresh inputs changed during computation; retry from fresh state')
             git_inputs.validate()
+            if not status.machine_alerts_current(current, alerts) or generation(final_paths) != expected:
+                common.die('state changed during the unlocked step; retry from fresh state')
+            git_inputs.final_check()
         return result

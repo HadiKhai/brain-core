@@ -405,6 +405,32 @@ def facts_meta(n):
 
 
 _LOCAL_JOB_SNAPSHOT = ContextVar('brain_local_job_snapshot', default=None)
+_MACHINE_ALERT_SNAPSHOT = ContextVar('brain_status_machine_alerts', default=None)
+
+
+@contextmanager
+def machine_alert_snapshot():
+    values = {}
+    token = _MACHINE_ALERT_SNAPSHOT.set(values)
+    try:
+        yield values
+    finally:
+        _MACHINE_ALERT_SNAPSHOT.reset(token)
+
+
+def status_machine_alert(inst):
+    values = _MACHINE_ALERT_SNAPSHOT.get()
+    if values is None:
+        return _m_machine.machine_episode_due(inst)
+    key = str(inst.root)
+    if key not in values:
+        values[key] = _m_machine.machine_episode_due(inst)
+    return values[key]
+
+
+def machine_alerts_current(inst, values):
+    key = str(inst.root)
+    return key not in values or values[key] == _m_machine.machine_episode_due(inst)
 
 
 @contextmanager
@@ -744,7 +770,7 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
             else:
                 items.append(advice)
     if n['id'] == 'root':
-        episode = _m_machine.machine_episode_due(inst)
+        episode = status_machine_alert(inst)
         if episode:
             add(episode['kind'], episode['text'], **{k: v for k, v in episode.items() if k not in ('kind', 'text')})
     for line in overdue_questions(inst, n, state["inbox"]):
@@ -1743,7 +1769,7 @@ def attention_items(inst, nodes, readonly=False, lifecycle_data=None):
                 for l in inbox_lines(n, readonly=readonly, lifecycle_data=lifecycle_data)]
         out += [(n["id"], "job", text) for text in runaway_jobs(inst, n)]
         if n["id"] == "root":
-            episode = _m_machine.machine_episode_due(inst)
+            episode = status_machine_alert(inst)
             if episode and episode["kind"] == "machine-alert":
                 out.append((n["id"], "machine-alert", episode["text"]))
         u = updated_at(inst, n)
