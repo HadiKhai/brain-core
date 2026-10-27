@@ -159,6 +159,8 @@ def governance_principals(n):
 def governance_file(n, path):
     """Only real instance library items and specialist role files get metadata treatment."""
     path = Path(os.path.abspath(path))
+    if path.suffix != '.md':
+        return False
     if path.parent.name == "library" and path.suffix == ".md":
         owner = path.parent.parent
     elif path.name in ("role.md", "lessons.md") and path.parent.parent.name == "specialists":
@@ -344,7 +346,9 @@ def scan_terms(n, paths=(), terms=None):
     if not terms:
         return [], []
     hits, errors, repos, unread = [], [], {}, []
-    needles = [t.casefold() for t, _ in terms]
+    folded_terms = [(t.casefold(), label) for t, label in terms]
+    needles = tuple(t for t, _ in folded_terms)
+    path_matches = {}
     visited = set()
     principals = governance_principals(n)
 
@@ -377,7 +381,9 @@ def scan_terms(n, paths=(), terms=None):
             tracked = {f for _, _, _, f in entries}
             submodules = {f for mode, _, _, f in entries if mode == "160000"}
             for f in files:  # names and folders, then contents: every file, binary or not, whole
-                hits += [(label, f"{_m_common.tilde(root)}/{f}") for label in find_terms(f, terms)]
+                if f not in path_matches:
+                    path_matches[f] = find_terms(f, terms)
+                hits += [(label, f"{_m_common.tilde(root)}/{f}") for label in path_matches[f]]
                 if f in submodules:
                     sub = root / f
                     if not (sub / ".git").exists():
@@ -392,7 +398,7 @@ def scan_terms(n, paths=(), terms=None):
                 kind = governance_file(n, fp)
                 seen = file_mentions(fp, needles, errors=unread,
                                      principals=principals if kind else (), lessons=kind == "lessons")
-                hits += [(label, f"{_m_common.tilde(root)}/{f}") for t, label in terms if t.casefold() in seen]
+                hits += [(label, f"{_m_common.tilde(root)}/{f}") for t, label in folded_terms if t in seen]
             blobs = {}
             included = set(files)
             for mode, oid, stage, f in entries:
@@ -431,7 +437,7 @@ def scan_terms(n, paths=(), terms=None):
                                 if proc.stdout.read(1) != b"\n":
                                     raise OSError("incomplete Git blob response")
                                 hits += [(label, f"index stage {stage}: {_m_common.tilde(root)}/{f}")
-                                         for f, stage in names for t, label in terms if t.casefold() in seen]
+                                         for f, stage in names for t, label in folded_terms if t in seen]
                     except (OSError, ValueError) as e:
                         errors.append(redact(f"reading index in {_m_common.tilde(root)}: {e}", terms))
                     finally:
@@ -453,8 +459,8 @@ def scan_terms(n, paths=(), terms=None):
                     kind = governance_file(n, fp)
                     seen = file_mentions(fp, needles, errors=unread,
                                          principals=principals if kind else (), lessons=kind == "lessons")
-                    hits += [(label, _m_common.tilde(fp)) for t, label in terms
-                             if t.casefold() in seen or t.casefold() in str(fp.relative_to(root)).casefold()]
+                    hits += [(label, _m_common.tilde(fp)) for t, label in folded_terms
+                             if t in seen or t in str(fp.relative_to(root)).casefold()]
     for root in repos.values():
         log = _m_common.git("log", "--all", "--format=%h%x00%B%x01", cwd=root)
         if log.returncode:
