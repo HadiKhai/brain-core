@@ -372,6 +372,29 @@ ui_json.ui_json_background(root, '[]')
         self.assertFalse((queue / 'shape.json').exists())
         self.assertIn('Pick a shape?', (node['dir'] / 'inbox.md').read_text())
 
+    def test_selected_observation_copies_only_its_record_and_preserves_isolation(self):
+        root = self.init('demo')
+        module = self.m._owners['observe']
+        selected = {'baseline': {'processed': 10}, 'nested': [1]}
+        class OtherRecord:
+            def __deepcopy__(self, memo):
+                raise AssertionError('copied an unrelated lifecycle record')
+        ledger = {'usage': {'selected': selected, 'other': OtherRecord()}}
+        reader = mock.Mock(return_value=ledger)
+        inst = self.m.UIInstance(root)
+        path = root / '.brain/wake/lifecycle.json'
+        with module.observe(inst) as view:
+            first = view.store(path, reader, select=lambda data: data['usage']['selected'])
+            first['baseline']['processed'] = 99
+            first['nested'].append(2)
+            second = view.store(path, reader, select=lambda data: data['usage']['selected'])
+            self.assertEqual(second, selected)
+            self.assertEqual(reader.call_count, 1)
+        selected['baseline']['processed'] = 20
+        with module.observe(inst) as view:
+            self.assertEqual(view.store(path, reader, select=lambda data: data['usage']['selected']), selected)
+        self.assertEqual(reader.call_count, 2)
+
     def test_readmodel_cache_validates_binding_and_keeps_metadata_separate_from_usage(self):
         ReadModel = self.m.ReadModel
         root = self.init('demo')

@@ -31,11 +31,12 @@ class Observation:
         self.root = root.resolve()
         self.records = {}
 
-    def store(self, path, reader):
+    def store(self, path, reader, select=None):
         key = str(path)
         if key not in self.records:
             self.records[key] = reader()
-        return copy.deepcopy(self.records[key])
+        value = self.records[key]
+        return copy.deepcopy(select(value) if select is not None else value)
 
 
 @contextlib.contextmanager

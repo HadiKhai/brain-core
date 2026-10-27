@@ -52,15 +52,6 @@ class Spend(Scenario):
         self.assertIsNone(m.spend_stamp(b'not a timestamp'))
         self.assertLessEqual(m.spend_month.cache_info().currsize, 128)
 
-    def test_codex_candidate_search_retains_all_record_and_tool_forms(self):
-        m = core_loader.SourceFileLoader('candidate_fast_path', str(CORE / 'bin/brain')).load_module()
-        markers = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"',
-                   b'"turn_context"', b'"user_message"', b'_call"')
-        # Nested and malformed candidates must still reach the existing JSON
-        # parser; a filter may reject only records the original filter rejected.
-        for marker in (*markers, b'"agent_message"', b'token_count', b'\\"token_count\\"', b'\xff'):
-            raw = b'{"payload":"' + b'large tool output ' * 1000 + b'",' + marker + b'}'
-            self.assertEqual(bool(m.SPEND_CODEX_HOT.search(raw)), any(x in raw for x in markers))
 
     def setUp(self):
         super().setUp()

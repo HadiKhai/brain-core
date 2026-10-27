@@ -37,8 +37,6 @@ JOB_MARK = "brain-job: {}"  # in every job brief: the sessions a brief starts ar
 JOB_MARK_RE = re.compile(rb"brain-job: ([0-9a-f]{24})\b")
 SPEND_STAMP = re.compile(rb'"timestamp":"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(\.\d+)?')
 SPEND_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,79}")
-# One C-level search replaces repeated full-line scans of large tool payloads.
-SPEND_CODEX_HOT = re.compile(rb'"(?:session_meta|token_usage_record|token_count|compacted|turn_context|user_message)"|_call"')
 SPEND_RECENT = 64  # Claude splits one response into a few adjacent records: ids remembered to count it once
 
 
@@ -174,7 +172,9 @@ def spend_codex_line(agg, raw, minute, at=None):
     if at is not None and st["own_start"] is not None and at < st["own_start"]:
         return  # history a fork copied from its parent: the parent's own file counts it, its time too
     spend_add(agg, "m", minute, -1, (1, 0, 0, 0, 0, 0, 0))
-    if not SPEND_CODEX_HOT.search(raw) and not (not st["prompt_done"] and b'"user' in raw):
+    hot = (b'"session_meta"', b'"token_usage_record"', b'"token_count"', b'"compacted"', b'"turn_context"', b'"user_message"',
+           b'_call"')
+    if not any(h in raw for h in hot) and not (not st["prompt_done"] and b'"user' in raw):
         return
     try:
         r = json.loads(raw)
@@ -1047,9 +1047,16 @@ def job_round_usage(inst, n, row, usage):
     time since their acknowledgement instead of charging the previous worker's hours.
     """
     from . import reminders as _m_reminders
+    from . import ui_readmodel
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
-    with _m_reminders.lifecycle_store(inst, readonly=True) as data:
-        record = data['usage'].get(key)
+    view = ui_readmodel.projection(inst.root)
+    if view is not None:
+        record = view.store(inst.root / '.brain/wake/lifecycle.json',
+                            lambda: _m_reminders.lifecycle_read(inst),
+                            select=lambda data: data['usage'].get(key))
+    else:
+        with _m_reminders.lifecycle_store(inst, readonly=True) as data:
+            record = data['usage'].get(key)
     if record is None:
         return None
     if not isinstance(record, dict) or record.get('job') != _m_jobs.job_key(row):

@@ -2960,3 +2960,32 @@ and month. Day, hour, minute and second overflow retains calendar.timegm's
 normalization, and fractional seconds retain their previous interpretation.
 No transcript observation or accounting result is retained by this arithmetic
 cache, and the aggregate schema does not change.
+
+## Retain guard blob verdicts for detached dashboard fills
+
+A full detached dashboard fill keeps its own term verdicts under the private
+UI cache directory. It uses the scanner's existing compiled/source identity,
+policy, descriptor, object-storage and Git-binding checks. Every fill still
+reads inventories, paths, refs and commit messages; a changed source, unsafe
+storage or damaged cache falls back to scanning. The ordinary check cache and
+its explicit publication policy remain separate. A fill whose optional storage
+was refused does not publish this cache.
+
+## Preserve generation-aware watchers and revalidate warm file reads
+
+Integration keeps one generation-aware WatchGroups definition. Both the
+persistent and per-command term-file shortcuts recheck the opened descriptor
+after cache lookup; a concurrent change reports an incomplete scan. Warm
+lookups retain the same descriptor-stability obligation as complete body reads.
+
+The compiled candidate filter described above is removed: full-parser samples
+showed a regression despite an isolated candidate-search win. Retain literal
+candidate checks and the independent Gregorian-month arithmetic optimization.
+
+## Select one detached lifecycle record before copying
+
+Read-only round-usage projection selects its job record from the command's
+captured lifecycle ledger before making a defensive deep copy. Unrelated
+receipts are not copied for each job. The selected nested data remains detached,
+mutations cannot reach the captured ledger, and a new observation reads current
+source state. Mutating projections retain whole-ledger defensive copies.
