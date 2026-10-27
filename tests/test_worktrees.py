@@ -129,6 +129,49 @@ cli.main()
     def test_wt_refuses_stale_projection_after_integration_moves(self):
         self.projection_race(['wt', 'add', 'app', 'job-race', '--no-setup'], 'git')
 
+    def machine_unlocked(self, command):
+        root = self.init('machine-unlocked')
+        home = self.repo(self.tmp / 'app')
+        self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+        calls = self.tmp / 'machine-calls'
+        # A separate process is essential: brain_lock is process-reentrant.
+        script = '''import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1] + '/lib')
+from brain import cli, instance, machine
+original, calls = machine.machine_state, Path(sys.argv[2])
+def observed(*args, **kwargs):
+    with calls.open('a') as stream:
+        stream.write(('locked' if instance._LOCK['fh'] is not None else 'unlocked') + ' ')
+    return original(*args, **kwargs)
+machine.machine_state = observed
+args = json.loads(sys.argv[3])
+sys.argv = [sys.argv[0], *args]
+cli.main()
+'''
+        env = {**self.env, 'BRAIN_ROOT': str(root)}
+        run = subprocess.run([sys.executable, '-B', '-c', script, str(CORE), str(calls), json.dumps(command)],
+                             cwd=root, env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        # The status projection reads machine telemetry twice (facts, snapshot);
+        # neither read may hold the writer lock.
+        reads = calls.read_text().split()
+        self.assertTrue(reads, run.stdout + run.stderr)
+        self.assertEqual(set(reads), {'unlocked'}, reads)
+        rows = [json.loads(line) for line in (root / '.brain/events.jsonl').read_text().splitlines()]
+        last = [row for row in rows if row['kind'] == 'commit'][-1]['data']
+        self.assertTrue(last['maintenance_ok'])
+        self.assertIn('Machine (snapshot at refresh', (root / 'nodes/app/status.md').read_text())
+
+    def test_report_reads_machine_snapshot_unlocked(self):
+        self.machine_unlocked(['report', 'app', 'race'])
+
+    def test_workbench_reads_machine_snapshot_unlocked(self):
+        self.machine_unlocked(['workbench', 'app', '--path'])
+
+    def test_wt_reads_machine_snapshot_unlocked(self):
+        self.machine_unlocked(['wt', 'add', 'app', 'job-race', '--no-setup'])
+
     def test_first_ledger_runtime_matches_worker_route_before_brief(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "app")
