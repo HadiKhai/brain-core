@@ -351,19 +351,20 @@ def git_state_paths(home):
     """
     marker = Path(home) / '.git'
     paths = [marker] if not marker.is_dir() else []
-    directory = marker
-    if marker.is_file():
-        value = marker.read_text().strip()
-        if not value.startswith('gitdir: '):
-            raise ValueError('invalid Git directory pointer')
-        directory = (Path(home) / value[8:]).resolve()
-    common = directory / 'commondir'
-    paths.append(common)
-    bases = [directory]
-    if common.is_file():
-        bases.append((directory / common.read_text().strip()).resolve())
+    bases = []
+    # Ask Git which metadata it actually reads: internal child nodes can share
+    # an ancestor repository, and linked worktrees/bare homes have other layouts.
+    # Supplying the unchanged environment bypasses display-query memoization;
+    # this is a publication recheck, never a cached layout observation.
+    for flag in ('--absolute-git-dir', '--git-common-dir'):
+        result = _m_common.git('rev-parse', flag, cwd=home, env=dict(os.environ))
+        value = result.stdout.strip()
+        if result.returncode == 0 and value:
+            base = (Path(home) / value).resolve()
+            bases.append(base)
+            paths.extend((base / 'commondir', (base / 'commondir').resolve()))
     for base in bases:
-        for name in ('HEAD', 'refs', 'packed-refs', 'config'):
+        for name in ('HEAD', 'refs', 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
             path = base / name
             paths.extend((path, path.resolve()))
             if name == 'refs' and path.is_dir():

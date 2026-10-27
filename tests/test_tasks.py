@@ -11,6 +11,37 @@ from brain.instance import Instance
 
 
 class Tasks(Scenario):
+    def assert_conversion_rechecks_internal_main(self, child=False, normalized_status=False):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        node = self.peer_node('producer') if child else self.n
+        self.ops_done(node)
+        changes = {'completion_kind': 'merge', 'merge_sha': head, 'baseline_sha': base,
+                   'code_path': 'engine.py', 'scope': ['engine.py']}
+        if normalized_status:
+            changes['status'] = ' DONE '
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('update-ref', 'refs/heads/main', base, cwd=self.root)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            tasks.mutate(self.inst, node, 'OPS-1', changes)
+        self.assertEqual(tasks.read_records(node)['OPS-1']['completion_kind'], 'ops')
+
+    def test_completion_kind_conversion_without_status_rechecks_internal_main(self):
+        self.assert_conversion_rechecks_internal_main()
+
+    def test_child_node_completion_conversion_rechecks_ancestor_git_main(self):
+        self.assert_conversion_rechecks_internal_main(child=True)
+
+    def test_normalized_completion_status_rechecks_internal_main(self):
+        self.assert_conversion_rechecks_internal_main(normalized_status=True)
+
     def test_report_artifact_change_after_validation_refuses_new_completion(self):
         import hashlib
         path = self.root / 'measurement.txt'
