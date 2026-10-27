@@ -3654,3 +3654,18 @@ Machine telemetry is sampled concurrently with the generated view while the writ
 lock is released, then rendered from that same observation. It remains display-only.
 Task reverse edges are constructed in one pass, preserving record order and one
 entry per dependent even when a dependency is repeated.
+
+## 2026-10-27: Cache generated ledger facts by independent semantic inputs
+
+Generated status keeps bounded, content-addressed string sections in the existing
+private derived database. Ledger records, local worktree/ref observations, worker
+projections, merge baseline, metadata mode, timezone and privacy terms bind each
+section. Input dictionaries retain their order. Only changed sections render
+again; missing or damaged storage falls back to fresh computation. Cache entries
+are bound to implementation bytes and contain no raw input records.
+
+Tasks, inbox requests, time thresholds, reminder lifecycle and readiness are
+observed on every command. No cached status section authorizes an action or skips
+the existing unlocked publication fence. Finished-job display uses a linear
+ordered lookup, retaining duplicate ledger keys rather than repeatedly hashing
+every ledger row for every due item.
