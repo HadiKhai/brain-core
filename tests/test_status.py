@@ -475,7 +475,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             self.git('add', 'concurrent.txt', cwd=wt)
             self.git('commit', '-qm', 'relevant branch change', cwd=wt)
             return text
-        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+        with mock.patch.dict(os.environ, self.env), self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
             refresh.compute(inst, node, changed)
         self.assertEqual((node['dir'] / 'status.md').read_bytes(), original)
 
