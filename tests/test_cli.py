@@ -210,6 +210,41 @@ class FixtureSetup(Scenario):
                     for template in cache.values():
                         template.directory.cleanup()
 
+    def test_remote_setup_clones_keep_origin_local_and_independent_after_source_removal(self):
+        import scenario
+        cases = []
+        built = []
+        def build(case):
+            built.append(case.tmp)
+            seed = case.repo(case.tmp / 'seed')
+            origin = case.tmp / 'origin.git'
+            case.git('clone', '--bare', str(seed), str(origin), cwd=case.tmp)
+            home = case.tmp / 'app'
+            case.git('clone', str(origin), str(home), cwd=case.tmp)
+            return seed, origin, home
+        with mock.patch.object(scenario, '_setup_templates', {}):
+            try:
+                for _ in range(3):
+                    case = Scenario()
+                    case.setUp()
+                    cases.append(case)
+                    self.addCleanup(case.doCleanups)
+                    self.addCleanup(case.tearDown)
+                    seed, origin, home = case.cached_setup('remote-control', lambda: build(case))
+                    self.assertEqual(case.git('remote', 'get-url', 'origin', cwd=home).strip(), str(origin))
+                self.assertEqual(built, [cases[0].tmp])
+                cases[0].tearDown()
+                second, third = cases[1:]
+                second.git('commit', '--allow-empty', '-qm', 'independent remote', cwd=second.tmp / 'app')
+                second.git('push', 'origin', 'main', cwd=second.tmp / 'app')
+                for case in (second, third):
+                    case.git('fetch', 'origin', cwd=case.tmp / 'app')
+                self.assertNotEqual(second.git('rev-parse', 'main', cwd=second.tmp / 'origin.git'),
+                                    third.git('rev-parse', 'main', cwd=third.tmp / 'origin.git'))
+            finally:
+                for template in scenario._setup_templates.values():
+                    template.directory.cleanup()
+
     def test_instance_templates_preserve_registration_operator_and_independent_git(self):
         import scenario
         cases = []

@@ -32,6 +32,14 @@ for name in ('diagnostics', 'full_gate', 'spec_run', 'train', 'dispatcher', 'sco
 
 
     def project(self, command="python3 -B verify.py", settings=()):
+        # This helper is also borrowed by TrainReviewFixes, rather than inherited.
+        settings = tuple(settings)
+        root, home = self.cached_setup(('train-project', command, settings),
+            lambda: MergeTrain.project_fixture(self, command, settings))
+        self.root, self.home = root, home
+        return root, home
+
+    def project_fixture(self, command, settings):
         root = self.init("alice")
         home = self.repo(self.tmp / "app", {"verify.py": "from pathlib import Path\nassert not Path('bad').exists()\n", "shared": "base\n"})
         self.fixture_b(root, "new", "a", "--title", "A", "--home", str(home))

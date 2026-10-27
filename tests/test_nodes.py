@@ -790,6 +790,9 @@ class TeamHomes(Scenario):
         self.assertIn(packet["head"], ledger)
 
     def team(self):
+        return self.cached_setup('team-home', self.team_fixture)
+
+    def team_fixture(self):
         root = self.init("alice")
         seed = self.repo(self.tmp / "seed")
         self.git("branch", "-m", "trunk", cwd=seed)

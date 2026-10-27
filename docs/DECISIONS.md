@@ -2955,3 +2955,14 @@ opt-ins keep real subprocesses, with an explicit per-call native escape.
 Share only immutable compiled source across identical fixture copies; recursively
 bind nested code filenames to each actual source path. Module globals, locks,
 context variables and initialized caches are always newly constructed per call.
+
+## D28006: Reuse complete deterministic scenario setup trees
+
+Cache complete lane-map, remote-home and merge-train project setup by their
+configuration inputs. Each test receives independent files and Git metadata,
+relocated local remote paths and machine bindings, and refreshed Git indexes.
+Restore helper instance attributes on cache hits as well as initial builds.
+Keep changed configurations distinct and rebuild when a test has already changed
+its HOME. Old-core migration producers and asserted test operations retain their
+original execution paths. A remote-clone control removes the source fixture and
+proves subsequent fetch/push operations stay within each independent clone.
