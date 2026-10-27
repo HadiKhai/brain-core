@@ -438,8 +438,8 @@ atomic_write(sys.argv[2], 'new', private=sys.argv[4] == 'True')
         before = self.path.stat()
         with self.m.directory_target(self.path) as target:
             target.recover_mode()
-        self.assertEqual(self.path.read_text(), 'old')
         self.assertEqual(self.path.stat(), before)
+        self.assertEqual(self.path.read_text(), 'old')
         self.assertTrue(record.exists())
         staging, = self.path.parent.glob('.record.json.*')
         self.assertEqual(staging.read_text(), 'new')
@@ -546,3 +546,61 @@ atomic_write(sys.argv[2], 'new', private=sys.argv[4] == 'True')
             target.atomic_write('retry', expected=before)
         self.assertEqual(self.path.read_text(), 'retry')
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o640)
+
+    def test_recovery_sync_races_preserve_independent_edits_and_intent(self):
+        for phase in ('file', 'directory'):
+            with self.subTest(phase=phase):
+                self.path.write_text('old')
+                self.path.chmod(0o640)
+                record = self.interrupted_publication()
+                real_sync = os.fsync
+                edits = []
+                def sync(fd):
+                    is_directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    if not edits and is_directory == (phase == 'directory'):
+                        edits.append(True)
+                        self.path.write_text('independent edit during recovery')
+                    return real_sync(fd)
+                with self.m.directory_target(self.path) as target:
+                    expected = target.generation(target.stat())
+                    with mock.patch.object(self.m.os, 'fsync', side_effect=sync), \
+                            mock.patch.object(self.m.os, 'replace') as replace:
+                        with self.assertRaisesRegex(OSError, 'changed during mode recovery'):
+                            target.atomic_write('stale retry', expected=expected)
+                replace.assert_not_called()
+                self.assertEqual(edits, [True])
+                self.assertEqual(self.path.read_text(), 'independent edit during recovery')
+                self.assertTrue(record.exists())
+                record.unlink()
+
+    def test_restrictive_umask_still_creates_recoverable_private_intent(self):
+        self.path.chmod(0o640)
+        old = os.umask(0o200)
+        try:
+            record = self.interrupted_publication()
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE(record.stat().st_mode), 0o600)
+        self.m.atomic_write(self.path, 'retry')
+        self.assertFalse(record.exists())
+        self.assertEqual(self.path.read_text(), 'retry')
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o640)
+
+    def test_recovery_chmod_race_refuses_same_size_edit_with_restored_mtime(self):
+        self.path.chmod(0o640)
+        record = self.interrupted_publication()
+        before = self.path.stat()
+        real_chmod = os.fchmod
+        def chmod(fd, mode):
+            real_chmod(fd, mode)
+            self.path.write_text('bad')
+            os.utime(self.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.m.directory_target(self.path) as target:
+            expected = target.generation(target.stat())
+            with mock.patch.object(self.m.os, 'fchmod', side_effect=chmod), \
+                    mock.patch.object(self.m.os, 'replace') as replace:
+                with self.assertRaisesRegex(OSError, 'changed during mode recovery'):
+                    target.atomic_write('stale retry', expected=expected)
+        replace.assert_not_called()
+        self.assertEqual(self.path.read_text(), 'bad')
+        self.assertTrue(record.exists())

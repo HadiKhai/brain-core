@@ -437,6 +437,9 @@ class DirectoryTarget:
         identity = (held.st_dev, held.st_ino)
         try:
             fcntl.flock(record_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.fchmod(record_fd, 0o600)
+            if stat.S_IMODE(os.fstat(record_fd).st_mode) != 0o600:
+                raise OSError('intended-mode record is not private')
             data = json.dumps(dict(version=1, destination=self.path.name, device=st.st_dev,
                                    inode=st.st_ino, size=st.st_size, mtime_ns=st.st_mtime_ns,
                                    sha256=hashlib.sha256(text.encode('utf-8')).hexdigest(), mode=mode)).encode()
@@ -510,10 +513,25 @@ class DirectoryTarget:
                     mode = 0o600 if self.private else record['mode']
                     if stat.S_IMODE(opened.st_mode) != mode:
                         os.fchmod(stream.fileno(), mode)
+                    prepared = os.fstat(stream.fileno())
+                    # Only our chmod may change mode/ctime. Do not adopt an
+                    # independent write as the caller's expected generation.
+                    if (self.generation(prepared)[:4] != before[:4]
+                            or prepared.st_nlink != opened.st_nlink
+                            or prepared.st_uid != opened.st_uid
+                            or stat.S_IMODE(prepared.st_mode) != mode):
+                        raise OSError('published content changed during mode recovery')
                     os.fsync(stream.fileno())
+                    os.fsync(self.fd)
+                    stream.seek(0)
+                    recovered_digest = hashlib.sha256()
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        recovered_digest.update(chunk)
                     self.check_file(stream.fileno())
-                    current = os.fstat(stream.fileno())
-                os.fsync(self.fd)
+                    if (self.generation(os.fstat(stream.fileno())) != self.generation(prepared)
+                            or recovered_digest.hexdigest() != record['sha256']):
+                        raise OSError('published content changed during mode recovery')
+                    current = prepared
                 self.unlink_owned(name, (held.st_dev, held.st_ino))
             finally:
                 os.close(fd)
