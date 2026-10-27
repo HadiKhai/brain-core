@@ -395,6 +395,9 @@ class AutonomyDue(AutonomyProject):
 class AutonomyFacts(AutonomyProject):
     def test_refresh_computes_unlocked_beside_a_real_background_commit(self):
         root, home, wt = self.project()
+        (wt / 'feature.txt').write_text('worker change\n')
+        self.git('add', 'feature.txt', cwd=wt)
+        self.git('commit', '-qm', 'worker change', cwd=wt)
         (home / 'unrelated.bin').write_bytes(b'before')
         self.git('add', 'unrelated.bin', cwd=home)
         self.git('commit', '-qm', 'unrelated source', cwd=home)
@@ -489,16 +492,44 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         base = self.git('rev-parse', 'HEAD', cwd=home).strip()
         self.git('commit', '--allow-empty', '-qm', 'concurrent target', cwd=home)
         head = self.git('rev-parse', 'HEAD', cwd=home).strip()
-        for branch in ('job/fix+api', 'job/café'):
+        for branch in ('job/fix+api', 'job/café', 'job/unqualified'):
             with self.subTest(branch=branch):
                 ref = 'refs/heads/' + branch
                 self.git('update-ref', ref, base, cwd=home)
                 def changed(current, target):
-                    answer = common.git('rev-parse', '--verify', ref, cwd=home).stdout
+                    answer = common.git('rev-parse', '--verify', branch if branch == 'job/unqualified' else ref, cwd=home).stdout
                     self.git('update-ref', ref, head, cwd=home)
                     return answer
                 with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
                     refresh.compute(inst, inst.node('app'), changed)
+
+    def test_refresh_fences_linked_worktree_head_history(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_linked_history', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        def changed(current, target):
+            answer = refresh.common.git('log', '-1', '--format=%H', cwd=wt).stdout
+            self.git('commit', '--allow-empty', '-qm', 'new worker history', cwd=wt)
+            return answer
+        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+            refresh.compute(inst, inst.node('app'), changed)
+
+    def test_refresh_reports_maintenance_refusal_as_failure(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_maintenance_failure', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        events = __import__('importlib').import_module(loader.package_name + '.events')
+        inst = m.Instance(root)
+        with mock.patch.object(events, 'maintain', side_effect=ValueError('concurrent input changed')):
+            with self.assertRaisesRegex(SystemExit, 'status refresh maintenance refused'):
+                with m.brain_lock(inst), events.Command(root, command='status'):
+                    pass
+        commit = events.read(inst)[-1]
+        self.assertEqual(commit['kind'], 'commit')
+        self.assertFalse(commit['data']['maintenance_ok'])
+        self.assertEqual(commit['data']['views'], {})
 
     def test_refresh_fences_symbolic_replacement_targets(self):
         root, home, wt = self.project()

@@ -85,7 +85,14 @@ class GitInputs:
         # dependency guesses. Valid ref names include Unicode, '+' and '@'.
         replay = command not in ('remote', 'symbolic-ref', 'rev-parse', 'merge-base', 'rev-list', 'log', 'for-each-ref', 'diff')
         revisions = query[1:query.index('--')] if '--' in query else query[1:]
+        option_value = False
         for arg in revisions:
+            if option_value:
+                option_value = False
+                continue
+            if command == 'log' and arg in ('-S', '-G'):
+                option_value = True
+                continue
             if arg.startswith('-'):
                 continue
             for revision in re.split(r'\.\.\.?', arg):
