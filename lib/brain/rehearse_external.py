@@ -627,6 +627,9 @@ def install_accounting(path, expected, clock):
     # UI machine totals have no authorized aggregate here. Keep them explicitly
     # incomplete rather than treating an empty provider HOME as measured zero.
     spend.spend_machine = lambda inst, budget=2.0: copy.deepcopy(packet['machine_usage'])
+    # Context/turn measurements have no Brain-owned aggregate to attest. The
+    # reader's native unknown value must not fall through to provider files.
+    spend.coordinator_measure = lambda inst, node: None
     spend.spend_input_signature = lambda inst: ('rehearsal-accounting-v1', expected, clock)
     def refuse_discovery(inst):
         raise ValueError('provider accounting discovery is outside the frozen aggregate contract')
