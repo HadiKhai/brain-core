@@ -64,7 +64,7 @@ def job_evidence(n, row):
                         actual.stdout.strip() == branch and Path(root.stdout.strip()).resolve() == path.resolve() and
                         common.stdout.strip() == other.stdout.strip()):
                     return {**result, 'state': 'live', 'worktree': str(path)}
-    if row.get('Ended') and row.get('Outcome') in ('abandoned', 'closed') and row.get('Cause'):
+    if row.get('Ended') and row.get('Outcome') == 'abandoned' and row.get('Cause'):
         # A bare claim of supersession is not proof of delivered replacement work.
         if not re.search(r'supersed', row['Cause'], re.I):
             result['state'] = 'abandoned'
@@ -95,11 +95,14 @@ def nonwork_reason(inst, n, row, requirements, lifecycle):
     protected = re.search(r'<!-- (?:host-question|handback|worker-failure|communication):', quote)
     if not protected and re.match(r'(?:FYI(?:\s+only)?\b|no action (?:needed|required)\b)', text, re.I):
         return 'Imported explicitly labelled FYI is not work.'
-    current = lifecycle['inbox'].get(n['id'], {}).get(_m_reminders.inbox_source_id(n, quote), {})
-    if current.get('answered') is True and any(
-            a.get('id') == current.get('id') and a.get('node') == n['id'] and
-            a.get('source_id') == _m_reminders.inbox_source_id(n, quote) and a.get('answer')
-            for a in lifecycle['answers'] if isinstance(a, dict)):
+    episodes = lifecycle['inbox'].get(n['id'], {})
+    if not isinstance(episodes, dict):
+        raise ValueError('invalid inbox lifecycle receipts')
+    key = _m_reminders.inbox_source_id(n, quote)
+    current = episodes.get(key)
+    if key in episodes:
+        _m_reminders.validate_inbox_episode(n, key, current, lifecycle['answers'])
+    if current is not None and current.get('answered') is True:
         return 'Imported inbox question already has an exact retained answer.'
     return None
 
@@ -140,7 +143,8 @@ def plan_node(inst, n, lifecycle):
             proof = job_evidence(n, job) if job else {'state': 'unknown', 'ref': 'missing ledger job'}
             if proof['state'] == 'merged':
                 row.update(status='done', merge_sha=proof['merge_sha'], baseline_sha=proof['base'],
-                           code_path=','.join(proof['code_paths']), scope=row.get('scope') or proof['code_paths'])
+                           code_path=','.join(proof['code_paths']), scope=row.get('scope') or proof['code_paths'],
+                           event_pending='task_landed')
             elif proof['state'] == 'abandoned':
                 reason = 'Imported job attempt abandoned: ' + proof['cause']
             elif proof['state'] == 'live':
@@ -218,6 +222,11 @@ def reconcile(inst, nodes, apply=False, drain=False):
             if drain:
                 _m_notices.expire(inst, nodes)
             inst.commit([], 'Reconcile imported task records without deleting sources')
+            # Publication follows the entire durable batch, including interrupted replays.
+            for n in nodes:
+                for row in _m_tasks.read_records(n).values():
+                    if row.get('reconcile_rule') == DECISION and row.get('event_pending') == 'task_landed':
+                        _m_tasks.emit_task_landed(inst, n, row)
         return [plan[0] for _, plan in plans]
 
 

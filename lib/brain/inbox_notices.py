@@ -14,7 +14,7 @@ def terminal_notice(line):
         r'(?: <!-- machine-wait:[0-9a-f]{32}:(?:completed|exited) -->)?', line))
 
 
-def pending(line, record):
+def notice_pending(line, record):
     return not record['answered'] and not (record.get('expired') is True and terminal_notice(line))
 
 
@@ -31,7 +31,7 @@ def expire(inst, nodes, delivered=None, data=None):
         for line in lines:
             key = _m_reminders.inbox_source_id(n, line)
             record = current[key]
-            if (terminal_notice(line) and pending(line, record) and
+            if (terminal_notice(line) and notice_pending(line, record) and
                     (delivered is None or record['id'] in delivered)):
                 record.update(expired=True, seen_at=inst.now(), expiry_rule='terminal-machine-notice-v1')
                 changes.append({'node': n['id'], 'episode': record['id'], 'source_id': key})

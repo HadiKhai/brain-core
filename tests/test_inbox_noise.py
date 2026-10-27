@@ -247,7 +247,7 @@ class InboxNoise(Scenario):
         after = json.loads(self.b(self.root, 'due', 'root', '--json'))
         self.assertEqual([i['id'] for i in after if i['kind'] == 'job-landed'], [landed['id']])
 
-    def test_terminal_terminal_notice_expires_after_delivery_without_changing_source(self):
+    def test_terminal_machine_notice_expires_after_delivery_without_changing_source(self):
         reminders = self.m._owners['lifecycle_read']
         path = self.root / 'inbox.md'
         notice = '- 2026-10-25T15:41:07.261523+00:00 from machine: command completed: command completed successfully <!-- machine-wait:00ad91d121f4a41cac633f58bb1275f8:completed -->'

@@ -208,6 +208,17 @@ def next_request_id(n, key, data):
     return _m_jobs.digest([key, 'recurrence', previous]) if previous else key
 
 
+def validate_inbox_episode(n, key, record, answers):
+    if (not isinstance(record, dict) or not isinstance(record.get('id'), str) or
+            not re.fullmatch(r'[0-9a-f]{24}', record['id']) or type(record.get('answered')) is not bool):
+        raise ValueError('invalid inbox episode receipt')
+    if record['answered'] and not any(isinstance(a, dict) and a.get('id') == record['id']
+                                      and a.get('source_id') == key and a.get('node') == n['id']
+                                      and isinstance(a.get('answer'), str) and a['answer'].strip()
+                                      for a in answers):
+        raise ValueError('answered receipt has no retained answer')
+
+
 def reconcile_requests(inst, n, lines, data):
     previous = data['inbox'].get(n['id'], {})
     if not isinstance(previous, dict):
@@ -220,14 +231,7 @@ def reconcile_requests(inst, n, lines, data):
         record = previous.get(key)
         if record is None:
             record = {'id': next_request_id(n, key, data), 'answered': False}
-        if (not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))) or
-                type(record.get('answered')) is not bool):
-            raise ValueError('invalid inbox episode receipt')
-        if record['answered'] and not any(isinstance(a, dict) and a.get('id') == record['id']
-                                          and a.get('source_id') == key and a.get('node') == n['id']
-                                          and isinstance(a.get('answer'), str) and a['answer'].strip()
-                                          for a in data['answers']):
-            raise ValueError('answered receipt has no retained answer')
+        validate_inbox_episode(n, key, record, data['answers'])
         current[key] = record
     absent = set(previous) - set(current)
     closed = data.get('inbox_retired', {}).get(n['id'], {})
@@ -260,11 +264,11 @@ def request_lines(inst, n, lines, readonly=False, lifecycle_data=None):
     from . import inbox_notices
     if lifecycle_data is not None:
         current = reconcile_requests(inst, n, lines, lifecycle_data)
-        return [line for line in lines if inbox_notices.pending(line, current[inbox_source_id(n, line)])]
+        return [line for line in lines if inbox_notices.notice_pending(line, current[inbox_source_id(n, line)])]
     try:
         with lifecycle_store(inst, readonly=readonly) as data:
             current = reconcile_requests(inst, n, lines, data)
-            return [line for line in lines if inbox_notices.pending(line, current[inbox_source_id(n, line)])]
+            return [line for line in lines if inbox_notices.notice_pending(line, current[inbox_source_id(n, line)])]
     except (OSError, ValueError):
         return lines  # unknown receipts never hide a question
 

@@ -34,12 +34,15 @@ def record_path(n, ident, folder='tasks'):
     return path
 
 
-def read_records(n, folder='tasks'):
+def read_records(n, folder='tasks', ident=None):
     base = n['dir'] / folder
     if base.is_symlink():
         raise ValueError('record folder must not be a link')
     records = {}
-    for path in sorted(base.glob('*.md')):
+    paths = [record_path(n, ident, folder)] if ident is not None else sorted(base.glob('*.md'))
+    for path in paths:
+        if not path.exists():
+            continue
         record_path(n, path.stem, folder)
         fm, body = _m_common.read_fm(path)
         row = {}
@@ -142,7 +145,7 @@ def validate(n, records):
         for link in row['decisions']:
             if not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', link):
                 raise ValueError('decision links use repo:D123 or private:D-123')
-        if row.get('requirement') and row['requirement'] not in read_records(n, 'requirements'):
+        if row.get('requirement') and row['requirement'] not in read_records(n, 'requirements', row['requirement']):
             raise ValueError(ident + ': requirement not found')
         if row['status'] in ('in-progress', 'in-review', 'testing') and not external:
             if jobs is None:

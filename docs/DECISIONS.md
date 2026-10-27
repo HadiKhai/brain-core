@@ -2845,3 +2845,8 @@ any linked task remains active.
 Terminal machine completion/exit notices expire only after their successful inbox
 delivery, or an explicit drain. Expiry is a retained lifecycle receipt, separate from
 an answer, and never suppresses a question, worker failure or actionable machine hold.
+
+New task creation validates the new record and its outgoing reachable local dependency
+subgraph, with direct requirement lookups. Existing-record edits and explicit task
+checks retain whole-graph validation. This avoids repeatedly parsing every requirement
+for every existing task while holding the instance lock for a single unrelated add.
