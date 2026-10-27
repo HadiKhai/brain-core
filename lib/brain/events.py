@@ -1001,11 +1001,12 @@ def read_comparisons(inst, repair=False, prepared=None, prepare=False):
     cache = inst.root / '.brain/events-compare-index.json'
     stamp = _stamp(path)
     if prepared is not None and prepared[0] == stamp:
-        if prepared[1] is not None:
-            common.atomic_write(cache, prepared[1], private=True, create=True)
-        return prepared[2]
+        # This derived index is optional. A healthy refresh consumes the
+        # prepared rows without publishing a potentially large cache blob
+        # under the writer lock; ordinary writers retain their existing cache.
+        return prepared[1]
     if stamp is None:
-        return (None, None, []) if prepare else []
+        return (None, []) if prepare else []
     try:
         saved = json.loads(private_read(cache))
         if (saved['version'] != 1 or not isinstance(saved['rows'], list) or not isinstance(saved['first'], dict)
@@ -1047,7 +1048,7 @@ def read_comparisons(inst, repair=False, prepared=None, prepare=False):
     saved.update(rows=rows, first=first, mtime=stamp[3], anchor=_anchor(path, saved['offset']))
     result = rows + [r for r in first.values() if r not in rows]
     if prepare:
-        return stamp, json.dumps(saved, separators=(',', ':'), sort_keys=True), result
+        return stamp, result
     if repair:
         common.atomic_write(cache, json.dumps(saved, separators=(',', ':'), sort_keys=True), private=True, create=True)
     return result
