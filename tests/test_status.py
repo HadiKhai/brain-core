@@ -2267,10 +2267,12 @@ class IncrementalFacts(Scenario):
                       'historical_summary': None, 'ledger': self.row, 'admission': None,
                       'queue': None, 'next_action': 'inspect'}
         self.state['job_projections'] = {self.jobs.job_key(self.row): projection}
-        with mock.patch.object(self.m._m_verify, 'read_ready_packet', return_value=None):
+        packet = {'rehearsal': {'delivery': [projection['summary']]}}
+        with mock.patch.object(self.m._m_verify, 'read_ready_packet', return_value=packet):
             first = self.facts()
             self.assertEqual(self.facts(), first)
             self.assertNotIn(projection['summary'], '\n'.join(first[0]))
+            self.assertIn('Rehearsal delivery (recorded ready evidence):', first[0])
 
     def test_invalid_configured_timezone_binds_the_process_fallback_zone(self):
         import time
