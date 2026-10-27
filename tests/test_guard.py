@@ -1120,6 +1120,42 @@ class JobPreviewReceipts(Scenario):
                     link.unlink()
                     inst.local_path.write_text(json.dumps(original))
 
+    def test_skeleton_fences_the_latest_alias_when_binding_reloads_after_outer_snapshot(self):
+        m, inst, n, row, data = self.context()
+        original = json.loads(inst.local_path.read_text())
+        wt = Path(n['local']['worktrees']['job']['path'])
+        aliases = [self.tmp / name for name in ('alias-a', 'alias-b')]
+        for alias in aliases:
+            alias.symlink_to(wt, target_is_directory=True)
+        alternate = self.tmp / 'alternate-worktree'
+        alternate.mkdir()
+        local = json.loads(json.dumps(original))
+        local['nodes']['web']['worktrees']['job']['path'] = str(aliases[0])
+        inst.local_path.write_text(json.dumps(local))
+        binding, git = m.job_preview_binding, m.git
+        bindings = queries = 0
+        def replace_alias(*args, **kwargs):
+            nonlocal bindings
+            bindings += 1
+            if bindings == 1:
+                local['nodes']['web']['worktrees']['job']['path'] = str(aliases[1])
+                inst.local_path.write_text(json.dumps(local))
+            return binding(*args, **kwargs)
+        def retarget_latest_alias(*args, **kwargs):
+            nonlocal queries
+            result = git(*args, **kwargs)
+            if args == ('rev-parse', '--git-dir'):
+                queries += 1
+                if queries == 2:
+                    aliases[1].unlink()
+                    aliases[1].symlink_to(alternate, target_is_directory=True)
+            return result
+        with mock.patch.object(m, 'job_preview_binding', side_effect=replace_alias), \
+                mock.patch.object(m, 'git', side_effect=retarget_latest_alias):
+            with self.assertRaisesRegex(ValueError, 'authority changed during read'):
+                m.preview_receipt_skeleton(inst, 'web', 'job')
+        self.assertEqual((bindings, queries), (2, 2))
+
     def test_bound_port_accepts_own_job_and_exact_head_without_changing_node_urls(self):
         m, inst, n, row, data = self.context()
         before = json.dumps(n['local'], sort_keys=True)

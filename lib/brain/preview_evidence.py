@@ -143,12 +143,17 @@ def preview_receipt_skeleton(inst, node_id, branch):
 
     data, n, row = collect()
     roots = [Path(data['binding'][key]) for key in ('home', 'worktree')]
-    logical_roots = [n['home_path'], Path(n['local']['worktrees'][branch]['path']).expanduser()]
 
     def signature():
         # Fence the final collection too: it may have loaded local/ledger data
         # before a later Git query observes an authority mutation. Signature
         # reads do not take a lock or publish a cache/observation.
+        live = _m_instance.Instance(inst.root)
+        current_node = live.node(node_id)
+        worktree = current_node['local'].get('worktrees', {}).get(branch)
+        if not current_node.get('home_path') or not isinstance(worktree, dict):
+            raise ValueError('preview receipt skeleton authority changed during read; retry')
+        logical_roots = [current_node['home_path'], Path(worktree['path']).expanduser()]
         paths = [n['dir'] / _m_jobs.JOBS_FILE, _m_jobs.contract_file(n, row)]
         for root in roots:
             paths.extend(_m_instance.git_state_paths(root))
@@ -157,8 +162,8 @@ def preview_receipt_skeleton(inst, node_id, branch):
         for root in [*roots, *logical_roots]:
             resolved = root.resolve(strict=True)
             stat = resolved.stat()
-            identities.append((str(resolved), stat.st_dev, stat.st_ino))
-        return _m_instance.state_signature(inst, n, extra=paths), identities
+            identities.append((str(root), str(resolved), stat.st_dev, stat.st_ino))
+        return _m_instance.state_signature(live, current_node, extra=paths), identities
 
     before = signature()
     current, _, _ = collect()
