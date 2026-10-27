@@ -280,6 +280,7 @@ class brain_lock:
             fh.write(str(os.getpid()))
             fh.flush()
             _LOCK["fh"] = fh
+            _LOCK["hold_started"] = time.perf_counter()
             os.environ["BRAIN_LOCK_HELD"] = f"{self.key}|{os.getpid()}"
         _LOCK["depth"] += 1
         return self
@@ -300,6 +301,9 @@ def unlock():
         fh.close()
         _LOCK["fh"] = None
         os.environ.pop("BRAIN_LOCK_HELD", None)
+        started = _LOCK.pop("hold_started", None)
+        if started is not None:
+            _m_timings.record("lock_hold", time.perf_counter() - started)
 
 
 def state_signature(inst, node=None, extra=(), local_keys=()):
@@ -337,6 +341,35 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
     selected["nodes"] = {n["id"]: local.get("nodes", {}).get(n["id"], {}) for n in nodes}
     h.update(json.dumps(selected, sort_keys=True).encode())
     return h.digest()
+
+
+def git_state_paths(home):
+    """Mutable ref/config generations, including linked-worktree common refs.
+
+    Git objects are immutable; traversing them would turn a recheck into a scan.
+    Keep both the logical metadata entry and its resolved target in the fence.
+    """
+    marker = Path(home) / '.git'
+    paths = [marker] if not marker.is_dir() else []
+    bases = []
+    # Ask Git which metadata it actually reads: internal child nodes can share
+    # an ancestor repository, and linked worktrees/bare homes have other layouts.
+    # Supplying the unchanged environment bypasses display-query memoization;
+    # this is a publication recheck, never a cached layout observation.
+    for flag in ('--absolute-git-dir', '--git-common-dir'):
+        result = _m_common.git('rev-parse', flag, cwd=home, env=dict(os.environ))
+        value = result.stdout.strip()
+        if result.returncode == 0 and value:
+            base = (Path(home) / value).resolve()
+            bases.append(base)
+            paths.extend((base / 'commondir', (base / 'commondir').resolve()))
+    for base in bases:
+        for name in ('HEAD', 'refs', 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
+            path = base / name
+            paths.extend((path, path.resolve()))
+            if name == 'refs' and path.is_dir():
+                paths.extend(p.resolve() for p in path.rglob('*') if p.is_symlink())
+    return paths
 
 
 @contextlib.contextmanager

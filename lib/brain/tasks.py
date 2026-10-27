@@ -164,34 +164,82 @@ def validate(n, records):
     _m_flow.validate_graph(n, records)
 
 
+def mutation_paths(inst, target=None, changes=None, ident=None):
+    paths = []
+    def artifact(node, receipt):
+        if isinstance(receipt, str):
+            try:
+                receipt = json.loads(receipt)
+            except ValueError:
+                return  # the existing validator refuses malformed receipts
+        relative = receipt.get('artifact') if isinstance(receipt, dict) else None
+        if isinstance(relative, str) and relative and not Path(relative).is_absolute() and '..' not in Path(relative).parts:
+            path = node['dir'] / relative
+            if not path.is_dir():  # directory artifacts are invalid; never traverse their contents
+                paths.extend((path, path.resolve()))
+    for node in inst.nodes():
+        paths.extend(node['dir'] / name for name in
+                     ('tasks', 'requirements', 'job-ledger.md', 'job-handbacks', 'job-attempts'))
+        try:
+            records = read_records(node)
+        except (OSError, ValueError):
+            # The unchanged validator refuses malformed required task sources.
+            # An unrelated damaged node must not broaden this task's authority
+            # or prevent observing the sources which can actually validate.
+            records = {}
+        if target == node['id'] and ident is not None:
+            # Fence the same effective row the validator will see. A completed
+            # task can change completion kind without repeating its status.
+            effective = {'status': 'backlog', 'completion_kind': 'merge',
+                         **records.get(ident, {}), **normalize(changes or {})}
+            records = {**records, ident: effective}
+        code_proof = False
+        for row in records.values():
+            artifact(node, row.get('completion_receipt'))
+            code_proof |= row.get('status') in ('merged', 'done') and row.get('completion_kind', 'merge') == 'merge'
+        if node.get('home_path') and (node.get('external') or code_proof):
+            paths.extend(_m_instance.git_state_paths(node['home_path']))
+    return paths
+
+
+def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
+    rows = read_records(n)
+    if create == (ident in rows):
+        raise ValueError('task already exists' if create else 'task not found')
+    changes = normalize(changes)
+    if not create and 'source' in changes and changes['source'] != rows[ident].get('source'):
+        raise ValueError('task source cannot be changed; preserve provider ownership')
+    if source(n) == 'linear' and not provider and (create and changes.get('source') != 'local' or
+            not create and rows[ident].get('source') == 'linear' and
+            set(changes) & {'title', 'description', 'status', 'priority', 'owner', 'depends_on'}):
+        raise ValueError('Linear owns external task fields; use task sync or the provider adapter')
+    if create:
+        row = {'version': VERSION, 'id': ident, 'title': '', 'kind': 'feature', 'status': 'backlog',
+               'priority': 'P2', 'order': 0, 'owner': ','.join(n.get('owners', [])), 'depends_on': [], 'decisions': [],
+               'evidence': [], 'provenance': [], 'superseded_by': [], 'scope': [], 'aliases': [], 'unresolved_dependencies': [],
+               'strikes': 0, 'source': 'local', 'completion_kind': 'merge', 'created': inst.now(),
+               'last_progress_at': inst.now()}
+    else:
+        row = dict(rows[ident])
+    row.update(changes, updated=inst.now())
+    if set(changes) & {'status', 'job', 'evidence', 'merge_sha', 'completion_receipt'}:
+        row['last_progress_at'] = changes.get('last_progress_at') or inst.now()
+    rows[ident] = row
+    validate(n, rows)
+    closed_transition = row['status'] in ('merged', 'done') and (create or read_records(n).get(ident, {}).get('status') != row['status'])
+    if closed_transition:
+        row['event_pending'] = 'task_landed'
+    return row, closed_transition
+
+
 def mutate(inst, n, ident, changes, create=False, provider=False):
     with _m_instance.brain_lock(inst):
-        rows = read_records(n)
-        if create == (ident in rows):
-            raise ValueError('task already exists' if create else 'task not found')
-        changes = normalize(changes)
-        if not create and 'source' in changes and changes['source'] != rows[ident].get('source'):
-            raise ValueError('task source cannot be changed; preserve provider ownership')
-        if source(n) == 'linear' and not provider and (create and changes.get('source') != 'local' or
-                not create and rows[ident].get('source') == 'linear' and
-                set(changes) & {'title', 'description', 'status', 'priority', 'owner', 'depends_on'}):
-            raise ValueError('Linear owns external task fields; use task sync or the provider adapter')
-        if create:
-            row = {'version': VERSION, 'id': ident, 'title': '', 'kind': 'feature', 'status': 'backlog',
-                   'priority': 'P2', 'order': 0, 'owner': ','.join(n.get('owners', [])), 'depends_on': [], 'decisions': [],
-                   'evidence': [], 'provenance': [], 'superseded_by': [], 'scope': [], 'aliases': [], 'unresolved_dependencies': [],
-                   'strikes': 0, 'source': 'local', 'completion_kind': 'merge', 'created': inst.now(),
-                   'last_progress_at': inst.now()}
-        else:
-            row = dict(rows[ident])
-        row.update(changes, updated=inst.now())
-        if set(changes) & {'status', 'job', 'evidence', 'merge_sha', 'completion_receipt'}:
-            row['last_progress_at'] = changes.get('last_progress_at') or inst.now()
-        rows[ident] = row
-        validate(n, rows)
-        closed_transition = row['status'] in ('merged', 'done') and (create or read_records(n).get(ident, {}).get('status') != row['status'])
-        if closed_transition:
-            row['event_pending'] = 'task_landed'
+        current = _m_instance.Instance(inst.root)
+        node = current.node(n['id'])
+        with _m_instance.released(inst, list(current.nodes()),
+                extra=lambda: mutation_paths(current, node['id'], changes, ident)):
+            row, closed_transition = prepare_mutation(current, node, ident, changes, create, provider)
+        n = node
         save_record(n, row)
         inst.commit([], n['id'] + ': task ' + ident)
         if closed_transition:
@@ -233,6 +281,8 @@ def cmd_requirement(a):
 
 
 def cmd_task(a):
+    if a.action in ('add', 'set'):
+        _m_instance.unlock()  # native mutate owns its write; parsing/validation do not
     inst = _m_nodes.load()
     n = inst.node(a.node)
     try:
@@ -250,6 +300,7 @@ def cmd_task(a):
             if a.owner is not None:
                 changes['owner'] = a.owner
             rows = [mutate(inst, n, a.task_id, changes, create=a.action == 'add')]
+            _m_instance.unlock()
         else:
             rows = projection(n)
             if a.action == 'show':

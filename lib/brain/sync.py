@@ -23,6 +23,9 @@ from . import worktrees as _m_worktrees
 
 def cmd_review(a):
     """Brief an independent reviewer, or record the completed host identity receipt."""
+    if getattr(a, 'receipt_file', None):
+        from . import instance
+        instance.unlock()
     inst = _m_nodes.load()
     n = inst.node(a.id)
     rows = _m_jobs.read_jobs(n)

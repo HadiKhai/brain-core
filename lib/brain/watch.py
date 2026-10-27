@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shlex
+import time
 from pathlib import Path
 
 from . import briefs as _m_briefs
@@ -159,7 +160,25 @@ def watch_text_identity(item):
     return ' '.join(text.split())
 
 
-def watch_untracked(groups):
+def watch_source_signature(inst):
+    """Recheck scan sources without recomputing transcript/Git projections."""
+    from . import events
+    nodes = list(inst.nodes())
+    paths = [n['dir'] / name for n in nodes for name in ('tasks', 'requirements')]
+    for n in nodes:
+        if n.get('external') and n.get('home_path'):
+            paths.extend(_m_instance.git_state_paths(n['home_path']))
+    paths += [inst.root / '.brain' / name for name in (
+        'communications.json', 'worker-runs.json', 'host-observations.json',
+        'host-tasks.json', 'machine.json', 'rotation')]
+    paths.append(_m_machine.machine_dir() / 'machine-care.json')
+    # resources includes ledgers, inbox/status, handbacks/attempts and legacy
+    # ready packets. It deliberately excludes transcripts, Git objects and caches.
+    return (_m_instance.state_signature(inst, nodes, extra=paths),
+            _m_jobs.digest(events.resources(inst)))
+
+
+def watch_untracked(groups, generation=None):
     """Unknown episode state must not reuse a transport key and hide a new need."""
     for group in groups.values():
         group['episodes_known'] = False
@@ -170,13 +189,15 @@ def watch_untracked(groups):
                 if item['kind'] == 'overdue-question':
                     item['legacy_reason'] = item['reason']
                     item['reason'] = 'overdue:' + item['id']
-    return groups
+    return WatchGroups(groups, None, generation)
 
 
 class WatchGroups(dict):
-    def __init__(self, values, revision):
+    def __init__(self, values, revision, generation=None, stale=False):
         super().__init__(values)
         self.receipt_revision = revision
+        self.source_generation = generation
+        self.stale = stale
 
 
 def watch_receipt_revision(inst):
@@ -204,7 +225,10 @@ def watch_due_episodes(inst, scan):
         if os.fstat(stream.fileno()).st_nlink != 1:
             raise ValueError('linked due episode lock')
         fcntl.flock(stream, fcntl.LOCK_EX)
+        generation = watch_source_signature(inst)
         groups = scan()
+        if watch_source_signature(inst) != generation:
+            return WatchGroups({}, None, generation, stale=True)
         entries = [i for group in groups.values() for i in group['items']
                    if ('reason' not in i or i['kind'] == 'overdue-question') and i['kind'] not in
                    ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
@@ -218,7 +242,7 @@ def watch_due_episodes(inst, scan):
                            for k, v in data['open'].items())):
                 raise ValueError('invalid due episode state')
         except (OSError, ValueError):
-            return watch_untracked(groups)  # preserve evidence and fail open until repaired
+            return watch_untracked(groups, generation)  # preserve evidence and fail open until repaired
         # Preserve pre-upgrade acknowledgements rather than replaying the backlog.
         try:
             legacy_seen = set(watch_state(inst).get('seen', []))
@@ -244,8 +268,8 @@ def watch_due_episodes(inst, scan):
                 {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
             revision = watch_receipt_revision(inst)
         except OSError:
-            return watch_untracked(groups)  # unpublished identities cannot prove resolution
-    return WatchGroups(groups, revision)
+            return watch_untracked(groups, generation)  # unpublished identities cannot prove resolution
+    return WatchGroups(groups, revision, generation)
 
 
 def watch_items(inst, n):
@@ -571,12 +595,18 @@ def watch_state_invalid(inst):
 
 def watch_groups(inst, nodes=None):
     """The file-only wake queue, grouped by the coordinator who can act on it."""
+    from . import communication
+    communication.communication_reconcile(inst)  # defaults precede observation, including fallback scans
     try:
         return watch_due_episodes(inst, lambda: watch_scan(inst, nodes))
     except (OSError, ValueError):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
-        return watch_untracked(watch_scan(inst, nodes))
+        generation = watch_source_signature(inst)
+        groups = watch_scan(inst, nodes)
+        if watch_source_signature(inst) != generation:
+            return WatchGroups({}, None, generation, stale=True)
+        return watch_untracked(groups, generation)
 
 
 def watch_inbox_rollup(inst, group):
@@ -679,8 +709,16 @@ def watch_precomputed_publication(inst, groups):
     """Fence old scans without waiting for a long scan while holding the instance lock."""
     import fcntl
     revision = getattr(groups, 'receipt_revision', None)
-    if revision is None:
+    generation = getattr(groups, 'source_generation', None)
+    if (getattr(groups, 'stale', False) or generation is not None and
+            watch_source_signature(inst) != generation):
         yield False
+        return
+    if revision is None:
+        # Unknown receipt storage grants no retirement authority, but cannot
+        # suppress current questions. Its separately rechecked source scan is
+        # still eligible for fail-open delivery with fresh transport identities.
+        yield generation is not None and all(not g.get('episodes_known', True) for g in groups.values())
         return
     stack = contextlib.ExitStack()
     try:
@@ -725,8 +763,6 @@ def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
     warnings = set(state.get('warnings', []))
     if kinds is None:
         watch_failures(inst, nodes, failures, warnings)
-    from . import communication as _m_communication
-    _m_communication.communication_reconcile(inst)
     groups = watch_groups(inst, nodes) if groups is None else groups
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     for group in groups.values():
@@ -817,13 +853,23 @@ def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
     folder = inst.root / '.brain'
     if _m_common.outward_links(inst.root):
         _m_common.die('watch: unsafe instance links; no wake sent')
+    if _m_instance._LOCK['fh'] is not None:
+        if not quiet:
+            print('watch: skipped; instance busy')
+        return
+    generation = _m_instance.state_signature(inst, list(inst.nodes()))
+    if groups is None:
+        from . import command_reads
+        with command_reads.snapshot(), _m_timings.phase('watch_compute'):
+            groups = watch_groups(inst)
     _m_common.safe_target(folder / 'lock')
     fd = os.open(folder / 'lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'r+') as stream:
         if os.fstat(stream.fileno()).st_nlink != 1:
             _m_common.die('watch: instance lock is hard-linked')
         try:
-            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with _m_timings.phase('lock_wait'):
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             if not quiet:
                 print('watch: skipped; instance busy')
@@ -833,8 +879,11 @@ def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
         stream.write(str(os.getpid()))
         stream.flush()
         _m_instance._LOCK['fh'], _m_instance._LOCK['depth'] = stream, 1
+        _m_instance._LOCK['hold_started'] = time.perf_counter()
         os.environ['BRAIN_LOCK_HELD'] = f'{inst.root.resolve()}|{os.getpid()}'
         try:
+            if _m_instance.state_signature(inst, list(inst.nodes())) != generation:
+                return  # changed routing/configuration cannot authorize the old scan
             with _m_timings.phase('watch_write'):
                 watch_run(inst, kinds=kinds, quiet=quiet, sources=sources, groups=groups)
         finally:

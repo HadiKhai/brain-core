@@ -22,6 +22,42 @@ EXPLICIT_DELIVERY_KINDS = {'inbox', 'handback', 'unsettled-threads', 'overlappin
 class Watcher(Scenario):
     fixture_templates = True
     fixture_init_in_process = True
+
+    def test_corrupt_episode_receipts_still_enqueue_current_questions(self):
+        directory = self.root / '.brain/wake'
+        directory.mkdir(exist_ok=True)
+        receipt = directory / 'due-episodes.json'
+        receipt.write_text('{broken')
+        (self.root / 'inbox.md').write_text('- Host question: Choose a color <!-- host-question:fixture -->\n')
+        with mock.patch.object(self.m, 'wake_start'):
+            self.watch(kinds={'inbox'})
+        self.assertEqual(receipt.read_text(), '{broken')
+        self.assertTrue(list(self.m.wake_directory(self.inst, self.inst.node('root')).glob('*.pending')))
+
+    def typed_question(self, expired=False):
+        now = self.inst.now_dt()
+        spec = {'options': [{'id': 'a', 'label': 'Continue', 'action': 'routine'},
+                            {'id': 'b', 'label': 'Hold', 'action': 'routine'}],
+                'recommendation': 'a', 'default': 'a',
+                'deadline': (now + datetime.timedelta(minutes=-1 if expired else 30)).isoformat()}
+        with mock.patch.object(self.m, 'request_wake', return_value=False):
+            return self.m.communication_record(self.inst, self.inst.node('root'), 'question', 'Choose', 'fixture', spec)
+
+    def test_answered_question_between_scan_and_publication_cannot_wake(self):
+        question = self.typed_question()
+        groups = self.m.watch_groups(self.inst)
+        self.b(self.root, 'question-answer', question['id'], 'a')
+        with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'request_wake') as wake:
+            self.m.watch_once(self.inst, kinds={'question'}, groups=groups)
+        wake.assert_not_called()
+
+    def test_expired_routine_question_reconciles_before_watcher_observation(self):
+        question = self.typed_question(expired=True)
+        with mock.patch.object(self.m, 'request_wake') as wake:
+            self.watch(kinds={'question'})
+        wake.assert_not_called()
+        self.assertEqual(self.m.communication_read(self.inst)['questions'][question['id']]['answer'], 'a')
+
     def setUp(self):
         super().setUp()
         self.patch = mock.patch.dict(os.environ, self.env)
@@ -576,6 +612,7 @@ class Watcher(Scenario):
             budget = {**row, 'Job': 'import:budget', 'Ended': '', 'Outcome': ''}
             self.m.write_jobs(self.inst, child, [row, budget])
             self.inst.local_of('sample')['worktrees'] = {budget['Job']: {'path': str(self.root)}}
+            self.inst.save_local()
             contract = self.m.contract_file(child, budget)
             contract.parent.mkdir(exist_ok=True)
             contract.write_text('## Budget\n\n1 h\n')
@@ -587,9 +624,11 @@ class Watcher(Scenario):
             self.assertEqual(self.since(), [])
             # A child with a coordinator receives its own settlement work.
             self.inst.local_of('sample').update(coordinator='fixture-child', wake='fixture-send')
+            self.inst.save_local()
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.assertTrue(list(self.m.wake_directory(self.inst, child).glob('*.pending')))
             self.inst.local_of('sample').pop('coordinator')
+            self.inst.save_local()
             line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: Choose blue <!-- host-question:abc -->'
             (child['dir'] / 'inbox.md').write_text(line + '\n')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)

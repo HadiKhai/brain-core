@@ -2778,3 +2778,38 @@ instance. Due's Docker observations precede watcher and display evidence.
 Introduction-date caching is scoped to an explicit command snapshot, and Git
 commit freshness evidence remains present after status metadata is generated.
 Live and detached UI observations expose the same top-level metadata fields.
+
+## Short writer holds for sampling and worker completion
+
+Machine sampling collects and reduces a reading before attempting its nonblocking
+publication lock. Publication compares the observed state and current policy;
+a concurrent replacement wins and the old sample is skipped. Pending episode
+transitions remain recoverable across interrupted publication.
+
+Worker completion releases the CLI lock before readiness setup and accounting.
+Attempt bindings are fingerprinted outside the lock, with node, ledger, attempt,
+Git-ref and selected-input generations checked again before publication. Native
+readiness facts and attempt writes release their physical holds before the next
+computation, even inside a suspended outer CLI scope. Terminal status projection
+also computes outside the lock; concurrent source changes invalidate that view
+without undoing the durable handback.
+
+Wake drains retain their destination and delivery fences without acquiring the
+instance lock for projection, rate waits or transport. A changed coordinator or
+transport generation after projection leaves requests pending for the current
+binding. Command timings separately report physical instance-lock hold and wait
+seconds; nested scopes count each physical hold once and exclude released work.
+
+Task creation and updates prepare and validate their prospective graph outside
+the writer lock, then fence task/requirement, job and Git-ref generations before
+saving. Receipt validation follows the same pattern for node bindings, ledger
+identity and exact code; a review observation must still be fresh at publication.
+Generated status for task and receipt writes computes outside the lock too.
+These changes preserve task counts and the existing graph/completion rules.
+
+Watcher source generations cover inbox/status, tasks, ledgers, attempts, recorded
+communications and external Git refs in addition to episode receipts. Derived
+lifecycle observations written by the scan are excluded from that input fence.
+Routine question defaults reconcile before observation. Damaged episode storage
+retains fail-open delivery with fresh identities and no retirement authority;
+source drift refuses stale publication without acknowledging the old scan.

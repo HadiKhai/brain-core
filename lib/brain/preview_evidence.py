@@ -74,14 +74,18 @@ def validate_preview_receipt(inst, n, row, head, data):
 
 def record_preview_receipt(inst, n, branch, data):
     with _m_instance.brain_lock(inst):
+        inst = _m_instance.Instance(inst.root)
+        n = inst.node(n['id'])
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
         if not row:
             raise ValueError('preview receipt requires an open job')
         repo = n.get('home_path') if n.get('external') else inst.root
-        head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
-        validate_preview_receipt(inst, n, row, head, data)
-        serialized = json.dumps(data, sort_keys=True) + '\n'
-        _m_guard.no_terms_in(n, serialized, 'preview sample receipt')
+        paths = lambda: [n['dir'] / _m_jobs.JOBS_FILE, *_m_instance.git_state_paths(repo)]
+        with _m_instance.released(inst, n, extra=paths):
+            head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
+            validate_preview_receipt(inst, n, row, head, data)
+            serialized = json.dumps(data, sort_keys=True) + '\n'
+            _m_guard.no_terms_in(n, serialized, 'preview sample receipt')
         path = preview_receipt_path(inst, n, row, head)
         _m_common.safe_target(path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -107,6 +111,7 @@ def validate_ready_preview(inst, n, branch, head, packet=None):
 
 
 def cmd_preview_receipt(a):
+    _m_instance.unlock()
     inst = _m_nodes.load()
     n = inst.node(a.id)
     try:

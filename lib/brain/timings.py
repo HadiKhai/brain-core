@@ -94,6 +94,7 @@ def publish(elapsed, phases, profiler, success):
     identity = uuid.uuid4().hex
     data = dict(command=name, elapsed_s=round(elapsed, 6), slow=elapsed > SLOW_SECONDS,
                 lock_wait_s=round(phases.get('lock_wait', 0.0), 6),
+                lock_hold_s=round(phases.get('lock_hold', 0.0), 6),
                 success=success, phases={k[:64]: round(v, 6) for k, v in sorted(phases.items())[:32]})
     if elapsed > SLOW_SECONDS:
         # Filenames alone (no absolute source paths, arguments, locals or callers).

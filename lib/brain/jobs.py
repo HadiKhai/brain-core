@@ -266,6 +266,9 @@ def validate_handback_options(a, row=None):
 
 
 def cmd_handback(a):
+    # The CLI journal owns the operation, not its computation. Each native
+    # mutation below takes its own lock and revalidates the job/attempt.
+    _m_instance.unlock()
     from . import job_attempts as _m_attempts
     from . import handback_queue as _m_queue
     inst = _m_nodes.load()
@@ -295,6 +298,7 @@ def cmd_handback(a):
             identity = attempt['id']
     except (OSError, ValueError) as error:
         _m_common.die(_m_guard.redact(str(error), _m_guard.never_terms(n)))
+    _m_instance.unlock()  # the outer CLI depth must not retain this short attempt write
     a._attempt_id = identity
     context_token = _m_attempts.ATTEMPT_CONTEXT.set((inst, n, row, identity))
     try:
@@ -346,6 +350,7 @@ def publish_handback(a):
                                            getattr(a, "reverify", False), full_receipt=getattr(a, "full_receipt", None))
         finally:
             _m_machine.ADMISSION_TIMING.reset(timing_token)
+            _m_instance.unlock()  # readiness may finish by publishing a short native fact
         duration = record_verify_duration(inst, n, row, packet, time.monotonic() - verify_started)
         duration["queue_seconds"] = 0.0 if duration["reused"] else sum(waits)
         if packet:
@@ -364,22 +369,24 @@ def publish_handback(a):
             _m_common.die("job changed during verification; hand back to its coordinator")
         from . import job_attempts as _m_attempts
         attempt = _m_attempts.current_attempt(n, current)
-        binding_matches = attempt and _m_attempts.attempt_matches(n, current, attempt)
-        if (not binding_matches and attempt and packet is None and reasons and not study
-                and a.state == 'done' and (a.reviews is not None or getattr(a, 'record', False))):
-            # A native failed input check carries diagnostics, never readiness.
-            # Permit only input drift; refs/config/job/attempt ownership stay fenced.
-            diagnostic_binding = {**attempt['binding'],
-                                  'inputs': _m_attempts.attempt_binding(n, current)['inputs']}
-            binding_matches = _m_attempts.attempt_matches(n, current,
-                {**attempt, 'binding': diagnostic_binding})
+        with _m_instance.released(inst, n, extra=lambda: _m_attempts.binding_paths(n, current)):
+            binding_matches = attempt and _m_attempts.attempt_matches(n, current, attempt)
+            if (not binding_matches and attempt and packet is None and reasons and not study
+                    and a.state == 'done' and (a.reviews is not None or getattr(a, 'record', False))):
+                # Failed input checks carry diagnostics, never readiness. Permit
+                # only input drift; refs/config/job/attempt ownership stay fenced.
+                diagnostic_binding = {**attempt['binding'],
+                                      'inputs': _m_attempts.attempt_binding(n, current)['inputs']}
+                binding_matches = _m_attempts.attempt_matches(n, current,
+                    {**attempt, 'binding': diagnostic_binding})
         if (not attempt or attempt['id'] != a._attempt_id or attempt['state'] not in _m_attempts.ATTEMPT_ACTIVE
                 or not binding_matches):
             detail = _m_guard.redact('; '.join(reasons), _m_guard.never_terms(n))
             _m_common.die('head, base, inputs or attempt changed; no stale handback published' + ('; ' + detail if detail else ''))
         request = getattr(a, '_queue_request', None)
         if packet and packet.get("version") == 1 and "integration_base" not in packet:
-            preflight, head, main = _m_verify.ready_preflight(n, a.branch)
+            with _m_instance.released(inst, n, extra=lambda: _m_attempts.binding_paths(n, current)):
+                preflight, head, main = _m_verify.ready_preflight(n, a.branch)
             if not preflight and packet.get("head") == head and _m_verify.packet_main_matches(n, packet, main):
                 packet = {**packet, "main": main, "integration_base": packet["main"]}
         f = handback_file(n, row)
@@ -469,11 +476,11 @@ def publish_handback(a):
             _m_common.touch(inbox)
         _m_tasks.handback_event(inst, n, row, data)
         inst.commit([], f"{n['id']}: worker hand-back")
+    _m_instance.unlock()  # wake identity scans follow durable publication, never its hold
     if question_created:
         _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
     elif a.state == "blocked" and not need:
         _m_hosts.request_wake(inst, n, "wake:" + data["wake_id"])
-    _m_instance.unlock()  # accounting follows durable publication and does not mutate shared state
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:

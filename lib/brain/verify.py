@@ -981,13 +981,15 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
             return None, ['full receipt missing, changed, failed or stale; run full-run on this exact candidate']
         return packet, []
     reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
-    # The CLI holds brain_lock here. Do not sweep an operator's dirty .gitignore into
+    # Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
     gi = inst.root / ".gitignore"
-    dirty_ignore = _m_common.git("status", "--porcelain", "--", ".gitignore", cwd=inst.root).stdout.strip()
-    _m_nodes.ensure_gitignore(inst.root)
-    if dirty_ignore:
-        _m_common.TOUCHED.discard(gi)
+    with _m_instance.brain_lock(inst.root):
+        dirty_ignore = _m_common.git("status", "--porcelain", "--", ".gitignore", cwd=inst.root).stdout.strip()
+        _m_nodes.ensure_gitignore(inst.root)
+        if dirty_ignore:
+            _m_common.TOUCHED.discard(gi)
+    _m_instance.unlock()  # a suspended outer CLI scope must not retain this write lock
     if reuse:
         input_ref = (previous.get("input_files_ref") if read_verify_input_files(n, previous) == input_files
                      else write_verify_input_files(inst, n, branch, inputs, input_files, previous.get("verify_log")))

@@ -11,6 +11,68 @@ from brain.instance import Instance
 
 
 class Tasks(Scenario):
+    def assert_conversion_rechecks_internal_main(self, child=False, normalized_status=False):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        node = self.peer_node('producer') if child else self.n
+        self.ops_done(node)
+        changes = {'completion_kind': 'merge', 'merge_sha': head, 'baseline_sha': base,
+                   'code_path': 'engine.py', 'scope': ['engine.py']}
+        if normalized_status:
+            changes['status'] = ' DONE '
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('update-ref', 'refs/heads/main', base, cwd=self.root)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            tasks.mutate(self.inst, node, 'OPS-1', changes)
+        self.assertEqual(tasks.read_records(node)['OPS-1']['completion_kind'], 'ops')
+
+    def test_completion_kind_conversion_without_status_rechecks_internal_main(self):
+        self.assert_conversion_rechecks_internal_main()
+
+    def test_child_node_completion_conversion_rechecks_ancestor_git_main(self):
+        self.assert_conversion_rechecks_internal_main(child=True)
+
+    def test_normalized_completion_status_rechecks_internal_main(self):
+        self.assert_conversion_rechecks_internal_main(normalized_status=True)
+
+    def test_report_artifact_change_after_validation_refuses_new_completion(self):
+        import hashlib
+        path = self.root / 'measurement.txt'
+        path.write_text('original measurement')
+        receipt = {'ref': 'fixture', 'scope': 'sample', 'result': 'passed', 'at': self.inst.now(),
+                   'artifact': 'measurement.txt', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'version': 1}
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            path.write_text('changed measurement')
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('REPORT-1', completion_kind='report', status='done', evidence=['Measured'], completion_receipt=receipt)
+        self.assertNotIn('REPORT-1', tasks.read_records(self.n))
+
+    def test_dependency_report_artifact_change_refuses_new_task(self):
+        import hashlib
+        path = self.root / 'measurement.txt'
+        path.write_text('original measurement')
+        receipt = {'ref': 'fixture', 'scope': 'sample', 'result': 'passed', 'at': self.inst.now(),
+                   'artifact': 'measurement.txt', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'version': 1}
+        self.add('REPORT-1', completion_kind='report', status='done', evidence=['Measured'], completion_receipt=receipt)
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            path.write_text('changed dependency measurement')
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('CHILD-1', depends_on=['REPORT-1'])
+        self.assertNotIn('CHILD-1', tasks.read_records(self.n))
+
     def setUp(self):
         super().setUp()
         self.root = self.tmp / 'fixture'
@@ -93,6 +155,7 @@ class Tasks(Scenario):
 
     def test_external_fields_cannot_be_locally_overwritten(self):
         self.n['fm']['tasks.source'] = 'linear'
+        tasks._m_common.write_fm(self.n['dir'] / 'node.md', self.n['fm'], '')
         with self.assertRaises(ValueError):
             self.add()
         self.add(source='local')
@@ -405,6 +468,7 @@ class Tasks(Scenario):
         self.n['fm'].update({'tasks.source': 'linear', 'tasks.linear.team_id': '11111111-1111-4111-8111-111111111111',
                              'tasks.linear.started_state_id': '22222222-2222-4222-8222-222222222222',
                              'tasks.linear.done_state_id': '33333333-3333-4333-8333-333333333333'})
+        tasks._m_common.write_fm(self.n['dir'] / 'node.md', self.n['fm'], '')
 
     def linear_issue(self, ident='DEMO-1', state='unstarted'):
         return {'id': '44444444-4444-4444-8444-444444444444', 'identifier': ident, 'title': 'Export report',

@@ -3,6 +3,7 @@ import contextvars
 import json
 import os
 import re
+from pathlib import Path
 
 from . import common as _m_common
 from . import instance as _m_instance
@@ -46,6 +47,27 @@ def attempt_binding(n, row):
             'input_selection': _m_jobs.digest(_m_common.lst(n['fm'].get('verify_inputs'))
                                               or _m_common.lst(_m_verify.VERIFY_INPUTS)),
             'port_reservation': _m_jobs.digest([w.get('port'), w.get('ports', 1)]) if w else ''}
+
+
+def binding_paths(n, row):
+    """Cheap generation checks around unlocked ref/input fingerprinting.
+
+    Ref files and packed refs cover both ordinary repositories and worktrees;
+    objects are immutable and are deliberately not traversed. Include resolved
+    input targets as well as their links because the input reader follows links.
+    """
+    paths = [n['dir'] / _m_jobs.JOBS_FILE, attempt_path(n, row)]
+    home = n.get('home_path')
+    if home:
+        paths.extend(_m_instance.git_state_paths(home))
+    w = n['local'].get('worktrees', {}).get(row['Job'])
+    if w:
+        root = Path(w['path'])
+        paths.append(root / '.git')
+        for pattern in _m_common.lst(n['fm'].get('verify_inputs')) or _m_common.lst(_m_verify.VERIFY_INPUTS):
+            for path in root.glob(pattern):
+                paths.extend((path, path.resolve()))
+    return paths
 
 
 def current_attempt(n, row, strict=True):
@@ -109,9 +131,12 @@ def begin_attempt(inst, n, row, request_id=None):
             raise ValueError('job changed before handback attempt')
         if sum(_m_jobs.job_key(r) == _m_jobs.job_key(row) for r in rows) != 1:
             raise ValueError('ambiguous job key; coordinator must reconcile it before handback')
+        with _m_instance.released(inst, n, extra=lambda: binding_paths(n, row)):
+            binding = attempt_binding(n, row)
+            owner = [os.getpid(), _m_machine.process_stamp(os.getpid())]
         data = {'version': 1, 'id': os.urandom(16).hex(), 'job_key': _m_jobs.job_key(row),
-                'state': 'queued', 'at': inst.now_dt().isoformat(), 'binding': attempt_binding(n, row),
-                'owner': [os.getpid(), _m_machine.process_stamp(os.getpid())], 'request_id': request_id}
+                'state': 'queued', 'at': inst.now_dt().isoformat(), 'binding': binding,
+                'owner': owner, 'request_id': request_id}
         write_attempt(n, row, data)
         return data
 

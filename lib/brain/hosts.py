@@ -780,11 +780,19 @@ def wake_drain(inst, n, once=False):
                             broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
                         history = []
                     refs = wake_delivery_items(current, target, pending)
+                    # Projection can inspect transcripts and local repositories.
+                    # Recheck the transport generation after that computation,
+                    # before reserving a turn or recording a delivery attempt.
+                    generation = _m_instance.state_signature(current, target)
+                    snapshot = wake_snapshot(current, target, refs)
+                    latest = _m_instance.Instance(inst.root)
+                    latest_target = latest.node(target['id'])
+                    if _m_instance.state_signature(latest, latest_target) != generation:
+                        return  # preserve pending work for its current coordinator
                     action, turn_token = _m_wake_turns.wake_turn_prepare(current, target, pending, refs)
                     if action == 'hold':
                         attempted.update(path.name for path in pending)
                         return
-                    snapshot = wake_snapshot(current, target, refs)
                     if history:
                         before = history[-1].get('snapshot', history[-1]['items'])
                     else:
