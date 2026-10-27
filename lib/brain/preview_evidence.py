@@ -96,7 +96,8 @@ def job_preview_binding(inst, n, row, head):
                                     identity(path), str(admin), identity(admin),
                                     str(common), identity(common), sorted(set(declared))])
         return {'generation': generation, 'created': created, 'port': port,
-                'ports': count, 'urls': declared}
+                'ports': count, 'urls': declared, 'home': str(home),
+                'worktree': str(path), 'start': worktree['start']}
     except (OSError, TypeError, KeyError, RuntimeError) as error:
         raise ValueError('job preview binding unavailable') from error
 
@@ -104,6 +105,55 @@ def job_preview_binding(inst, n, row, head):
 def job_preview_generation(inst, n, row, head):
     """Generation token to include in an explicit ``scope: job`` receipt."""
     return job_preview_binding(inst, n, row, head)['generation']
+
+
+def preview_receipt_skeleton(inst, node_id, branch):
+    """Read current job authority without recording a browser observation.
+
+    Re-read before returning to refuse authority that changes during collection.
+    The recorder remains responsible for validating authority at publication.
+    """
+    def collect():
+        live = _m_instance.Instance(inst.root)
+        n = live.node(node_id)
+        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+        if not row:
+            raise ValueError('preview receipt skeleton requires an open job')
+        repo = n.get('home_path') if n.get('external') else None
+        if repo is None or not repo.is_dir():
+            raise ValueError('preview receipt skeleton requires a bound external home')
+        result = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}',
+                               cwd=repo, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+        head = result.stdout.strip()
+        if result.returncode or not re.fullmatch(r'[0-9a-f]{40,64}', head):
+            raise ValueError('preview receipt skeleton requires a current job branch head')
+        binding = job_preview_binding(live, n, row, head)
+        return {'version': 1, 'scope': 'job', 'node': node_id,
+                'job_key': _m_jobs.job_key(row), 'branch': branch, 'head': head,
+                'worktree_generation': binding['generation'],
+                'binding': {**{key: binding[key] for key in
+                              ('home', 'worktree', 'start', 'port', 'ports', 'urls')},
+                            'created': binding['created'].isoformat()},
+                'checked_at': None, 'renderer_threadId': None,
+                'urls': [{'url': 'http://127.0.0.1:' + str(binding['port']) + '/',
+                          'rendered': None, 'render_evidence': None,
+                          'items': [{'page_item': None, 'source_ref': None, 'source_item': None}
+                                    for _ in range(3)]}]}
+
+    data = collect()
+    if collect() != data:
+        raise ValueError('preview receipt skeleton authority changed during read; retry')
+    return data
+
+
+def cmd_preview_receipt_skeleton(a):
+    try:
+        # load() registers an instance on first use; this accessor must never write.
+        inst = _m_instance.Instance(_m_nodes.find_root())
+        data = preview_receipt_skeleton(inst, a.id, a.branch)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as error:
+        _m_common.die(str(error))
+    print(json.dumps(data, indent=2, sort_keys=True))
 
 
 def job_preview_url(url, binding):

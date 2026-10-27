@@ -883,6 +883,150 @@ class JobPreviewReceipts(Scenario):
         data['urls'][0]['url'] = 'http://127.0.0.1:' + str(n['local']['worktrees']['job']['port']) + '/review'
         return m, inst, n, row, data
 
+    def skeleton_cli(self, root, node='web', branch='job'):
+        return subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'),
+                               'preview-receipt-skeleton', node, '--branch', branch, '--json'],
+                              cwd=root, env={**self.env, 'BRAIN_LOCK_WAIT': '0'},
+                              capture_output=True, text=True, timeout=10)
+
+    def tree_snapshot(self):
+        # Include the instance, external home/worktree and first-use user config;
+        # ignore access times, which any legitimate read may change.
+        result = {}
+        for path in [self.tmp, *self.tmp.rglob('*')]:
+            stat = path.lstat()
+            content = (os.readlink(path) if path.is_symlink() else
+                       path.read_bytes() if path.is_file() else None)
+            result[str(path.relative_to(self.tmp))] = (stat.st_mode, stat.st_ino,
+                                                      stat.st_mtime_ns, stat.st_ctime_ns, content)
+        return result
+
+    def test_skeleton_cli_round_trips_only_after_real_observation_fields_are_supplied(self):
+        m, inst, n, row, observation = self.context()
+        help_result = self.b(inst.root, 'preview-receipt-skeleton', '--help')
+        self.assertIn('--branch', help_result)
+        self.assertIn('--json', help_result)
+        self.assertIn('writes nothing', help_result)
+        result = self.skeleton_cli(inst.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        data = json.loads(result.stdout)
+        for key in ('version', 'scope', 'node', 'job_key', 'branch', 'head', 'worktree_generation'):
+            self.assertEqual(data[key], observation[key])
+        wt = n['local']['worktrees']['job']
+        self.assertEqual(data['binding'], {'home': str(n['home_path'].resolve()),
+                         'worktree': str(Path(wt['path']).resolve()), 'start': wt['start'],
+                         'created': inst.parse_time(wt['created']).isoformat(),
+                         'port': wt['port'], 'ports': wt.get('ports', 1), 'urls': []})
+        self.assertEqual(data['urls'][0]['url'], 'http://127.0.0.1:' + str(wt['port']) + '/')
+        self.assertIsNone(data['checked_at'])
+        self.assertIsNone(data['renderer_threadId'])
+        self.assertEqual(data['urls'][0], {'url': data['urls'][0]['url'], 'rendered': None,
+                         'render_evidence': None, 'items': [dict.fromkeys(
+                             ('page_item', 'source_ref', 'source_item')) for _ in range(3)]})
+        with self.assertRaises(ValueError):
+            m.validate_preview_receipt(inst, n, row, data['head'], data)
+        data['checked_at'] = observation['checked_at']
+        data['renderer_threadId'] = observation['renderer_threadId']
+        data['urls'][0].update({k: observation['urls'][0][k]
+                                for k in ('rendered', 'render_evidence', 'items')})
+        self.assertIs(m.validate_preview_receipt(inst, n, row, data['head'], data), data)
+        receipt = self.tmp / 'filled-preview.json'
+        receipt.write_text(json.dumps(data))
+        self.b(inst.root, 'preview-receipt', 'web', '--branch', 'job', '--file', str(receipt))
+        self.assertEqual(json.loads(m.preview_receipt_path(inst, n, row, data['head']).read_text()), data)
+        self.assertEqual(m.validate_ready_preview(inst, n, 'job', data['head']), [])
+
+    def test_skeleton_is_read_only_on_first_use_and_ignores_a_held_writer_lock(self):
+        import fcntl
+        m, inst, n, row, data = self.context()
+        # A new/unregistered invocation must not even create a user registry.
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            registry = m.brains_file()
+        if registry.exists():
+            registry.unlink()
+        lock = inst.root / '.brain/lock'
+        with lock.open('a+') as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            before = self.tree_snapshot()
+            result = self.skeleton_cli(inst.root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.tree_snapshot(), before)
+        self.assertFalse(registry.exists())
+
+    def test_skeleton_refuses_missing_or_stale_authority_without_writing(self):
+        m, inst, n, row, data = self.context()
+        local_path = inst.local_path
+        original = json.loads(local_path.read_text())
+        worktree = original['nodes']['web']['worktrees']['job']
+        wt = Path(worktree['path'])
+
+        def refuses(reason, node='web', branch='job'):
+            before = self.tree_snapshot()
+            result = self.skeleton_cli(inst.root, node, branch)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, '')
+            self.assertIn(reason, result.stderr)
+            self.assertNotIn('Traceback', result.stderr)
+            self.assertEqual(self.tree_snapshot(), before)
+
+        refuses('no node', node='missing')
+        refuses('open job', branch='missing')
+        rows = m.read_jobs(n)
+        m.write_jobs(inst, n, [{**row, 'Ended': inst.now()}])
+        refuses('open job')
+        m.write_jobs(inst, n, rows)
+        for key, value in (('home', None), ('home', str(self.tmp / 'missing-home')),
+                           ('worktrees', {})):
+            changed = json.loads(json.dumps(original))
+            changed['nodes']['web'][key] = value
+            local_path.write_text(json.dumps(changed))
+            with self.subTest(binding=key, value=value):
+                refuses('bound external home' if key == 'home' else 'bound worktree')
+        for key, value in (('path', str(self.tmp / 'missing-worktree')),
+                           ('path', str(n['home_path'])), ('created', None),
+                           ('created', '2999-01-01T00:00:00Z'), ('start', ''),
+                           ('port', 0), ('ports', 0), ('port', True)):
+            changed = json.loads(json.dumps(original))
+            changed['nodes']['web']['worktrees']['job'][key] = value
+            local_path.write_text(json.dumps(changed))
+            with self.subTest(worktree=key, value=value):
+                refuses('preview')
+        local_path.write_text(json.dumps(original))
+        # A real but unrelated checkout must not impersonate the bound Git repo.
+        unrelated = self.repo(self.tmp / 'unrelated')
+        self.git('checkout', '-b', 'job', cwd=unrelated)
+        changed = json.loads(json.dumps(original))
+        changed['nodes']['web']['worktrees']['job']['path'] = str(unrelated)
+        local_path.write_text(json.dumps(changed))
+        refuses('current bound worktree')
+        local_path.write_text(json.dumps(original))
+        for declared in ('not json', '{}', '[1]'):
+            m.write_jobs(inst, n, [{**row, 'Preview URLs': declared}])
+            with self.subTest(declared=declared):
+                refuses('preview' if declared != 'not json' else 'Expecting value')
+        m.write_jobs(inst, n, rows)
+        self.git('checkout', '--detach', cwd=wt)
+        refuses('current bound worktree')
+        self.git('checkout', '-b', 'different', cwd=wt)
+        refuses('current bound worktree')
+        self.git('checkout', '--detach', cwd=wt)
+        self.git('branch', '-D', 'job', cwd=n['home_path'])
+        refuses('current job branch head')
+
+    def test_skeleton_refuses_authority_drift_during_collection(self):
+        m, inst, n, row, data = self.context()
+        binding = m.job_preview_binding
+        def rebind(*args):
+            result = binding(*args)
+            fresh = m.Instance(inst.root)
+            fresh.local_of('web')['worktrees']['job']['port'] += 1
+            fresh.save_local()
+            return result
+        with mock.patch.object(m, 'job_preview_binding', side_effect=rebind):
+            with self.assertRaisesRegex(ValueError, 'authority changed during read'):
+                m.preview_receipt_skeleton(inst, 'web', 'job')
+
     def test_bound_port_accepts_own_job_and_exact_head_without_changing_node_urls(self):
         m, inst, n, row, data = self.context()
         before = json.dumps(n['local'], sort_keys=True)
