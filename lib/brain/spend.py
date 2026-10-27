@@ -1208,7 +1208,8 @@ def live_usage_snapshot(values, revision):
     token = _UI_USAGE.set((values, revision))
     discovery = _UI_DISCOVERY.set({})
     try:
-        yield
+        with _m_command_reads.scope(spend_discovery_signature):
+            yield
     finally:
         _UI_USAGE.reset(token)
         _UI_DISCOVERY.reset(discovery)
