@@ -56,9 +56,9 @@
 .task-facts:not(:has(p)) { display:none; }
 .task-card { border-inline-start:3px solid var(--task-status-color,var(--border)); }
 .task-blocked { color:var(--task-status-color); font-weight:600; }
-.task-parked-group summary { padding:10px; border:1px solid var(--border); border-radius:8px; cursor:pointer; font-size:12px; color:var(--muted-foreground); }
-.task-parked-group[open] { display:flex; flex-direction:column; gap:12px; }
-.task-parked-group[open] summary { margin-bottom:12px; }
+.task-parked-group { display:flex; flex-direction:column; gap:12px; }
+.task-parked-toggle { width:100%; height:auto; min-height:36px; justify-content:flex-start; padding:10px; font-size:12px; color:var(--muted-foreground); }
+.task-parked-cards:not([hidden]) { display:flex; flex-direction:column; gap:12px; }
 .task-status-legend { display:flex; flex-wrap:wrap; gap:8px 18px; margin-bottom:14px; font-size:11px; color:var(--muted-foreground); }
 .task-status-legend span { display:inline-flex; align-items:center; gap:6px; }
 .task-status-legend i, .task-status-dot { width:9px; height:9px; border-radius:50%; background:var(--task-status-color); flex-shrink:0; }

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { SectionTabs } from "./dash";
 import { ReaderRow } from "./detail-panel";
 import { Choice, Empty, Reader, Status, TechnicalDetails, Text } from "./shared";
@@ -95,9 +96,12 @@ export function Tasks({ s, go, node }: { s: RecordData; go: Go; node?: string })
               <h2>{column} <span>{cards.length}</span></h2>
               <div className="task-column-cards">{cards.length ? <>
                 {cards.filter(t => column !== "Parked" || t.status === "blocked").map(t => <TaskCard key={taskKey(t)} task={t} graph={graph} s={s} go={go} />)}
-                {column === "Parked" && cards.some(t => t.status !== "blocked") && <details className="task-parked-group"><summary>Show {cards.filter(t => t.status !== "blocked").length} parked tasks</summary>
-                  {cards.filter(t => t.status !== "blocked").map(t => <TaskCard key={taskKey(t)} task={t} graph={graph} s={s} go={go} />)}
-                </details>}
+                {column === "Parked" && cards.some(t => t.status !== "blocked") && <Collapsible className="task-parked-group">
+                  <CollapsibleTrigger render={<Button variant="outline" size="sm" className="task-parked-toggle" />}>Show {cards.filter(t => t.status !== "blocked").length} parked tasks</CollapsibleTrigger>
+                  <CollapsibleContent keepMounted className="task-parked-cards">
+                    {cards.filter(t => t.status !== "blocked").map(t => <TaskCard key={taskKey(t)} task={t} graph={graph} s={s} go={go} />)}
+                  </CollapsibleContent>
+                </Collapsible>}
               </> : <p className="task-column-empty">No tasks</p>}</div>
             </section>;
           })}
