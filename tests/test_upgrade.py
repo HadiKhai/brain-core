@@ -145,6 +145,9 @@ class InstallAndUpgrade(Scenario):
         root = self.init('demo')
         inst = m.Instance(root)
         node = inst.node('root')
+        self.repo(root)
+        self.git('checkout', '-qb', 'job/example', cwd=root)
+        node['local']['worktrees'] = {'job/example': {'path': str(root)}}
         with mock.patch.dict(os.environ, self.env, clear=True):
             m.job_started(inst, node, 'job/example', 'codex')
             ledger = root / 'job-ledger.md'
