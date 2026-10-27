@@ -31,7 +31,6 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 class MachineCare(Scenario):
     fixture_init_in_process = True
-    fixture_templates = True
     def setUp(self):
         super().setUp()
         self.m = core_loader.SourceFileLoader("brain_machine_care", str(CORE / "bin/brain")).load_module()

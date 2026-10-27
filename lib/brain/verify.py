@@ -79,40 +79,10 @@ def main_notice(n):
         print(f"main: {short} (cached); local {name} is missing")
 
 
-def _commit_refs(home, refs):
-    """Resolve a small ref set in one fresh Git observation, without a cache.
-
-    Unusual names, non-commit objects and unreadable inventories retain Git's
-    original recursive commit-peeling query. Exact names prevent prefix matches
-    from substituting a sibling ref. This never spans a verifier or publication.
-    """
-    refs = tuple(dict.fromkeys(refs))
-    ordinary = all(re.fullmatch(r'refs/(?:heads|remotes)/[^~^: ?*\[\]\\\x00-\x20]+', ref)
-                   for ref in refs)
-    if ordinary:
-        result = _m_common.git('for-each-ref', '--format=%(refname)%00%(objectname)%00%(objecttype)',
-                               '--', *refs, cwd=home, env=dict(os.environ))
-        if not result.returncode and not result.stderr.strip():
-            values = {}
-            for line in result.stdout.splitlines():
-                parts = line.split('\0')
-                if (len(parts) != 3 or parts[2] != 'commit'
-                        or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', parts[1])):
-                    break
-                values[parts[0]] = parts[1]
-            else:
-                return {ref: values.get(ref, '') for ref in refs}
-    return {ref: _m_common.git('rev-parse', '--verify', '--quiet', ref + '^{commit}',
-                               cwd=home, env=dict(os.environ)).stdout.strip() for ref in refs}
-
-
-def ready_refs(n, branch, integration=None):
+def ready_refs(n, branch):
     home = n["home_path"]
-    if integration is None:
-        integration = integration_ref(home)
-    names = ('refs/heads/' + branch, integration)
-    values = _commit_refs(home, names)
-    return tuple(values[name] for name in names)
+    return tuple(_m_common.git("rev-parse", "--verify", "--quiet", ref + "^{commit}", cwd=home).stdout.strip()
+                 for ref in ("refs/heads/" + branch, integration_ref(home)))
 
 
 def ready_preflight(n, branch, base=None):
@@ -120,20 +90,11 @@ def ready_preflight(n, branch, base=None):
     reasons = []
     if not n["external"] or not n["home_path"] or not n["home_path"].exists():
         return ["an external git home on this machine is required"], "", ""
-    ref = integration_ref(n["home_path"])
-    local_ref = ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
-    names = ['refs/heads/' + branch, ref]
-    if base is not None:
-        names.append('refs/heads/main')
-    if n['fm'].get('merge', 'local') != 'pr' and ref.startswith('refs/remotes/origin/'):
-        names.append(local_ref)
-    commits = _commit_refs(n['home_path'], names)
-    head, main = (commits[name] for name in names[:2])
-    remote_main = main
+    head, main = ready_refs(n, branch)
     if not head or not main:
         return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
     if base is not None:
-        local_main = commits['refs/heads/main']
+        local_main = _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}", cwd=n["home_path"]).stdout.strip()
         if (n["fm"].get("merge", "local") == "pr" or not isinstance(base, str)
                 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base)
                 or not local_main or _m_common.git("merge-base", "--is-ancestor", base, local_main, cwd=n["home_path"]).returncode):
@@ -141,7 +102,7 @@ def ready_preflight(n, branch, base=None):
         else:
             main = base
     if branch == "main" or ("refs/heads/" + branch ==
-                            ref.replace("refs/remotes/origin/", "refs/heads/")):
+                            integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/")):
         reasons.append("the job branch must differ from main")
     if _m_common.git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
         reasons.append("worker must rebase on current main")
@@ -153,11 +114,13 @@ def ready_preflight(n, branch, base=None):
         elif result.returncode:
             reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
     # A local merge integrates with unpublished local work too; PR mode integrates on the host.
+    ref = integration_ref(n["home_path"])
     if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
-        local = commits[local_ref]
+        local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
+        local = _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
         if not local:
             reasons.append("local integration branch is missing; configure merge=pr for host merges")
-        elif _m_common.git("merge-base", "--is-ancestor", remote_main, local, cwd=n["home_path"]).returncode:
+        elif _m_common.git("merge-base", "--is-ancestor", ready_refs(n, branch)[1], local, cwd=n["home_path"]).returncode:
             reasons.append("local default must include origin default for merge=local; coordinator must update it "
                            "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
         elif _m_common.git("merge-base", "--is-ancestor", base or local, head, cwd=n["home_path"]).returncode:
@@ -303,12 +266,12 @@ def current_ready_reasons(reasons):
 
 def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
     display = display and (not train or advisory)
+    reasons, head, main = ready_preflight(n, branch)
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     signal = _m_jobs.read_handback(n, row) if row else None
     packet = read_ready_packet(inst, n, branch, row)
-    base = packet.get("integration_base", packet.get("main")) if train and packet else None
-    reasons, head, main = ready_preflight(n, branch, base=base)
     if train and packet:
+        reasons, head, main = ready_preflight(n, branch, base=packet.get("integration_base", packet.get("main")))
         remote = ready_refs(n, branch)[1]
         old_remote = packet.get("main")
         if (not isinstance(old_remote, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", old_remote)

@@ -164,22 +164,15 @@ def lock_worker(spec_path):
 
 
 class _LockSiteScenario(Scenario):
-    fixture_init_in_process = True
-    fixture_templates = True
-
     def setUp(self):
         super().setUp()
         self.env["BRAIN_NO_UPDATE_CHECK"] = "1"
         self.env["BRAIN_LOCK_WAIT"] = "15"
-        self.r, self.home = self.cached_setup('lock-site', self.site_fixture)
-        self.marker, self.release = self.tmp / "slow-ready", self.tmp / "slow-release"
-
-    def site_fixture(self):
         self.r = self.init("demo")
         self.home = self.repo(self.tmp / "application")
         self.b(self.r, "new", "app", "--title", "Application", "--home", str(self.home))
         self.b(self.r, "new", "other", "--title", "Other")
-        return self.r, self.home
+        self.marker, self.release = self.tmp / "slow-ready", self.tmp / "slow-release"
 
     def prepare(self, site):
         command = []
@@ -345,7 +338,22 @@ class _LockSiteScenario(Scenario):
 
 
 class ReleasedSites(_LockSiteScenario):
-    pass
+    fixture_init_in_process = True
+    fixture_templates = True
+
+    def setUp(self):
+        Scenario.setUp(self)
+        self.env['BRAIN_NO_UPDATE_CHECK'] = '1'
+        self.env['BRAIN_LOCK_WAIT'] = '15'
+        self.r, self.home = self.cached_setup('released-site', self.site_fixture)
+        self.marker, self.release = self.tmp / 'slow-ready', self.tmp / 'slow-release'
+
+    def site_fixture(self):
+        self.r = self.init('demo')
+        self.home = self.repo(self.tmp / 'application')
+        self.b(self.r, 'new', 'app', '--title', 'Application', '--home', str(self.home))
+        self.b(self.r, 'new', 'other', '--title', 'Other')
+        return self.r, self.home
 
 
 # Each case is independently runnable, with its own synthetic instance.

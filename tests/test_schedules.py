@@ -29,7 +29,6 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class Schedules(Scenario):
-    cli_in_process = True
     def test_check_warns_on_recorded_provider_mismatch(self):
         r = self.init("alice")
         self.b(r, "new", "app", "--title", "App", "--runtime", "codex")

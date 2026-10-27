@@ -22,7 +22,6 @@ import tempfile
 import time
 import unittest
 import types
-from functools import lru_cache
 from pathlib import Path
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
@@ -30,44 +29,9 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 # Per-worker APFS template; instance state is always initialized anew. Checked
 # bytecode avoids recompiling unchanged core sources in every real CLI child.
 _core_template = None
-_runtime_core_template = None
 _core_bytecode = {}
 _runtime_bytecode = None
 _bytecode_lock = threading.RLock()
-_git_directories = {}
-_cli_context_lock = threading.RLock()
-
-
-@lru_cache(maxsize=8)
-def fixture_executable_path(path):
-    """Avoid Apple's Git dispatcher for fixtures using the selected developer Git.
-
-    Resolve once per worker; keep explicit Git installations and non-Darwin PATHs
-    unchanged. This selects the same executable as /usr/bin/git, with its real
-    hooks, locking, environment and subprocess boundaries intact.
-    """
-    if sys.platform != 'darwin' or shutil.which('git', path=path) != '/usr/bin/git':
-        return path
-    try:
-        result = subprocess.run(['/usr/bin/xcrun', '--find', 'git'], check=True,
-                                capture_output=True, text=True)
-        executable = Path(result.stdout.strip())
-        if executable.is_absolute() and executable.is_file() and os.access(executable, os.X_OK):
-            key = str(executable)
-            if key not in _git_directories:
-                candidate = tempfile.TemporaryDirectory(prefix='brain-test-git-')
-                try:
-                    (Path(candidate.name) / 'git').symlink_to(executable)
-                except BaseException:
-                    candidate.cleanup()
-                    raise
-                _git_directories[key] = candidate
-            # Prepending the developer's whole bin directory also overrides
-            # python3 and other tools. Expose only Git to preserve those choices.
-            return _git_directories[key].name + os.pathsep + path
-    except (OSError, subprocess.CalledProcessError):
-        pass
-    return path
 
 
 def compiled_fixture_core(source, identity):
@@ -163,33 +127,6 @@ _repo_templates = {}
 _setup_templates = {}
 
 
-def clone_fixture_runtime_core(source, destination, **kwargs):
-    """Copy runtime assets independently; omit developer docs/tests/UI sources."""
-    global _runtime_core_template
-    if Path(source) != CORE:
-        return clone_fixture_core(source, destination, **kwargs)
-    if _runtime_core_template is None:
-        candidate = tempfile.TemporaryDirectory(prefix='brain-test-runtime-core-')
-        original_ignore = kwargs.get('ignore')
-        def ignore(directory, names):
-            ignored = set(original_ignore(directory, names) if original_ignore else ())
-            if Path(directory) == Path(source):
-                ignored.update({'docs', 'tests'})
-            elif Path(directory) == Path(source) / 'ui':
-                ignored.update(set(names) - {'dist'})
-            return ignored
-        try:
-            tree = Path(candidate.name) / 'core'
-            shutil.copytree(source, tree, **{**kwargs, 'ignore': ignore})
-            shutil.copytree(compiled_fixture_core(tree, CORE), tree / 'lib/brain/__pycache__')
-        except BaseException:
-            candidate.cleanup()
-            raise
-        _runtime_core_template = candidate
-    _copy_fixture_tree(Path(_runtime_core_template.name) / 'core', destination)
-    return str(destination)
-
-
 def _copy_fixture_tree(source, destination):
     """Copy mutable fixtures with independent inodes, preserving relative links."""
     destination = Path(destination)
@@ -228,15 +165,13 @@ class _FixtureTemplate:
     def __init__(self, source, home, value):
         self.directory = tempfile.TemporaryDirectory(prefix='brain-test-template-')
         self.home = str(home)
-        self.relocations, self.links, self.repositories = [], [], []
+        self.relocations, self.links = [], []
         tree = Path(self.directory.name) / 'tree'
         try:
             self.value = _relocate_fixture_value(value, self.home, self.home)
             _copy_fixture_tree(source, tree)
             for directory, dirs, files in os.walk(tree, followlinks=False):
                 base = Path(directory)
-                if '.git' in dirs or '.git' in files:
-                    self.repositories.append(base.relative_to(tree))
                 # Installed source and compressed Git objects are immutable.
                 if base.name == '.git':
                     dirs[:] = [d for d in dirs if d != 'objects']
@@ -258,7 +193,7 @@ class _FixtureTemplate:
             self.directory.cleanup()
             raise
 
-    def clone(self, destination, home, env=None):
+    def clone(self, destination, home):
         _copy_fixture_tree(Path(self.directory.name) / 'tree', destination)
         for relative, data in self.relocations:
             (destination / relative).write_bytes(data.replace(self.home.encode(), str(home).encode()))
@@ -266,20 +201,12 @@ class _FixtureTemplate:
             path = destination / relative
             path.unlink()
             path.symlink_to(target.replace(self.home, str(home)))
-        # Copies have independent inodes. Refresh Git's stat cache before an
-        # asserted operation snapshots the index, so its first status read cannot
-        # appear to be an unrelated operator mutation. Preserve dirty contents.
-        for relative in self.repositories:
-            subprocess.run(['git', 'status', '--porcelain'], cwd=destination / relative,
-                           env=env, check=True, capture_output=True, text=True)
         return _relocate_fixture_value(self.value, self.home, str(home))
 
 
 class Scenario(unittest.TestCase):
     fixture_init_in_process = False
     fixture_templates = False
-    cli_in_process = False
-    fixture_runtime_only_core = False
     def setUp(self):
         # A real verify may enclose the test runner. Its descriptor stays open and
         # locked; its environment proof must not identify our temporary instances.
@@ -303,7 +230,7 @@ class Scenario(unittest.TestCase):
                     "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
                     "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false",
                     "GIT_CONFIG_KEY_2": "gc.autoDetach", "GIT_CONFIG_VALUE_2": "false",
-                    "PATH": fixture_executable_path(os.environ.get("PATH", "")),
+                    "PATH": os.environ.get("PATH", ""),
                     "PYTHONPATH": str(CORE / "tests"), "BRAIN_USAGE_TESTING": "1",
                     "BRAIN_USAGE_TEST_NO_KEYCHAIN": "1", "BRAIN_MACHINE_TESTING": "1",
                     "BRAIN_MACHINE_READING": json.dumps({"cpus": 8, "load": [1, 1, 1],
@@ -315,12 +242,6 @@ class Scenario(unittest.TestCase):
 
         self.env['PYTHONPYCACHEPREFIX'] = str(fixture_runtime_cache(CORE))
         self.env['PYTHONDONTWRITEBYTECODE'] = '1'
-
-        # Direct API calls need the same disposable HOME/config as CLI children.
-        # Otherwise session/account discovery scans the worker's real profiles.
-        environment = mock.patch.dict(os.environ, self.env, clear=True)
-        environment.start()
-        self.addCleanup(environment.stop)
 
     def tearDown(self):
         # Diagnostic finalizers must run before removal, not in addCleanup.
@@ -405,90 +326,21 @@ class Scenario(unittest.TestCase):
         return result
 
     # helpers
-    def run_(self, args, cwd, ok=True, brain=None, *, native=False):
-        r = self.command_result(args, cwd, brain, native=native)
+    def run_(self, args, cwd, ok=True, brain=None):
+        # Existing scenarios assert complete UI data; the default JSON CLI may
+        # now return an honest initial observation while its fill is running.
+        if args and args[0] == 'ui' and '--json' in args and '--wait' not in args:
+            args = [*args, '--wait']
+        launcher = Path(brain or (cwd / 'core/bin/brain'))
+        cache = fixture_runtime_cache(launcher.resolve().parent.parent)
+        r = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=' + str(cache),
+                            str(launcher), *args], cwd=cwd,
+                           env=self.env, capture_output=True, text=True)
         if ok is True and r.returncode:
             self.fail(f"brain {' '.join(args)} failed:\n{r.stdout}\n{r.stderr}")
         if ok is False and not r.returncode:
             self.fail(f"brain {' '.join(args)} should have failed:\n{r.stdout}")
         return r.stdout + r.stderr
-
-    def command_result(self, args, cwd, brain=None, *, native=False):
-        # Existing scenarios require a complete UI observation.
-        if args and args[0] == 'ui' and '--json' in args and '--wait' not in args:
-            args = [*args, '--wait']
-        launcher = Path(brain or (cwd / 'core/bin/brain'))
-        cache = fixture_runtime_cache(launcher.resolve().parent.parent)
-        command = [sys.executable, '-B', '-X', 'pycache_prefix=' + str(cache), str(launcher), *args]
-        if self._can_run_in_process(launcher, native):
-            return self._in_process_result(args, cwd, launcher, command)
-        return subprocess.run(command, cwd=cwd, env=self.env, capture_output=True, text=True)
-
-    def _can_run_in_process(self, launcher, native=False):
-        # Exact-class opt-in: a future subclass must audit its own boundaries.
-        if (native or not type(self).__dict__.get('cli_in_process', False)
-                or self.env.get('BRAIN_NO_REEXEC') != '1'
-                or self._native_evidence_active()):
-            return False
-        package = launcher.resolve().parent.parent / 'lib/brain'
-        required = ('__init__', 'cli', 'common', 'instance', 'jobs', 'events')
-        try:
-            return (all((package / (name + '.py')).is_file() for name in required)
-                    and launcher.read_bytes() == (CORE / 'bin/brain').read_bytes())
-        except OSError:
-            return False
-
-    def _native_evidence_active(self):
-        if (getattr(self, '_evidence', None)
-                or getattr(self, 'retain_rehearsal_evidence', False)
-                or hasattr(self, '_native_retention')
-                or self.env.get('BRAIN_REHEARSAL_EVIDENCE_DIR')
-                or os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR')):
-            return True
-        for module in list(sys.modules.values()):
-            name = getattr(module, '__name__', '')
-            for suffix, variable in (('.rehearse', '_retention_children'),
-                                     ('.rehearse_transactions', '_validation_retainer')):
-                if name.endswith(suffix):
-                    context = getattr(module, variable, None)
-                    if context is not None and context.get() is not None:
-                        return True
-        return False
-
-    def _runtime_only_core(self):
-        return (type(self).__dict__.get('fixture_runtime_only_core', False)
-                and self.fixture_init_in_process and self.fixture_templates
-                and not self._native_evidence_active())
-
-    def _in_process_result(self, args, cwd, launcher, command):
-        """Text-only audited commands; fresh main, never native child evidence."""
-        stdout, stderr = io.StringIO(newline=None), io.StringIO(newline=None)
-        code = 0
-        try:
-            with _cli_context_lock, contextlib.redirect_stdout(stdout), \
-                    contextlib.redirect_stderr(stderr), \
-                    mock.patch.object(sys, 'stdin', io.StringIO()), \
-                    mock.patch.object(sys, 'argv', [str(launcher), *args]), \
-                    mock.patch.object(sys, 'path', list(sys.path)), \
-                    mock.patch.object(sys, 'meta_path', list(sys.meta_path)), \
-                    mock.patch.object(sys, 'pycache_prefix', self.env.get('PYTHONPYCACHEPREFIX')), \
-                    self._fixture_module(cwd, launcher) as module:
-                try:
-                    module.main()
-                except SystemExit as error:
-                    if error.code is None:
-                        code = 0
-                    elif isinstance(error.code, int):
-                        code = error.code & 255
-                    else:
-                        print(error.code, file=stderr)
-                        code = 1
-        except Exception as error:
-            raise AssertionError('in-process brain command raised: ' + ' '.join(args)
-                                 + '\n' + stdout.getvalue() + stderr.getvalue()) from error
-        result = subprocess.CompletedProcess(command, code, stdout.getvalue(), stderr.getvalue())
-        result.in_process = True
-        return result
 
     def git(self, *args, cwd):
         r = subprocess.run(["git", "-c", "protocol.file.allow=always", *args], cwd=cwd, env=self.env,
@@ -502,7 +354,7 @@ class Scenario(unittest.TestCase):
         use_template = self.fixture_templates and not getattr(self, '_evidence', None)
         key = self._fixture_key(name, operator or name)
         if use_template and key in _instance_templates and not root.exists():
-            _instance_templates[key].clone(root, self.tmp, self.env)
+            _instance_templates[key].clone(root, self.tmp)
             # Registration is machine-local and must describe this fresh HOME,
             # including any other instances already registered by this test.
             with self._fixture_module(self.tmp, CORE / 'bin/brain') as module:
@@ -524,7 +376,7 @@ class Scenario(unittest.TestCase):
         # The pytest identity changes per method; it is not fixture input.
         environment = tuple(sorted((k, v.replace(str(self.tmp), '<fixture-home>'))
                                    for k, v in self.env.items() if k != 'PYTEST_CURRENT_TEST'))
-        return (str(CORE), self._runtime_only_core(), environment, *parts)
+        return (str(CORE), environment, *parts)
 
     def cached_setup(self, key, build):
         """Reuse an audited setup tree; each test still gets independent files.
@@ -541,7 +393,7 @@ class Scenario(unittest.TestCase):
             _setup_templates[key] = candidate
             return value
         self.tmp.rmdir()  # known empty; never remove a populated fixture
-        value = _setup_templates[key].clone(self.tmp, self.tmp, self.env)
+        value = _setup_templates[key].clone(self.tmp, self.tmp)
         self._prepare_fixture_cores()
         return value
 
@@ -577,14 +429,12 @@ class Scenario(unittest.TestCase):
             return self.run_(args, cwd=cwd, brain=brain)
         stdout, stderr = io.StringIO(), io.StringIO()
         launcher = str(brain or cwd / 'core/bin/brain')
-        # Freeze mode before _fixture_module replaces the caller's environment.
-        copy_core = clone_fixture_runtime_core if self._runtime_only_core() else clone_fixture_core
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), \
                 mock.patch.object(sys, 'argv', [launcher, *args]), \
                 self._fixture_module(cwd, brain) as module:
             nodes = module._owners['cmd_init']
             copy = types.SimpleNamespace(**vars(shutil))
-            copy.copytree = copy_core
+            copy.copytree = clone_fixture_core
             with mock.patch.object(nodes, 'shutil', copy):
                 try:
                     module.main()
@@ -604,7 +454,7 @@ class Scenario(unittest.TestCase):
         key = self._fixture_key(tuple(sorted(files.items())))
         use_template = self.fixture_templates and not getattr(self, '_evidence', None)
         if use_template and key in _repo_templates and not path.exists():
-            _repo_templates[key].clone(path, self.tmp, self.env)
+            _repo_templates[key].clone(path, self.tmp)
             return path
         path.mkdir(parents=True, exist_ok=True)
         self.git('init', '-q', '-b', 'main', cwd=path)
@@ -632,12 +482,7 @@ class Scenario(unittest.TestCase):
 
 class AutonomyProject(Scenario):
     fixture_init_in_process = True
-    fixture_templates = True
-
     def project(self):
-        return self.cached_setup('autonomy-project', self.project_fixture)
-
-    def project_fixture(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'code' / 'app')
         self.fixture_b(r, 'new', 'app', '--title', 'App', '--home', str(home))

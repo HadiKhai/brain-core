@@ -16,7 +16,6 @@ from scenario import CORE, Scenario
 
 class BatchLand(Scenario):
     fixture_init_in_process = True
-    fixture_templates = True
     project = test_train.MergeTrain.project
     job = test_train.MergeTrain.job
     batches = test_train.MergeTrain.batches

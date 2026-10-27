@@ -29,43 +29,6 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureGitConfig(Scenario):
-    def test_fixture_git_resolution_preserves_overrides_and_falls_back(self):
-        import scenario
-        native = self.tmp / 'developer/bin/git'
-        native.parent.mkdir(parents=True)
-        native.write_text('#!/bin/sh\nexit 0\n')
-        native.chmod(0o700)
-        path = '/fixture/bin:/usr/bin'
-        with mock.patch.object(scenario.sys, 'platform', 'darwin'), \
-                mock.patch.object(scenario.shutil, 'which', return_value='/usr/bin/git'), \
-                mock.patch.object(scenario.subprocess, 'run', return_value=
-                                  subprocess.CompletedProcess([], 0, str(native) + '\n', '')) as run:
-            scenario.fixture_executable_path.cache_clear()
-            self.addCleanup(scenario.fixture_executable_path.cache_clear)
-            resolved = scenario.fixture_executable_path(path)
-            directory, original = resolved.split(os.pathsep, 1)
-            self.assertEqual(original, path)
-            self.assertEqual(sorted(p.name for p in Path(directory).iterdir()), ['git'])
-            self.assertEqual((Path(directory) / 'git').resolve(), native)
-            self.assertEqual(scenario.fixture_executable_path(path), resolved)
-            run.assert_called_once_with(['/usr/bin/xcrun', '--find', 'git'], check=True,
-                                        capture_output=True, text=True)
-            for selected, platform in (('/custom/git', 'darwin'), ('/usr/bin/git', 'linux')):
-                scenario.fixture_executable_path.cache_clear()
-                with mock.patch.object(scenario.shutil, 'which', return_value=selected), \
-                        mock.patch.object(scenario.sys, 'platform', platform):
-                    self.assertEqual(scenario.fixture_executable_path(path), path)
-            self.assertEqual(run.call_count, 1)
-            for failure in (OSError('missing xcrun'), subprocess.CalledProcessError(1, ['xcrun'])):
-                scenario.fixture_executable_path.cache_clear()
-                run.side_effect = failure
-                self.assertEqual(scenario.fixture_executable_path(path), path)
-            run.side_effect = None
-            for invalid in ('relative/git', str(self.tmp / 'missing/git')):
-                scenario.fixture_executable_path.cache_clear()
-                run.return_value.stdout = invalid
-                self.assertEqual(scenario.fixture_executable_path(path), path)
-
     def test_fabricated_repos_disable_automatic_maintenance(self):
         home = self.repo(self.tmp / 'code')
         root = self.init('alice')

@@ -111,12 +111,7 @@ class Collaboration(Scenario):
         hr, hclone = brains["ana"]
         self.git("checkout", "-q", "-b", "auth-tests", cwd=hclone)
         (hclone / "test_auth.py").write_text("def test_guard():\n    assert True\n")
-        self.git("add", "-A", cwd=hclone)
-        # Git dates have second resolution. Put this fixture commit strictly
-        # between the initial status boundary and the later sync mark.
-        with mock.patch.dict(self.env, {'GIT_AUTHOR_DATE': '2026-01-02T09:00:00+00:00',
-                                       'GIT_COMMITTER_DATE': '2026-01-02T09:00:00+00:00'}):
-            self.git("commit", "-qm", "Add auth guard tests", cwd=hclone)
+        self.git("add", "-A", cwd=hclone); self.git("commit", "-qm", "Add auth guard tests", cwd=hclone)
         self.git("push", "-q", "origin", "auth-tests", cwd=hclone)
 
         # ben's Brain learns about it only through the repo
@@ -124,6 +119,7 @@ class Collaboration(Scenario):
         out = self.b(rr, "sync", "proj")
         self.assertIn("Add auth guard tests", out)
         self.assertIn("auth-tests", out)
+        time.sleep(1.1)  # git dates have one-second resolution
         self.b(rr, "sync", "proj", "--mark")
         self.assertNotIn("Add auth guard tests", self.b(rr, "sync", "proj", "--offline"))
 

@@ -15,8 +15,6 @@ from brain import events, instance, transitions, hosts
 
 
 class ReviewRegressions(Scenario):
-    fixture_init_in_process = True
-    fixture_templates = True
     def app(self, external=False):
         root = self.init('demo')
         args = ['new', 'app', '--title', 'App']

@@ -29,89 +29,6 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class WorkerReadyPackets(Scenario):
-    fixture_init_in_process = True
-    fixture_templates = True
-    def test_batched_commit_refs_keep_exact_names_peeling_and_fresh_calls(self):
-        home = self.repo(self.tmp / 'ref-batch')
-        m = core_loader.SourceFileLoader('commit_ref_batch_proof', str(CORE / 'bin/brain')).load_module()
-        owner = m.ready_refs.__globals__
-        resolve = owner['_commit_refs']
-        self.git('branch', 'prefix/child', cwd=home)
-        refs = ['refs/heads/main', 'refs/heads/prefix', 'refs/heads/missing']
-        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
-            first = resolve(home, refs)
-            self.assertEqual(first['refs/heads/main'], self.git('rev-parse', 'main', cwd=home).strip())
-            self.assertEqual(first['refs/heads/prefix'], '')
-            self.assertEqual(first['refs/heads/missing'], '')
-            self.git('commit', '--allow-empty', '-qm', 'new main', cwd=home)
-            second = resolve(home, refs)
-            self.assertNotEqual(first['refs/heads/main'], second['refs/heads/main'])
-            self.git('tag', '-am', 'annotated', 'wrapped', cwd=home)
-            self.git('update-ref', 'refs/remotes/origin/wrapped', 'refs/tags/wrapped', cwd=home)
-            peeled = resolve(home, ['refs/remotes/origin/wrapped'])
-            self.assertEqual(peeled['refs/remotes/origin/wrapped'], second['refs/heads/main'])
-            real_git = owner['_m_common'].git
-            def damaged(*args, **kw):
-                if args[0] == 'for-each-ref':
-                    return subprocess.CompletedProcess(args, 0, 'malformed\n', '')
-                return real_git(*args, **kw)
-            with mock.patch.object(owner['_m_common'], 'git', side_effect=damaged):
-                self.assertEqual(resolve(home, refs), second)
-                self.git('commit', '--allow-empty', '-qm', 'fresh fallback head', cwd=home)
-                third = resolve(home, refs)
-                self.assertNotEqual(third['refs/heads/main'], second['refs/heads/main'])
-                self.assertEqual(third['refs/heads/main'], self.git('rev-parse', 'main', cwd=home).strip())
-
-    def test_metadata_batch_fences_linked_refs_and_bypasses_display_memoization(self):
-        home = self.repo(self.tmp / 'metadata-batch')
-        wt = self.tmp / 'metadata-worktree'
-        self.git('worktree', 'add', '-qb', 'job', str(wt), cwd=home)
-        m = core_loader.SourceFileLoader('metadata_batch_proof', str(CORE / 'bin/brain')).load_module()
-        real_git = m.git
-        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
-            with mock.patch.object(m, 'git', wraps=real_git) as git:
-                first = m.git_state_paths(wt)
-                second = m.git_state_paths(wt)
-                queries = [call for call in git.call_args_list if call.args[0] == 'rev-parse']
-                self.assertEqual(len(queries), 2)
-                self.assertTrue(all(call.kwargs['env'] == dict(os.environ) for call in queries))
-                self.assertEqual(first, second)
-                self.assertIn(wt / '.git', first)
-                self.assertIn(home / '.git/refs', first)
-                self.assertTrue(any(path.name == 'HEAD' and path.parent.name == wt.name for path in first))
-            def old_git(*args, **kw):
-                if '--path-format=absolute' in args:
-                    return subprocess.CompletedProcess(args, 129, '', 'unsupported path-format')
-                return real_git(*args, **kw)
-            with mock.patch.object(m, 'git', side_effect=old_git):
-                self.assertEqual(set(m.git_state_paths(wt)), set(first))
-
-    def test_preflight_resolves_remote_once_and_refreshes_changed_refs_on_next_call(self):
-        r, home, wt = self.job()
-        self.git('remote', 'add', 'origin', str(self.tmp / 'uncontacted-origin'), cwd=home)
-        self.git('update-ref', 'refs/remotes/origin/main', 'main', cwd=home)
-        self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main', cwd=home)
-        m = core_loader.SourceFileLoader('brain_preflight_ref_reads', str(CORE / 'bin/brain')).load_module()
-        n = m.Instance(r).node('a')
-        n['fm']['merge'] = 'pr'
-        with mock.patch.dict(os.environ, self.env, clear=True):
-            def preflight():
-                with mock.patch.object(m, 'integration_ref', wraps=m.integration_ref) as remote:
-                    result = m.ready_preflight(n, 'job')
-                    self.assertEqual(remote.call_count, 1)
-                    self.assertEqual(result[0], [])
-                    return result[1:]
-            first = preflight()
-            self.git('update-ref', 'refs/remotes/origin/other', 'job', cwd=home)
-            self.git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/other', cwd=home)
-            second = preflight()
-            self.assertEqual(second[0], first[0])
-            self.assertNotEqual(second[1], first[1])
-            self.git('commit', '--allow-empty', '-qm', 'next worker head', cwd=wt)
-            third = preflight()
-            self.assertNotEqual(third[0], second[0])
-            self.assertEqual(third[1], second[1])
-
     def test_port_changes_rerun_monolithic_and_lane_commands(self):
         m = core_loader.SourceFileLoader('brain_port_reuse', str(CORE / 'bin/brain')).load_module()
         owner = m.record_ready.__globals__
@@ -825,8 +742,6 @@ class VerifyLogs(Scenario):
 
 
 class VerifyInputDiagnostics(Scenario):
-    fixture_init_in_process = True
-    fixture_templates = True
     job = WorkerReadyPackets.job
     packet = WorkerReadyPackets.packet
 

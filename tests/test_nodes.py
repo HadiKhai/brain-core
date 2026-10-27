@@ -29,7 +29,6 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class Basics(Scenario):
-    cli_in_process = True
     def test_fresh_instance_is_generic_and_passes(self):
         r = self.init("alice")
         self.assertIn("✓", self.b(r, "check"))
@@ -84,7 +83,6 @@ class Basics(Scenario):
 
 
 class MachineBindings(Scenario):
-    cli_in_process = True
     def test_host_ids_stay_on_this_machine(self):
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "A")
@@ -790,9 +788,6 @@ class TeamHomes(Scenario):
         self.assertIn(packet["head"], ledger)
 
     def team(self):
-        return self.cached_setup('team-home', self.team_fixture)
-
-    def team_fixture(self):
         root = self.init("alice")
         seed = self.repo(self.tmp / "seed")
         self.git("branch", "-m", "trunk", cwd=seed)

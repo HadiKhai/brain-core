@@ -911,9 +911,6 @@ cli.main()
 
 
 class NodeHygiene(Scenario):
-    cli_in_process = True
-    fixture_init_in_process = True
-    fixture_templates = True
     def setUp(self):
         super().setUp()
         loader = core_loader.SourceFileLoader('brain_hygiene', str(CORE / 'bin/brain'))
@@ -1396,7 +1393,6 @@ class RuleActivationDue(unittest.TestCase):
 
 
 class RenderedFingerprint(Scenario):
-    cli_in_process = True
     fixture_templates = True
     fixture_init_in_process = True
     """Native fabricated readiness, plus focused render-boundary telemetry probes."""

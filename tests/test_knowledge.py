@@ -56,7 +56,6 @@ class Specialists(Scenario):
 
 
 class LessonTags(Scenario):
-    cli_in_process = True
     def fixture(self):
         r = self.init("alice")
         self.b(r, "new", "app", "--title", "App")
