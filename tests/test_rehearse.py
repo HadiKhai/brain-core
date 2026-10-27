@@ -618,6 +618,7 @@ class RehearsalRedaction(Scenario):
 
 
 class RehearsalFixture(Scenario):
+    temporary_parent = CORE.parent
     def setUp(self):
         super().setUp()
         owned_rehearsal_workdir(self)
@@ -1208,6 +1209,7 @@ class RehearsalCoverageFaultTypes(unittest.TestCase):
 
 
 class RehearsalCloneCaches(Scenario):
+    temporary_parent = CORE.parent
     def test_frozen_aggregate_bootstrap_covers_read_and_ui_without_provider_discovery(self):
         from brain import instance, rehearse_external
         source = self.init('accounting-source')
@@ -1623,6 +1625,7 @@ class RehearsalCloneCaches(Scenario):
 
 
 class RehearsalSandbox(Scenario):
+    temporary_parent = CORE.parent
     retain_rehearsal_evidence = True
 
     def runner(self, script, args=(), terms=(), kind='read', raw_output=None):
@@ -2505,6 +2508,7 @@ class RehearsalDelivery(unittest.TestCase):
 
 
 class RehearsalGitFormats(Scenario):
+    temporary_parent = CORE.parent
     def test_reftable_and_sha256_formats_survive_without_hooks_or_helpers(self):
         for name, option, key, value in [('reftable', '--ref-format=reftable', 'extensions.refstorage', 'reftable'),
                                          ('sha256', '--object-format=sha256', 'extensions.objectformat', 'sha256')]:

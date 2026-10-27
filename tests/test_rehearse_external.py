@@ -11,15 +11,14 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from brain import instance, rehearse, rehearse_external
-from scenario import Scenario
+from scenario import Scenario, CORE
 from unittest import mock
 
 
 class OwnedCopyLifecycle(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.parent = Path(self.temp.name).resolve()
+        from test_rehearse import persistent_fixture_directory
+        self.parent = persistent_fixture_directory(self)
 
     def test_persistent_copy_root_refuses_temp_and_realpath_aliases_before_start(self):
         from types import SimpleNamespace
@@ -30,10 +29,11 @@ class OwnedCopyLifecycle(unittest.TestCase):
         with mock.patch.dict(os.environ, {'TMPDIR': str(aged)}), \
                 mock.patch.object(rehearse_external.tempfile, 'mkdtemp') as allocate, \
                 mock.patch.object(rehearse_external.OwnedCopies, 'start_guardian') as start:
-            for path in (aged, aged / 'run', alias / 'run', Path('/var/folders/sample/run'),
-                         Path('/private/var/folders/sample/run')):
-                with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'temporary rehearsal'):
-                    rehearse_external.OwnedCopies(parent=path, persistent=True)
+            for options in ({}, {'persistent': True}):
+                for path in (aged, aged / 'run', alias / 'run', Path('/var/folders/sample/run'),
+                             Path('/private/var/folders/sample/run'), Path(tempfile.gettempdir()) / 'run'):
+                    with self.subTest(path=path, options=options), self.assertRaisesRegex(ValueError, 'temporary rehearsal'):
+                        rehearse_external.OwnedCopies(parent=path, **options)
             allocate.assert_not_called()
             start.assert_not_called()
             node = dict(external=True, home_path=self.parent / 'candidate',
@@ -45,6 +45,35 @@ class OwnedCopyLifecycle(unittest.TestCase):
                     rehearse.rehearse(SimpleNamespace(), node, 'sample')
                 sandbox.assert_not_called()
             self.assertEqual([], list(aged.iterdir()))
+
+    def test_all_copy_allocations_refuse_home_dot_directories_before_start(self):
+        home = self.parent / 'fabricated-home'
+        home.mkdir()
+        alias = self.parent / 'alias'
+        alias.symlink_to(home / '.codex', target_is_directory=True)
+        before = rehearse.snapshot(self.parent)
+        with mock.patch.dict(os.environ, {'HOME': str(home)}), \
+                mock.patch.object(rehearse_external.tempfile, 'mkdtemp') as allocate, \
+                mock.patch.object(rehearse_external.OwnedCopies, 'start_guardian') as start:
+            for options in ({}, {'persistent': True}):
+                for name in ('.codex', '.claude', '.claude-work', '.config', '.cache', '.ssh', '.other'):
+                    for path in (home / name, home / name / 'runs'):
+                        with self.subTest(path=path, options=options), self.assertRaisesRegex(ValueError, 'HOME dot-directory'):
+                            rehearse_external.OwnedCopies(parent=path, **options)
+                for path in (alias / 'runs', Path('~/.codex/runs')):
+                    with self.subTest(path=path, options=options), self.assertRaisesRegex(ValueError, 'HOME dot-directory'):
+                        rehearse_external.OwnedCopies(parent=path, **options)
+                with self.assertRaisesRegex(ValueError, 'HOME dot-directory'):
+                    rehearse_external.OwnedCopies(parent=home, prefix='.hidden-', **options)
+            allocate.assert_not_called()
+            start.assert_not_called()
+        self.assertEqual(before, rehearse.snapshot(self.parent))
+
+    def test_copy_allocation_requires_an_explicit_parent(self):
+        with mock.patch.object(rehearse_external.tempfile, 'mkdtemp') as allocate:
+            with self.assertRaisesRegex(ValueError, 'copy parent required'):
+                rehearse_external.OwnedCopies()
+        allocate.assert_not_called()
 
     def test_persistent_workbench_copy_preserves_timestamps_and_cleans_owned_bulk(self):
         from test_rehearse import persistent_fixture_directory
@@ -736,6 +765,7 @@ with copies:
 
 
 class DeclaredExternalSnapshot(Scenario):
+    temporary_parent = CORE.parent
     def test_provider_installation_routes_are_excluded_without_waiving_link_guard(self):
         root = self.init('provider-routes')
         provider = self.tmp / 'provider-config'
