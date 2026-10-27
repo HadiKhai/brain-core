@@ -2715,3 +2715,27 @@ and altered KPI values; all negative controls must be rejected before acceptance
 For first-data paint, derive the oracle from the actual HTTP response delivered to the
 app. Do not add a second state request to the measured navigation merely to obtain
 expected values; that changes the workload instead of observing the displayed reading.
+
+## D40004: Bind job preview evidence to its current worktree generation
+
+Preview receipts may opt into `scope: job` and include `worktree_generation`
+from `job_preview_generation(instance, node, job_row, head)`. This permits an
+owned preview without changing the node's configured preview or review URLs.
+Receipts without job scope retain the existing exact node-URL policy.
+
+A job URL must use HTTP(S) and either a loopback host (`localhost`, `127.0.0.1`,
+or `::1`) on the current worktree's allocated port block, or an exact URL
+declared in that job's ledger `Preview URLs` cell (a JSON string array) or
+contract `## Preview URLs` section (one URL per line, optionally bulleted and
+backtick-quoted). Credentials in job preview URLs are refused. Declarations
+are exact URLs, not host or port wildcards.
+
+Job receipts bind the open job key, exact head, current node binding, worktree
+creation record, physical checkout and Git metadata identities, allocated ports
+and current URL declarations. Validation reloads authority from disk, verifies
+the checked-out branch and head against the node's home repository, and refuses
+a missing, replaced or rebound worktree. Both required and supplied optional
+job receipts are revalidated by the readiness policy before full verification.
+A receipt still needs a rendered-page observation and three distinct matching
+source comparisons for every URL; recording remains a supplied observation,
+not an automated browser check.
