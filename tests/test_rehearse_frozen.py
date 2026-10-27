@@ -127,7 +127,7 @@ class FrozenInputs(RehearsalFixture):
         else:
             super().setUp()
 
-    def probe(self, stdout, stderr='', command='ui', mutation=None):
+    def probe(self, stdout, stderr='', command='ui', mutation=None, kind='read'):
         self.probes += 1
         lane = self.tmp / ('probe-' + str(self.probes))
         (lane / 'brain').mkdir(parents=True)
@@ -140,7 +140,91 @@ class FrozenInputs(RehearsalFixture):
         with mock.patch.object(rehearsal, 'sandbox_prefix', return_value=[]), \
                 mock.patch.object(rehearsal.subprocess, 'Popen', return_value=process), \
                 mock.patch.object(rehearsal.os, 'killpg'):
-            return rehearsal.run_command(lane / 'brain/core', lane, [command], 'read', [], self.terms)
+            return rehearsal.run_command(lane / 'brain/core', lane, [command], kind, [], self.terms)
+
+    def test_hook_inventory_and_generated_audit_marker_publish_privately(self):
+        self.probes = 0
+        self.probe('', command='hook', kind='hook')
+        lane = self.tmp / ('probe-' + str(self.probes))
+        inventory = lane / 'home/brains.json'
+        self.assertEqual(inventory.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(inventory.read_text())['default'], 'rehearsal')
+        marker = lane / 'home/write-attempt'
+        marker.write_text('earlier fixture\n')
+        marker.chmod(0o644)
+        inode = marker.stat().st_ino
+        outside = self.tmp / 'outside-fixture'
+        code = "import os,runpy,sys; runpy.run_path(sys.argv[1]); fd=os.open(sys.argv[2],os.O_WRONLY|os.O_CREAT,0o600); os.close(fd)"
+        env = dict(os.environ, BRAIN_REHEARSAL_BOUNDARY=str(lane), BRAIN_REHEARSAL_MARKER=str(marker))
+        child = subprocess.run([sys.executable, '-I', '-S', '-c', code,
+                                str(lane / 'bootstrap/rehearsal_audit.py'), str(outside)],
+                               env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(marker.stat().st_ino, inode)
+        lines = marker.read_text().splitlines()
+        self.assertEqual(lines[0], 'earlier fixture')
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[1])['path'], str(outside))
+
+    def test_private_copy_modes_precede_content_in_native_and_fallback_paths(self):
+        source = self.tmp / 'private-copy-source'
+        (source / '.brain').mkdir(parents=True)
+        (source / 'job-handbacks').mkdir()
+        (source / 'job-trains').mkdir()
+        (source / 'ordinary').mkdir()
+        private = {'.brain/local.json': b'legacy-local', 'job-handbacks/receipt.json': b'legacy-receipt',
+                   'protected': b'protected-content'}
+        for name, value in private.items():
+            path = source / name
+            path.write_bytes(value)
+            path.chmod(0o600 if name == 'protected' else 0o644)
+        shared = source / 'ordinary/note'
+        shared.write_text('shared content')
+        shared.chmod(0o640)
+        shared_ignore = source / 'job-trains/.gitignore'
+        shared_ignore.write_text('*.log\n')
+        shared_ignore.chmod(0o640)
+        tool = source / '.brain/private-tool'
+        tool.write_text('private helper')
+        tool.chmod(0o700)
+        original = rehearsal.snapshot(source)
+        copy = shutil.copyfileobj
+        for platform, result in (('linux', 0), ('darwin', 0), ('darwin', 1)):
+            with self.subTest(platform=platform, native_result=result):
+                seen = []
+                def copied(incoming, outgoing, *args, **kwargs):
+                    payload = os.pread(incoming.fileno(), 100, 0)
+                    if payload in set(private.values()) | {b'private helper'}:
+                        self.assertEqual(stat.S_IMODE(os.fstat(outgoing.fileno()).st_mode), 0o600)
+                    seen.append(payload)
+                    return copy(incoming, outgoing, *args, **kwargs)
+                def native(args, **kwargs):
+                    src, dst = Path(args[-2]), Path(args[-1])
+                    self.assertIn(src, (source / 'ordinary', source / 'job-trains'))
+                    if result:
+                        dst.mkdir()
+                        (dst / 'partial').write_text('partial clone')
+                    else:
+                        shutil.copytree(src, dst)
+                    return subprocess.CompletedProcess(args, result, b'', b'')
+                dest = self.tmp / ('private-copy-' + platform + str(result))
+                with mock.patch.object(rehearsal.sys, 'platform', platform), \
+                        mock.patch.object(rehearsal._m_rehearse_external, 'owned_run', side_effect=native), \
+                        mock.patch.object(rehearsal.shutil, 'copyfileobj', side_effect=copied):
+                    rehearsal.copy_tree(source, dest)
+                self.assertTrue(set(private.values()).issubset(seen))
+                self.assertIn(b'private helper', seen)
+                for name, value in private.items():
+                    path = dest / name
+                    self.assertEqual(path.read_bytes(), value)
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                    self.assertNotEqual(path.stat().st_ino, (source / name).stat().st_ino)
+                self.assertEqual(stat.S_IMODE((dest / 'ordinary/note').stat().st_mode), 0o640)
+                self.assertEqual(stat.S_IMODE((dest / 'job-trains/.gitignore').stat().st_mode), 0o640)
+                self.assertEqual(stat.S_IMODE((dest / '.brain/private-tool').stat().st_mode), 0o700)
+                self.assertFalse(list(dest.glob('.rehearse-copy-*')))
+                self.assertEqual(rehearsal.snapshot(source), original)
 
     def ui(self):
         def job(branch, ready):
