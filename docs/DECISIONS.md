@@ -3629,3 +3629,15 @@ while the flock is held: a surviving child still keeps the gate busy, and a
 dead owner with a held descriptor is still reported. The mark is best-effort
 and takes no instance lock, so unwinding never waits on or fails over it.
 Gate phase writes take the instance lock by root, as gate paths do.
+## 2026-10-27: Reuse ledger parsing and batch terminal handback display reads
+
+Ledger observations still read the current file on every call. A bounded cache
+stores only immutable parsed rows keyed by the complete text and default columns;
+each consumer receives fresh dictionaries. Same-size edits, restored timestamps,
+legacy columns and caller mutations cannot reuse stale ledger state.
+
+After a handback publishes, its generated status projection uses the existing
+command read snapshot within the existing unlocked source fence. Repeated display
+queries share one observation. The snapshot ends before the fence is revalidated
+and before generated status or journal publication; attempt ownership, readiness
+and publication checks outside this display scope remain fresh.

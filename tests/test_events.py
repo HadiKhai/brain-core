@@ -417,6 +417,59 @@ class EventAppend(Scenario):
 
 class EventViews(Scenario):
     fixture_init_in_process = True
+
+    def test_handback_projection_snapshot_preserves_generated_bytes_and_expires(self):
+        import contextlib
+        from brain import command_reads, jobs, status
+        r = self.init('handback-snapshot')
+        home = self.repo(self.tmp / 'code')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(r, 'wt', 'add', 'app', 'job-one', '--no-setup')
+        inst = instance.Instance(r)
+        n = inst.node('app')
+        path = n['dir'] / 'status.md'
+        original = path.read_bytes()
+        op = argparse.Namespace(inst=inst, node='app', command='handback', record_paths=set(),
+                                close_job=False, study_handback=False)
+        clock = inst.now_dt()
+        snapshot = command_reads.snapshot
+        results = []
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(instance.Instance, 'now_dt', return_value=clock), \
+                mock.patch.object(status._m_machine, 'machine_state', return_value={}), \
+                mock.patch.object(status._m_machine, 'machine_summary', return_value='fixture machine'), \
+                mock.patch.object(events, 'status_commit'):
+            for reads in (contextlib.nullcontext, snapshot):
+                path.write_bytes(original)
+                with mock.patch.object(command_reads, 'snapshot', reads), instance.brain_lock(inst):
+                    view = events.maintain(op, {})
+                results.append((json.dumps(view, ensure_ascii=False).encode(), path.read_bytes()))
+                self.assertIsNone(command_reads._VALUES.get())
+        self.assertEqual(results[0], results[1])
+        # Parsing and publication consumers outside the display scope stay fresh.
+        ledger = n['dir'] / 'job-ledger.md'
+        ledger.write_text(ledger.read_text().replace('| job-one |', '| job-two |'))
+        self.assertEqual(jobs.read_jobs(n)[0]['Job'], 'job-two')
+
+    def test_handback_projection_ref_drift_refuses_and_clears_read_scope(self):
+        from brain import command_reads
+        r = self.init('handback-ref-drift')
+        home = self.repo(self.tmp / 'code')
+        self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
+        inst = instance.Instance(r)
+        op = argparse.Namespace(inst=inst, node='app', command='handback', record_paths=set(),
+                                close_job=False, study_handback=False)
+        original = events.snapshot_view
+        def drift(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.git('commit', '--allow-empty', '-qm', 'Concurrent home change', cwd=home)
+            return result
+        with mock.patch.dict(os.environ, self.env, clear=True), instance.brain_lock(inst), \
+                mock.patch.object(events, 'snapshot_view', side_effect=drift):
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                events.maintain(op, {})
+        self.assertIsNone(command_reads._VALUES.get())
+
     def tracked_state(self, root, paths):
         return {name: ((root / name).read_bytes() if (root / name).exists() else None,
                        self.git('ls-files', '--stage', '--', name, cwd=root),

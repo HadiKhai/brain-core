@@ -1422,7 +1422,9 @@ def maintain(op, changed):
                         paths.extend(instance.git_state_paths(node['home_path'], refs=refs - {''}, include_head=False))
                 paths.append(op.inst.root / '.brain/communications.json')
                 return paths
-            with instance.released(op.inst, list(op.inst.nodes()), extra=projection_inputs):
+            from . import command_reads
+            reads = command_reads.snapshot if op.command == 'handback' else contextlib.nullcontext
+            with instance.released(op.inst, list(op.inst.nodes()), extra=projection_inputs), reads():
                 view = snapshot_view(op.inst, n, known)
         else:
             view = snapshot_view(op.inst, n, known)
