@@ -1348,6 +1348,10 @@ def affected_nodes(inst, changed, preferred):
 
 
 RELEASED_PROJECTION_ATTEMPTS = 3
+WT_COMMANDS = ('wt_add', 'wt_setup', 'wt_rm', 'wt_prune')
+# These writers fence their released projection on their own node's records
+# and recompute a view a concurrent writer made stale.
+SCOPED_PROJECTIONS = ('set', 'handback', 'task', 'upgrade', *WT_COMMANDS)
 
 
 def released_view(op, n, known_of, inputs, prepare=None, retry=False):
@@ -1450,8 +1454,8 @@ def maintain(op, changed):
             known = status.facts_meta(n).get('merged', [])
         if op.command == 'status':
             view = prepared[n['id']][0]
-        elif op.command in ('set', 'handback', 'task', 'review', 'preview_receipt',
-                            'report', 'workbench', 'wt_add', 'wt_setup', 'wt_rm', 'wt_prune'):
+        elif op.command in ('set', 'handback', 'task', 'review', 'preview_receipt', 'report', 'workbench',
+                            'upgrade', *WT_COMMANDS):
             # Status projection can scan worker transcripts. It grants no action
             # authority, and must not hold up writers after terminal publication.
             # A concurrent source change refuses this generated view; the normal
@@ -1459,7 +1463,7 @@ def maintain(op, changed):
             def projection_inputs():
                 prefix = n['dir'].relative_to(op.inst.root).as_posix()
                 prefix = '' if prefix == '.' else prefix + '/'
-                scoped = op.command in ('set', 'handback', 'task')
+                scoped = op.command in SCOPED_PROJECTIONS
                 paths = [op.inst.root / path for path in resources(op.inst, paths_only=True)
                          if not path.startswith('@ready/') and (not scoped or
                              path.startswith(prefix) and not path[len(prefix):].startswith('nodes/'))]
@@ -1480,7 +1484,7 @@ def maintain(op, changed):
                 text = status.refreshed_text(current, node, view, machine_snapshot=machine)
             view, n = released_view(op, n, lambda node: status.facts_meta(node).get('merged', []),
                                     projection_inputs, prepare=prepare if materialize else None,
-                                    retry=op.command in ('set', 'handback', 'task'))
+                                    retry=op.command in SCOPED_PROJECTIONS)
         else:
             view = snapshot_view(op.inst, n, known)
         # During comparison, files supply new facts. After switching, a write materializes its
