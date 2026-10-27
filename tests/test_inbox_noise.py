@@ -246,3 +246,55 @@ class InboxNoise(Scenario):
         self.assertEqual((self.root / 'job-ledger.md').read_bytes(), ledger)
         after = json.loads(self.b(self.root, 'due', 'root', '--json'))
         self.assertEqual([i['id'] for i in after if i['kind'] == 'job-landed'], [landed['id']])
+
+    def test_terminal_terminal_notice_expires_after_delivery_without_changing_source(self):
+        reminders = self.m._owners['lifecycle_read']
+        path = self.root / 'inbox.md'
+        notice = '- 2026-10-25T15:41:07.261523+00:00 from machine: command completed: command completed successfully <!-- machine-wait:00ad91d121f4a41cac633f58bb1275f8:completed -->'
+        question = '- 2026-10-25 15:42 +00:00 from worker: Which export? <!-- host-question:fixture -->'
+        text = notice + '\n' + question + '\n'
+        path.write_text(text)
+        first = self.inbox()
+        self.assertTrue(any('command completed' in i['text'] for i in first))
+        second = self.inbox()
+        self.assertFalse(any('command completed' in i['text'] for i in second))
+        self.assertTrue(any('Which export?' in i['text'] for i in second))
+        self.assertEqual(path.read_text(), text)
+        inst = self.m.Instance(self.root)
+        key = reminders.inbox_source_id(inst.node('root'), notice)
+        record = reminders.lifecycle_read(inst)['inbox']['root'][key]
+        self.assertTrue(record['expired'])
+        self.assertFalse(record['answered'])
+        self.assertTrue(record['seen_at'])
+
+    def test_drain_only_terminal_notices_and_readonly_counts_never_write(self):
+        inbox_notices = self.m._owners['terminal_notice']
+        task_reconcile = self.m._owners['count_node']
+        path = self.root / 'inbox.md'
+        lines = ['- 2026-10-25 15:40 +00:00 from machine: held step exited: command exited with status 2',
+                 '- 2026-10-25 15:41 +00:00 from machine: hold heavy work: thermal warning',
+                 '- 2026-10-25 15:42 +00:00 from worker: command completed: command completed successfully',
+                 '- 2026-10-25 15:43 +00:00 from machine: command completed: command completed successfully <!-- host-question:protected -->']
+        path.write_text('\n'.join(lines) + '\n')
+        n = self.inst.node('root')
+        before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file() and not p.is_symlink()}
+        self.assertEqual(task_reconcile.count_node(self.inst, n)['inbox_pending'], 4)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.assertEqual(len(inbox_notices.expire(self.inst, [n])), 1)
+        self.assertEqual(inbox_notices.expire(self.inst, [n]), [])
+        self.assertEqual(task_reconcile.count_node(self.inst, n)['inbox_pending'], 3)
+        self.assertEqual(path.read_text(), '\n'.join(lines) + '\n')
+
+    def test_failed_stdout_delivery_never_expires_a_notice(self):
+        import argparse
+        reminders = self.m._owners['lifecycle_read']
+        path = self.root / 'inbox.md'
+        notice = '- 2026-10-25 15:40 +00:00 from machine: command completed: command completed successfully'
+        path.write_text(notice + '\n')
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch('sys.stdout.write', side_effect=BrokenPipeError):
+            with self.assertRaises(BrokenPipeError):
+                self.m.cmd_inbox(argparse.Namespace(id='root', json=True, new=False))
+        state = reminders.lifecycle_read(self.inst)
+        key = reminders.inbox_source_id(self.inst.node('root'), notice)
+        self.assertNotIn('expired', state['inbox'].get('root', {}).get(key, {}))

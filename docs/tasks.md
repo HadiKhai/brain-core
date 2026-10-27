@@ -118,3 +118,23 @@ existing `wt add`, `jobs --contract-file` and `brief` command arrays, plus the
 contract digest. The configured native lifecycle/host adapter owns actual launch
 and rebinding. Generating the plan performs no host action. A detected Markdown
 build-order entry is not launch authority.
+
+### Repairing legacy imports
+
+`brain task migrate NODE` imports explicit entries in `backlog.md` and
+`build-order.md`, and open jobs with a matching unmerged local worktree. It never
+imports inbox messages, status history, closed attempts, or their requirements.
+
+`brain task counts NODE` reports tasks by status and origin, active source counts,
+requirement totals/drops and pending inbox lines. Reads do not drain notices.
+
+`brain task reconcile-records NODE` plans repairs without writing. Add `--apply`
+to retain non-work imports as dropped with a per-node private decision. Exact
+main-delivery evidence closes imported jobs; abandoned attempts retain their ledger
+cause, and incomplete evidence remains parked with a resume action. The command
+never edits the ledger or deletes records. `--all` selects unarchived nodes.
+
+Add `--drain-notices` to expire terminal machine notices through retained lifecycle
+receipts when applying repairs. Normal `brain inbox` delivery also expires those
+notices after output succeeds. Source lines and exact answer evidence are retained;
+questions, worker failures and machine holds remain pending.

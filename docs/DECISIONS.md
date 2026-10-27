@@ -2830,3 +2830,18 @@ adding a worktree. A minute boundary can otherwise refresh root's generated
 `Facts refreshed` timestamp without committing it, leaving setup dirty before
 the handback under test. This fixture correction retains the pre-handback stamp
 clear and every strict assertion; production hourly coalescing is unchanged.
+
+## D28003: Keep task migration limited to explicit work and retain reconciliation history
+
+Automatic migration imports backlog/build-order entries and open jobs with a matching,
+unmerged local Git worktree. Inbox messages and status history are observations rather
+than work sources. The explicit record reconciliation command defaults to a read-only
+plan and retains every task, requirement, source line and ledger row. It records one
+private decision per node for dropped imports. Proven main delivery closes imported
+job tasks with their baseline, delivering commit and changed paths; incomplete proof
+keeps a visible reconciliation obligation. Shared requirement records stay active while
+any linked task remains active.
+
+Terminal machine completion/exit notices expire only after their successful inbox
+delivery, or an explicit drain. Expiry is a retained lifecycle receipt, separate from
+an answer, and never suppresses a question, worker failure or actionable machine hold.

@@ -257,13 +257,14 @@ def reconcile_requests(inst, n, lines, data):
 
 def request_lines(inst, n, lines, readonly=False, lifecycle_data=None):
     """Keep source history intact; an observed recurrence gets a fresh episode."""
+    from . import inbox_notices
     if lifecycle_data is not None:
         current = reconcile_requests(inst, n, lines, lifecycle_data)
-        return [line for line in lines if not current[inbox_source_id(n, line)]['answered']]
+        return [line for line in lines if inbox_notices.pending(line, current[inbox_source_id(n, line)])]
     try:
         with lifecycle_store(inst, readonly=readonly) as data:
             current = reconcile_requests(inst, n, lines, data)
-            return [line for line in lines if not current[inbox_source_id(n, line)]['answered']]
+            return [line for line in lines if inbox_notices.pending(line, current[inbox_source_id(n, line)])]
     except (OSError, ValueError):
         return lines  # unknown receipts never hide a question
 

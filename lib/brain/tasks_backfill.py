@@ -9,7 +9,7 @@ from . import jobs as _m_jobs
 from . import tasks as _m_tasks
 
 
-SOURCES = ('backlog.md', 'build-order.md', 'status.md', 'inbox.md')
+SOURCES = ('backlog.md', 'build-order.md')
 
 
 def fingerprint(*parts):
@@ -37,8 +37,6 @@ def candidates(inst, n):
             if raw.startswith('#'):
                 section = raw.lstrip('#').strip().lower()
                 continue
-            if filename == 'status.md' and not any(word in section for word in ('build order', 'promised', 'next', 'parked')):
-                continue
             match = re.match(r'^(?:[-*] |(\d+)[.)] )(?:\[([ xX])\] )?(.+)$', raw)
             if not match or match[2] and match[2].lower() == 'x':
                 continue
@@ -55,19 +53,19 @@ def candidates(inst, n):
                             'order': int(match[1]) if match[1] else len(entries) + 1,
                             'status': 'backlog', 'source': 'local'})
     for row in _m_jobs.read_jobs(n) or []:
+        from . import task_reconcile as _m_reconcile
+        state = _m_reconcile.job_evidence(n, row)
+        if state['state'] != 'live':
+            continue
         key = _m_jobs.job_key(row)
         signal = _m_jobs.read_handback(n, row) or {}
         receipt = {'ref': 'job-ledger.md#' + key, 'scope': row.get('Cause') or row['Job'],
                    'raw': row, 'handback': signal, 'head': row.get('Head commit', '')}
-        closed = bool(row.get('Ended'))
-        mapping = delivery_mapping(n, row.get('Base commit'), row.get('Head commit')) if row.get('Base commit') and row.get('Head commit') else None
-        if mapping:
-            receipt['delivery_candidate'] = mapping
         entries.append({'id': row.get('Task') or 'TASK-' + key.upper(), 'title': 'Work on ' + row['Job'],
                         'quote': row['Job'], 'at': row['Started'], 'date_basis': 'job-start',
                         'ref': 'job-ledger.md#' + key, 'origin': 'job:' + key, 'order': len(entries) + 1,
-                        'status': 'backlog' if closed else 'in-progress', 'job': key, 'branch': row['Job'],
-                        'source': 'local', 'raw_receipts': [receipt], 'reconciliation': closed})
+                        'status': 'in-progress', 'job': key, 'branch': row['Job'],
+                        'source': 'local', 'raw_receipts': [receipt], 'reconciliation': False})
     # Exact external IDs collapse duplicate prose references. Open job identity wins.
     unique = {}
     for entry in entries:

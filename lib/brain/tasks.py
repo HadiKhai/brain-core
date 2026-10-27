@@ -356,6 +356,8 @@ def register(sub):
     from . import task_requirements as _m_requirements
     from . import tasks_backfill as _m_backfill
     _m_requirements.register(actions)
+    from . import task_reconcile
+    task_reconcile.register(actions)
     migration = actions.add_parser('migrate', help='additively migrate local task sources after install/upgrade')
     migration.add_argument('node', nargs='?')
     migration.add_argument('--all', action='store_true')

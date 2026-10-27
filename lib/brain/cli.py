@@ -147,6 +147,8 @@ def writes(a):
         return a.action == "rule-add"
     if name == "cmd_task_migrate":
         return True
+    if name == 'cmd_records':
+        return a.action == 'reconcile-records' and a.apply
     if name == "cmd_task_backfill":
         return a.apply
     if name == "cmd_requirement":

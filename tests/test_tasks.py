@@ -403,7 +403,11 @@ class Tasks(Scenario):
 
     def test_backfill_selects_build_order_and_attaches_open_job(self):
         from brain import tasks_backfill, jobs
-        (self.root / 'status.md').write_text('# Status\n## Done\n- Finished\n## Build order\n1. Add preview\n2. Add export\n')
+        (self.root / 'status.md').write_text('# Status\n## Done\n- Finished\n')
+        (self.root / 'build-order.md').write_text('1. Add preview\n2. Add export\n')
+        self.repo(self.root)
+        self.git('checkout', '-qb', 'job/example', cwd=self.root)
+        self.n['local']['worktrees'] = {'job/example': {'path': str(self.root)}}
         jobs.job_started(self.inst, self.n, 'job/example', 'codex')
         created = tasks_backfill.backfill(self.inst, self.n, apply=True)
         self.assertEqual(len(created), 3)
@@ -755,7 +759,7 @@ class Tasks(Scenario):
         with self.assertRaises(ValueError):
             tasks.prepare_start(self.n, 'DEMO-1', 'job/example')
 
-    def test_backfill_retains_closed_job_claims_as_reconciliation_and_explicit_dependencies(self):
+    def test_backfill_skips_closed_jobs_and_retains_explicit_dependencies(self):
         from brain import tasks_backfill, jobs
         jobs.job_started(self.inst, self.n, 'job/old-attempt', 'codex')
         rows = jobs.read_jobs(self.n)
@@ -763,14 +767,12 @@ class Tasks(Scenario):
         jobs.write_jobs(self.inst, self.n, rows)
         (self.root / 'backlog.md').write_text('- APP-1 Import the source\n- APP-2 Share depends_on=APP-1,MISSING-1\n')
         created = tasks_backfill.backfill(self.inst, self.n, apply=True)
-        self.assertEqual(len(created), 3)
+        self.assertEqual(len(created), 2)
         current = tasks.read_records(self.n)
         self.assertEqual(current['APP-2']['depends_on'], ['APP-1'])
         self.assertEqual(current['APP-2']['unresolved_dependencies'], ['MISSING-1'])
-        task = next(r for r in current.values() if r.get('branch') == 'job/old-attempt')
-        self.assertEqual(task['status'], 'backlog')
-        self.assertTrue(task['reconciliation'])
-        self.assertEqual(task['raw_receipts'][0]['raw']['Cause'], 'Retired implementation, scope unresolved')
+        self.assertFalse(any(r.get('branch') == 'job/old-attempt' for r in current.values()))
+        self.assertEqual(jobs.read_jobs(self.n)[0]['Cause'], 'Retired implementation, scope unresolved')
         self.assertEqual(tasks_backfill.backfill(self.inst, self.n, apply=True), [])
 
     def test_backfill_patch_equivalence_maps_rebased_sha_without_closing_scope(self):
@@ -863,3 +865,150 @@ class Tasks(Scenario):
         self.assertFalse((self.root / 'job-ledger.md').exists())
         self.n['fm']['labels'] = 'state:paused'
         self.assertIsNone(tasks.launch_plan(self.inst, self.n))
+
+    def legacy_import(self, ident='OLD-1', origin='inbox.md', quote=None, **changes):
+        from brain import tasks_backfill
+        quote = quote or '- 2026-10-25T15:41:07.261523+00:00 from machine: command completed: command completed successfully <!-- machine-wait:00ad91d121f4a41cac633f58bb1275f8:completed -->'
+        req = 'REQ-' + ident
+        tasks.requirement_add(self.inst, self.n, req, quote, self.inst.now(), origin + ':1')
+        row = self.add(ident, requirement=req, provenance=[origin + ':' + tasks_backfill.fingerprint(quote), origin + ':1'], **changes)
+        return row
+
+    def test_migration_real_shaped_inbox_and_status_history_create_no_records(self):
+        from brain import tasks_backfill
+        inbox = ('- 2026-10-25T15:41:07.261523+00:00 from machine: command completed: command completed successfully <!-- machine-wait:00ad91d121f4a41cac633f58bb1275f8:completed -->\n'
+                 '- 2026-10-25T15:40:29.767005+00:00 from machine: held step exited: command exited with status 1 <!-- machine-wait:f9cec7da7d8f792d8f883d2a33d1c3e7:exited -->\n'
+                 '- 2026-10-25 15:42 +00:00 from worker: FYI report attached\n'
+                 '- 2026-10-25 15:43 +00:00 from root: Answered question\n')
+        (self.root / 'inbox.md').write_text(inbox)
+        (self.root / 'status.md').write_text('## Next\n- Historical promise\n## Build order\n1. Historical order\n')
+        (self.root / 'backlog.md').write_text('- Export current work\n')
+        (self.root / 'build-order.md').write_text('1. Add native report\n')
+        rows = tasks_backfill.migrate(self.inst, [self.n])
+        self.assertEqual(rows[0]['created'], 2)
+        self.assertEqual({r['title'] for r in tasks.read_records(self.n).values()}, {'Export current work', 'Add native report'})
+        self.assertEqual(len(tasks.read_records(self.n, 'requirements')), 2)
+        self.assertEqual((self.root / 'inbox.md').read_text(), inbox)
+
+    def test_reconcile_drops_nonwork_with_one_decision_and_retains_every_file(self):
+        from brain import task_reconcile
+        self.legacy_import()
+        self.legacy_import('OLD-2', 'status.md', '- History')
+        self.legacy_import('OLD-3', quote='- 2026-10-25 15:42 +00:00 from worker: FYI only, report attached')
+        self.legacy_import('OLD-4', quote='- 2026-10-25 15:42 +00:00 from root: Repair export support')
+        self.add('MANUAL-1', title='Manual work')
+        files = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        plan = task_reconcile.reconcile(self.inst, [self.n])
+        self.assertEqual(len(plan[0]['changes']), 3)
+        self.assertEqual(files, {p: p.read_bytes() for p in files})
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        self.assertTrue(all(p.exists() for p in files))
+        rows = tasks.read_records(self.n)
+        self.assertEqual([rows[i]['status'] for i in ('OLD-1', 'OLD-2', 'OLD-3', 'OLD-4', 'MANUAL-1')], ['dropped'] * 3 + ['backlog'] * 2)
+        self.assertEqual(rows['OLD-1']['drop_decision'], 'private:D-task-counts-v1')
+        req = tasks.read_records(self.n, 'requirements')['REQ-OLD-1']
+        self.assertEqual(req['status'], 'dropped')
+        self.assertIn('from machine:', req['quote'])
+        before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(task_reconcile.reconcile(self.inst, [self.n], apply=True)[0]['changes'], [])
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.assertEqual((self.root / 'decisions.md').read_text().count('<!-- task-reconcile:'), 1)
+
+    def test_reconcile_protects_shared_requirements_and_manual_provider_records(self):
+        from brain import task_reconcile
+        self.legacy_import()
+        self.add('MANUAL', requirement='REQ-OLD-1')
+        provider = self.legacy_import('PROVIDER')
+        provider['source'] = 'linear'
+        tasks.save_record(self.n, provider)
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        self.assertNotIn('status', tasks.read_records(self.n, 'requirements')['REQ-OLD-1'])
+        self.assertEqual(tasks.read_records(self.n)['PROVIDER']['status'], 'backlog')
+
+    def test_reconcile_preflights_all_nodes_and_refuses_linked_decision_log(self):
+        from brain import task_reconcile
+        self.legacy_import()
+        target = self.tmp / 'foreign.md'
+        target.write_text('Foreign decisions\n')
+        (self.root / 'decisions.md').symlink_to(target)
+        before = (self.root / 'tasks/OLD-1.md').read_bytes()
+        with self.assertRaises((ValueError, SystemExit)):
+            task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        self.assertEqual(before, (self.root / 'tasks/OLD-1.md').read_bytes())
+        self.assertEqual(target.read_text(), 'Foreign decisions\n')
+
+    def legacy_job(self, ended=False, cause=''):
+        from brain import jobs
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex')
+        row = jobs.read_jobs(self.n)[0]
+        if ended:
+            row.update(Ended=self.inst.now(), Outcome='abandoned', Cause=cause)
+            jobs.write_jobs(self.inst, self.n, [row])
+        task = self.add('IMPORTED', job=jobs.job_key(row), branch=row['Job'], provenance=['job:' + jobs.job_key(row)])
+        return row, task
+
+    def test_reconcile_merged_job_uses_exact_main_commit_and_changed_paths(self):
+        from brain import task_reconcile
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('VALUE = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver engine', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('branch', 'job/example', cwd=self.root)
+        self.n['local']['worktrees'] = {'job/example': {'path': str(self.root), 'start': base}}
+        self.legacy_job()
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        row = tasks.read_records(self.n)['IMPORTED']
+        self.assertEqual(row['status'], 'done')
+        self.assertEqual(row['merge_sha'], head)
+        self.assertEqual(row['code_path'], 'engine.py')
+        tasks.validate(self.n, tasks.read_records(self.n))
+
+    def test_reconcile_unknown_and_unproved_supersession_preserve_open_work(self):
+        from brain import task_reconcile
+        self.legacy_job(ended=True, cause='Superseded by next release')
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        row = tasks.read_records(self.n)['IMPORTED']
+        self.assertEqual(row['status'], 'parked')
+        self.assertTrue(row['resume'])
+        self.assertTrue(task_reconcile.reconcile(self.inst, [self.n])[0]['unresolved'])
+        self.assertEqual(task_reconcile.reconcile(self.inst, [self.n], apply=True)[0]['changes'], [])
+
+    def test_reconcile_abandoned_attempt_retains_exact_ledger_cause(self):
+        from brain import task_reconcile
+        self.legacy_job(ended=True, cause='Operator cancelled the attempted implementation; resume tracked separately')
+        result = task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        row = tasks.read_records(self.n)['IMPORTED']
+        self.assertEqual(row['status'], 'dropped')
+        self.assertEqual(result[0]['changes'][0]['evidence']['outcome'], 'abandoned')
+        self.assertIn('Operator cancelled', row['drop_reason'])
+
+    def test_migrate_missing_reused_and_merged_worktrees_are_not_live(self):
+        from brain import task_reconcile, tasks_backfill
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('branch', 'job/example', cwd=self.root)
+        job, _ = self.legacy_job()
+        self.n['local']['worktrees'] = {'job/example': {'path': str(self.root), 'start': base}}
+        self.assertEqual(task_reconcile.job_evidence(self.n, job)['state'], 'unknown')
+        self.git('checkout', 'job/example', cwd=self.root)
+        self.assertEqual(task_reconcile.job_evidence(self.n, job)['state'], 'live')
+        self.assertEqual(len(tasks_backfill.candidates(self.inst, self.n)), 1)
+        self.n['local']['worktrees']['job/example']['path'] = str(self.tmp / 'absent')
+        self.assertEqual(tasks_backfill.candidates(self.inst, self.n), [])
+
+    def test_reconcile_does_not_close_a_merged_tip_with_uncommitted_work(self):
+        from brain import task_reconcile
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('VALUE = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver engine', cwd=self.root)
+        self.git('checkout', '-qb', 'job/example', cwd=self.root)
+        self.n['local']['worktrees'] = {'job/example': {'path': str(self.root), 'start': base}}
+        job, _ = self.legacy_job()
+        (self.root / 'engine.py').write_text('VALUE = 2\n')
+        self.assertEqual(task_reconcile.job_evidence(self.n, job)['state'], 'live')
+        task_reconcile.reconcile(self.inst, [self.n], apply=True)
+        self.assertEqual(tasks.read_records(self.n)['IMPORTED']['status'], 'backlog')
