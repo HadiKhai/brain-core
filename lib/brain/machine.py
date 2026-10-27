@@ -237,12 +237,8 @@ def machine_publish(inst, path, text):
             _m_common.die("machine sampler: state folder moved")
         out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
         with os.fdopen(out, "w") as stream:
-            try:
-                prior = os.stat(path.name, dir_fd=fd, follow_symlinks=False)
-                if stat.S_ISREG(prior.st_mode):
-                    os.fchmod(stream.fileno(), stat.S_IMODE(prior.st_mode))
-            except FileNotFoundError:
-                pass
+            # Machine samples, hold inventory and wake state are always private.
+            os.fchmod(stream.fileno(), 0o600)
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -462,7 +458,7 @@ def machine_service(inst, action, yes=False):
             path.unlink(missing_ok=True)
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
-            _m_common.atomic_write(path, payload)
+            _m_common.atomic_write(path, payload, private=True)
             r = subprocess.run(["launchctl", "bootstrap", domain, str(path)], capture_output=True, text=True)
             if r.returncode:
                 _m_common.die("machine sampler not loaded: " + r.stderr.strip())

@@ -355,7 +355,7 @@ def docker_leftover_nodes(inst, nodes):
                                           'delivered': prior.get('delivered', False)}
                 store['nodes'][key] = active
                 # Save new episode identity before publishing its inbox marker.
-                _m_common.atomic_write(path, json.dumps(store))
+                _m_common.atomic_write(path, json.dumps(store), private=True)
                 for entry in active.values():
                     result['leftovers'].append(entry['row'])
                     if not entry['delivered'] and not failed and leftover_reportable(n, entry['row']):
@@ -368,7 +368,7 @@ def docker_leftover_nodes(inst, nodes):
                         except OSError:
                             result['partial'] = failed = True
                             result['errors'].append('inbox unavailable')
-                _m_common.atomic_write(path, json.dumps(store))
+                _m_common.atomic_write(path, json.dumps(store), private=True)
                 if failed:
                     break
     except _LEFTOVER_ERRORS as error:

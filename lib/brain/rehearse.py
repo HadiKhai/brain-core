@@ -2100,7 +2100,7 @@ def cmd_rehearse(a):
             raise RehearsalError('protected evidence refused', code='protected-evidence-refused')
         phase = 'publication'
         path.parent.mkdir(parents=True, exist_ok=True)
-        _m_common.atomic_write(path, json.dumps(result, indent=2) + '\n')
+        _m_common.atomic_write(path, json.dumps(result, indent=2) + '\n', private=True)
     except (RehearsalError, OSError, subprocess.SubprocessError, ValueError) as error:
         # Exception messages and command output can contain protected source content.
         _m_common.die('rehearsal refused or incomplete; phase=' + getattr(error, 'rehearsal_phase', phase)

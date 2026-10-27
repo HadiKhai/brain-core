@@ -138,7 +138,7 @@ def cmd_diagnose(a):
             if _m_common.git('rev-parse', '--verify', 'HEAD', cwd=where).stdout.strip() != head:
                 raise ValueError('diagnostic HEAD changed during source inspection')
             path.parent.mkdir(parents=True, exist_ok=True)
-            _m_common.atomic_write(path, json.dumps(state, sort_keys=True) + '\n')
+            _m_common.atomic_write(path, json.dumps(state, sort_keys=True) + '\n', private=True)
     except (OSError, ValueError, TypeError, UnicodeError) as error:
         _m_common.die(str(error))
     print(json.dumps(state, sort_keys=True))

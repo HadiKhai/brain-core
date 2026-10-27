@@ -208,7 +208,7 @@ def core_update(inst, check=True):
         cache = {"checked": time.time(), "head": head}
         try:
             cache_file.parent.mkdir(exist_ok=True)
-            _m_common.atomic_write(cache_file, json.dumps(cache) + "\n")
+            _m_common.atomic_write(cache_file, json.dumps(cache) + "\n", private=True)
         except OSError:
             pass
     remote = cache.get("head") if isinstance(cache.get("head"), str) else ""

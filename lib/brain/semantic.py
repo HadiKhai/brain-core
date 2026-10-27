@@ -227,7 +227,7 @@ def semantic_ranked(inst, node, problem, embedder=None):
             (waiting if fm.get('status') == 'proposed' else found).append(row)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            _m_common.atomic_write(path, json.dumps({'model': MODEL_ID, 'items': current}) + '\n')
+            _m_common.atomic_write(path, json.dumps({'model': MODEL_ID, 'items': current}) + '\n', private=True)
         except (OSError, ValueError):
             pass  # retrieval still works on read-only/contended cache storage
         return sorted(found, key=lambda r: r[:2]), sorted(waiting, key=lambda r: r[:2])

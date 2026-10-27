@@ -109,7 +109,7 @@ def dispatch_run(inst, limit=50, node_limit=200):
             body = json.dumps({'version': 1, 'accepted': sorted(accepted)})
             if len(body.encode()) > 1024 * 1024:
                 raise ValueError('dispatch receipts exceed bound; queue remains durable')
-            _m_common.atomic_write(path, body + '\n')
+            _m_common.atomic_write(path, body + '\n', private=True)
     return result
 
 

@@ -296,10 +296,10 @@ sys.path.insert(0, sys.argv[1])
 from brain import common, instance, settings_batch
 root = Path(sys.argv[2]); inst = instance.Instance(root)
 write = common.atomic_write
-def fault(path, text):
+def fault(path, text, **kwargs):
     if path == root/'schedules.md':
         os.kill(os.getpid(), signal.SIGKILL)
-    return write(path, text)
+    return write(path, text, **kwargs)
 common.atomic_write = fault
 with instance.brain_lock(inst):
     settings_batch.publish_settings_batch(inst, {root/'node.md': (root/'node.md').read_text()+'new\\n',

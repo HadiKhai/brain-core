@@ -255,7 +255,7 @@ def settle_closed_jobs(inst, n, rpc=None, job_keys=None, revalidate=False, tell=
                 path = n['dir'] / 'job-settlements' / (key + '.json')
                 _m_common.safe_target(path)
                 path.parent.mkdir(exist_ok=True)
-                _m_common.atomic_write(path, json.dumps(evidence, sort_keys=True) + '\n')
+                _m_common.atomic_write(path, json.dumps(evidence, sort_keys=True) + '\n', private=True)
                 current['Settled'] = inst.now()
                 _m_jobs.write_jobs(inst, n, current_rows)
                 inst.commit([path], f"{n['id']}: native host settlement confirmed")

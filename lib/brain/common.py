@@ -411,7 +411,7 @@ def directory_target(path, *, create=False, private=False):
 
 
 @contextlib.contextmanager
-def durable_directory_target(path, mode=0o700):
+def durable_directory_target(path, mode=0o700, *, private=False):
     """Keep one checked physical authority through persistence and publication."""
     path = Path(os.path.abspath(path))
     path = safe_target(path) or path.parent.resolve() / path.name
@@ -421,7 +421,7 @@ def durable_directory_target(path, mode=0o700):
     root = Path(root)
     # The resolved name is already checked. Never resolve its physical components
     # again: O_NOFOLLOW descent must refuse replacement with another internal alias.
-    with DirectoryTarget(root / '.persistence-target', _checked_physical=True) as target:
+    with DirectoryTarget(root / '.persistence-target', private=private, _checked_physical=True) as target:
         for part in parent.relative_to(root).parts:
             target.durable_child(part, mode)
         target.path = path

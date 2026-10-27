@@ -182,7 +182,7 @@ def cmd_preview(a):
         path = preview_receipt_file(inst, n)
         _m_common.safe_target(path)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
+        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n', private=True)
     else:
         result = preview_evidence(inst, n)
     print(json.dumps(result) if a.json else 'preview: ' + result['state'] +

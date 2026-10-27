@@ -294,8 +294,8 @@ def record_review_receipt(inst, n, branch, data):
             raise ValueError('reviewer thread already supplied a different receipt; use a fresh review context')
         from . import review_findings as _m_review_findings
         _m_review_findings.record_review_findings(inst, n, branch, head, data['findings'])
-        _m_common.atomic_write(history, serialized)
-        _m_common.atomic_write(path, serialized)
+        _m_common.atomic_write(history, serialized, private=True)
+        _m_common.atomic_write(path, serialized, private=True)
         rows = _m_jobs.read_jobs(n)
         current = _m_jobs.open_job(rows or [], branch)
         current['Review identity required'] = 'true'

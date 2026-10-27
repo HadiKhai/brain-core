@@ -1600,11 +1600,11 @@ class AckAllShown(Scenario):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]
         atomic, failed = m.atomic_write, []
-        def write(path, value):
+        def write(path, value, **kwargs):
             if path.name == 'history.json' and not failed:
                 failed.append(True)
                 raise OSError('fixture transient history write')
-            return atomic(path, value)
+            return atomic(path, value, **kwargs)
         with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
@@ -1638,11 +1638,11 @@ class AckAllShown(Scenario):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'\xfftorn')
         atomic, failed = m.atomic_write, []
-        def write(target, value):
+        def write(target, value, **kwargs):
             if target == path and not failed:
                 failed.append(True)
                 raise OSError('fixture transient shown receipt failure')
-            return atomic(target, value)
+            return atomic(target, value, **kwargs)
         with mock.patch.object(m, 'watch_groups', return_value={'root': {'items': refs}}), \
                 mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
@@ -1665,11 +1665,11 @@ class AckAllShown(Scenario):
         owner, root = self.inst.node('child'), self.inst.node('root')
         ref = {'id': 'a' * 64, 'kind': 'machine-exited'}
         original, faults, calls = m.atomic_write, [], []
-        def write(path, value):
+        def write(path, value, **kwargs):
             if path == m.wake_terminal_receipt(self.inst, ref['id']) and not faults:
                 faults.append(True)
                 raise OSError('fixture receipt publication fault')
-            return original(path, value)
+            return original(path, value, **kwargs)
         def send(command, reason=None):
             calls.append(command)
             m.wake_drain(self.inst, root, once=True)

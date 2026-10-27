@@ -202,7 +202,7 @@ def conflicting_jobs(n, rows, accepted, tip):
 
 
 def save(path, data):
-    _m_common.atomic_write(path, json.dumps(data, indent=2) + "\n")
+    _m_common.atomic_write(path, json.dumps(data, indent=2) + "\n", private=True)
     _m_common.touch(path)
 
 

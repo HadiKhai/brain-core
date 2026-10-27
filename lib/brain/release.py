@@ -195,7 +195,7 @@ def release_repository(n):
 
 
 def save_releases(path, rows):
-    _m_common.atomic_write(path, json.dumps(rows, indent=2) + '\n')
+    _m_common.atomic_write(path, json.dumps(rows, indent=2) + '\n', private=True)
 
 
 def run_release(inst, n, slot=None):

@@ -41,7 +41,7 @@ def cleanup_notice(inst, n, job_key, identity, workspace, rpc):
             return (isinstance(data, dict) and data.get('version') == 1
                     and data.get('binding') == binding and data.get('state') == 'accepted')
         data = dict(version=1, binding=binding, state='sending', client_request_id='cleanup-' + key)
-        _m_common.atomic_write(record, json.dumps(data, sort_keys=True) + '\n')
+        _m_common.atomic_write(record, json.dumps(data, sort_keys=True) + '\n', private=True)
         try:
             reply = rpc('t3_thread_send', dict(threadId=identity, mode='auto',
                 clientRequestId=data['client_request_id'],
@@ -53,7 +53,7 @@ def cleanup_notice(inst, n, job_key, identity, workspace, rpc):
                     or not isinstance(reply.get('runId'), str) or not reply['runId']):
                 return False
             data.update(state='accepted', message_id=reply['messageId'], run_id=reply['runId'])
-            _m_common.atomic_write(record, json.dumps(data, sort_keys=True) + '\n')
+            _m_common.atomic_write(record, json.dumps(data, sort_keys=True) + '\n', private=True)
         except (_m_rpc.HostRPCError, OSError, ValueError):
             return False
         return False  # a send may start a turn; require a separate fresh observation

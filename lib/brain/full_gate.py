@@ -73,7 +73,7 @@ def cmd_full_run(a):
         path = full_receipt_path(n, identity)
         _m_common.safe_target(path.parent)
         path.parent.mkdir(exist_ok=True)
-        _m_common.atomic_write(path, json.dumps(data, indent=2) + '\n')
+        _m_common.atomic_write(path, json.dumps(data, indent=2) + '\n', private=True)
     except (OSError, ValueError, KeyError):
         _m_common.die('full receipt could not be recorded; no readiness published')
     print('full-run: passed; full receipt ' + identity + '; no hand-back published')

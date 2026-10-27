@@ -174,7 +174,7 @@ def queue_conversation_answers(inst, n, data):
             raise ValueError('answer evidence queue reached its bound; retain it for repair')
         _m_common.atomic_write(target, json.dumps({'node': n['id'], 'episode': episode,
             'marker': marker, 'answer': text, 'origin': origin, 'evidence': evidence,
-            'source': source, 'at': inst.now(), 'state': 'pending'}, sort_keys=True) + '\n')
+            'source': source, 'at': inst.now(), 'state': 'pending'}, sort_keys=True) + '\n', private=True)
 
 
 def answer_lines(inst, n, lines, readonly=False, lifecycle_data=None):
@@ -214,7 +214,7 @@ def answer_lines(inst, n, lines, readonly=False, lifecycle_data=None):
                 receipt['state'] = 'applied'
                 # Retain actual answer evidence; never erase it as stale cleanup.
                 _m_common.safe_target(path.with_suffix('.done'))
-                _m_common.atomic_write(path.with_suffix('.done'), json.dumps(receipt, sort_keys=True) + '\n')
+                _m_common.atomic_write(path.with_suffix('.done'), json.dumps(receipt, sort_keys=True) + '\n', private=True)
                 path.unlink()
             except (OSError, ValueError, KeyError):
                 continue  # unknown evidence cannot close a request

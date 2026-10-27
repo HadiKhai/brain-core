@@ -166,9 +166,9 @@ def wake_terminal_delivered(inst, identity, quarantine=False):
 def wake_accept_write(path, value):
     """Retry accepted-delivery publication without re-entering the transport."""
     try:
-        _m_common.atomic_write(path, value)
+        _m_common.atomic_write(path, value, private=True)
     except OSError:
-        _m_common.atomic_write(path, value)
+        _m_common.atomic_write(path, value, private=True)
 
 
 @contextlib.contextmanager
@@ -413,7 +413,7 @@ def wake_retire_due_pending(path, current):
     if refs and not allowed:
         path.unlink(missing_ok=True)
     elif allowed != refs:
-        _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n')
+        _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n', private=True)
 
 
 def wake_actionable_pending(inst, path, terminal_quarantine=False):
@@ -475,7 +475,7 @@ def wake_actionable_pending(inst, path, terminal_quarantine=False):
         path.unlink(missing_ok=True)
         return False
     if allowed != refs:
-        _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n')
+        _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n', private=True)
     return True
 
 
@@ -530,7 +530,7 @@ def request_wake(inst, n, reason, items=None, explicit=False):
                 return True
             refs = allowed
             _m_common.atomic_write(pending, json.dumps({'items': refs, 'binding': _m_wake_turns.wake_turn_binding(inst, target),
-                              **({'explicit_kinds': True} if explicit else {})}) + '\n')
+                              **({'explicit_kinds': True} if explicit else {})}) + '\n', private=True)
         wake_start(inst, target)
         return True
     except (Exception, SystemExit):
@@ -625,7 +625,7 @@ def wake_binding(command):
 def wake_record(directory, command, status, name="delivery.json"):
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     record = {"binding": wake_binding(command), "status": status, "at": time.time()}
-    _m_common.atomic_write(directory / name, json.dumps(record))
+    _m_common.atomic_write(directory / name, json.dumps(record), private=True)
     return record
 
 
@@ -728,7 +728,7 @@ def wake_drain(inst, n, once=False):
                 try:
                     previous, now = float(last.read_text()), WAKE_CLOCK.time()
                     if previous > now:
-                        _m_common.atomic_write(last, str(now))  # bound deferral after a clock rollback
+                        _m_common.atomic_write(last, str(now), private=True)  # bound deferral after a clock rollback
                         previous = now
                     delay = max(0, WAKE_INTERVAL - (now - previous))
                 except (OSError, ValueError):
@@ -756,7 +756,7 @@ def wake_drain(inst, n, once=False):
                             path.unlink(missing_ok=True)
                             continue
                         if allowed != refs:
-                            _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n')
+                            _m_common.atomic_write(path, json.dumps({**value, 'items': allowed}) + '\n', private=True)
                         _m_common.safe_target(destination / path.name)
                         path.replace(destination / path.name)
                     if command:
@@ -796,10 +796,10 @@ def wake_drain(inst, n, once=False):
                         except (OSError, ValueError):
                             known = set()
                         before = [i for i in snapshot if i['id'] in known]
-                    _m_common.atomic_write(last, str(WAKE_CLOCK.time()))  # failures are rate-limited too
+                    _m_common.atomic_write(last, str(WAKE_CLOCK.time()), private=True)  # failures are rate-limited too
                     inflight = directory / 'inflight.json'
                     try:
-                        _m_common.atomic_write(inflight, json.dumps({'before': before}) + '\n')
+                        _m_common.atomic_write(inflight, json.dumps({'before': before}) + '\n', private=True)
                     except OSError:
                         pass  # comparison bookkeeping cannot suppress a question
                     try:
@@ -1347,7 +1347,7 @@ def capture_hook_questions(inst, n, data):
                     fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     created = not pending.exists()
                     if created:
-                        _m_common.atomic_write(pending, json.dumps({"line": line, "marker": marker}) + "\n")
+                        _m_common.atomic_write(pending, json.dumps({"line": line, "marker": marker}) + "\n", private=True)
             except BlockingIOError:
                 created = False  # the other publisher is recording this same question
         if created:
@@ -1527,7 +1527,7 @@ def cmd_hook_approve(a):
     if f'[projects."{real}"]' not in text:  # first: Codex lists no hooks for an untrusted project
         home.mkdir(parents=True, exist_ok=True)
         text = text.rstrip("\n") + ("\n\n" if text.strip() else "") + f'[projects."{real}"]\ntrust_level = "trusted"\n'
-        cfg.write_text(text)
+        _m_common.atomic_write(cfg, text, private=True)
         print(f"codex: trusting the project {_m_common.tilde(real)}")
     ours = str(real / ".codex" / "hooks.json")
     hooks = [h for h in codex_hooks(real) if h.get("sourcePath") == ours]
@@ -1545,7 +1545,7 @@ def cmd_hook_approve(a):
         print(f"codex: trusting {h['eventName']} hook: {h['command'][:80]}")
     if add:
         home.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(text.rstrip("\n") + ("\n\n" if text.strip() else "") + "\n".join(add))
+        _m_common.atomic_write(cfg, text.rstrip("\n") + ("\n\n" if text.strip() else "") + "\n".join(add), private=True)
         print(f"codex: wrote {_m_common.tilde(cfg)}")
     else:
         print("codex: already trusted")

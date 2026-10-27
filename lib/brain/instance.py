@@ -70,7 +70,7 @@ class Instance:
         return data
 
     def save_local(self):
-        with _m_common.durable_directory_target(self.local_path) as target:
+        with _m_common.durable_directory_target(self.local_path, private=True) as target:
             target.atomic_write(json.dumps(self.local, indent=2, sort_keys=True) + "\n")
 
     def local_of(self, nid):

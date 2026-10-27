@@ -49,7 +49,7 @@ def communication_store(inst):
         if len(after.encode()) > 1024 * 1024:
             raise ValueError('communication state exceeds bound')
         if after != before:
-            _m_common.atomic_write(directory / 'communications.json', after + '\n')
+            _m_common.atomic_write(directory / 'communications.json', after + '\n', private=True)
 
 
 def communication_question(inst, spec):

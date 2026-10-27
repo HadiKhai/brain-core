@@ -85,7 +85,7 @@ def write_attempt(n, row, data):
         _m_common.safe_target(path)
         path.parent.mkdir(exist_ok=True)
         previous = current_attempt(n, row, strict=False)
-        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n')
+        _m_common.atomic_write(path, json.dumps(data, sort_keys=True) + '\n', private=True)
         _m_common.touch(path)
 
         if (previous or {}).get('state') != data.get('state'):

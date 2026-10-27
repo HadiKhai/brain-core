@@ -91,7 +91,7 @@ def recover_settings_batch(inst, packet):
                 raise ValueError('staged metadata changed by a foreign edit')
         _m_common.durable_makedirs(folder)
         record['state'] = 'recovering'
-        _m_common.atomic_write(packet, json.dumps(record, indent=2) + '\n')
+        _m_common.atomic_write(packet, json.dumps(record, indent=2) + '\n', private=True)
         for relative, path in targets.items():
             # Do not overwrite another file writer arriving after validation.
             metadata_target(inst.root, relative)
@@ -99,12 +99,12 @@ def recover_settings_batch(inst, packet):
                 raise ValueError('metadata changed during recovery; pending packet retained')
             if contents(path) != record['after'][relative]:
                 _m_common.durable_makedirs(path.parent)
-                _m_common.atomic_write(path, record['after'][relative])
+                _m_common.atomic_write(path, record['after'][relative], private=(path == inst.local_path))
         if any(contents(p) != record['after'][r] for r, p in targets.items()):
             raise ValueError('metadata changed before recovery commit; packet retained')
         inst.commit_settings_batch(shared, 'settings: complete interrupted metadata batch')
         record.update(state='recovered', head=_m_common.git('rev-parse', 'HEAD', cwd=inst.root).stdout.strip())
-        _m_common.atomic_write(packet, json.dumps(record, indent=2) + '\n')
+        _m_common.atomic_write(packet, json.dumps(record, indent=2) + '\n', private=True)
         inst.local = inst._load_local()
     return packet
 

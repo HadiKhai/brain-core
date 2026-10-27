@@ -51,7 +51,7 @@ class OwnedCopies:
 
     def publish(self):
         from .common import atomic_write
-        atomic_write(self.root / 'cleanup.json', json.dumps(self.receipt, sort_keys=True) + '\n')
+        atomic_write(self.root / 'cleanup.json', json.dumps(self.receipt, sort_keys=True) + '\n', private=True)
 
     def record(self, **facts):
         if not self.safe():
