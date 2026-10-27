@@ -26,8 +26,10 @@ export function RequestRow({ s, item, go, showProject = true, compact = false, a
     <DetailRow className="row request" data-item onOpen={() => setOpen(true)}>
       <div className="row-main">
         <div className="row-line">{showProject && <strong dir="auto"><Text>{project?.title || "Workspace"}</Text></strong>}<small>{sender(item)} · {time(item.first_seen, s.brain?.tz)}</small>{archived ? <Status>{item.archive_reason || "Archived"}</Status> : <WorkStatus item={{ ...item, state: item.state || "waiting", waiting_on_operator: true }} s={s} />}</div>
-        <p className="row-text" dir="auto"><Text>{compact ? needAsk(body(item)) : body(item)}</Text></p>
-        {!compact && recommendation && <p className="row-note" dir="auto">Recommended: <Text>{recommendation}</Text></p>}
+        {/* Every open request carries a recommendation, so it shares the ask's line to keep rows two lines tall. */}
+        {!compact && recommendation
+          ? <div className="row-ask"><p className="row-text" dir="auto"><Text>{body(item)}</Text></p><p className="row-note" dir="auto">Recommended: <Text>{recommendation}</Text></p></div>
+          : <p className="row-text" dir="auto"><Text>{compact ? needAsk(body(item)) : body(item)}</Text></p>}
       </div>
       <div className="row-actions">
         {conversation ? <ThreadLink href={conversation} label={archived ? "Open source conversation" : (!compact && nextAction) || (question ? "Answer" : "Open conversation")} />

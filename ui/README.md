@@ -27,12 +27,11 @@ cd ui
 npm ci
 npm run build
 npm test
-python3 tests/fixture.py --port 4109
 ```
 
-In another terminal, run `cd ui && npm run test:browser`. The runner uses one worker so browser scenarios run serially. If browser engines are missing, run `npx playwright install chromium webkit` first; these are development-only drivers.
+`npm run test:browser` starts the fixture itself on 4109 and on 4192 (the task views) and fails if either port is already taken; to test a server you started, set `BRAIN_TEST_UI_URL` or `BRAIN_TASK_UI_URL` and the runner leaves that port alone. The runner uses one worker so browser scenarios run serially. Chromium is required; a missing WebKit engine is reported as a skipped scenario, never a pass. Run `npx playwright install chromium webkit` to cover both; these are development-only drivers.
 
-Open `http://127.0.0.1:4109/?k=demo` for synthetic data, or `/snapshot` for a saved snapshot. Fixture scenarios include `?k=long`, `empty`, `single`, `ten`, `hundred`, `thousand`, `longtext`, `longtitle`, `rtl`, `partial`, `error`, `loading`, `slow` (a slow search endpoint) and `many` (1,200 made-up projects behind the picker's search); no key demonstrates the permission state. No real brain is read. `UI_DIST=<folder>` serves another build, for example a previous one, to record a gate's failure.
+To browse by hand, run `python3 tests/fixture.py --port 4109` and open `http://127.0.0.1:4109/?k=demo` for synthetic data, or `/snapshot` for a saved snapshot. Fixture scenarios include `?k=long`, `empty`, `single`, `ten`, `hundred`, `thousand`, `longtext`, `longtitle`, `rtl`, `partial`, `error`, `loading`, `slow` (a slow search endpoint) and `many` (1,200 made-up projects behind the picker's search); no key demonstrates the permission state. No real brain is read. `UI_DIST=<folder>` serves another build, for example a previous one, to record a gate's failure.
 
 - `tests/ui-fitness.spec.ts` is the **ui-fitness gate**: one check per lean-structure rule (one title, no option overflow, themed scrollbars, sidebar hierarchy, no page without a job, at most two surface levels and no single-item box or short inner scroll, lean rows, scroll chaining, Overview as a dashboard), over every sidebar destination. The rules live in `tests/fitness-rules.ts`; `tests/ui-fitness.mutations.spec.ts` breaks each rule on purpose and requires the check to fail, then pass again. Set `UI_FITNESS_OUT` to save the findings as JSON.
 - `tests/first-load.spec.ts` holds a made-up 700 KB state response past the idle transition, verifies elapsed loading feedback and the busy-server retry after 20 seconds, and checks missing/rejected keys and failed first reads. A pending first read never presents an idle or unavailable workspace.

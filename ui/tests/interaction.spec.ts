@@ -1,5 +1,5 @@
 import { test, expect, chromium, webkit } from "@playwright/test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 test("real touch activates mobile navigation, filters, paging and the fixed import dock", async ({
   browser,
@@ -309,6 +309,8 @@ test("job state separates its kind from the clamped readable description", async
 
 for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
   test(`${engine}: project page, reader scrim, focus, metadata, keyboard and activity`, async () => {
+    // A missing engine is a reported skip, never a pass: `npx playwright install ${engine}`.
+    test.skip(!existsSync(browserType.executablePath()), `${engine} engine not installed; this scenario did not run`);
     const browser = await browserType.launch();
     const page = await browser.newPage();
     for (const width of [1440, 320]) {
@@ -316,7 +318,7 @@ for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
       for (const theme of ["light", "dark"]) {
         await page.emulateMedia({ colorScheme: theme as "light" | "dark" });
         // Old addresses still land: `node=` opens the project's page.
-        await page.goto("http://127.0.0.1:4109/?k=demo#view=overview&node=field-guide&tab=threads");
+        await page.goto((process.env.BRAIN_TEST_UI_URL || "http://127.0.0.1:4109") + "/?k=demo#view=overview&node=field-guide&tab=threads");
         const project = page.locator("[data-page=project]");
         await expect(page.locator(".page-header h1")).toHaveText("Field Guide");
         await expect(page.locator('[data-slot="sidebar"]')).toHaveCount(width >= 768 ? 1 : 0);
