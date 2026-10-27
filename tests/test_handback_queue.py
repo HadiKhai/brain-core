@@ -121,6 +121,33 @@ class HandbackLifecycle(Scenario):
             self.assertTrue(launch.call_args.kwargs['start_new_session'])
             self.assertEqual(len(launch.call_args.kwargs['pass_fds']), 1)
 
+    def test_write_unchecked_handback_replays_primary_without_duplicate_failure(self):
+        m, inst, n, row = self.fixture()
+        m.mutate(inst, n, 'TASK1', {'title': 'Linked task', 'owner': 'fixture'}, create=True)
+        row['Task'] = 'TASK1'
+        m.write_jobs(inst, n, [row])
+        args = dict(id='root', branch=row['Job'], state='failed', summary='Fixture failure', question=None,
+                    lessons='none: fixture', report=None, reviews=None, need_human=None,
+                    restart=None, reverify=False, full_receipt=None)
+        request = m.submit_intent(inst, dict(kind='handback', node='root', job_key=m.job_key(row), args=args), start=False)
+        write = m.write_record
+        def killed(*values, **kwargs):
+            write(*values, **kwargs)
+            if values[2] == 'handback':
+                raise RuntimeError('owned kill after handback write')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}), \
+                mock.patch.object(m.Instance, 'commit'), mock.patch.object(m, 'request_wake'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(m, 'write_record', side_effect=killed), self.assertRaises(RuntimeError):
+                m.drain_intents(inst)
+            self.assertEqual(m.read_handback(n, row)['write_request'], request['id'])
+            self.assertIsNone(m.intent_receipt(inst, request['id']))
+            m.drain_intents(inst)
+            m.drain_intents(inst)
+        self.assertEqual(m.read_records(n)['TASK1']['strikes'], 1)
+        self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'applied')
+
     def test_attempt_binding_ignores_other_branch_commits_but_fences_own_branch(self):
         m, inst, n, row = self.fixture()
         home = self.repo(self.tmp / 'home')
@@ -1029,18 +1056,23 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                                     env=self.env,capture_output=True,text=True,timeout=3)
             self.assertEqual(result.returncode==0,ok,result.stdout+result.stderr)
             return result.stdout
-        identity=cli('handback','root','--branch',row['Job'],'--state','blocked','--summary','New result',
-                     '--lessons','none: fixture','--enqueue').strip()
+        fd = m.intent_lease(inst)
+        try:
+            identity=cli('handback','root','--branch',row['Job'],'--state','blocked','--summary','New result',
+                         '--lessons','none: fixture','--enqueue').strip()
+            self.assertIsNone(m.intent_receipt(inst, identity))
+            self.assertEqual(m.read_handback(n, row)['summary'], 'Historical result')
+            self.assertEqual([d['id'] for _, d in m.intent_index(inst)].index(identity) + 1, 1)
+        finally:
+            os.close(fd)
         self.assertRegex(identity,r'^[0-9a-f]{32}$')
-        view=json.loads(cli('jobs','root','--live'))
-        self.assertEqual(view['state'],'queued')
-        self.assertEqual(view['historical_summary'],'Historical result')
-        self.assertEqual(view['queue']['position'],1)
-        cli('queue','run','root','--once','--request-id',identity)
+        cli('queue','drain')
+        receipt = json.loads(cli('queue','wait',identity))
         hb=path.read_bytes()
         self.assertEqual(json.loads(hb)['summary'],'New result')
-        self.assertEqual(m.read_queue_request(n,identity)['state'],'terminal')
-        cli('queue','run','root','--once','--request-id',identity,ok=False)
+        self.assertEqual(receipt['state'],'applied')
+        cli('queue','drain')
+        self.assertEqual(json.loads(cli('queue','wait',identity)), receipt)
         self.assertEqual(path.read_bytes(),hb)
 
     def test_m3_cli_empty_scan_silent_then_one_synthetic_ask(self):

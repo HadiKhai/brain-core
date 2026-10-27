@@ -215,7 +215,8 @@ class ReviewRegressions(Scenario):
 
     def test_m7_stop_hook_ignores_generated_dirt_but_keeps_now_edits(self):
         root, _ = self.app()
-        self.b(root, 'inbox', 'app', '--add', 'needs attention')
+        request = self.b(root, 'inbox', 'app', '--add', 'needs attention').strip()
+        self.b(root, 'queue', 'wait', request)
         inst = instance.Instance(root)
         self.assertEqual(hosts.notes_lag(inst, inst.node('app')), [])
         path = root / 'nodes/app/status.md'
@@ -251,8 +252,12 @@ class ReviewRegressions(Scenario):
         root, _ = self.app()
         path = root / 'nodes/app/status.md'
         path.write_text(path.read_text() + '\n<!-- brain:facts v1 -->\n')
-        out = self.b(root, 'inbox', 'app', '--add', 'retry would duplicate')
-        self.assertIn('maintenance', out.lower())
+        request = self.b(root, 'inbox', 'app', '--add', 'retry would duplicate').strip()
+        out = self.b(root, 'queue', 'wait', request)
+        self.assertEqual(json.loads(out)['state'], 'applied')
+        self.assertTrue((root / '.brain/events-repair-needed.json').exists() or
+                        any(e['kind'] == 'commit' and not e['data'].get('maintenance_ok', True)
+                            for e in events.read(instance.Instance(root))))
         self.assertEqual((root / 'nodes/app/inbox.md').read_text().count('retry would duplicate'), 1)
         self.assertEqual(self.pending(root), {})
 

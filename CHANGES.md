@@ -5,6 +5,15 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-28: Queued inbox additions and task metadata
+
+`inbox --add`, metadata-only `task set`, and unchecked `handback --enqueue`
+now return a durable request ID and start a detached applier. A return means
+queued, not applied or ready. Run `brain queue wait ID` before reading or acting
+on that write. See `core/docs/tasks.md` for eligible fields, retries and recovery.
+Status/claim/dependency/hold/authority/contract changes, checked handbacks and item
+writes retain their synchronous behavior. No service installation is required.
+
 ## 2026-10-25: Native tasks and source-preserving migration
 
 **For agents**

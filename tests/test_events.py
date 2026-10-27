@@ -547,7 +547,9 @@ class EventAppend(Scenario):
         ]
         for args in commands:
             with self.subTest(command=args[0]):
-                self.b(r, *args)
+                result = self.b(r, *args)
+                if args[0] == 'inbox' and '--add' in args:
+                    self.b(r, 'queue', 'wait', result.strip())
                 count += 1
                 self.assertEqual(len(self.commits(r)), count)
         local = json.loads((r / '.brain/local.json').read_text())
@@ -992,7 +994,8 @@ class EventViews(Scenario):
     def test_events_view_matches_refreshed_snapshot_and_never_reads_node_sources(self):
         r = self.init('demo')
         self.b(r, 'new', 'app', '--title', 'App')
-        self.b(r, 'inbox', 'app', '--add', 'MESSAGE-PRIVATE')
+        request = self.b(r, 'inbox', 'app', '--add', 'MESSAGE-PRIVATE').strip()
+        self.b(r, 'queue', 'wait', request)
         self.b(r, 'status', 'app', '--refresh')
         inst = instance.Instance(r)
         expected = events.snapshot_view(inst, inst.node('app'))

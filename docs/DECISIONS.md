@@ -3422,6 +3422,22 @@ attempt published owns the current job, and an older queued attempt still fails
 the runner's identity check. Completion publication continues to fence the exact
 attempt, and lease ownership and PID birth-stamp checks remain unchanged.
 
+## D40010: Queue low-risk metadata and unchecked messages before instance locking
+
+Inbox additions, a narrow allowlist of task metadata patches, and unchecked
+handback enqueue requests use immutable instance-level request files. A single
+O_APPEND index establishes order by byte position. The existing handback queue
+module owns this transport as well as the unchanged checked foreground runner.
+A detached, independently leased applier publishes one applied/rejected receipt
+per payload-bound request ID. Task replay compares prepared before/after records;
+inbox replay uses retained identity markers, and handback replay retains its
+publication, attempt and failure-event identity. Unexplained drift blocks replay.
+
+Acceptance is distinct from application. Dependent readers explicitly wait for
+the request receipt. Authority/status/dependency transitions, checked verification
+and item mutations remain synchronous. An installed service, item intents and a
+general multi-file crash-recovery matrix are separate work.
+
 ## D40009: Bound live accounting to command and job observations
 
 Each command captures transcript discovery once. A job aggregate's revision

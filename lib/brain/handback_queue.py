@@ -16,6 +16,7 @@ import hashlib
 import subprocess
 import sys
 import time
+import io
 
 from . import common as _m_common
 from . import instance as _m_instance
@@ -89,11 +90,24 @@ def submit_intent(inst, payload, identity=None, start=True):
     except FileExistsError:
         if intent_read(inst, identity + '.request') != data:
             raise ValueError('write request ID already has a different payload')
+        # An earlier caller may have died after write but before fsync. A retry
+        # must establish durability itself before acknowledging the same ID.
+        with _m_common.directory_target(intent_path(inst, identity + '.request'), private=True) as target:
+            fd = target.open()
+            try:
+                os.fsync(fd)
+                os.fsync(target.fd)
+            finally:
+                os.close(fd)
     # The byte position of this one O_APPEND line establishes monotonic order.
     # Repeated identical IDs are transport retries, not additional applications.
     events.append_line(intent_path(inst, 'index'), dict(id=identity, hash=data['hash']))
     if start:
-        start_intent_drainer(inst)
+        try:
+            start_intent_drainer(inst)
+        except OSError:
+            print('write accepted; applier could not start: run brain queue drain, then queue wait ' + identity,
+                  file=sys.stderr)
     return data
 
 
@@ -238,11 +252,12 @@ def apply_intent(inst, data):
     if payload['kind'] == 'inbox':
         marker = '<!-- write-request:' + identity + ' -->'
         # Archives retain the marker. A death after append must not resurrect it.
-        archived = any(marker in p.read_text() for p in n['dir'].glob('inbox-archive*.md'))
+        archived = archived_intent_marker(n, marker)
         if not archived:
             transitions.inbox_append(n['dir'], '- ' + payload['at'] + ' from brain: ' +
                                      payload['text'] + ' ' + marker + '\n', marker)
         _m_common.touch(n['dir'] / 'inbox.md')
+        _m_common.sync_directory(n['dir'])
         inst.commit([], n['id'] + ': inbox item')
     elif payload['kind'] == 'task':
         if not payload['changes'] or not set(payload['changes']) <= PATCH_FIELDS:
@@ -272,6 +287,15 @@ def apply_intent(inst, data):
         raise ValueError('unsupported write request kind')
 
 
+def archived_intent_marker(n, marker):
+    path = n['dir'] / 'inbox-archive.md'
+    try:
+        with _m_common.directory_target(path) as target:
+            return marker in target.read_bytes().decode()
+    except FileNotFoundError:
+        return False
+
+
 def apply_handback_intent(inst, n, request):
     """Unchecked native publication, with durable effects retained for replay."""
     from . import tasks, transitions, events, hosts
@@ -279,6 +303,10 @@ def apply_handback_intent(inst, n, request):
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], payload['args']['branch'])
     if not row or _m_jobs.job_key(row) != payload['job_key']:
         raise ValueError('job changed before queued message application')
+    from . import briefs
+    if (payload['args']['state'] == 'done' and not briefs.import_job(row['Job'])
+            and payload['args'].get('reviews') is not None):
+        raise ValueError('checked handback cannot use the write-intent applier')
     try:
         prepared = intent_read(inst, request['id'] + '.prepared')
     except FileNotFoundError:
@@ -292,8 +320,13 @@ def apply_handback_intent(inst, n, request):
         raise RuntimeError('handback preparation identity changed')
     data = prepared['after']
     with _m_instance.brain_lock(inst):
+        attempt = _m_attempts.current_attempt(n, row)
+        if not attempt or attempt['id'] != data['attempt_id']:
+            raise RuntimeError('handback attempt changed after preparation')
         current = _m_jobs.read_handback(n, row)
         if current == prepared['before']:
+            if not _m_attempts.attempt_matches(n, row, attempt):
+                raise RuntimeError('handback binding changed after preparation')
             events.write_record(inst, n, 'handback', _m_jobs.job_key(row), json.dumps(data, indent=2) + '\n')
         elif current != data:
             raise RuntimeError('handback drift after preparation; retain blocked request')
@@ -303,10 +336,11 @@ def apply_handback_intent(inst, n, request):
             bullet = ('- ' + data['at'] + ' from worker ' + prepared['branch'] + ': ' + data['state'] +
                       ': ' + prepared['message'] + ' <!-- wake:' + data['wake_id'] + ' --> ' + prepared['marker'] + '\n')
             marker = prepared['marker']
-            archived = any(marker in p.read_text() for p in n['dir'].glob('inbox-archive*.md'))
+            archived = archived_intent_marker(n, marker)
             if not archived:
                 transitions.inbox_append(n['dir'], bullet, marker)
             _m_common.touch(n['dir'] / 'inbox.md')
+            _m_common.sync_directory(n['dir'])
         tasks.handback_event(inst, n, row, data)  # failure event uses the saved attempt ID
         inst.commit([], n['id'] + ': worker hand-back')
     _m_instance.unlock()
@@ -330,18 +364,20 @@ def drain_intents(inst, lease_fd=None):
                 break
             sequence, data = pending[0]
             state, reason = 'applied', ''
+            diagnostic = io.StringIO()
             with _m_instance.brain_lock(inst):
                 current = _m_instance.Instance(inst.root)
                 args = argparse.Namespace(cmd='queue', action='apply', id=data['payload']['node'], f=cmd_intent_queue)
                 try:
-                    with events.Command(inst.root, args):
-                        apply_intent(current, data)
+                    with contextlib.redirect_stderr(diagnostic):
+                        with events.Command(inst.root, args):
+                            apply_intent(current, data)
                 except (ValueError, SystemExit) as error:
                     # Rejection is terminal only when no prepared primary effect
                     # exists. Partial application always remains blocked/replayable.
                     if intent_path(inst, data['id'] + '.prepared').exists():
                         raise RuntimeError('prepared application needs recovery') from error
-                    state, reason = 'rejected', str(error)
+                    state, reason = 'rejected', diagnostic.getvalue().strip() or str(error)
                 with _m_instance.brain_lock(inst):
                     intent_store(inst, data['id'] + '.receipt', dict(id=data['id'], hash=data['hash'],
                                  sequence=sequence, state=state, reason=reason), exclusive=True)

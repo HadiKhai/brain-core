@@ -4,6 +4,40 @@ Each node keeps one `tasks/<id>.md` per task. Requirements preserve exact quotes
 under `requirements/REQ-*.md`. JSON-valued Markdown frontmatter preserves punctuation
 and multiline text without a runtime dependency beyond Python 3.9.
 
+## Queued metadata and read barriers
+
+`task set` patches containing only `title`, `description`, `kind`, `priority`,
+`order`, `estimate`, `spent`, `external_url` and `next_action` return a durable
+request ID immediately. `inbox NODE --add TEXT` and unchecked
+`handback NODE --enqueue ...` use the same instance queue. The return means
+**queued**. Fresh-state validation and publication happen in a detached applier.
+Task status, owner/claim, dependencies, holds, authority, contracts and other gate
+fields keep their synchronous path. Checked `handback --state done --reviews N`
+retains the existing verifier/foreground-queue behavior. Item writes stay synchronous.
+
+Before any dependent read or action, carry the returned ID through a barrier:
+
+```sh
+request=$(brain task set app APP-1 priority=P1)
+brain queue wait "$request" && brain task show app APP-1
+```
+
+`--json` submissions return `{"state":"queued","request_id":"..."}`.
+`brain queue wait ID --timeout 30` reads receipts without taking the instance
+lock. A rejected receipt or timeout exits nonzero; keep the ID and inspect it,
+rather than submitting under a new identity. `--request-id ID` on these producer
+forms retries the same immutable payload; different payloads with that ID refuse.
+Two identical inbox messages with different IDs remain two intentional messages.
+
+The producer starts an applier only when its independent lease is free. It drains
+in append-index order, locks the instance for each record, and exits when empty.
+After an interrupted applier, the next producer starts recovery; `brain queue
+drain` also retries explicitly. Corrupt or short evidence and independent changes
+after preparation block the queue for inspection; no records are skipped.
+Inspect `.brain/write-queue/blocked` for the retained reason. Request, prepared
+effect and applied/rejected receipt files are private instance state. Do not edit,
+rotate or remove the spool while requests or producers exist.
+
 ## Adopt after installation or upgrade
 
 Installation and upgrade call `brain task migrate --all`. It imports explicit

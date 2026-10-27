@@ -390,7 +390,8 @@ class UnifiedHandbacks(Scenario):
         self.assertIn('unknown or ambiguous item ID; inspect the current inbox or due output', refused)
         self.assertEqual(inbox.read_bytes(), source)
         # The lesson workflow still answers a real unresolved request and retains its source.
-        self.b(r, 'inbox', 'a', '--add', 'question: Which retained lesson resolution should be recorded?')
+        request = self.b(r, 'inbox', 'a', '--add', 'question: Which retained lesson resolution should be recorded?').strip()
+        self.b(r, 'queue', 'wait', request)
         source = inbox.read_bytes()
         request, = [i for i in json.loads(self.b(r, 'inbox', 'a', '--json'))
                     if i['kind'] == 'inbox' and 'Which retained lesson resolution' in i['text']]
