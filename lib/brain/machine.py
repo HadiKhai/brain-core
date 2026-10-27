@@ -23,6 +23,7 @@ from . import nodes as _m_nodes
 from . import schedules as _m_schedules
 from . import ui as _m_ui
 from . import timings as _m_timings
+from . import gate_lock as _m_gate_lock
 
 
 MACHINE_DEFAULTS = {"load5_per_cpu": 0.8, "memory_free_gb": 8, "disk_free_gb": 40,
@@ -1228,10 +1229,12 @@ def job_queue_projection(inst, node, owner):
 def machine_wait(kind="heavy", inst=None, node=None, job=None, clock=None, read=None, pause=None,
                  reduction_ready=False, token=None):
     clock = clock or (token.clock if token is not None else time)
-    if token is not None:
-        return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
-    with machine_run(kind, inst, node, job, clock, close_success=False) as token:
-        return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
+    with (_m_gate_lock.gate_admission(inst, node) if inst is not None and node is not None
+          else contextlib.nullcontext()):
+        if token is not None:
+            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
+        with machine_run(kind, inst, node, job, clock, close_success=False) as token:
+            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
 
 
 def machine_release(token):
@@ -1413,7 +1416,7 @@ def machine_summary(reading):
 
 def cmd_heavy(a):
     inst = _m_nodes.load()
-    node = inst.node(getattr(a, "node", None) or "root")
+    node = inst.node(getattr(a, "node", None) or os.environ.get('BRAIN_GATE_NODE') or "root")
     with machine_run('heavy', inst, node['id']) as token:
         machine_wait(inst=inst, node=node['id'], token=token)
     print("machine care: heavy work allowed (admission only)")

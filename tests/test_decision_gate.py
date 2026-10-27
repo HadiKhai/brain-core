@@ -10,6 +10,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 from unittest import mock
 
 import core_loader
@@ -106,6 +107,113 @@ class DecisionGate(Scenario):
 
     def gate_path(self, node='root'):
         return self.root / '.brain/gates' / (hashlib.sha256(node.encode()).hexdigest() + '.lock')
+
+    def test_waiting_heavy_holder_is_idle_then_running_with_same_node_exclusion(self):
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        code = r"""import argparse,os,sys
+sys.path.insert(0,sys.argv[1]+'/lib')
+from unittest import mock
+import brain.machine as m
+reading={'load_per_cpu':[9,9,9], 'mem_free_gb':32, 'disk_free_gb':200, 'thermal':'normal'}
+def pause(seconds):
+ print('admission-barrier',file=sys.stderr,flush=True)
+ sys.stdin.readline()
+ reading['load_per_cpu']=[0,0,0]
+with mock.patch.object(m,'machine_reading',side_effect=lambda inst=None:dict(reading)), mock.patch.object(m.time,'sleep',side_effect=pause):
+ m.cmd_heavy(argparse.Namespace(node=None))
+print('running-barrier',file=sys.stderr,flush=True)
+sys.stdin.readline()
+"""
+        first = self.start_gate('admission', code, str(CORE), node='maple')
+        self.assertEqual(self.line(first.stderr), 'admission-barrier')
+        inst = self.m.Instance(self.root)
+        path = self.gate_path('maple')
+        before = path.read_bytes()
+        inode = path.stat().st_ino
+        self.assertEqual(json.loads(before)['phase'], 'waiting-for-admission')
+        self.assertEqual(self.m.open_jobs_anywhere(inst), [])
+        self.assertEqual(path.read_bytes(), before)
+        second = self.start_gate('second', "import sys; print('second-barrier'); sys.stdin.readline()", node='maple')
+        self.assertIn('waiting for gate held by admission', self.line(second.stderr))
+        self.assertEqual(select.select([second.stdout], [], [], 0)[0], [])
+        first.stdin.write('\n')
+        first.stdin.flush()
+        self.assertEqual(self.line(first.stderr), 'running-barrier')
+        self.assertEqual(json.loads(path.read_text())['phase'], 'running')
+        self.assertIn(('maple', 'in-flight node gate'), self.m.open_jobs_anywhere(inst))
+        self.assertEqual(path.stat().st_ino, inode)
+        out, err = first.communicate('\n', timeout=5)
+        self.assertIn('machine care: heavy held', out)
+        self.assertIn('heavy work allowed', out)
+        self.assertEqual(self.line(second.stdout), 'second-barrier')
+        self.assertEqual(path.stat().st_ino, inode)
+        self.assertIn(('maple', 'in-flight node gate'), self.m.open_jobs_anywhere(inst))
+        third = self.start_gate('third', 'print(43)', node='maple')
+        self.assertIn('waiting for gate held by second', self.line(third.stderr))
+        second.communicate('\n', timeout=5)
+        out, err = third.communicate(timeout=5)
+        self.assertEqual((first.returncode, second.returncode, third.returncode), (0, 0, 0), err)
+        self.assertEqual(out.strip(), '43')
+        self.assertEqual(path.stat().st_ino, inode)
+
+    def test_native_first_admission_is_idle_but_later_lane_admission_is_busy(self):
+        m, inst, n = self.m, self.inst, self.n
+        with m.node_gate(inst, n, self.env, 'native'):
+            def wait():
+                self.assertEqual(json.loads(self.gate_path().read_text())['phase'], 'waiting-for-admission')
+                self.assertEqual(m.open_jobs_anywhere(inst), [])
+                return 'fixture-token'
+            with mock.patch.object(m, 'machine_admit', side_effect=lambda *a: wait()):
+                self.assertEqual(m.machine_wait(inst=inst, node='root', token='token', clock=time), 'fixture-token')
+            self.assertEqual(json.loads(self.gate_path().read_text())['phase'], 'running')
+            def later(*args):
+                self.assertIn(('root', 'in-flight node gate'), m.open_jobs_anywhere(inst))
+                return 'later-token'
+            with mock.patch.object(m, 'machine_admit', side_effect=later):
+                self.assertEqual(m.machine_wait(inst=inst, node='root', token='token', clock=time), 'later-token')
+
+    def test_failed_admission_restores_busy_phase_without_losing_gate(self):
+        with self.m.node_gate(self.inst, self.n, self.env, 'failure'):
+            with mock.patch.object(self.m, 'machine_admit', side_effect=RuntimeError('admission failed')):
+                with self.assertRaisesRegex(RuntimeError, 'admission failed'):
+                    self.m.machine_wait(inst=self.inst, node='root', token='token', clock=time)
+            self.assertEqual(json.loads(self.gate_path().read_text())['phase'], 'running')
+            self.assertIn(('root', 'in-flight node gate'), self.m.open_jobs_anywhere(self.inst))
+
+    def test_dead_holder_is_reported_and_reclaimed_without_replacing_inode(self):
+        dead = subprocess.Popen([sys.executable, '-c', 'pass'], env=self.env)
+        dead.wait(timeout=5)
+        path = self.gate_path()
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(dict(node='root', pid=dead.pid, phase='running')))
+        before, inode = path.read_bytes(), path.stat().st_ino
+        diagnostic = io.StringIO()
+        with contextlib.redirect_stderr(diagnostic):
+            self.assertEqual(self.m.open_jobs_anywhere(self.inst), [])
+        self.assertIn('stale node gate holder pid ' + str(dead.pid), diagnostic.getvalue())
+        self.assertEqual(path.read_bytes(), before)
+        next_gate = self.start_gate('reclaim', 'print(42)')
+        out, err = next_gate.communicate(timeout=5)
+        self.assertEqual(next_gate.returncode, 0, err)
+        self.assertEqual(out.strip(), '42')
+        self.assertIn('stale holder pid ' + str(dead.pid), err)
+        self.assertEqual(path.stat().st_ino, inode)
+
+    def test_dead_wait_reporter_and_overlapping_inherited_admissions_fail_closed(self):
+        with self.m.node_gate(self.inst, self.n, self.env, 'overlap') as env:
+            with self.m.gate_admission(self.inst, 'root'):
+                self.assertEqual(self.m.open_jobs_anywhere(self.inst), [])
+                # An inherited second admission cannot hide work from the first.
+                with self.m.gate_admission(self.inst, 'root'):
+                    self.assertIn(('root', 'in-flight node gate'), self.m.open_jobs_anywhere(self.inst))
+            self.assertEqual(json.loads(self.gate_path().read_text())['phase'], 'running')
+            fd = int(env['BRAIN_GATE_FD'])
+            row = self.m.gate_metadata(fd)
+            dead = subprocess.Popen([sys.executable, '-c', 'pass'], env=self.env)
+            dead.wait(timeout=5)
+            row.update(phase='waiting-for-admission', phase_owner=[dead.pid, 'dead'])
+            self.m.gate_write_metadata(fd, row)
+            self.assertIn(('root', 'in-flight node gate'), self.m.open_jobs_anywhere(self.inst))
 
     def test_scenario_isolates_and_restores_enclosing_native_gate_proof(self):
         code = r"""import os,sys,unittest

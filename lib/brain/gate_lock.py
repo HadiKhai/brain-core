@@ -1,5 +1,6 @@
 """Node-local process gates, independent of configurable machine admission."""
 import contextlib
+import contextvars
 import errno
 import fcntl
 import hashlib
@@ -9,12 +10,85 @@ from pathlib import Path
 import stat
 import signal
 import sys
+import threading
 
 from . import common as _m_common
 from . import nodes as _m_nodes
+from . import instance as _m_instance
+from . import machine as _m_machine
 
 
 GATE_ENV = ('BRAIN_GATE_FD', 'BRAIN_GATE_PATH', 'BRAIN_GATE_NODE')
+ACTIVE_GATE = contextvars.ContextVar('brain_node_gate', default=None)
+_PHASE_LOCK = threading.RLock()
+
+
+def gate_metadata(fd):
+    try:
+        row = json.loads(os.pread(fd, 4096, 0))
+        return row if isinstance(row, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def gate_stale_holder(row):
+    pid = row.get('pid')
+    if type(pid) is not int or pid <= 0:
+        return False
+    stamp = _m_machine.process_stamp(pid)
+    return stamp is None or (stamp != 'unknown' and row.get('owner_stamp') not in (None, 'unknown', stamp))
+
+
+def gate_waiting(row, node):
+    who = row.get('phase_owner')
+    return (row.get('node') == node and row.get('phase') == 'waiting-for-admission'
+            and type(row.get('pid')) is int and row['pid'] > 0
+            and isinstance(row.get('owner_stamp'), str) and row['owner_stamp'] not in ('', 'unknown')
+            and _m_machine.process_stamp(row['pid']) == row['owner_stamp']
+            and isinstance(who, list) and len(who) == 2 and type(who[0]) is int and who[0] > 0
+            and isinstance(who[1], str) and who[1] not in ('', 'unknown')
+            and _m_machine.process_stamp(who[0]) == who[1])
+
+
+def gate_write_metadata(fd, row):
+    data = (json.dumps(row) + '\n').encode()
+    if len(data) > 4096:
+        _m_common.die('gate-lock: holder metadata too large')
+    if os.pwrite(fd, data, 0) != len(data):
+        _m_common.die('gate-lock: incomplete holder metadata')
+    os.ftruncate(fd, len(data))
+
+
+@contextlib.contextmanager
+def gate_admission(inst, node):
+    """Only the first admission can be idle; later lane waits retain running ownership."""
+    active = ACTIVE_GATE.get()
+    env = active[2] if active is not None and active[:2] == (inst.root, node) else os.environ
+    fd = gate_inherited_fd(inst.root, env, node)
+    if fd is None:
+        yield
+        return
+    # Serialize phase changes with upgrade's instance lock. Never hold it while
+    # waiting for admission. A running phase is sticky across nested commands.
+    with _PHASE_LOCK, _m_instance.brain_lock(inst):
+        row = gate_metadata(fd)
+        if row.get('phase') == 'starting':
+            row.update(phase='waiting-for-admission',
+                       phase_owner=[os.getpid(), _m_machine.process_stamp(os.getpid())])
+            gate_write_metadata(fd, row)
+        elif row.get('phase') == 'waiting-for-admission':
+            # Two inherited admission callers cannot both vouch for an idle gate.
+            row.update(phase='running')
+            gate_write_metadata(fd, row)
+    try:
+        yield
+    finally:
+        with _PHASE_LOCK, _m_instance.brain_lock(inst):
+            row = gate_metadata(fd)
+            if row.get('phase') == 'waiting-for-admission':
+                row.update(phase='running')
+                row.pop('phase_owner', None)
+                gate_write_metadata(fd, row)
 
 
 def gate_path(root, node):
@@ -91,24 +165,27 @@ def gate_acquire(inst, node, env, label):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            try:
-                holder = json.loads(os.pread(fd, 4096, 0))
-                if not isinstance(holder, dict):
-                    holder = {}
-            except (OSError, ValueError):
-                holder = {}
+            holder = gate_metadata(fd)
             print('waiting for gate held by ' + str(holder.get('label', 'unknown')) +
                   ' since ' + str(holder.get('started', 'unknown')), file=sys.stderr, flush=True)
+            if gate_stale_holder(holder):
+                print('gate-lock: stale holder pid ' + str(holder['pid']) +
+                      '; descriptor still held; waiting', file=sys.stderr, flush=True)
             fcntl.flock(fd, fcntl.LOCK_EX)
         target = path.lstat()
         if (not stat.S_ISREG(target.st_mode) or
                 (opened.st_dev, opened.st_ino) != (target.st_dev, target.st_ino) or
                 os.fstat(fd).st_nlink != 1):
             _m_common.die('gate-lock: lock path changed while waiting')
-        metadata = json.dumps({'node': node, 'label': label, 'started': inst.now(), 'pid': os.getpid()}) + '\n'
-        os.fchmod(fd, 0o600)
-        os.ftruncate(fd, 0)
-        os.pwrite(fd, metadata.encode(), 0)
+        with _PHASE_LOCK, _m_instance.brain_lock(inst):
+            holder = gate_metadata(fd)
+            if gate_stale_holder(holder):
+                print('gate-lock: stale holder pid ' + str(holder['pid']) +
+                      '; reclaiming released gate', file=sys.stderr, flush=True)
+            os.fchmod(fd, 0o600)
+            gate_write_metadata(fd, {'node': node, 'label': label, 'started': inst.now(),
+                                    'pid': os.getpid(), 'owner_stamp': _m_machine.process_stamp(os.getpid()),
+                                    'phase': 'starting'})
         return fd, True
     except BaseException:
         os.close(fd)
@@ -123,9 +200,12 @@ def gate_environment(inst, node, env, fd):
 @contextlib.contextmanager
 def node_gate(inst, n, env, label):
     fd, owned = gate_acquire(inst, n['id'], env, label)
+    env = gate_environment(inst, n['id'], env, fd)
+    active = ACTIVE_GATE.set((inst.root, n['id'], env))
     try:
-        yield gate_environment(inst, n['id'], env, fd)
+        yield env
     finally:
+        ACTIVE_GATE.reset(active)
         if owned:
             # Close, never unlock: a surviving child retains the same ownership.
             os.close(fd)

@@ -3566,3 +3566,25 @@ continues to count the allowed subscription folders, so registering an already
 allowed folder cannot double-count it or grant access to another subscription.
 Fixture-mode machine service installation and removal refuse before invoking
 an OS service manager; service tests explicitly intercept the production calls.
+## 2026-10-27: Distinguish initial gate admission from running ownership
+
+Node gates keep their stable flock inode while waiting for machine admission.
+Holder metadata starts conservatively busy, records `waiting-for-admission`
+during the first native or inherited `heavy` admission, then becomes `running`
+before the admitted caller can continue. The upgrade idle guard ignores only a
+waiting phase whose gate owner and admission reporter have matching live process
+birth stamps. Missing, malformed, legacy or uncertain metadata stays busy when
+the flock is held. The inherited gate node is the default for `heavy`.
+
+Phase transitions use the instance writer lock, shared with upgrade, but release
+it before admission waits. Running is sticky for the gate lifetime: later lane
+waits and overlapping inherited admissions cannot hide previously started work.
+Native verification carries gate context explicitly across its admission calls.
+No phase transition unlocks, replaces or removes the gate file, and surviving
+children retain the inherited descriptor after a parent exits.
+
+The idle guard and the next gate acquisition report stale holder PIDs. An
+unlocked stale file is idle and reused in place; a stale PID with a still-held
+descriptor remains busy because a surviving child may own the gate. Controlled
+process barriers cover admission, upgrade refusal, same-node competitors, inode
+continuity, failed admission and dead reporters without generating machine load.

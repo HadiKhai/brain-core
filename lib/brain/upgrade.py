@@ -334,7 +334,16 @@ def _upgrade_node_gate_busy(inst, n):
             try:
                 fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
+                row = _m_gate_lock.gate_metadata(held.fileno())
+                if _m_gate_lock.gate_stale_holder(row):
+                    return [(n['id'], f"in-flight node gate (stale holder pid {row['pid']}; descriptor still held)")]
+                if _m_gate_lock.gate_waiting(row, n['id']):
+                    return []
                 return [(n["id"], "in-flight node gate")]
+            row = _m_gate_lock.gate_metadata(held.fileno())
+            if _m_gate_lock.gate_stale_holder(row):
+                print(f"upgrade: stale node gate holder pid {row['pid']}; released lock is idle",
+                      file=sys.stderr)
         return []
     except (OSError, ValueError, TypeError):
         return [(n["id"], "unreadable node gate inventory")]

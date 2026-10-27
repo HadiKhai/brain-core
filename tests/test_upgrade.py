@@ -327,6 +327,44 @@ class R2VersionAndUpgrade(Scenario):
                     if other.exists():
                         other.unlink()
 
+    def test_initial_admission_wait_allows_upgrade_but_running_holder_refuses(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        with m.node_gate(inst, n, self.env, 'admission'):
+            with m.gate_admission(inst, n['id']):
+                before = m.gate_path(inst.root, n['id']).read_bytes()
+                self.upgrade_attempt(m, inst)
+                self.assertEqual(m.gate_path(inst.root, n['id']).read_bytes(), before)
+            self.assertIn('node gate', self.upgrade_attempt(m, inst, refused=True))
+
+    def test_held_dead_pid_is_visibly_stale_and_cannot_hide_surviving_child(self):
+        import fcntl
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        dead = subprocess.Popen([sys.executable, '-c', 'pass'], env=self.env)
+        dead.wait(timeout=5)
+        path = m.gate_path(inst.root, n['id'])
+        path.parent.mkdir(parents=True)
+        with path.open('w+') as held:
+            json.dump(dict(node=n['id'], pid=dead.pid, phase='waiting-for-admission',
+                           phase_owner=[os.getpid(), m.process_stamp(os.getpid())]), held)
+            held.flush()
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertIn('stale holder pid ' + str(dead.pid), self.upgrade_attempt(m, inst, refused=True))
+
+    def test_uncertain_waiting_phase_remains_busy(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        with m.node_gate(inst, n, self.env, 'uncertain') as env:
+            fd = int(env['BRAIN_GATE_FD'])
+            with m.gate_admission(inst, n['id']):
+                row = m.gate_metadata(fd)
+            for changes in ({'phase_owner': [True, 'unknown']}, {'phase_owner': [os.getpid(), 'recycled']},
+                            {'pid': None}, {'owner_stamp': 'unknown'}, {'node': 'another'}, {'phase': 'other'}):
+                with self.subTest(changes=changes):
+                    m.gate_write_metadata(fd, {**row, **changes})
+                    self.assertIn('node gate', self.upgrade_attempt(m, inst, refused=True))
+
     def test_m7_parked_blocked_done_jobs_and_worktrees_upgrade_with_notice(self):
         m = self.module()
         inst, n = self.upgrade_fixture(m)
