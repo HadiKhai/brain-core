@@ -1576,6 +1576,37 @@ class GitReadBatches(Scenario):
         self.git('worktree', 'add', *args, str(tree), cwd=self.home)
         return tree
 
+    def test_worktree_and_index_reads_observe_changes_inside_a_snapshot(self):
+        tracked = self.home / 'tracked.txt'
+        tracked.write_text('before\n')
+        self.git('add', 'tracked.txt', cwd=self.home)
+        self.git('commit', '-qm', 'tracked input', cwd=self.home)
+        queries = [('status', '--porcelain'), ('diff', '--name-only'),
+                   ('diff', '--cached', '--name-only'), ('ls-files', '--stage'),
+                   ('ls-files', '--others', '--exclude-standard'),
+                   ('-c', 'core.quotepath=false', 'status', '--porcelain')]
+
+        def observe():
+            return [(r.returncode, r.stdout, r.stderr) for args in queries
+                    for r in [self.common.git(*args, cwd=self.home)]]
+
+        before = observe()
+        with self.common.git_read_snapshot():
+            self.assertEqual(observe(), before)
+            # Same-size edits are invisible to an index/HEAD-only cache key.
+            tracked.write_text('after!\n')
+            (self.home / 'untracked.txt').write_text('new\n')
+            changed = observe()
+            self.assertIn('tracked.txt', changed[1][1])
+            self.assertIn('untracked.txt', changed[4][1])
+            self.git('add', 'tracked.txt', cwd=self.home)
+            staged = observe()
+            self.assertEqual(staged[1][1], '')
+            self.assertIn('tracked.txt', staged[2][1])
+            self.assertNotEqual(staged[3], before[3])
+        # Compare every result with native uncached Git on the final state.
+        self.assertEqual(staged, observe())
+
     def test_refs_worktree_heads_dates_and_ancestry_batch_with_nasty_paths(self):
         tree = self.linked()
         (tree / 'file é\nnew line').write_text('one\n')

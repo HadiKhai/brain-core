@@ -2841,3 +2841,10 @@ limit or persistent authority. Failed or malformed batches fall back to the
 individual Git reads, including local job-state observations. Read-only `ready`
 uses this scope; readiness recording and other write paths keep their existing
 reads and writes.
+
+Git read snapshots never memoize `status`, `diff` or `ls-files`. A configured
+lane-map command can edit the worktree or index during a read command, so these
+observations must come from native Git each time; index and HEAD fingerprints
+alone cannot detect unstaged edits. Ref and commit-graph batching remains scoped
+to the command. Readiness retains its strict dirty-worktree evidence after a
+dynamic map runs.

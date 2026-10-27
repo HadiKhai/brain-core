@@ -460,7 +460,7 @@ _GIT_READS = contextvars.ContextVar('brain_git_reads', default=None)
 
 @contextlib.contextmanager
 def git_read_snapshot():
-    """Share repeated display reads within one build, never across threads or builds."""
+    """Share ref/commit reads within a build; worktree and index reads stay live."""
     if _GIT_READS.get() is not None:
         yield
         return
@@ -576,8 +576,11 @@ def git(*args, cwd=None, check=False, env=None):
     query = args
     while len(query) >= 2 and query[0] == '-c':
         query = query[2:]
+    # A read command can run a configured lane map or another subprocess that
+    # edits files or stages changes without going through this helper. Never
+    # memoize worktree/index observations, even inside a display snapshot.
     read_only = (query and (query[0] in
-                 ('rev-parse', 'log', 'status', 'diff', 'ls-files', 'merge-base', 'rev-list', 'for-each-ref')
+                 ('rev-parse', 'log', 'merge-base', 'rev-list', 'for-each-ref')
                  or query == ('remote',)
                  or (query[0] == 'symbolic-ref' and len([x for x in query[1:] if not x.startswith('-')]) == 1
                      and all(not x.startswith('-') or x in ('--short', '--quiet', '-q') for x in query[1:]))))
