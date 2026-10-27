@@ -3641,3 +3641,16 @@ command read snapshot within the existing unlocked source fence. Repeated displa
 queries share one observation. The snapshot ends before the fence is revalidated
 and before generated status or journal publication; attempt ownership, readiness
 and publication checks outside this display scope remain fresh.
+## 2026-10-27: Bound write-display work without weakening generation fences
+
+Scoped Git fences inspect loose ref headers before asking Git to resolve symbolic
+chains. Ordinary and missing branch refs need no subprocess per branch; symbolic
+targets, linked metadata, packed refs and reftable storage remain in the generation
+fence. No layout or generation result is retained across publication rechecks.
+
+Terminal write projections share one command read snapshot for task updates as
+well as handbacks. Readiness and mutation validation remain outside that scope.
+Machine telemetry is sampled concurrently with the generated view while the writer
+lock is released, then rendered from that same observation. It remains display-only.
+Task reverse edges are constructed in one pass, preserving record order and one
+entry per dependent even when a dependency is repeated.

@@ -315,12 +315,16 @@ def mutate(inst, n, ident, changes, create=False, provider=False):
 
 def projection(n):
     rows = read_records(n)
+    blocks = {}
+    for row in rows.values():
+        for dependency in set(row.get('depends_on', [])):
+            blocks.setdefault(dependency, []).append(row['id'])
     result = []
     for row in sorted(rows.values(), key=lambda r: (r.get('order', 0), r.get('priority', 'P2'), r['id'])):
         from . import task_flow as _m_flow
         blockers = _m_flow.blockers(n, row, rows) + row.get('unresolved_dependencies', [])
         result.append({**row, 'blocked_by': blockers,
-                       'blocks': [r['id'] for r in rows.values() if row['id'] in r.get('depends_on', [])]})
+                       'blocks': blocks.get(row['id'], [])})
     return result
 
 

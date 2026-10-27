@@ -11,6 +11,15 @@ from brain.instance import Instance
 
 
 class Tasks(Scenario):
+    def test_projection_reverse_edges_keep_record_order_and_duplicate_dependencies_once(self):
+        self.add('BASE')
+        self.add('SECOND', depends_on=['BASE', 'BASE'])
+        self.add('FIRST', depends_on=['BASE'])
+        rows = tasks.read_records(self.n)
+        expected = {ident: [row['id'] for row in rows.values() if ident in row.get('depends_on', [])]
+                    for ident in rows}
+        self.assertEqual({row['id']: row['blocks'] for row in tasks.projection(self.n)}, expected)
+
     def test_set_survives_unrelated_instance_commit_with_other_completed_tasks(self):
         self.repo(self.root, {'engine.py': 'value = 1\n'})
         base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()

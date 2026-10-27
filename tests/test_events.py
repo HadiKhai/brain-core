@@ -418,6 +418,32 @@ class EventAppend(Scenario):
 class EventViews(Scenario):
     fixture_init_in_process = True
 
+    def test_terminal_projection_samples_machine_alongside_view_without_writer_lock(self):
+        import threading
+        from brain import status
+        r = self.init('parallel-machine')
+        inst = instance.Instance(r)
+        op = argparse.Namespace(inst=inst, node='root', command='handback', record_paths=set(),
+                                close_job=False, study_handback=False)
+        sampled, rendering = threading.Event(), threading.Event()
+        original = events.snapshot_view
+        def machine(_inst):
+            self.assertIsNone(instance._LOCK['fh'])
+            sampled.set()
+            self.assertTrue(rendering.wait(3), 'view must run before sampling finishes')
+            return {'fixture': True}
+        def view(*args, **kwargs):
+            self.assertTrue(sampled.wait(3), 'machine sampling must already be running')
+            rendering.set()
+            return original(*args, **kwargs)
+        with mock.patch.dict(os.environ, self.env, clear=True), instance.brain_lock(inst), \
+                mock.patch.object(status._m_machine, 'machine_state', side_effect=machine) as read, \
+                mock.patch.object(status._m_machine, 'machine_summary', return_value='fixture machine'), \
+                mock.patch.object(events, 'snapshot_view', side_effect=view):
+            events.maintain(op, {})
+        self.assertEqual(read.call_count, 1)
+        self.assertIn('fixture machine', (r / 'status.md').read_text())
+
     def test_handback_projection_snapshot_preserves_generated_bytes_and_expires(self):
         import contextlib
         from brain import command_reads, jobs, status
@@ -430,7 +456,7 @@ class EventViews(Scenario):
         path = n['dir'] / 'status.md'
         original = path.read_bytes()
         op = argparse.Namespace(inst=inst, node='app', command='handback', record_paths=set(),
-                                close_job=False, study_handback=False)
+                                close_job=False, study_handback=False, args=argparse.Namespace())
         clock = inst.now_dt()
         snapshot = command_reads.snapshot
         results = []
@@ -439,12 +465,16 @@ class EventViews(Scenario):
                 mock.patch.object(status._m_machine, 'machine_state', return_value={}), \
                 mock.patch.object(status._m_machine, 'machine_summary', return_value='fixture machine'), \
                 mock.patch.object(events, 'status_commit'):
-            for reads in (contextlib.nullcontext, snapshot):
-                path.write_bytes(original)
-                with mock.patch.object(command_reads, 'snapshot', reads), instance.brain_lock(inst):
-                    view = events.maintain(op, {})
-                results.append((json.dumps(view, ensure_ascii=False).encode(), path.read_bytes()))
-                self.assertIsNone(command_reads._VALUES.get())
+            for command in ('handback', 'task'):
+                op.command = command
+                results = []
+                for reads in (contextlib.nullcontext, snapshot):
+                    path.write_bytes(original)
+                    with mock.patch.object(command_reads, 'snapshot', reads), instance.brain_lock(inst):
+                        view = events.maintain(op, {})
+                    results.append((json.dumps(view, ensure_ascii=False).encode(), path.read_bytes()))
+                    self.assertIsNone(command_reads._VALUES.get())
+                self.assertEqual(results[0], results[1])
         self.assertEqual(results[0], results[1])
         # Parsing and publication consumers outside the display scope stay fresh.
         ledger = n['dir'] / 'job-ledger.md'

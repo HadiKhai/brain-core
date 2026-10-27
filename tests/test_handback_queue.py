@@ -16,6 +16,27 @@ from scenario import CORE, Scenario
 
 
 class HandbackLifecycle(Scenario):
+    def test_many_scoped_refs_only_query_git_for_loose_symbolic_targets(self):
+        m, inst, n, row = self.fixture()
+        home = self.repo(self.tmp / 'home')
+        self.git('branch', 'stable', cwd=home)
+        self.git('symbolic-ref', 'refs/heads/main', 'refs/heads/middle', cwd=home)
+        self.git('symbolic-ref', 'refs/heads/middle', 'refs/heads/stable', cwd=home)
+        refs = {'refs/heads/main'} | {f'refs/heads/missing-{i}' for i in range(100)}
+        calls = []
+        git = m.git
+        def record(*args, **kwargs):
+            calls.append(args)
+            return git(*args, **kwargs)
+        with mock.patch.object(m, 'git', side_effect=record):
+            paths = m.git_state_paths(home, refs=refs, include_head=False)
+        self.assertEqual(sum(c[:1] == ('symbolic-ref',) for c in calls), 2)
+        self.assertIn(home / '.git/refs/heads/middle', paths)
+        self.assertIn(home / '.git/refs/heads/stable', paths)
+        before = m.state_signature(inst, extra=paths)
+        self.git('commit', '--allow-empty', '-qm', 'Selected target changed', cwd=home)
+        self.assertNotEqual(before, m.state_signature(inst, extra=paths))
+
     def test_attempt_binding_ignores_other_branch_commits_but_fences_own_branch(self):
         m, inst, n, row = self.fixture()
         home = self.repo(self.tmp / 'home')

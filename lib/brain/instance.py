@@ -407,6 +407,24 @@ def git_state_paths(home, *, task_proof=False, refs=None, include_head=True):
                 continue
             seen.add(ref)
             refs.add(ref)
+            # Packed/reftable refs cannot add an unfenced loose symbolic
+            # target. Most selected refs are ordinary object IDs or missing;
+            # ask Git only when loose metadata can actually redirect a ref.
+            symbolic = False
+            for base in bases:
+                path = base / ref
+                if path.is_symlink():
+                    symbolic = True
+                    break
+                try:
+                    with path.open('rb') as stream:
+                        symbolic = stream.read(4) == b'ref:'
+                except (FileNotFoundError, IsADirectoryError):
+                    continue
+                if symbolic:
+                    break
+            if not symbolic:
+                continue
             result = _m_common.git('symbolic-ref', '--no-recurse', '-q', ref,
                                    cwd=home, env=dict(os.environ))
             target = result.stdout.strip()

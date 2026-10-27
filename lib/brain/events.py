@@ -8,6 +8,7 @@ import fcntl
 import stat
 import subprocess
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import common, guard, instance, nodes, timings
@@ -1393,6 +1394,7 @@ def maintain(op, changed):
                                           targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)
                                           if any(source(op.inst, n) == 'events' for n in selected.values()) else ())
     for n in selected.values():
+        machine_snapshot = None
         if materialize and op.command != 'status':
             cap_now(op.inst, n)
         if op.command == 'status' or (op.command == 'check' and status.facts_meta(n)):
@@ -1423,9 +1425,17 @@ def maintain(op, changed):
                 paths.append(op.inst.root / '.brain/communications.json')
                 return paths
             from . import command_reads
-            reads = command_reads.snapshot if op.command == 'handback' else contextlib.nullcontext
+            reads = command_reads.snapshot
             with instance.released(op.inst, list(op.inst.nodes()), extra=projection_inputs), reads():
-                view = snapshot_view(op.inst, n, known)
+                if materialize:
+                    # Telemetry is display-only and independent of node facts.
+                    # Sample it alongside the view, while the writer is released.
+                    with ThreadPoolExecutor(max_workers=1) as pool:
+                        sample = pool.submit(status._m_machine.machine_state, op.inst)
+                        view = snapshot_view(op.inst, n, known)
+                        machine_snapshot = sample.result()
+                else:
+                    view = snapshot_view(op.inst, n, known)
         else:
             view = snapshot_view(op.inst, n, known)
         # During comparison, files supply new facts. After switching, a write materializes its
@@ -1434,7 +1444,9 @@ def maintain(op, changed):
             view = events_view_without_current(op.inst, n)
         views[n['id']] = view
         if materialize:
-            status.refresh_status(op.inst, n, view, prepared_text=prepared[n['id']][1] if op.command == 'status' else None)
+            status.refresh_status(op.inst, n, view,
+                                  prepared_text=prepared[n['id']][1] if op.command == 'status' else None,
+                                  machine_snapshot=machine_snapshot)
             active_table(op.inst, n, view)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
             force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)
