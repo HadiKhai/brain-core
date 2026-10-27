@@ -30,6 +30,131 @@ import test_verify as _test_verify
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class ScanTermsCache(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('term_cache_fixture', str(CORE / 'bin/brain')).load_module()
+        self.guard = self.m._owners['scan_terms']
+        notes = self.tmp / 'notes'
+        notes.mkdir()
+        (notes / 'instance.md').write_text('---\nprincipals: fixture-owner\n---\n')
+        self.home = self.repo(self.tmp / 'home', {'one.txt': 'needle\n', 'two.txt': 'clean\n'})
+        self.node = dict(dir=notes, parent=None, external=True, home_path=self.home,
+                         local={}, id='fixture')
+        self.terms = [('Needle', 'term 1'), ('CAFÉ', 'term 2'), ('ss', 'term 3')]
+
+    def scan(self):
+        return self.guard.scan_terms(self.node, terms=self.terms)
+
+    def test_cached_scan_matches_uncached_worktree_index_and_unicode(self):
+        (self.home / 'one.txt').write_bytes(b'clean\x00' + 'Café Straße'.encode())
+        class Uncached(dict):
+            def __setitem__(self, key, value):
+                pass
+        token = self.guard._TERM_SCAN_CACHE.set(Uncached())
+        try:
+            expected = self.scan()
+        finally:
+            self.guard._TERM_SCAN_CACHE.reset(token)
+        with self.guard.term_scan_cache():
+            self.assertEqual(self.scan(), expected)
+            with mock.patch.object(self.guard, 'stream_mentions', wraps=self.guard.stream_mentions) as stream:
+                self.assertEqual(self.scan(), expected)
+                self.assertEqual(stream.call_count, 0)
+        # A new command must read sources again.
+        with mock.patch.object(self.guard, 'stream_mentions', wraps=self.guard.stream_mentions) as stream:
+            self.assertEqual(self.scan(), expected)
+            self.assertGreater(stream.call_count, 0)
+        self.assertTrue(any('index stage 0:' in where for _, where in expected[0]))
+        self.assertTrue(any(label == 'term 2' for label, _ in expected[0]))
+
+    def test_cached_files_invalidate_rewrites_replacements_terms_and_symlinks(self):
+        file = self.home / 'one.txt'
+        guard = self.guard
+        def read(needles=('needle',), principals=(), lessons=False):
+            return guard.file_mentions(file, needles, principals=principals, lessons=lessons)
+        with guard.term_scan_cache():
+            self.assertEqual(read(), {'needle'})
+            old = file.stat()
+            file.write_text('clean!\n')  # same size, restored mtime; ctime still changes
+            os.utime(file, ns=(old.st_atime_ns, old.st_mtime_ns))
+            self.assertEqual(read(), set())
+            replacement = self.home / 'replacement'
+            replacement.write_text('needle\n')
+            os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
+            replacement.replace(file)
+            self.assertEqual(read(), {'needle'})
+            self.assertEqual(read(('clean',)), set())
+            file.unlink()
+            file.symlink_to('two.txt')
+            self.assertEqual(read(), set())
+            (self.home / 'two.txt').write_text('needle')
+            self.assertEqual(read(), {'needle'})
+            file.unlink()
+            errors = []
+            self.assertEqual(guard.file_mentions(file, ['needle'], errors=errors), set())
+            self.assertEqual(len(errors), 1)
+
+    def test_governance_and_failed_reads_do_not_share_cached_results(self):
+        file = self.home / 'one.txt'
+        file.write_text('---\nscope: needle\n---\nclean\n')
+        with self.guard.term_scan_cache():
+            self.assertEqual(self.guard.file_mentions(file, ['needle']), {'needle'})
+            self.assertEqual(self.guard.file_mentions(file, ['needle'], principals=['needle']), set())
+            self.assertEqual(self.guard.file_mentions(file, ['needle'], principals=['other']), {'needle'})
+            errors = []
+            with mock.patch('builtins.open', side_effect=PermissionError(13, 'Permission denied')):
+                self.assertEqual(self.guard.file_mentions(file, ['needle'], errors=errors), set())
+            self.assertEqual(len(errors), 1)
+
+    def test_cached_blob_from_other_repo_does_not_hide_missing_object(self):
+        other = self.repo(self.tmp / 'other', {'one.txt': 'needle\n', 'two.txt': 'clean\n'})
+        oid = self.git('rev-parse', 'HEAD:one.txt', cwd=other).strip()
+        with self.guard.term_scan_cache():
+            self.scan()
+            (other / '.git/objects' / oid[:2] / oid[2:]).unlink()
+            hits, errors = self.guard.scan_terms(self.node, [other], terms=self.terms)
+            self.assertTrue(any('Git index blob unavailable' in error for error in errors), errors)
+
+    def test_replacement_refs_never_reuse_a_different_blob_result(self):
+        oid = self.git('rev-parse', 'HEAD:one.txt', cwd=self.home).strip()
+        clean = self.git('rev-parse', 'HEAD:two.txt', cwd=self.home).strip()
+        (self.home / 'one.txt').write_text('clean\n')
+        with self.guard.term_scan_cache():
+            self.assertTrue(any('index stage' in where for _, where in self.scan()[0]))
+            self.git('replace', oid, clean, cwd=self.home)
+            self.assertEqual(self.scan(), ([], []))
+            self.git('replace', '-d', oid, cwd=self.home)
+            self.assertTrue(any('index stage' in where for _, where in self.scan()[0]))
+
+    def test_files_changed_during_read_are_not_cached(self):
+        file = self.home / 'one.txt'
+        original = self.guard.stream_mentions
+        def changing(*args, **kwargs):
+            result = original(*args, **kwargs)
+            file.write_text('clean\n')
+            return result
+        with self.guard.term_scan_cache():
+            with mock.patch.object(self.guard, 'stream_mentions', side_effect=changing):
+                self.assertEqual(self.guard.file_mentions(file, ['needle']), {'needle'})
+            self.assertEqual(self.guard.file_mentions(file, ['needle']), set())
+
+    def test_repeated_scan_avoids_duplicate_reads_with_timing_budget(self):
+        stream = self.guard.stream_mentions
+        def delayed(*args, **kwargs):
+            time.sleep(.02)  # model read latency; no machine-speed assertion
+            return stream(*args, **kwargs)
+        with mock.patch.object(self.guard, 'stream_mentions', side_effect=delayed):
+            start = time.monotonic()
+            self.scan(); self.scan()
+            uncached = time.monotonic() - start
+            start = time.monotonic()
+            with self.guard.term_scan_cache():
+                self.scan(); self.scan()
+            cached = time.monotonic() - start
+        self.assertLess(cached, uncached * .85)
+
+
 class Hardening(Scenario):
     """What the second-runtime reviews broke, kept broken-proof."""
 

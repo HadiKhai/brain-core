@@ -57,6 +57,11 @@ def decision_warnings(inst, n):
 
 def collect_problems(inst):
     """Returns (problems, warnings, fixable) for the axioms that can be checked mechanically."""
+    with _m_guard.term_scan_cache():
+        return _collect_problems(inst)
+
+
+def _collect_problems(inst):
     problems, warnings, fixable = [], [], []
     p = problems.append
     fallback = inst.local.get("fallback", [])
@@ -354,6 +359,11 @@ def apply_fixes(inst, kinds):
 
 
 def cmd_check(a):
+    with _m_guard.term_scan_cache():
+        return _cmd_check(a)
+
+
+def _cmd_check(a):
     inst = _m_nodes.load()
     from . import semantic as _m_semantic
     print(_m_semantic.semantic_mode(inst))

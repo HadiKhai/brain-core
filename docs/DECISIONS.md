@@ -2830,3 +2830,20 @@ adding a worktree. A minute boundary can otherwise refresh root's generated
 `Facts refreshed` timestamp without committing it, leaving setup dirty before
 the handback under test. This fixture correction retains the pre-handback stamp
 clear and every strict assertion; production hourly coalescing is unchanged.
+
+## Reuse term-scan observations within a command
+
+Mechanical checks share term-scan results across nodes and the two fix passes.
+File results use the absolute path, device, inode, size, nanosecond modification
+and change times, mode, owner, group and link count, plus the complete folded term
+set and governance context. Each lookup opens the file and checks its descriptor;
+only reads whose identity remains stable are retained. Read failures are never
+cached. No file observations survive the command.
+Small files with identical byte hashes share decoding and matching after each
+file's bytes have been read; large files retain the bounded streaming path.
+
+Index blob matches share content-addressed results, with a batch availability
+check in every repository before reuse. Replacement refs disable blob reuse for
+that repository. File inventories, index entries, paths, commit messages, refs,
+governance decisions and scan errors remain current; results keep the original
+labels, ordering and redaction. The cache stores match sets rather than file text.
