@@ -678,6 +678,207 @@ ui_json.ui_json_background(root, '[]')
             with get('/api/loading') as response:
                 self.assertFalse(json.load(response)['filling_in'])
 
+    def test_last_complete_snapshot_opens_immediately_and_swaps_after_background_fill(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        version = self.m.ui_code_version()
+        record = module.ui_json_build(inst, [], version)
+        record['built_at'] = datetime.datetime(2026, 1, 1, 16, 31, tzinfo=datetime.timezone.utc).timestamp()
+        self.m.ReadModel(inst, version).write('json-snapshot', record)
+        release, entered = threading.Event(), threading.Event()
+        spend = mock.Mock(inst=inst, value={'complete': True, 'files': 0, 'read': 0}, revision=0, permissions=None)
+        spend.advance.return_value = False
+        spend.refresh_view.return_value = False
+        def discover():
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('background fill barrier not released')
+        spend.discover.side_effect = discover
+        with self.integration_server(root, lambda _: spend, release.set) as (ready, get, workers, start):
+            self.assertTrue(ready.wait(2))
+            self.assertTrue(entered.wait(1))
+            with get('/api/state') as response:
+                first = json.load(response)
+                first_version = response.headers['X-Brain-UI-Version']
+            self.assertLess(time.monotonic() - start, 5)
+            self.assertEqual(first['source']['kind'], 'cached-full')
+            self.assertEqual(first['source']['built_at'], '2026-01-01T16:31:00+00:00')
+            self.assertFalse(first['brain'].get('filling_in'))
+            # Compare encoded data fields exactly; delivery age/source labels are intentional additions.
+            for key in ('nodes', 'items', 'commits', 'attention', 'inbox', 'spend', 'problems'):
+                self.assertEqual(json.dumps(first[key], sort_keys=True), json.dumps(record['state'][key], sort_keys=True))
+            with get('/api/loading') as response:
+                self.assertTrue(json.load(response)['refreshing'])
+            release.set()
+            deadline = time.monotonic() + 5
+            while True:
+                with get('/api/state') as response:
+                    next_state = json.load(response)
+                    next_version = response.headers['X-Brain-UI-Version']
+                if next_version != first_version:
+                    break
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            self.assertEqual(next_state['source']['kind'], 'live')
+            self.assertFalse(next_state['brain'].get('filling_in'))
+
+    def test_cached_bootstrap_revalidates_visibility_before_delivery(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        module.ui_json_build(inst, [], self.m.ui_code_version())
+        release = threading.Event()
+        spend = mock.Mock(inst=inst, value={}, revision=0, permissions=None)
+        spend.discover.side_effect = lambda: release.wait(5)
+        spend.advance.return_value = False
+        spend.refresh_view.return_value = False
+        with self.integration_server(root, lambda _: spend, release.set) as (ready, get, workers, start):
+            self.assertTrue(ready.wait(2))
+            with get('/api/state') as response:
+                self.assertEqual(json.load(response)['source']['kind'], 'cached-full')
+            (root / 'never-name.txt').write_text('unused-policy-fixture\n')
+            with get('/api/state') as response:
+                state = json.load(response)
+            self.assertTrue(state['brain']['filling_in'])
+            self.assertEqual(state['problems'], None)
+
+    def test_second_json_waiter_joins_owner_without_a_second_rebuild(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        original = module.ui_json_build
+        entered, release, joined = threading.Event(), threading.Event(), threading.Event()
+        original_lock = module.ui_json_fill_lock
+        @contextlib.contextmanager
+        def fill_lock(inst, blocking):
+            with original_lock(inst, blocking) as acquired:
+                if not blocking and not acquired:
+                    joined.set()
+                yield acquired
+        builds, results, errors = [], [], []
+        def build(*args, **kw):
+            builds.append(True); entered.set()
+            if not release.wait(5):
+                raise RuntimeError('fill barrier not released')
+            return original(*args, **kw)
+        def read():
+            try:
+                results.append(module.ui_json_read(self.m.UIInstance(root), [], wait=True))
+            except BaseException as error:
+                errors.append(error)
+        with mock.patch.object(module, 'ui_json_build', side_effect=build), \
+                mock.patch.object(module, 'ui_json_fill_lock', side_effect=fill_lock):
+            first = threading.Thread(target=read); first.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                second = threading.Thread(target=read); second.start()
+                self.assertTrue(joined.wait(2), 'second reader never joined the held fill')
+                release.set()
+            finally:
+                release.set(); first.join(5)
+                if 'second' in locals(): second.join(5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]['nodes'], results[1]['nodes'])
+        self.assertEqual(results[0]['source']['built_at'], results[1]['source']['built_at'])
+
+    def test_cached_snapshot_rejects_unformattable_timestamps(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        record = module.ui_json_build(self.m.UIInstance(root), [], self.m.ui_code_version())
+        for bad in (None, True, -1, float('nan'), 1e100):
+            with self.subTest(timestamp=repr(bad)), mock.patch.object(module, 'ui_json_load', return_value={**record, 'built_at': bad}):
+                self.assertIsNone(module.ui_json_last_complete(self.m.UIInstance(root), self.m.ui_code_version(), []))
+
+    def test_late_source_rediscovery_retains_complete_cache_until_complete_swap(self):
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        module.ui_json_build(inst, [], self.m.ui_code_version())
+        release, draining = threading.Event(), threading.Event()
+        discoveries, advances, signatures = [], [], []
+        spend = mock.Mock(inst=inst, value={'complete': True, 'files': 1, 'read': 1}, revision=0, permissions=None)
+        spend.refresh_view.return_value = False
+        def discover():
+            discoveries.append(True)
+            if len(discoveries) > 1:
+                spend.value = {'complete': False, 'files': 2, 'read': 1}
+        def advance():
+            if spend.value['complete']:
+                return False
+            advances.append(True)
+            if len(advances) == 1:
+                return False
+            draining.set()
+            if not release.wait(5):
+                raise RuntimeError('late source drain barrier not released')
+            spend.value = {'complete': True, 'files': 2, 'read': 2}
+            return True
+        def signature():
+            signatures.append(True)
+            return ('initial',) if len(signatures) == 1 else ('changed',)
+        spend.discover.side_effect = discover
+        spend.advance.side_effect = advance
+        with mock.patch.object(self.m.UIInputs, 'source_signature', side_effect=signature):
+            with self.integration_server(root, lambda _: spend, release.set) as (ready, get, workers, start):
+                self.assertTrue(ready.wait(2))
+                self.assertTrue(draining.wait(3))
+                with get('/api/state') as response:
+                    state = json.load(response)
+                self.assertEqual(state['source']['kind'], 'cached-full')
+                self.assertFalse(state['brain'].get('filling_in'))
+                release.set()
+                deadline = time.monotonic() + 5
+                while True:
+                    with get('/api/state') as response:
+                        state = json.load(response)
+                    if state['source']['kind'] == 'live':
+                        break
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                self.assertTrue(state['spend']['complete'])
+                self.assertEqual(state['spend']['read'], 2)
+
+    def test_cached_visibility_invalidation_never_exposes_old_body_to_another_reader(self):
+        import urllib.request
+        root = self.first_paint_root()
+        inst = self.m.UIInstance(root)
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        module.ui_json_build(inst, [], self.m.ui_code_version())
+        finish, entered, allow_fallback = threading.Event(), threading.Event(), threading.Event()
+        spend = mock.Mock(inst=inst, value={}, revision=0, permissions=None)
+        spend.discover.side_effect = lambda: finish.wait(5)
+        spend.advance.return_value = False
+        spend.refresh_view.return_value = False
+        original = self.m.ui_initial_state
+        def fallback(*args, **kw):
+            entered.set()
+            if not allow_fallback.wait(5):
+                raise RuntimeError('fallback barrier not released')
+            return original(*args, **kw)
+        def cleanup():
+            allow_fallback.set(); finish.set()
+        with self.integration_server(root, lambda _: spend, cleanup) as (ready, get, workers, start):
+            self.assertTrue(ready.wait(2))
+            (root / 'never-name.txt').write_text('unused-policy-fixture\n')
+            results = []
+            def read():
+                with get('/api/state') as response:
+                    results.append(json.load(response))
+            with mock.patch.object(self.m, 'ui_initial_state', side_effect=fallback):
+                first = threading.Thread(target=read); first.start()
+                self.assertTrue(entered.wait(2))
+                second = threading.Thread(target=read); second.start()
+                # No response may escape while fallback construction owns the transaction.
+                self.assertFalse(allow_fallback.wait(.1))
+                self.assertEqual(results, [])
+                allow_fallback.set(); first.join(3); second.join(3)
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(state['brain'].get('filling_in') for state in results))
+
     @contextlib.contextmanager
     def integration_server(self, root, spend, cleanup=lambda: None, every=0.05):
         import http.server
@@ -741,6 +942,9 @@ ui_json.ui_json_background(root, '[]')
         queued = '- 2026-01-01 00:00 +00:00 from worker: question: Which size? <!-- host-question:demo -->\n'
         for with_queue in (False, True):
             with self.subTest(queue=with_queue):
+                # Each case exercises the cache-free fallback; the prior server
+                # now persists its complete replacement during cleanup.
+                (root / '.brain/ui-cache/json-snapshot.json').unlink(missing_ok=True)
                 inbox = root / 'inbox.md'
                 inbox.write_text(pending + '\n' + answered + '\n')
                 data = reminders.lifecycle_empty()

@@ -1269,7 +1269,9 @@ def cmd_ui(a):
             return started
     cond = threading.Condition()
     interval = max(0.05, a.every)
-    box = {'json': b'', 'version': 0, 'clients': 0, 'last_poll': float('-inf'),
+    from . import ui_json
+    seed = ui_json.ui_json_last_complete(inst, version, scan)
+    box = {'json': b'', 'version': 0, 'clients': 0, 'last_poll': float('-inf'), 'cached': False,
            'telemetry': time.monotonic(), 'request': 0, 'checked': 0,
            'partial': True, 'metadata_ready': False, 'built_at': time.time(), 'building': True, 'error': '', 'stopped': False}
 
@@ -1280,10 +1282,10 @@ def cmd_ui(a):
             requested = box['request']
             cond.notify_all()
             # An idle poll must receive the newly checked snapshot, not the previous poll's data.
-            if wait or not box['partial']:
+            if wait or (not box['partial'] and not box['cached']):
                 cond.wait_for(lambda: not box['partial'] and box['checked'] >= requested, timeout=4)
 
-    def publish(st, complete=False):
+    def publish(st, complete=False, privacy=None):
         st = {**st, "review": {"enabled": reviews.enabled}}
         with cond:
             if complete:
@@ -1299,8 +1301,23 @@ def cmd_ui(a):
             if box['metadata_ready']:
                 box['partial'] = not _m_ui_fill.complete(st)
             if complete:
-                box.update(built_at=time.time(), building=False, error='')
+                box.update(built_at=time.time(), building=False, error='', cached=False)
             cond.notify_all()
+        if complete and privacy is not None:
+            ui_json.ui_json_save_complete(UIInstance(inst.root), version, scan, st, privacy)
+
+    def validate_seed():
+        # Keep invalidation and replacement one transaction: another request may
+        # never observe cached=False while the old private body is still served.
+        with cond:
+            if not box['cached']:
+                return
+            current = UIInstance(inst.root)
+            record = ui_json.ui_json_last_complete(current, version, scan)
+            if record is None or record['privacy'] != seed['privacy']:
+                partial = ui_initial_state(current, scan)
+                box.update(cached=False, metadata_ready=False, partial=True)
+                publish(partial)
 
     def refresh(inputs, signature, spend, cache, source_signature, permissions):
         metadata_at = float('-inf')
@@ -1323,6 +1340,7 @@ def cmd_ui(a):
                         with cond:
                             box['building'] = True
                         i = UIInstance(inst.root)
+                        privacy = ui_json.ui_json_privacy_key(i, version)
                         if inputs.topology != inputs.topology_key(i):
                             inputs = UIInputs(i)
                             changed = inputs.signature()
@@ -1343,7 +1361,7 @@ def cmd_ui(a):
                         st = ui_state(i, problems, scan, machine_spend=spend.value, cache=cache,
                                       node_keys=inputs.node_keys(i, changed))
                         signature = changed
-                        publish(st, complete=True)
+                        publish(st, complete=True, privacy=privacy)
                     sources = inputs.source_signature()
                     if sources != source_signature:
                         spend.discover()
@@ -1468,11 +1486,13 @@ def cmd_ui(a):
                     return self.send(409, b'{"error":"Review catalog is unavailable"}', "application/json")
                 return self.send(200, json.dumps(result).encode(), "application/json")
             if url.path == "/api/state":
+                validate_seed()
                 touch()
                 with cond:
                     body, version = box["json"], str(box["version"])
                 return self.send(200, body, "application/json", {"X-Brain-UI-Version": version})
             if url.path == "/api/search":
+                validate_seed()
                 q = urllib.parse.parse_qs(url.query)
                 one = lambda k, d: (q.get(k) or [d])[0]  # noqa: E731
                 try:
@@ -1498,6 +1518,9 @@ def cmd_ui(a):
                             if box["version"] == seen:
                                 cond.wait(timeout=1)
                             v, body = box["version"], box["json"]
+                        validate_seed()
+                        with cond:
+                            v, body = box["version"], box["json"]
                         if select.select([self.connection], [], [], 0)[0] and not self.connection.recv(1, socket.MSG_PEEK):
                             return
                         if v == seen and time.monotonic() - pinged < 15:
@@ -1517,8 +1540,13 @@ def cmd_ui(a):
                         cond.notify_all()
             self.send(404, b"not found", "text/plain")
 
-    st = ui_initial_state(inst, scan)
-    publish(st)
+    if seed is None:
+        st = ui_initial_state(inst, scan)
+        publish(st)
+    else:
+        st = ui_json.ui_json_source(seed['state'], seed, refreshing=True)
+        publish(st)
+        box.update(cached=True, metadata_ready=True, partial=False, built_at=seed['built_at'], building=True)
 
     def initialize():
         # One worker owns initialization and ongoing refresh. A failed attempt sleeps
@@ -1532,9 +1560,17 @@ def cmd_ui(a):
             try:
                 with _m_common.git_read_snapshot():
                     current = UIInstance(inst.root)
+                    privacy = ui_json.ui_json_privacy_key(current, version)
                     spend = UISpend(current)
                     spend.discover()
                     _m_ui_fill.advance_warm(spend)
+                    # Keep the complete previous reading until its replacement is
+                    # complete too; a partial aggregate must not truncate it.
+                    while seed is not None and not _m_ui_fill.complete({'spend': spend.value}):
+                        with cond:
+                            if box['stopped']:
+                                return
+                        spend.advance()
                     inputs = UIInputs(current)
                     signature = inputs.signature()
                     cache = UIStateCache()
@@ -1562,11 +1598,19 @@ def cmd_ui(a):
                         spend.discover()
                         spend.advance()
                         full = {**full, 'spend': spend.value}
+                    while seed is not None and not _m_ui_fill.complete(full):
+                        with cond:
+                            if box['stopped']:
+                                return
+                        spend.advance()
+                        full = {**full, 'spend': spend.value}
                     source_signature, permissions = latest_sources, latest_permissions
                 with cond:
                     if box['stopped']:
                         return
-                    publish(full, complete=True)
+                    if privacy != ui_json.ui_json_privacy_key(UIInstance(inst.root), version):
+                        raise ValueError('UI visibility changed during fill')
+                    publish(full, complete=True, privacy=privacy)
                     box['checked'] = requested
             except (Exception, SystemExit) as error:
                 with cond:

@@ -4,15 +4,19 @@ export type ReadingProgress = { version: number; refreshing?: boolean; failed?: 
 
 export function readingMarker(value: any, progress: ReadingProgress | null, connection: string, now = Date.now()): string | null {
   const partial = !!value?.brain?.filling_in;
+  const cached = value?.source?.kind === 'cached-full';
   const version = value?.__ui_version;
-  if (!partial && version == null) return null; // Older servers and saved snapshots have no delivery metadata.
+  if (!partial && !cached && version == null) return null; // Older servers and saved snapshots have no delivery metadata.
   const confirmed = progress && String(progress.version) === version;
   const failure = progress?.failed ? 'Refresh failed' :
     ['Connection failed', 'Updates interrupted', 'Permission required'].includes(connection) ? connection : null;
-  if (!partial && confirmed && !progress.refreshing && !failure) return null;
-  const at = Date.parse(value?.brain?.now);
+  if (!partial && !cached && confirmed && !progress.refreshing && !failure) return null;
+  const at = Date.parse(cached ? value?.source?.built_at : value?.brain?.now);
   const age = Number.isFinite(at) ? `reading ${Math.max(0, Math.floor((now - at) / 1000))}s old` : 'reading age unknown';
-  return [partial ? 'Filling in…' : !failure ? 'Refreshing…' : null, failure, age].filter(Boolean).join(' · ');
+  const captured = cached && Number.isFinite(at) ? 'As of ' + new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit', minute: '2-digit', timeZone: value?.brain?.tz || undefined,
+  }).format(new Date(at)) : null;
+  return [captured, partial ? 'Filling in…' : !failure ? 'Refreshing…' : null, failure, age].filter(Boolean).join(' · ');
 }
 
 export function watchLive(key: string, state: (value: any) => void, status: (value: string) => void, notify = false) {
@@ -23,7 +27,7 @@ export function watchLive(key: string, state: (value: any) => void, status: (val
   let active = true, disposed = false, generation = 0, filling = false;
   const delay = () => filling ? 1_000 : 60_000;
   const deliver = (value: any, version: string | null) => {
-    filling = !!value?.brain?.filling_in;
+    filling = !!value?.brain?.filling_in || value?.source?.kind === 'cached-full';
     state({ ...value, __ui_version: version });
   };
   const close = () => {

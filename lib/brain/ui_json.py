@@ -4,9 +4,11 @@ import datetime
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
+import secrets
 import sys
 import time
 
@@ -19,6 +21,42 @@ from . import usage as _m_usage
 
 
 UI_JSON_WAIT = 1  # static capability for cross-version rehearsal callers
+
+
+def ui_json_complete(record):
+    from . import ui_fill
+    try:
+        if type(record.get('built_at')) not in (int, float):
+            return False
+        datetime.datetime.fromtimestamp(record['built_at'], datetime.timezone.utc)
+    except (AttributeError, ValueError, OverflowError, OSError):
+        return False
+    state = record.get('state') if isinstance(record, dict) else None
+    return (isinstance(state, dict) and isinstance(state.get('brain'), dict)
+            and isinstance(state.get('nodes'), list) and type(state.get('problems')) is int
+            and not state['brain'].get('filling_in') and ui_fill.complete(state)
+            and isinstance(state.get('loading'), dict) and not state['loading'].get('filling_in')
+            and (state.get('spend') is None or isinstance(state.get('spend'), dict))
+            and type(record.get('built_at')) in (int, float)
+            and math.isfinite(record['built_at']) and record['built_at'] >= 0)
+
+
+def ui_json_last_complete(inst, code, scan):
+    try:
+        record = ui_json_load(inst, code, scan)
+        return record if ui_json_complete(record) else None
+    except (OSError, ValueError, TypeError, OverflowError, SystemExit):
+        return None
+
+
+def ui_json_save_complete(inst, code, scan, state, privacy):
+    """Only a complete observation under its original privacy fence is reusable."""
+    record = {'version': 1, 'privacy': privacy, 'built_at': time.time(), 'state': state,
+              'generation': secrets.token_hex(16),
+              'selection': hashlib.sha256(json.dumps(scan, sort_keys=True).encode()).hexdigest()}
+    if not ui_json_complete(record) or privacy != ui_json_privacy_key(inst, code):
+        return False
+    return _m_ui_readmodel.ReadModel(inst, code).write('json-snapshot', record)
 
 def ui_json_privacy_key(inst, code):
     # A stale observation may be dated; changed visibility or source permission
@@ -122,6 +160,7 @@ def ui_json_build(inst, scan, code, cache=True):
         return None  # do not publish text observed under an obsolete visibility policy
     state['brain'].pop('filling_in', None)
     record = {'version': 1, 'privacy': before, 'built_at': time.time(), 'state': state,
+              'generation': secrets.token_hex(16),
               'selection': hashlib.sha256(json.dumps(scan, sort_keys=True).encode()).hexdigest()}
     if cache:
         model = _m_ui_readmodel.ReadModel(inst, code)
@@ -140,11 +179,25 @@ def ui_json_read(inst, scan, wait=False, cache=True):
         return ui_json_source(record['state'], record, origin='fresh-full')
     if wait:
         stack, cache = contextlib.ExitStack(), True
+        previous = _m_ui_readmodel.ReadModel(inst, code).read('json-snapshot')
+        generation = previous.get('generation') if isinstance(previous, dict) else None
         try:
             try:
-                stack.enter_context(ui_json_fill_lock(inst, blocking=True))
+                acquired = stack.enter_context(ui_json_fill_lock(inst, blocking=False))
             except (OSError, ValueError, SystemExit):
                 cache = False  # refused optional storage never prevents a source read
+            if cache and acquired:
+                latest = ui_json_last_complete(ui.UIInstance(inst.root), code, scan)
+                if latest is not None and latest.get('generation') and latest['generation'] != generation:
+                    return ui_json_source(latest['state'], latest, origin='fresh-full')
+            if cache and not acquired:
+                stack.close()
+                # Join the owner once. Never queue a redundant full rebuild.
+                stack.enter_context(ui_json_fill_lock(inst, blocking=True))
+                joined = ui_json_last_complete(ui.UIInstance(inst.root), code, scan)
+                if joined is None or not joined.get('generation') or joined['generation'] == generation:
+                    _m_common.die('UI fill did not publish a validated complete snapshot; retry --wait')
+                return ui_json_source(joined['state'], joined, origin='fresh-full')
             # Build failures remain failures; only optional lock/storage errors fall back.
             record = ui_json_build(inst, scan, code, cache=cache)
         finally:

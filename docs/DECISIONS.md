@@ -3017,3 +3017,10 @@ Disabling optional dashboard storage now applies to nested usage and discovery
 publication as well as the final snapshot. Nested scopes cannot re-enable
 publication denied by an outer read-only scope. Ordinary accounting storage
 and explicit accounting commands retain their existing behavior.
+
+
+## 2026-10-27: Open the last complete dashboard reading while its replacement builds
+
+An authenticated browser startup may seed its first response from the existing private full JSON snapshot only after the existing code, instance, scan selection, word policy and allowed-source privacy binding validates. Explicitly partial/unavailable-format records fall back to the file-only startup. The displayed capture timestamp and age stay attached to that reading; a background rebuild replaces it only after usage and metadata are complete. Cached deliveries revalidate the stored snapshot and current privacy policy. Browser full rebuilds persist a complete snapshot under their original privacy fence. A changed core version intentionally invalidates the old snapshot, so installation needs one complete fill under the new version before this warm startup path is available.
+
+Concurrent explicit JSON waiters first attempt the fill lock without blocking. A follower joins the existing owner, then consumes its newly published validated complete generation. It never queues another rebuild; failed or unpublished owners fail closed for the follower. The source-bound input-index work is parked separately while this urgent 7.3a change is reviewed.
