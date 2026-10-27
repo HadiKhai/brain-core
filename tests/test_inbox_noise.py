@@ -658,6 +658,179 @@ class InboxNoise(Scenario):
         self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
         self.assertEqual(source.read_text(), question)
 
+    def test_autoarchive_plans_and_reconciles_without_instance_lock(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        instance = self.m._owners['state_signature']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        source.write_text('- 2020-01-01T00:00Z from worker: FYI: available\n')
+        plan, reconcile, publish = notices.archive_plan, reminders.reconcile_requests, notices.publish_archive
+        observed = []
+        def unlocked_plan(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            observed.append('plan')
+            return plan(*args, **kwargs)
+        def unlocked_reconcile(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            observed.append('reconcile')
+            return reconcile(*args, **kwargs)
+        def locked_publish(prepared):
+            self.assertIsNotNone(instance._LOCK['fh'])
+            # The identities being removed must already be durable.
+            self.assertEqual(reminders.lifecycle_read(self.inst), prepared['lifecycle'])
+            publish(prepared)
+        with mock.patch.object(notices, 'archive_plan', side_effect=unlocked_plan), \
+                mock.patch.object(reminders, 'reconcile_requests', side_effect=unlocked_reconcile), \
+                mock.patch.object(notices, 'publish_archive', side_effect=locked_publish):
+            with instance.brain_lock(self.inst):
+                self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
+                self.assertIsNotNone(instance._LOCK['fh'])
+        self.assertIn('plan', observed)
+        self.assertEqual(observed.count('reconcile'), 2)
+        self.assertEqual(source.read_text(), '')
+
+    def test_autoarchive_replans_changed_source_seen_and_lifecycle(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        line = '- 2020-01-01T00:00Z from worker: FYI: available\n'
+        question = '- 2020-01-01T00:00Z from worker: Which export?\n'
+        for resource in ('source', 'seen', 'lifecycle'):
+            with self.subTest(resource=resource):
+                source.write_text(line)
+                plan, calls = notices.archive_plan, []
+                def drift(*args, **kwargs):
+                    self.assertIsNone(self.m._owners['state_signature']._LOCK['fh'])
+                    result = plan(*args, **kwargs)
+                    calls.append(True)
+                    if len(calls) == 1:
+                        if resource == 'source':
+                            self.m.inbox_append(n['dir'], question)
+                        elif resource == 'seen':
+                            (self.root / '.brain/inbox-seen.json').write_text(
+                                json.dumps({'version': 2, 'reporters': {'other': {}}}))
+                        else:
+                            with reminders.lifecycle_store(self.inst) as data:
+                                data['usage']['concurrent'] = {'retained': True}
+                    return result
+                with mock.patch.object(notices, 'archive_plan', side_effect=drift):
+                    with self.m.brain_lock(self.inst):
+                        self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(source.read_text(), question if resource == 'source' else '')
+                if resource == 'lifecycle':
+                    self.assertEqual(reminders.lifecycle_read(self.inst)['usage']['concurrent'], {'retained': True})
+
+    def test_autoarchive_defers_after_three_drifts_and_on_busy_lifecycle(self):
+        import fcntl
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        line = '- 2020-01-01T00:00Z from worker: FYI: available\n'
+        source.write_text(line)
+        plan, calls = notices.archive_plan, []
+        def drift(*args, **kwargs):
+            result = plan(*args, **kwargs)
+            calls.append(True)
+            self.m.inbox_append(n['dir'], '- fixture from worker: Question ' + str(len(calls)) + '?\n')
+            return result
+        with mock.patch.object(notices, 'archive_plan', side_effect=drift):
+            self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
+        self.assertEqual(len(calls), 3)
+        self.assertIn(line, source.read_text())
+        self.assertFalse((self.root / 'inbox-archive.md').exists())
+        with reminders.lifecycle_store(self.inst):
+            pass
+        with (self.root / '.brain/wake/lifecycle.lock').open('a+') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(notices, 'archive_plan', wraps=plan) as planned:
+                self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
+                self.assertEqual(planned.call_count, 3)
+        self.assertIn(line, source.read_text())
+
+    def test_autoarchive_does_not_wait_for_busy_source_append_lock(self):
+        import fcntl
+        notices = self.m._owners['terminal_notice']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        line = '- 2020-01-01T00:00Z from worker: FYI: available\n'
+        source.write_text(line)
+        with source.open('rb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
+        self.assertEqual(source.read_text(), line)
+        self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
+
+    def test_autoarchive_retirement_preserves_intervening_answers_and_new_requests(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        old = '- 2020-01-01T00:00Z from worker: FYI: available'
+        ask = '- 2020-01-01T00:00Z from worker: Which export?'
+        new = '- 2020-01-01T00:00Z from worker: Which new export?'
+        source.write_text(old + '\n' + ask + '\n')
+        publish = notices.publish_archive
+        def interleave(plan):
+            publish(plan)
+            self.m.inbox_append(n['dir'], new + '\n' + old + '\n', nonblocking=True)
+            with reminders.lifecycle_store(self.inst) as data:
+                records = reminders.reconcile_requests(self.inst, n, [ask, new, old], data)
+                key = reminders.inbox_source_id(n, ask)
+                reminders.record_answer(self.inst, n, ask, records[key]['id'], 'Blue export', data)
+                data['usage']['concurrent'] = {'retained': True}
+        with mock.patch.object(notices, 'publish_archive', side_effect=interleave):
+            self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
+        saved = reminders.lifecycle_read(self.inst)
+        self.assertEqual(saved['answers'][-1]['answer'], 'Blue export')
+        self.assertEqual(saved['usage']['concurrent'], {'retained': True})
+        visible = self.m.inbox_lines(n, readonly=True)
+        self.assertIn(new, visible)
+        self.assertIn(old, visible)  # recurrence cannot inherit the expired episode
+        self.assertNotIn(ask, visible)
+
+    def test_autoarchive_waits_for_post_publish_lifecycle_without_instance_lock(self):
+        import fcntl
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        instance = self.m._owners['state_signature']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        old = '- 2020-01-01T00:00Z from worker: FYI: available\n'
+        source.write_text(old)
+        publish, store = notices.publish_archive, reminders.lifecycle_store
+        held, checked = [], []
+        def busy_after_publish(plan):
+            publish(plan)
+            lock = (self.root / '.brain/wake/lifecycle.lock').open('a+')
+            held.append(lock)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.m.inbox_append(n['dir'], old, nonblocking=True)
+        @contextlib.contextmanager
+        def lifecycle(inst, readonly=False, blocking=True):
+            if held:
+                self.assertTrue(blocking)
+                self.assertIsNone(instance._LOCK['fh'])
+                checked.append(True)
+                fcntl.flock(held[0], fcntl.LOCK_UN)
+                held.pop().close()
+            with store(inst, readonly=readonly, blocking=blocking) as data:
+                yield data
+        try:
+            with mock.patch.object(notices, 'publish_archive', side_effect=busy_after_publish), \
+                    mock.patch.object(reminders, 'lifecycle_store', side_effect=lifecycle):
+                with instance.brain_lock(self.inst):
+                    self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
+                    self.assertIsNotNone(instance._LOCK['fh'])
+        finally:
+            for lock in held:
+                lock.close()
+        self.assertEqual(checked, [True])
+        self.assertIn(old.rstrip(), self.m.inbox_lines(n, readonly=True))
+
 
     def test_root_delivery_does_not_archive_fresh_child_machine_completion(self):
         child = self.new('project')

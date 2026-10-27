@@ -57,7 +57,7 @@ def lifecycle_read(inst):
 
 
 @contextlib.contextmanager
-def lifecycle_store(inst, readonly=False):
+def lifecycle_store(inst, readonly=False, blocking=True):
     """Serialize scans with updates; publishing pins the actual private directory."""
     from . import ui_readmodel
     view = ui_readmodel.projection(inst.root)
@@ -76,7 +76,7 @@ def lifecycle_store(inst, readonly=False):
         if (os.fstat(lock.fileno()).st_nlink != 1 or
                 _m_history.history_fd_path(lock.fileno()) != str(path.absolute())):
             raise ValueError('unsafe lifecycle lock')
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         data = lifecycle_read(inst)
         # This is only an in-memory change detector; no pickle is read or kept.
         # Most observations do not change receipts, so avoid encoding their

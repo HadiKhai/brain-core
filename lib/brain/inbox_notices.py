@@ -147,7 +147,7 @@ def publish_archive(plan):
         # Appenders recheck their opened inode after acquiring this lock.
         with common.directory_target(plan['source']) as source:
             with os.fdopen(source.open(), 'rb') as stream:
-                fcntl.flock(stream, fcntl.LOCK_EX)
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 source.check_file(stream.fileno())
                 if source.generation(os.fstat(stream.fileno())) != plan['source_generation']:
                     raise OSError('inbox changed after archive planning; replan before publishing')
@@ -158,9 +158,43 @@ def publish_archive(plan):
 
 
 def autoarchive(inst, nodes):
-    """One short writer batch on an ordinary inbox read; weekly/UI reads stay pure."""
+    """Also release an enclosing inbox-seen writer during archive maintenance."""
+    from . import instance
+    with instance.released(inst):
+        return _autoarchive(inst, nodes)
+
+
+def retire_archived(inst, published):
+    """Finish prepared retirements without holding the instance writer lock."""
+    with _m_reminders.lifecycle_store(inst) as current:
+        for n, plan, final in published:
+            previous = plan['lifecycle']['inbox'].get(n['id'], {})
+            retained = final['inbox'].get(n['id'], {})
+            active = current['inbox'].setdefault(n['id'], {})
+            closed = current.setdefault('inbox_retired', {}).setdefault(n['id'], {})
+            if not isinstance(active, dict) or not isinstance(closed, dict):
+                raise ValueError('invalid inbox lifecycle receipts')
+            old_closed = plan['lifecycle'].get('inbox_retired', {}).get(n['id'], {})
+            for key, episode in final.get('inbox_retired', {}).get(n['id'], {}).items():
+                if key in previous and key not in retained:
+                    if active.get(key, {}).get('id') == previous[key]['id']:
+                        del active[key]
+                        closed[key] = episode
+                elif key not in active and closed.get(key) == old_closed.get(key):
+                    closed[key] = episode
+            if len(closed) > _m_reminders.LIFECYCLE_LIMIT:
+                raise ValueError('retired inbox episode bound reached; retain history for review')
+
+
+def _autoarchive(inst, nodes):
+    """Plan unlocked, then fence only archive inputs in a bounded writer batch."""
     from . import instance, status
-    with instance.brain_lock(inst):
+    inputs = [inst.root / '.brain/inbox-seen.json', inst.root / '.brain/wake/lifecycle.json']
+    inputs += [n['dir'] / name for n in nodes for name in ('inbox.md', 'inbox-archive.md')]
+    for attempt in range(3):
+        # Reuse the c24/c40 stamp fence, without taking a writer lock to start
+        # planning. Transcripts, status facts and unrelated jobs are not inputs.
+        before = instance.state_signature(inst, nodes, extra=inputs)
         if common.outward_links(inst.root):
             return  # Never read or move lines while outward links exist; the inbox read itself still works.
         saved, _ = status.inbox_seen_snapshot(inst)
@@ -169,31 +203,60 @@ def autoarchive(inst, nodes):
         reporters = saved.get('reporters', {}) if saved.get('version') == 2 else {}
         if not isinstance(reporters, dict):
             raise ValueError('invalid inbox reporter state')
-        plans = []
-        # Persist selected episode identities before removing any source line.
-        with _m_reminders.lifecycle_store(inst) as data:
-            for n in nodes:
-                seen = reporters.get(n['id'], {})
-                if not isinstance(seen, dict):
-                    raise ValueError('invalid owning inbox reporter state')
-                plan = archive_plan(inst, n, data, automatic=True, seen=seen)
-                if plan['episodes']:
-                    data.update(plan['lifecycle'])
-                    plans.append((n, plan))
-        paths = []
+        initial = _m_reminders.lifecycle_read(inst)
+        data, plans = copy.deepcopy(initial), []
+        for n in nodes:
+            seen = reporters.get(n['id'], {})
+            if not isinstance(seen, dict):
+                raise ValueError('invalid owning inbox reporter state')
+            plan = archive_plan(inst, n, data, automatic=True, seen=seen)
+            if plan['episodes']:
+                data = plan['lifecycle']
+                final = copy.deepcopy(data)
+                _m_reminders.reconcile_requests(inst, n,
+                    [line for line in plan['inbox_text'].splitlines() if line.startswith('- ')], final)
+                plans.append((n, plan, final))
+        if not plans:
+            return 0
+        published, paths = [], []
         try:
-            for n, plan in plans:
-                publish_archive(plan)
-                paths.extend([plan['source'], plan['archive']])
-                with _m_reminders.lifecycle_store(inst) as data:
-                    _m_reminders.reconcile_requests(inst, n,
-                        [line for line in plan['inbox_text'].splitlines() if line.startswith('- ')], data)
+            with instance.brain_lock(inst):
+                if before != instance.state_signature(inst, nodes, extra=inputs):
+                    continue
+                try:
+                    # Persist episode identities before removing source bytes;
+                    # a busy lifecycle writer defers maintenance, never delivery.
+                    with _m_reminders.lifecycle_store(inst, blocking=False) as current:
+                        if current != initial:
+                            continue
+                        current.clear()
+                        current.update(data)
+                except BlockingIOError:
+                    continue
+                try:
+                    for n, plan, final in plans:
+                        try:
+                            publish_archive(plan)
+                        except BlockingIOError:
+                            break  # hook appender owns the source; keep its bytes
+                        paths.extend([plan['source'], plan['archive']])
+                        published.append((n, plan, final))
+                finally:
+                    if paths:
+                        inst.commit_settings_batch(paths, 'Archive handled inbox notices')
         finally:
-            # A later node's refusal must not strand earlier durable removals
-            # outside Git. Commit only successfully published node pairs.
-            if paths:
-                inst.commit_settings_batch(paths, 'Archive handled inbox notices')
-        return sum(len(plan['episodes']) for _, plan in plans)
+            # released() preserves an enclosing writer's nesting depth. An
+            # inner brain_lock exit therefore need not release its file handle.
+            # Drop that handle before retirement AND before a retry replans.
+            instance.unlock()
+            # Wait for lifecycle ownership only AFTER releasing brain_lock.
+            # Always close successful removals, including partial batch failures,
+            # so ordinary contention cannot let a recurrence inherit an old ID.
+            if published:
+                retire_archived(inst, published)
+        return sum(len(plan['episodes']) for _, plan, _ in published)
+    # Maintenance may be deferred on a busy instance; inbox delivery still runs.
+    return 0
 
 
 def cmd_inbox_seen(a):
