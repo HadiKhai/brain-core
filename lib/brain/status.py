@@ -1158,13 +1158,15 @@ def refreshed_text(inst, n, view=None):
     return text
 
 
-def refresh_status(inst, n, view=None):
+def refresh_status(inst, n, view=None, prepared_text=None):
     from . import status_refresh
-    text = (status_refresh.compute(inst, n, lambda current, node: refreshed_text(current, node, view))
-            if status_refresh.requested(inst) else refreshed_text(inst, n, view))
+    text = prepared_text if prepared_text is not None else (
+        status_refresh.compute(inst, n, lambda current, node: refreshed_text(current, node, view))
+        if status_refresh.requested(inst) else refreshed_text(inst, n, view))
     f = n['dir'] / 'status.md'
-    _m_common.atomic_write(f, text)
-    _m_common.touch(f)
+    with _m_timings.phase('refresh_write'):
+        _m_common.atomic_write(f, text)
+        _m_common.touch(f)
 
 
 class InboxReporters(dict):

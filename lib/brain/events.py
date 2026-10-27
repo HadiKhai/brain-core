@@ -930,13 +930,38 @@ def reconcile(inst, node=None, snapshot=False):
         leases = {ref: stack.enter_context(dead_lease(inst, ref)) for ref in dead}
         marker = stack.enter_context(common.directory_target(inst.root / '.brain/events-repair-needed.json', private=True))
         marker_st = marker.stat()
-        # Keep evidence of the gap before installing a new baseline.
-        for n in inst.nodes():
-            comparison(inst, n)
-        current = resource_list(inst, resources(inst))
+        from . import status_refresh
+        if status_refresh.requested(inst):
+            def reconciliation_inputs():
+                paths = [inst.root / name for name in resources(inst) if not name.startswith('@ready/')]
+                paths.extend(inst.root / '.brain' / name for name in
+                             ('events.jsonl', 'events-leases', 'events-repair-needed.json',
+                              'hook-events.jsonl', 'hook-events-offset'))
+                paths.extend(Path(n['local']['workbench']).expanduser() / 'scratch/ready'
+                             for n in inst.nodes() if n['local'].get('workbench'))
+                return paths
+            def prepare_reconciliation(current_inst, _node):
+                projected = {n['id']: snapshot_view(current_inst, n) for n in current_inst.nodes()}
+                comparisons = [comparison(current_inst, n, current=projected[n['id']], record=False)
+                               for n in current_inst.nodes()]
+                current_resources = resource_list(current_inst, resources(current_inst))
+                views = {n['id']: projected[n['id']] for n in current_inst.nodes() if not n['archived']}
+                return comparisons, current_resources, views
+            # One fence covers the complete baseline and every view until their
+            # shared reconcile event is published. No per-node stale adoption.
+            comparisons, current, views = status_refresh.compute(
+                inst, node or inst.node('root'), prepare_reconciliation,
+                all_nodes=True, extra=reconciliation_inputs)
+            for result in comparisons:
+                append_line(inst.root / '.brain/events-compare.jsonl', screen(inst, result))
+        else:
+            # Keep evidence of the gap before installing a new baseline.
+            for n in inst.nodes():
+                comparison(inst, n)
+            current = resource_list(inst, resources(inst))
+            views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}
         existing = {r['id'] for r in current}
         current += [{**r, 'hash': None} for key, r in state.items() if key not in existing]
-        views = {n['id']: snapshot_view(inst, n) for n in inst.nodes() if not n['archived']}
         for ref in dead or [uuid.uuid4().hex]:
             lease = leases.get(ref)
             if lease:
@@ -1279,15 +1304,34 @@ def maintain(op, changed):
     for n in op.inst.nodes():
         if not n['archived'] and node_ref(n['id']) in journal(op.inst).state['invalid']:
             selected[n['id']] = n
+    prepared = {}
+    if op.command == 'status' and selected:
+        from . import status_refresh
+        for n in selected.values():
+            if materialize:
+                cap_now(op.inst, n)
+        def prepare_views(current, _node):
+            result = {}
+            for nid in selected:
+                target = current.node(nid)
+                view = snapshot_view(current, target, status.facts_meta(target).get('merged_before', []))
+                if source(current, target) == 'events':
+                    view = events_view_without_current(current, target)
+                result[nid] = (view, status.refreshed_text(current, target, view))
+            return result
+        prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
+                                          targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',))
     for n in selected.values():
-        if materialize:
+        if materialize and op.command != 'status':
             cap_now(op.inst, n)
         if op.command == 'status' or (op.command == 'check' and status.facts_meta(n)):
             # A requested refresh already consumed its merge baseline; retain that display.
             known = status.facts_meta(n).get('merged_before', [])
         else:
             known = status.facts_meta(n).get('merged', [])
-        if op.command in ('handback', 'task', 'review', 'preview_receipt'):
+        if op.command == 'status':
+            view = prepared[n['id']][0]
+        elif op.command in ('handback', 'task', 'review', 'preview_receipt'):
             # Status projection can scan worker transcripts. It grants no action
             # authority, and must not hold up writers after terminal publication.
             # A concurrent source change refuses this generated view; the normal
@@ -1311,7 +1355,7 @@ def maintain(op, changed):
             view = events_view_without_current(op.inst, n)
         views[n['id']] = view
         if materialize:
-            status.refresh_status(op.inst, n, view)
+            status.refresh_status(op.inst, n, view, prepared_text=prepared[n['id']][1] if op.command == 'status' else None)
             active_table(op.inst, n, view)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
             force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)

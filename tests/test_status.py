@@ -394,10 +394,10 @@ class AutonomyDue(AutonomyProject):
 
 class AutonomyFacts(AutonomyProject):
     def test_refresh_computes_unlocked_beside_a_real_background_commit(self):
-        root = self.init('alice')
-        (root / 'unrelated.bin').write_bytes(b'before')
-        self.git('add', 'unrelated.bin', cwd=root)
-        self.git('commit', '-qm', 'unrelated source', cwd=root)
+        root, home, wt = self.project()
+        (home / 'unrelated.bin').write_bytes(b'before')
+        self.git('add', 'unrelated.bin', cwd=home)
+        self.git('commit', '-qm', 'unrelated source', cwd=home)
         marker, release = self.tmp / 'refresh-compute', self.tmp / 'refresh-release'
         script = '''import sys, time
 from pathlib import Path
@@ -415,7 +415,7 @@ def slow(*args, **kwargs):
         time.sleep(.01)
     return original(*args, **kwargs)
 status.status_facts = slow
-sys.argv = ['brain', 'status', 'root', '--refresh']
+sys.argv = ['brain', 'status', 'app', '--refresh']
 cli.main()
 '''
         env = {**self.env, 'BRAIN_ROOT': str(root)}
@@ -432,9 +432,9 @@ cli.main()
 sys.path.insert(0, sys.argv[1])
 from brain import instance
 with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2]))):
-    (__import__('pathlib').Path(sys.argv[2]) / 'unrelated.bin').write_bytes(b'after')
-    __import__('subprocess').run(['git', 'commit', '-qam', 'background commit'], cwd=sys.argv[2], check=True)
-''', str(CORE / 'lib'), str(root)], env=env, capture_output=True, text=True, timeout=3)
+    (__import__('pathlib').Path(sys.argv[3]) / 'unrelated.bin').write_bytes(b'after')
+    __import__('subprocess').run(['git', 'commit', '-qam', 'background commit'], cwd=sys.argv[3], check=True)
+''', str(CORE / 'lib'), str(root), str(home)], env=env, capture_output=True, text=True, timeout=3)
             self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
             self.assertIsNone(reader.poll())
         finally:
@@ -460,6 +460,74 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
             status_refresh.compute(inst, inst.node('root'), changed)
         self.assertEqual(path.read_text(), original + '\nConcurrent coordinator judgement.\n')
+
+    def test_refresh_refuses_a_changed_job_ref(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_git_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        node = inst.node('app')
+        original = (node['dir'] / 'status.md').read_bytes()
+        def changed(current, target):
+            text = m.refreshed_text(current, target)
+            (wt / 'concurrent.txt').write_text('relevant branch change\n')
+            self.git('add', 'concurrent.txt', cwd=wt)
+            self.git('commit', '-qm', 'relevant branch change', cwd=wt)
+            return text
+        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+            refresh.compute(inst, node, changed)
+        self.assertEqual((node['dir'] / 'status.md').read_bytes(), original)
+
+    def test_refresh_reconciliation_fences_earlier_nodes_until_publication(self):
+        root = self.init('alice')
+        self.b(root, 'new', 'a', '--title', 'A')
+        self.b(root, 'new', 'b', '--title', 'B')
+        loader = core_loader.SourceFileLoader('refresh_batch_fence', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        events = __import__('importlib').import_module(loader.package_name + '.events')
+        inst = m.Instance(root)
+        path = root / 'nodes/a/status.md'
+        path.write_text(path.read_text() + '\nDirty baseline.\n')
+        original = events.snapshot_view
+        changed = []
+        def interleave(current, node, *args, **kwargs):
+            if node['id'] == 'b' and not changed:
+                path.write_text(path.read_text() + '\nConcurrent first-node judgement.\n')
+                changed.append(True)
+            return original(current, node, *args, **kwargs)
+        journal = root / '.brain/events.jsonl'
+        with m.brain_lock(inst), events.Command(root, command='status'):
+            before = journal.read_bytes()
+            with mock.patch.object(events, 'snapshot_view', side_effect=interleave):
+                with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                    events.reconcile(inst, node=inst.node('root'), snapshot=True)
+            self.assertEqual(journal.read_bytes(), before, 'stale reconciliation was published')
+        self.assertTrue(changed)
+        self.assertIn('Concurrent first-node judgement.', path.read_text())
+
+    def test_refresh_write_lock_excludes_slow_projection(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_lock_measurement', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        timings = __import__('importlib').import_module(loader.package_name + '.timings')
+        inst = m.Instance(root)
+        phases = {}
+        token = timings._CURRENT.set(phases)
+        def slow(current, node):
+            self.assertIsNone(refresh.instance._LOCK['fh'])
+            time.sleep(.15)
+            return m.refreshed_text(current, node)
+        try:
+            with m.brain_lock(inst):
+                text = refresh.compute(inst, inst.node('root'), slow)
+                self.assertIsNotNone(refresh.instance._LOCK['fh'])
+                m.atomic_write(root / 'status.md', text)
+            self.assertGreaterEqual(phases['refresh_compute'], .15)
+            self.assertLess(phases['lock_hold'], 1)
+        finally:
+            timings._CURRENT.reset(token)
 
 
     def test_refresh_preserves_judgement_bytes_and_separates_timestamps(self):

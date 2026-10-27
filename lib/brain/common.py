@@ -640,6 +640,9 @@ def git(*args, cwd=None, check=False, env=None):
                  or query == ('remote',)
                  or (query[0] == 'symbolic-ref' and len([x for x in query[1:] if not x.startswith('-')]) == 1
                      and all(not x.startswith('-') or x in ('--short', '--quiet', '-q') for x in query[1:]))))
+    observer = _GIT_OBSERVER.get()
+    if observer is not None and read_only:
+        observer(args, cwd, env, None)
     cacheable = (reads is not None and read_only and env is None
                  and not any(str(a).startswith('--output') for a in args))
     result = reads.get(key) if cacheable else None
@@ -667,7 +670,6 @@ def git(*args, cwd=None, check=False, env=None):
             reads[key] = result
     if check:
         result.check_returncode()
-    observer = _GIT_OBSERVER.get()
     if observer is not None and read_only:
         observer(args, cwd, env, result)
     return result
