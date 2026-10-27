@@ -481,21 +481,72 @@ def stability_snapshot(root):
     return out
 
 
+PRIVATE_COPY_DIRS = {'.brain', 'job-handbacks', 'job-attempts', 'job-settlements',
+                     'job-trains', 'spec-runs'}
+PRIVATE_COPY_DATA = {'.json', '.jsonl', '.log'}
+
+
+def private_copy_file(path, mode=None):
+    namespaces = PRIVATE_COPY_DIRS.intersection(path.parts)
+    return ('.brain' in namespaces or bool(namespaces and path.suffix in PRIVATE_COPY_DATA) or
+            stat.S_IMODE(path.stat().st_mode if mode is None else mode) & 0o077 == 0)
+
+
+def copy_regular_file(source, dest):
+    # Never pass private content through copy2's ordinary-open-before-copystat
+    # fallback, or a clone that preserves a legacy permissive source mode.
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as incoming:
+        saved = os.fstat(incoming.fileno())
+        if not stat.S_ISREG(saved.st_mode):
+            raise OSError('private copy source is not a regular file')
+        mode = 0o600 if private_copy_file(Path(source), saved.st_mode) else stat.S_IMODE(saved.st_mode)
+        if mode == 0o600 and saved.st_mode & stat.S_IXUSR and Path(source).suffix not in PRIVATE_COPY_DATA:
+            mode |= stat.S_IXUSR  # retain execution of private helper programs
+        with _m_common.directory_target(dest, private=True) as target:
+            with os.fdopen(target.open(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 'wb') as outgoing:
+                shutil.copyfileobj(incoming, outgoing)
+                outgoing.flush()
+                os.fsync(outgoing.fileno())
+                os.fchmod(outgoing.fileno(), mode)
+                os.utime(outgoing.fileno(), ns=(saved.st_atime_ns, saved.st_mtime_ns))
+                os.fsync(outgoing.fileno())
+    return dest
+
+
 def copy_tree(source, dest):
+    source, dest = Path(source), Path(dest)
     if dest.exists() or dest.is_symlink():
         raise FileExistsError(str(dest))
-    if sys.platform == 'darwin':
-        # Unsupported cloning can leave a partial tree. Only clean up the tree
-        # inside this operation's own temporary directory, never its destination.
-        with _m_rehearse_external.OwnedCopies(prefix='.rehearse-copy-', parent=dest.parent) as copies:
-            cloned = copies.bulk / 'tree'
-            r = _m_rehearse_external.owned_run(['/bin/cp', '-c', '-p', '-R', '-P', str(source), str(cloned)],
-                                             capture_output=True)
-            if not r.returncode:
-                cloned.rename(dest)
-    if not dest.exists():
-        # Independent inodes, including for source hard links; never hardlink.
-        shutil.copytree(source, dest, symlinks=True)
+    def contains_private(root):
+        return any(not p.is_symlink() and p.is_file() and private_copy_file(p)
+                   for p in root.rglob('*'))
+    def copy_directory(src, dst):
+        if contains_private(src):
+            dst.mkdir()
+            for child in src.iterdir():
+                output = dst / child.name
+                if child.is_symlink():
+                    output.symlink_to(os.readlink(child), target_is_directory=child.is_dir())
+                elif child.is_dir():
+                    copy_directory(child, output)
+                else:
+                    copy_regular_file(child, output)
+            shutil.copystat(src, dst)
+            return
+        if sys.platform == 'darwin':
+            # Keep copy receipts outside the copied tree, including when only
+            # an ordinary subtree can use the native clone fast path.
+            with _m_rehearse_external.OwnedCopies(prefix='.rehearse-copy-', parent=dest.parent) as copies:
+                cloned = copies.bulk / 'tree'
+                r = _m_rehearse_external.owned_run(['/bin/cp', '-c', '-p', '-R', '-P', str(src), str(cloned)],
+                                                 capture_output=True)
+                if not r.returncode:
+                    cloned.rename(dst)
+        if not dst.exists():
+            # Independent inodes, including for source hard links; never hardlink.
+            shutil.copytree(src, dst, symlinks=True, copy_function=copy_regular_file)
+    copy_directory(source, dest)
     relocate_links(source, dest)
     capture_gitfiles(source, dest)
 
@@ -1300,8 +1351,8 @@ def _run_command(core, lane, args, kind, roots, terms, cache, raw_output, on_lef
     unrelated = lane / 'unrelated'
     unrelated.mkdir(exist_ok=True)
     if kind == 'hook':
-        (home / 'brains.json').write_text(json.dumps({
-            'brains': {'rehearsal': {'root': str(brain)}}, 'default': 'rehearsal'}))
+        _m_common.atomic_write(home / 'brains.json', json.dumps({
+            'brains': {'rehearsal': {'root': str(brain)}}, 'default': 'rehearsal'}), private=True)
     bootstrap = lane / 'bootstrap'
     bootstrap.mkdir(exist_ok=True)
     clock_file = lane / 'rehearse-clock'
@@ -1382,7 +1433,7 @@ except BaseException:
     startup_failed.unlink(missing_ok=True)
     # OS sandboxing is the enforcement boundary. The audit hook additionally
     # observes Python attempts even when candidate code catches a denied write.
-    (bootstrap / 'rehearsal_audit.py').write_text('''import json, os, pathlib, sys
+    (bootstrap / 'rehearsal_audit.py').write_text('''import json, os, pathlib, stat, sys
 boundary = pathlib.Path(os.environ['BRAIN_REHEARSAL_BOUNDARY']).resolve()
 marker = pathlib.Path(os.environ['BRAIN_REHEARSAL_MARKER'])
 busy = False
@@ -1421,7 +1472,13 @@ def audit(event, args):
                     recorded_open = None
                     del caller
                     continue
-                with marker.open('a') as stream:
+                fd = os.open(marker, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, 'a') as stream:
+                    held, current = os.fstat(fd), marker.lstat()
+                    if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
+                            or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)):
+                        raise OSError('audit marker changed')
+                    os.fchmod(fd, 0o600)
                     stream.write(json.dumps(dict(event=event, path=str(p))) + '\\n')
                 recorded_open = ((str(p), args[2], id(caller))
                                  if event == 'open' and isinstance(args[1], str)

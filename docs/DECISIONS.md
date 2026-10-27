@@ -2755,3 +2755,7 @@ Inbox acknowledgement publication errors retain the already-flushed delivery
 and warning, then propagate the original error with a nonzero exit. They never
 report successful persistence. A stale-generation no-op may still repeat later
 without overwriting a newer acknowledgement or resolution.
+
+## Private rehearsal copy and alternate writer permissions
+
+Sampler/watcher lock writers and generated rehearsal diagnostics enforce 0600 on held inodes; rehearsal copying separates private state and private-mode sources from native cloning, writes copies through 0600 descriptors, and preserves ordinary shared modes after content fsync.
