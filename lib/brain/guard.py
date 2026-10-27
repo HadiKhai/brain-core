@@ -320,6 +320,12 @@ def stream_mentions(fh, needles, size=None, chunk=1 << 20, principals=(), raw=No
         tail = text[-keep:] if keep else ""
 
 
+def term_open_file(path, flags):
+    # Inspect the opened descriptor, without blocking if a regular path was
+    # replaced by a FIFO. No bytes are read from nonregular descriptors.
+    return os.open(path, flags | os.O_NONBLOCK)
+
+
 def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lessons=False, policy=None,
                   missing_ok=False):
     """Which of `needles` (case-folded) appear in a regular file, read whole in chunks that overlap by the longest
@@ -327,10 +333,10 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
     a read forever). A regular file that can't be read: nothing, and the reason goes to `errors`."""
     found = set()
     try:
-        if not stat.S_ISREG(os.stat(fp).st_mode):
-            return found
-        with open(fp, "rb", buffering=0) as fh:
+        with open(fp, 'rb', buffering=0, opener=term_open_file) as fh:
             before = os.fstat(fh.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                return found
             identity = term_file_identity(before)
             if policy is not None and policy.file_clean(fp, before):
                 return found  # opening/fstat still verifies current read access
@@ -364,6 +370,11 @@ def file_mentions(fp, needles, errors=None, chunk=1 << 20, principals=(), lesson
     except OSError as e:
         if isinstance(e, FileNotFoundError) and missing_ok and not os.path.lexists(fp):
             return found  # valid tracked deletion; its index body remains guarded
+        try:
+            if not stat.S_ISREG(os.stat(fp).st_mode):
+                return found  # directories/devices may refuse open; still not scan inputs
+        except OSError:
+            pass
         if errors is not None:
             errors.append((fp, e.strerror or str(e)))
     return found
@@ -448,8 +459,10 @@ def term_git_binding(root):
     return directory, tuple(tokens)
 
 
-def term_inventory(root, in_node):
+def term_inventory(root, in_node, require_marker=False):
     try:
+        if require_marker and not os.path.lexists(root / '.git'):
+            return None, [], 'Git directory binding unavailable', None
         before = term_git_binding(root)
         files, entries, error = home_files(root, in_node, with_stage=True)
         if before != term_git_binding(root):
@@ -506,10 +519,12 @@ def scan_terms(n, paths=(), terms=None):
     # Every worktree still gets a fresh tagged inventory. Bound read concurrency
     # instead of serially paying process/I/O latency for hundreds of worktrees.
     initial = {root: root.resolve() == n['dir'].resolve() for root in pending
-               if (root / '.git').exists() or root.resolve() == n['dir'].resolve()}
+               if os.path.lexists(root / '.git') or root.resolve() == n['dir'].resolve()}
+    expected_repos = set(initial)
     if len(initial) > 1:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {root: pool.submit(term_inventory, root, in_node) for root, in_node in initial.items()}
+            futures = {root: pool.submit(term_inventory, root, in_node, not in_node)
+                       for root, in_node in initial.items()}
             inventories = {root: future.result() for root, future in futures.items()}
             futures = {root: pool.submit(contextvars.copy_context().run, term_file_observations,
                                          n, root, files, entries, needles, principals, policies)
@@ -524,10 +539,10 @@ def scan_terms(n, paths=(), terms=None):
             continue
         visited.add(root.resolve())
         in_node = root.resolve() == n["dir"].resolve()
-        own_repo = (root / ".git").exists() and not in_node
+        own_repo = (root in expected_repos or os.path.lexists(root / '.git')) and not in_node
         if own_repo or in_node:
             files, entries, err, binding = (inventories.pop(root) if root in inventories
-                                            else term_inventory(root, in_node))
+                                            else term_inventory(root, in_node, require_marker=own_repo))
             if err:
                 errors.append(f"listing {redact(_m_common.tilde(root), terms)}: {redact(err, terms)}")
                 continue
@@ -554,6 +569,7 @@ def scan_terms(n, paths=(), terms=None):
                         errors.append(f"submodule unavailable: {redact(_m_common.tilde(sub), terms)}")
                     else:
                         pending.append(sub)
+                        expected_repos.add(sub)
                     continue
                 kind, seen = observed[f]
                 kinds[f] = kind
@@ -825,3 +841,10 @@ def cmd_seal(a):
 
 
 # ---------- move, split, merge ----------
+
+# An already-running old command must not publish under the identity of newer
+# source files installed while it runs. Capture its actual compiled semantics.
+_TERM_IMPLEMENTATION = _m_term_cache.digest([
+    _m_term_cache.loaded_code(globals()), _m_term_cache.loaded_code(vars(_m_common)),
+    _m_common.FRONTMATTER_RE.pattern, _m_common.FRONTMATTER_RE.flags,
+    NEVER_FILE, sorted(NOTE_FILES)])

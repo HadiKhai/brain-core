@@ -206,6 +206,15 @@ class ScanTermsCache(TermsFixture):
             cached = time.monotonic() - start
         self.assertLess(cached, uncached * .85)
 
+    def test_nonregular_descriptors_are_never_read_or_blocking(self):
+        fifo = self.tmp / 'fifo'
+        os.mkfifo(fifo)
+        for path in (fifo, self.tmp):
+            errors = []
+            with mock.patch.object(self.guard, 'stream_mentions', side_effect=AssertionError('nonregular read')):
+                self.assertEqual(self.guard.file_mentions(path, ['needle'], errors=errors), set())
+            self.assertEqual(errors, [])
+
 
 class PersistentTermsCache(TermsFixture):
     @property
@@ -517,6 +526,57 @@ print(json.dumps(guard.scan_terms(node, terms=[('Needle', 'term 1'), ('CAFÉ', '
             self.assertNotIn('needle', text.casefold())
             self.assertNotIn('/absolute/', text)
             self.assertTrue(self.guard._m_term_cache.valid_cache(json.loads(text)))
+
+    def test_prefetched_repository_cannot_fall_back_to_folder_after_git_disappears(self):
+        other = self.repo(self.tmp / 'other', {'file.txt': 'clean\n'})
+        (self.home / 'one.txt').write_text('clean\n')  # index alone holds the forbidden word
+        self.node['local']['worktrees'] = {'second': {'path': str(other)}}
+        self.assertTrue(any(where.startswith('index stage') for _, where in self.scan()[0]))
+        for hook in ('home_files', 'term_file_observations'):
+            for warm in (False, True):
+                for dangling in (False, True):
+                    with self.subTest(hook=hook, warm=warm, dangling=dangling):
+                        self.cache_file.unlink(missing_ok=True)
+                        if warm:
+                            self.prime()
+                        original = getattr(self.guard, hook)
+                        marker = self.home / '.git'
+                        saved = self.tmp / 'saved-git'
+                        def disappear(*args, **kwargs):
+                            result = original(*args, **kwargs)
+                            root = args[0 if hook == 'home_files' else 1]
+                            if root == self.home and not saved.exists():
+                                marker.rename(saved)
+                                if dangling:
+                                    marker.symlink_to(self.tmp / 'missing-git-target')
+                            return result
+                        try:
+                            with mock.patch.object(self.guard, hook, side_effect=disappear):
+                                hits, errors = self.scan()
+                            self.assertTrue(errors, (hits, errors))
+                        finally:
+                            if marker.is_symlink():
+                                marker.unlink()
+                            if saved.exists():
+                                saved.rename(marker)
+                        self.assertTrue(any(where.startswith('index stage') for _, where in self.scan()[0]))
+
+    def test_old_loaded_scanner_cannot_publish_under_replaced_source_version(self):
+        self.clean_fixture()
+        core = self.tmp / 'installed-core'
+        shutil.copytree(CORE / 'lib', core / 'lib')
+        (core / 'bin').mkdir()
+        shutil.copy2(CORE / 'bin/brain', core / 'bin/brain')
+        old = core_loader.SourceFileLoader('old_scanner', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+        source = core / 'lib/brain/guard.py'
+        text = source.read_text()
+        self.assertIn('found |= {x for x in needles if x in text}', text)
+        source.write_text(text.replace('found |= {x for x in needles if x in text}', 'found |= set(needles)', 1))
+        with old.term_scan_cache(persist=True):
+            self.assertEqual(old.scan_terms(self.node, terms=self.terms), ([], []))
+        new = core_loader.SourceFileLoader('new_scanner', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+        self.assertNotEqual(old._m_term_cache.scanner_version(), new._m_term_cache.scanner_version())
+        self.assertTrue(new.scan_terms(self.node, terms=self.terms)[0])
 
 
 class Hardening(Scenario):

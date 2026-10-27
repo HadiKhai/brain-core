@@ -58,6 +58,44 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def loaded_code(namespace):
+    """Fingerprint compiled implementation, independent of later source replacement."""
+    import types
+    rows = []
+    def constant(value):
+        if isinstance(value, types.CodeType):
+            return ['code', value.co_code.hex(), [constant(x) for x in value.co_consts],
+                    value.co_names, value.co_varnames, value.co_freevars, value.co_cellvars,
+                    value.co_flags, value.co_argcount, value.co_posonlyargcount, value.co_kwonlyargcount]
+        if isinstance(value, bytes):
+            return ['bytes', value.hex()]
+        if isinstance(value, tuple):
+            return ['tuple', [constant(x) for x in value]]
+        if isinstance(value, frozenset):
+            return ['frozenset', sorted((constant(x) for x in value), key=lambda x: json.dumps(x, sort_keys=True))]
+        if isinstance(value, complex):
+            return ['complex', value.real, value.imag]
+        if value is Ellipsis:
+            return ['ellipsis']
+        return value
+    def add(name, value):
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if isinstance(value, types.FunctionType):
+            while hasattr(value, '__wrapped__'):
+                value = value.__wrapped__
+            rows.append([name, digest(constant(value.__code__))])
+    for name, value in sorted(namespace.items()):
+        if getattr(value, '__module__', None) != namespace['__name__']:
+            continue
+        if isinstance(value, type):
+            for method, function in sorted(vars(value).items()):
+                add(name + '.' + method, function)
+        else:
+            add(name, value)
+    return digest(rows)
+
+
 def identity(value):
     return [value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
             value.st_ctime_ns, value.st_mode, value.st_uid, value.st_gid, value.st_nlink]
@@ -73,7 +111,9 @@ def accessible(path, mode):
 
 def scanner_version():
     # Implementation changes invalidate even when the explicit format stays put.
-    return digest([SCANNER_VERSION, unicodedata.unidata_version, list(sys.version_info[:3]),
+    from . import guard as _m_guard
+    return digest([SCANNER_VERSION, MAX_BYTES, _TERM_CACHE_IMPLEMENTATION, _m_guard._TERM_IMPLEMENTATION,
+                   unicodedata.unidata_version, list(sys.version_info[:3]),
                    hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                    hashlib.sha256(Path(__file__).with_name('guard.py').read_bytes()).hexdigest(),
                    hashlib.sha256(Path(__file__).with_name('common.py').read_bytes()).hexdigest(),
@@ -290,3 +330,6 @@ class ObjectStorage:
     def unchanged(self):
         return (self.stamp is not None and self.fingerprint() == self.stamp
                 and all(self.source_stamp(oid) == old for oid, old in self.blobs.items()))
+
+
+_TERM_CACHE_IMPLEMENTATION = loaded_code(globals())

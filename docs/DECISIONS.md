@@ -2874,3 +2874,9 @@ Fresh tagged Git inventories distinguish untracked names from stage records,
 including names containing tabs/newlines. At most four inventory/file readers
 overlap in copied command contexts; labels, ordering and publication remain in
 the caller. Large bodies retain bounded streaming while their Git IDs are hashed.
+An inventoried repository retains its classification if its Git marker disappears;
+saved inventory errors and later binding failures cannot become a plain folder scan.
+Regular-file checks use a freshly opened nonblocking descriptor, preventing a FIFO
+replacement from blocking and avoiding a redundant pathname stat on each warm file.
+Scanner identity includes its compiled implementation as well as source hashes,
+so a command loaded before an upgrade cannot publish as the newly installed code.
