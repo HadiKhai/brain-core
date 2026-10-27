@@ -1,6 +1,8 @@
 """Ui mechanics for Brain."""
 import argparse
 import contextlib
+import contextvars
+from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
@@ -155,6 +157,30 @@ def cached_worktree(inst, home, branch, w, n, cache, live=None):
     if old is None or old[0] != key:
         cache.worktrees[job] = (key, {**ui_worktree(inst, home, branch, w, n), 'live': True})
     return cache.worktrees[job][1]
+
+
+def ui_worktree_rows(inst, n, cache, hide):
+    """Bound independent repository reads while preserving branch order and scopes."""
+    home, live = n['home_path'], ui_live_worktrees(n)
+    branches = sorted(n['local'].get('worktrees', {}))
+    def read(branch):
+        work = n['local']['worktrees'][branch]
+        row = {k: hide(v) for k, v in cached_worktree(inst, home, branch, work, n, cache,
+                                                    live=branch in live).items()}
+        if row.get('live', True):
+            state = _m_verify.ready_state(inst, n, branch, display=True)
+            row['ready'] = {'ready': state['ready'], 'reasons': [hide(x) for x in state['reasons']],
+                            'packet': {k: hide(v) for k, v in state['packet'].items()
+                                       if k not in ('input_files', 'input_files_ref')}
+                            if state['packet'] else None}
+        return row
+    if len(live) < 2:
+        return [read(branch) for branch in branches]
+    # Resolve shared refs once before readers share the command's Git snapshot.
+    _m_common.branch_refs(home)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        pending = [pool.submit(contextvars.copy_context().run, read, branch) for branch in branches]
+        return [future.result() for future in pending]
 
 
 def ui_commits(cwd, since, all_refs=False):
@@ -346,16 +372,7 @@ def ui_node(inst, n, since, cache=None, partial=False):
     hide = lambda t: _m_guard.redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
     if not partial and n["external"] and n["home_path"] and n["home_path"].exists():
         home = n["home_path"]
-        live = ui_live_worktrees(n)
-        wts = [{k: hide(v) for k, v in cached_worktree(inst, home, b, w, n, cache, live=b in live).items()}
-               for b, w in sorted(loc.get("worktrees", {}).items())]
-        for wt, branch in zip(wts, sorted(loc.get("worktrees", {}))):
-            if not wt.get('live', True):
-                continue
-            state = _m_verify.ready_state(inst, n, branch, display=True)
-            wt["ready"] = {"ready": state["ready"], "reasons": [hide(x) for x in state["reasons"]],
-                           "packet": {k: hide(v) for k, v in state["packet"].items() if k not in ("input_files", "input_files_ref")}
-                           if state["packet"] else None}
+        wts = ui_worktree_rows(inst, n, cache, hide)
         for c in ui_commits(home, since, all_refs=True):  # what comes from the home is shown as guard shows it
             home_commits.append({**c, "subject": hide(c["subject"]), "node": n["id"], "where": "home"})
     work = [{k: hide(v) for k, v in j.items()} for j in work]

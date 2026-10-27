@@ -2989,3 +2989,11 @@ captured lifecycle ledger before making a defensive deep copy. Unrelated
 receipts are not copied for each job. The selected nested data remains detached,
 mutations cannot reach the captured ledger, and a new observation reads current
 source state. Mutating projections retain whole-ledger defensive copies.
+
+## Bound independent dashboard worktree reads
+
+Full worktree projection runs at most four independent readers concurrently.
+Each reader inherits the command's observation, Git and readiness contexts;
+shared refs are resolved before launch. Results retain sorted branch order,
+closed work remains metadata-only, and any source failure rejects the complete
+result instead of publishing a partial list.

@@ -191,6 +191,48 @@ class LiveView(Scenario):
 
 
 class ExpandedUI(Scenario):
+    def test_parallel_worktree_reads_keep_order_scopes_and_a_four_reader_bound(self):
+        root = self.init('demo')
+        inst = self.m.UIInstance(root)
+        module = self.m._owners['ui_worktree_rows']
+        model = self.m._owners['observe']
+        works = {f'job/{i}': {'path': str(root / str(i))} for i in reversed(range(8))}
+        node = {'id': 'root', 'home_path': root, 'local': {'worktrees': works}}
+        barrier, lock = threading.Barrier(4), threading.Lock()
+        active, peak = [0], [0]
+        def read(_inst, _home, branch, *args, **kwargs):
+            self.assertIs(model.projection(root), view)
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            try:
+                barrier.wait(timeout=2)
+                return {'branch': branch, 'live': True}
+            finally:
+                with lock:
+                    active[0] -= 1
+        with model.observe(inst) as view, \
+                mock.patch.object(module, 'ui_live_worktrees', return_value=works), \
+                mock.patch.object(module, 'cached_worktree', side_effect=read), \
+                mock.patch.object(module._m_common, 'branch_refs', return_value={}), \
+                mock.patch.object(module._m_verify, 'ready_state', return_value={
+                    'ready': False, 'reasons': ['source reason'], 'packet': None}):
+            rows = module.ui_worktree_rows(inst, node, None, lambda value: value)
+        self.assertEqual([row['branch'] for row in rows], sorted(works))
+        self.assertEqual(peak[0], 4)
+        self.assertTrue(all(row['ready']['reasons'] == ['source reason'] for row in rows))
+
+    def test_parallel_worktree_source_error_refuses_a_partial_result(self):
+        root = self.init('demo')
+        module = self.m._owners['ui_worktree_rows']
+        works = {f'job/{i}': {'path': str(root / str(i))} for i in range(2)}
+        node = {'id': 'root', 'home_path': root, 'local': {'worktrees': works}}
+        with mock.patch.object(module, 'ui_live_worktrees', return_value=works), \
+                mock.patch.object(module._m_common, 'branch_refs', return_value={}), \
+                mock.patch.object(module, 'cached_worktree', side_effect=OSError('source read')):
+            with self.assertRaisesRegex(OSError, 'source read'):
+                module.ui_worktree_rows(self.m.UIInstance(root), node, None, lambda value: value)
+
     def setUp(self):
         super().setUp()
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
