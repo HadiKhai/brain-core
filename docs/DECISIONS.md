@@ -2835,7 +2835,8 @@ Read commands share branch tips, commit dates and linked-worktree HEADs from one
 ref/worktree enumeration per repository. Ancestry queries use one ref-containment
 enumeration per ancestor. Commit counts and clean-title checks share one commit
 graph per integration base; unfinished-title findings retain the original Git
-log order. These derived reads expire at the end of the command, without a time
+log order. Configured signature display retains the native date-log read. These
+derived reads expire at the end of the command, without a time
 limit or persistent authority. Failed or malformed batches fall back to the
 individual Git reads, including local job-state observations. Read-only `ready`
 uses this scope; readiness recording and other write paths keep their existing

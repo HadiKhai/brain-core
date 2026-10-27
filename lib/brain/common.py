@@ -604,7 +604,13 @@ def git(*args, cwd=None, check=False, env=None):
             branch_refs(cwd)
             stamp = reads.get((repository, 'commit-time', args[3]))
             if stamp is not None:
-                result = subprocess.CompletedProcess(['git', *args], 0, stamp + '\n', '')
+                signature_key = (key[0], 'log-show-signature')
+                if signature_key not in reads:
+                    config = git('config', '--bool', '--get', 'log.showSignature', cwd=cwd)
+                    reads[signature_key] = (config.returncode == 1 or
+                                            config.returncode == 0 and config.stdout.strip() == 'false')
+                if reads[signature_key]:
+                    result = subprocess.CompletedProcess(['git', *args], 0, stamp + '\n', '')
         elif len(args) == 3 and args[:2] == ('rev-list', '--count') and args[2].count('..') == 1:
             base, head = args[2].split('..')
             summary = commit_range_summary(cwd, base, head)
