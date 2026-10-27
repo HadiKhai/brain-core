@@ -624,6 +624,49 @@ print(json.dumps(guard.scan_terms(node, terms=[('Needle', 'term 1'), ('CAFÉ', '
             self.assertTrue(new.scan_terms(self.node, terms=self.terms)[0])
         self.assertFalse(self.cache_file.exists())
 
+    def test_receiver_bound_and_ordered_mapping_defaults_cannot_publish_upgrade_verdicts(self):
+        notes = self.node['dir']
+        (notes / 'node.md').write_text('fixture\n')
+        (notes / 'library').mkdir()
+        (notes / 'library/item.md').write_text('---\nscope: needle\n---\nclean\n')
+        self.node['home_path'] = notes / 'library'
+        signature = 'def governance_text(text, principals=(), drop=False):'
+        cases = [('receiver', '{"enabled": True}.get', '{"enabled": False}.get', 'if drop("enabled"):'),
+                 ('mapping', '{"yes": True, "no": False}', '{"no": False, "yes": True}',
+                  'if next(iter(drop.values())):')]
+        for name, previous, current, condition in cases:
+            with self.subTest(default=name):
+                self.cache_file.unlink(missing_ok=True)
+                core = self.tmp / ('core-default-' + name)
+                shutil.copytree(CORE / 'lib', core / 'lib')
+                (core / 'bin').mkdir()
+                shutil.copy2(CORE / 'bin/brain', core / 'bin/brain')
+                source = core / 'lib/brain/guard.py'
+                text = source.read_text().replace('        if drop:', '        ' + condition, 1)
+                source.write_text(text.replace(signature, 'def governance_text(text, principals=(), drop=' + previous + '):', 1))
+                old = core_loader.SourceFileLoader('old_receiver', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+                source.write_text(text.replace(signature, 'def governance_text(text, principals=(), drop=' + current + '):', 1))
+                new = core_loader.SourceFileLoader('new_receiver', str(core / 'bin/brain')).load_module()._owners['scan_terms']
+                self.assertIsNone(old._TERM_IMPLEMENTATION)
+                self.assertIsNone(new._TERM_IMPLEMENTATION)
+                expected = new.scan_terms(self.node, terms=self.terms)
+                self.assertTrue(expected[0])
+                with old.term_scan_cache(persist=True):
+                    self.assertEqual(old.scan_terms(self.node, terms=self.terms), ([], []))
+                self.assertFalse(self.cache_file.exists())
+                self.assertEqual(new.scan_terms(self.node, terms=self.terms), expected)
+
+    def test_mutable_unordered_and_subclass_defaults_are_not_accepted_as_plain_values(self):
+        cache = self.guard._m_term_cache
+        class SpecialTuple(tuple):
+            pass
+        for default in ([], {}, frozenset((0, 8)), SpecialTuple((True,)), {'enabled': True}.get):
+            def fixture(value=default):
+                return value
+            with self.subTest(kind=type(default).__name__):
+                with self.assertRaises(ValueError):
+                    cache.loaded_code({'__name__': fixture.__module__, 'fixture': fixture})
+
 
 class Hardening(Scenario):
     """What the second-runtime reviews broke, kept broken-proof."""

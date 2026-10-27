@@ -121,8 +121,10 @@ def byte_mentions(data, needles, chunk=1 << 20, principals=(), lessons=False):
 
 class TermBlobReader:
     """Hash a complete canonical Git blob while preserving bounded streaming."""
-    def __init__(self, stream, size, algorithm=hashlib.sha1):
+    def __init__(self, stream, size, algorithm=None):
         self.stream, self.count = stream, 0
+        if algorithm is None:
+            algorithm = hashlib.sha1
         self.digest = algorithm(b'blob ' + str(size).encode() + b'\0')
 
     def read(self, size):

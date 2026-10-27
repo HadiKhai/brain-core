@@ -2883,3 +2883,7 @@ so a command loaded before an upgrade cannot publish as the newly installed code
 The compiled identity includes normalized positional and keyword-only defaults;
 unsupported defaults disable persistent reuse/publication while source scanning
 continues normally.
+Only exact immutable scalar/tuple defaults are supported. Callable, mutable,
+unordered and subclass defaults remain opaque and disable persistence; keyword
+binding order is preserved. The streaming hash helper selects SHA-1 inside its
+constructor from a None default instead of encoding a callable as a bare symbol.

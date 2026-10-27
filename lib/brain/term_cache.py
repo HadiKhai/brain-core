@@ -60,31 +60,31 @@ def digest(value):
 
 def loaded_code(namespace):
     """Fingerprint compiled implementation, independent of later source replacement."""
+    import struct
     import types
     rows = []
-    def constant(value):
-        if isinstance(value, types.CodeType):
+    def constant(value, *, default=False):
+        if type(value) is types.CodeType:
+            if default:
+                raise ValueError('executable scanner default')
             return ['code', value.co_code.hex(), [constant(x) for x in value.co_consts],
                     value.co_names, value.co_varnames, value.co_freevars, value.co_cellvars,
                     value.co_flags, value.co_argcount, value.co_posonlyargcount, value.co_kwonlyargcount]
-        if isinstance(value, bytes):
+        if type(value) is bytes:
             return ['bytes', value.hex()]
-        if isinstance(value, tuple):
-            return ['tuple', [constant(x) for x in value]]
-        if isinstance(value, list):
-            return ['list', [constant(x) for x in value]]
-        if isinstance(value, dict):
-            return ['dict', sorted(([constant(k), constant(v)] for k, v in value.items()),
-                                   key=lambda x: json.dumps(x[0], sort_keys=True))]
-        if isinstance(value, frozenset):
+        if type(value) is tuple:
+            return ['tuple', [constant(x, default=default) for x in value]]
+        if type(value) is frozenset:
+            if default:
+                raise ValueError('unordered scanner default')
             return ['frozenset', sorted((constant(x) for x in value), key=lambda x: json.dumps(x, sort_keys=True))]
-        if isinstance(value, complex):
-            return ['complex', value.real, value.imag]
+        if type(value) is complex:
+            return ['complex', constant(value.real), constant(value.imag)]
+        if type(value) is float:
+            return ['float', struct.pack('!d', value).hex()]
         if value is Ellipsis:
             return ['ellipsis']
-        if isinstance(value, (types.BuiltinFunctionType, types.BuiltinMethodType)):
-            return ['builtin', value.__module__, value.__qualname__]
-        if value is None or type(value) in (str, bool, int, float):
+        if value is None or type(value) in (str, bool, int):
             return value
         raise ValueError('unsupported compiled scanner constant/default')
     def add(name, value):
@@ -93,8 +93,11 @@ def loaded_code(namespace):
         if isinstance(value, types.FunctionType):
             while hasattr(value, '__wrapped__'):
                 value = value.__wrapped__
-            rows.append([name, digest([constant(value.__code__), constant(value.__defaults__),
-                                       constant(value.__kwdefaults__)])])
+            positional = (None if value.__defaults__ is None else
+                          [constant(x, default=True) for x in value.__defaults__])
+            keyword = (None if value.__kwdefaults__ is None else
+                       [[key, constant(x, default=True)] for key, x in value.__kwdefaults__.items()])
+            rows.append([name, digest([constant(value.__code__), positional, keyword])])
     for name, value in sorted(namespace.items()):
         if getattr(value, '__module__', None) != namespace['__name__']:
             continue
