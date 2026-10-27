@@ -157,7 +157,7 @@ def writes(a):
         return a.action in ("add", "set", "backfill", "sync", "event", "requirement-add")
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
-    if name in ('cmd_full_run', 'cmd_spec_run'):
+    if name in ('cmd_full_run', 'cmd_spec_run', 'cmd_gate'):
         return False  # native execution owns short locks and machine admission
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
@@ -582,6 +582,11 @@ def _main():
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("full-run", _Command("full_gate", "cmd_full_run"), "run the native full gate and retain exact-candidate evidence without publishing completion", "id",
         opt("--branch", required=True), opt("--reviews", required=True, type=int))
+    gate = cmd("gate", _Command("full_gate", "cmd_gate"), "run the per-change readiness gate; --train or --nightly forces complete verification", "id",
+        opt("--branch", required=True), opt("--reviews", required=True, type=int))
+    gate_mode = gate.add_mutually_exclusive_group()
+    gate_mode.add_argument('--train', action='store_true')
+    gate_mode.add_argument('--nightly', action='store_true')
     cmd("spec-run", _Command("spec_run", "cmd_spec_run"), "run one focused command with native admission; never records full readiness", "id",
         opt("--branch", required=True), opt("--command", nargs=argparse.REMAINDER, required=True))
     cmd("ready", _Command("verify", "cmd_ready"), "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",

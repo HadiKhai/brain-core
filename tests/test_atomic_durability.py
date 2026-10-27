@@ -1,5 +1,8 @@
 """Per-file persistence ordering; these tests do not simulate power loss."""
 import os
+import json
+import subprocess
+import sys
 import stat
 import tempfile
 import unittest
@@ -86,7 +89,7 @@ class AtomicDurability(unittest.TestCase):
             return real_replace(source, target, **kwargs)
         with mock.patch.object(self.m.os, 'fsync', side_effect=sync), mock.patch.object(self.m.os, 'replace', side_effect=replace):
             self.m.atomic_write(self.path, 'new')
-        self.assertEqual(events, ['file', 'file', 'replace', 'directory'])
+        self.assertEqual(events, ['file', 'file', 'directory', 'file', 'replace', 'directory', 'directory'])
         self.assertEqual(self.path.read_text(), 'new')
 
     def test_prepublication_sync_failure_preserves_old_file(self):
@@ -97,15 +100,25 @@ class AtomicDurability(unittest.TestCase):
         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
 
     def test_directory_sync_failure_is_reported_after_complete_publication(self):
-        real_sync = os.fsync
+        real_sync, real_replace = os.fsync, os.replace
+        published = []
+        def replace(*args, **kwargs):
+            result = real_replace(*args, **kwargs)
+            published.append(True)
+            return result
         def sync(fd):
-            if stat.S_ISDIR(os.fstat(fd).st_mode):
+            if published and stat.S_ISDIR(os.fstat(fd).st_mode):
                 raise OSError('directory persistence unavailable')
             return real_sync(fd)
-        with mock.patch.object(self.m.os, 'fsync', side_effect=sync):
+        with mock.patch.object(self.m.os, 'fsync', side_effect=sync), \
+                mock.patch.object(self.m.os, 'replace', side_effect=replace):
             with self.assertRaisesRegex(OSError, 'directory persistence'):
                 self.m.atomic_write(self.path, 'new')
         self.assertEqual(self.path.read_text(), 'new')
+        records = list(self.path.parent.glob('.intended-mode-*'))
+        self.assertEqual(len(records), 1)
+        with self.m.directory_target(self.path) as target:
+            target.recover_mode()
         self.assertEqual(list(self.path.parent.iterdir()), [self.path])
 
     def test_cleanup_failure_preserves_primary_publication_error(self):
@@ -116,11 +129,18 @@ class AtomicDurability(unittest.TestCase):
                 primary = OSError('primary publication failure')
                 cleanup = OSError('secondary cleanup failure')
                 real_sync, real_unlink = os.fsync, os.unlink
+                replacing = []
+
+                def replace(*args, **kwargs):
+                    replacing.append(True)
+                    raise primary
 
                 def sync(fd):
                     if stat.S_ISREG(os.fstat(fd).st_mode):
                         if primary_phase == 'file-sync':
                             raise primary
+                        return real_sync(fd)
+                    if primary_phase == 'replace' and not replacing:
                         return real_sync(fd)
                     raise cleanup
 
@@ -131,7 +151,7 @@ class AtomicDurability(unittest.TestCase):
 
                 with mock.patch.object(self.m.os, 'fsync', side_effect=sync), \
                         mock.patch.object(self.m.os, 'unlink', side_effect=unlink), \
-                        mock.patch.object(self.m.os, 'replace', side_effect=primary):
+                        mock.patch.object(self.m.os, 'replace', side_effect=replace):
                     with self.assertRaises(OSError) as raised:
                         self.m.atomic_write(self.path, 'new')
                 self.assertIs(raised.exception, primary)
@@ -184,8 +204,9 @@ class AtomicDurability(unittest.TestCase):
                 mock.patch.object(self.m.os, 'fdopen', side_effect=Writer):
             self.m.atomic_write(self.path, 'new')
         self.assertEqual(modes, [('write', 0o600), ('flush', 0o600),
-                                 ('file-sync', 0o600), ('file-sync', 0o644),
-                                 ('replace', 0o644), ('directory-sync', None)])
+                                 ('file-sync', 0o600), ('write', 0o600), ('flush', 0o600),
+                                 ('file-sync', 0o600), ('directory-sync', None), ('file-sync', 0o644),
+                                 ('replace', 0o644), ('directory-sync', None), ('directory-sync', None)])
         self.assertEqual(self.path.read_text(), 'new')
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
 
@@ -230,6 +251,11 @@ class AtomicDurability(unittest.TestCase):
                     replace.assert_not_called()
                     self.assertEqual(self.path.read_text(), 'old')
                     self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+                    records = list(self.path.parent.glob('.intended-mode-*'))
+                    self.assertEqual(len(records), int(cleanup_fails))
+                    for record in records:
+                        self.assertEqual(stat.S_IMODE(record.stat().st_mode), 0o600)
+                        record.unlink()
                     staging = [path for path in self.path.parent.iterdir() if path != self.path]
                     self.assertEqual(len(staging), int(cleanup_fails))
                     if cleanup_fails:
@@ -248,7 +274,10 @@ class AtomicDurability(unittest.TestCase):
         self.assertIs(raised.exception.__cause__, cleanup)
         self.assertEqual(self.path.read_text(), 'old')
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
-        staging = [path for path in self.path.parent.iterdir() if path != self.path]
+        records = list(self.path.parent.glob('.intended-mode-*'))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(stat.S_IMODE(records[0].stat().st_mode), 0o600)
+        staging = [path for path in self.path.parent.iterdir() if path != self.path and path not in records]
         self.assertEqual(len(staging), 1)
         self.assertEqual(staging[0].read_text(), 'new')
         self.assertEqual(stat.S_IMODE(staging[0].stat().st_mode), 0o600)
@@ -357,3 +386,221 @@ class AtomicDurability(unittest.TestCase):
         self.assertEqual(self.path.read_text(), 'old')
         self.assertEqual(foreign.read_text(), 'old')
         self.assertEqual({p.name for p in self.path.parent.iterdir()}, {'record.json', 'other-name'})
+
+    def interrupted_publication(self, phase='after', private=False):
+        code = """
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from brain.common import atomic_write
+real = os.replace
+def replace(src, dst, **kwargs):
+    if sys.argv[3] == 'before':
+        os._exit(17)
+    real(src, dst, **kwargs)
+    # Model a recovered filesystem whose content survived but mode is private.
+    os.chmod(dst, 0o600, dir_fd=kwargs['dst_dir_fd'])
+    os._exit(17)
+os.replace = replace
+atomic_write(sys.argv[2], 'new', private=sys.argv[4] == 'True')
+"""
+        result = subprocess.run([sys.executable, '-B', '-c', code, str(CORE / 'lib'),
+                                 str(self.path), phase, str(private)], timeout=5)
+        self.assertEqual(result.returncode, 17)
+        records = list(self.path.parent.glob('.intended-mode-*'))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(stat.S_IMODE(records[0].stat().st_mode), 0o600)
+        return records[0]
+
+    def test_recovery_restores_durable_intended_mode_before_retry_captures_mode(self):
+        for existing, private, intended in ((0o640, False, 0o640),
+                                            (None, False, 0o644),
+                                            (0o644, True, 0o600)):
+            with self.subTest(existing=existing, private=private):
+                self.path.unlink(missing_ok=True)
+                if existing is not None:
+                    self.path.write_text('old')
+                    self.path.chmod(existing)
+                record = self.interrupted_publication(private=private)
+                self.assertEqual(self.path.read_text(), 'new')
+                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+                # A read is nonmutating; the next writer recovers first.
+                with self.m.directory_target(self.path, private=private) as target:
+                    self.assertEqual(target.read_bytes(), b'new')
+                self.assertTrue(record.exists())
+                self.m.atomic_write(self.path, 'retry', private=private)
+                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), intended)
+                self.assertEqual(self.path.read_text(), 'retry')
+                self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
+    def test_recovery_does_not_promote_unpublished_staging_or_change_old_destination(self):
+        self.path.chmod(0o640)
+        record = self.interrupted_publication('before')
+        before = self.path.stat()
+        with self.m.directory_target(self.path) as target:
+            target.recover_mode()
+        self.assertEqual(self.path.stat(), before)
+        self.assertEqual(self.path.read_text(), 'old')
+        self.assertTrue(record.exists())
+        staging, = self.path.parent.glob('.record.json.*')
+        self.assertEqual(staging.read_text(), 'new')
+
+    def test_recovery_refuses_changed_content_and_unsafe_or_invalid_records(self):
+        record = self.interrupted_publication()
+        original = record.read_bytes()
+        for kind in ('json', 'mode', 'hardlink', 'symlink', 'digest'):
+            with self.subTest(kind=kind):
+                record.write_bytes(original)
+                record.chmod(0o600)
+                foreign = self.path.parent / 'foreign'
+                if kind == 'json':
+                    record.write_text('{')
+                elif kind == 'mode':
+                    record.chmod(0o644)
+                elif kind == 'hardlink':
+                    os.link(record, foreign)
+                elif kind == 'symlink':
+                    record.rename(foreign)
+                    record.symlink_to(foreign)
+                else:
+                    data = json.loads(original)
+                    data['sha256'] = '0' * 64
+                    record.write_text(json.dumps(data))
+                with self.m.directory_target(self.path) as target:
+                    with self.assertRaises(OSError):
+                        target.recover_mode()
+                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+                self.assertEqual(self.path.read_text(), 'new')
+                if kind == 'symlink':
+                    record.unlink()
+                    foreign.rename(record)
+                foreign.unlink(missing_ok=True)
+        record.write_bytes(original)
+        self.path.write_text('foreign edit')
+        with self.m.directory_target(self.path) as target:
+            with self.assertRaises(OSError):
+                target.recover_mode()
+        self.assertEqual(self.path.read_text(), 'foreign edit')
+
+    def test_recovery_chmod_or_sync_failure_retains_intent_and_never_publishes(self):
+        record = self.interrupted_publication()
+        for operation in ('fchmod', 'fsync'):
+            with self.subTest(operation=operation):
+                self.path.chmod(0o600)
+                with mock.patch.object(self.m.os, operation, side_effect=OSError('recovery refused')), \
+                        mock.patch.object(self.m.os, 'replace') as replace:
+                    with self.assertRaisesRegex(OSError, 'recovery refused'):
+                        self.m.atomic_write(self.path, 'retry')
+                replace.assert_not_called()
+                self.assertEqual(self.path.read_text(), 'new')
+                self.assertTrue(record.exists())
+        with self.m.directory_target(self.path) as target:
+            target.recover_mode()
+            target.recover_mode()
+        self.assertFalse(record.exists())
+
+    def test_intent_directory_sync_failure_prevents_publication_and_cleans_owned_files(self):
+        real_sync = os.fsync
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError('intent directory sync refused')
+            return real_sync(fd)
+        with mock.patch.object(self.m.os, 'fsync', side_effect=sync), \
+                mock.patch.object(self.m.os, 'replace') as replace:
+            with self.assertRaisesRegex(OSError, 'intent directory sync refused'):
+                self.m.atomic_write(self.path, 'new')
+        replace.assert_not_called()
+        self.assertEqual(self.path.read_text(), 'old')
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+
+    def test_recovery_refuses_retargeted_parent_and_preserves_foreign_mode(self):
+        record = self.interrupted_publication()
+        outside = self.path.parent / 'foreign'
+        outside.mkdir()
+        foreign = outside / self.path.name
+        foreign.write_text('foreign')
+        foreign.chmod(0o600)
+        root = self.path.parent
+        moved = root.with_name(root.name + '-moved')
+        with self.m.directory_target(self.path) as target:
+            root.rename(moved)
+            root.symlink_to(outside.relative_to(root))
+            try:
+                with self.assertRaises(OSError):
+                    target.recover_mode()
+                self.assertEqual((moved / 'foreign' / self.path.name).read_text(), 'foreign')
+                self.assertEqual(stat.S_IMODE((moved / 'foreign' / self.path.name).stat().st_mode), 0o600)
+            finally:
+                root.unlink()
+                moved.rename(root)
+        self.assertTrue(record.exists())
+
+    def test_recovery_preserves_expected_generation_contract(self):
+        self.path.chmod(0o640)
+        record = self.interrupted_publication()
+        with self.m.directory_target(self.path) as target:
+            before = target.generation(target.stat())
+            with self.assertRaisesRegex(OSError, 'publication target changed'):
+                target.atomic_write('stale', expected=None)
+            self.assertEqual(target.generation(target.stat()), before)
+            self.assertTrue(record.exists())
+            target.atomic_write('retry', expected=before)
+        self.assertEqual(self.path.read_text(), 'retry')
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o640)
+
+    def test_recovery_sync_races_preserve_independent_edits_and_intent(self):
+        for phase in ('file', 'directory'):
+            with self.subTest(phase=phase):
+                self.path.write_text('old')
+                self.path.chmod(0o640)
+                record = self.interrupted_publication()
+                real_sync = os.fsync
+                edits = []
+                def sync(fd):
+                    is_directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    if not edits and is_directory == (phase == 'directory'):
+                        edits.append(True)
+                        self.path.write_text('independent edit during recovery')
+                    return real_sync(fd)
+                with self.m.directory_target(self.path) as target:
+                    expected = target.generation(target.stat())
+                    with mock.patch.object(self.m.os, 'fsync', side_effect=sync), \
+                            mock.patch.object(self.m.os, 'replace') as replace:
+                        with self.assertRaisesRegex(OSError, 'changed during mode recovery'):
+                            target.atomic_write('stale retry', expected=expected)
+                replace.assert_not_called()
+                self.assertEqual(edits, [True])
+                self.assertEqual(self.path.read_text(), 'independent edit during recovery')
+                self.assertTrue(record.exists())
+                record.unlink()
+
+    def test_restrictive_umask_still_creates_recoverable_private_intent(self):
+        self.path.chmod(0o640)
+        old = os.umask(0o200)
+        try:
+            record = self.interrupted_publication()
+        finally:
+            os.umask(old)
+        self.assertEqual(stat.S_IMODE(record.stat().st_mode), 0o600)
+        self.m.atomic_write(self.path, 'retry')
+        self.assertFalse(record.exists())
+        self.assertEqual(self.path.read_text(), 'retry')
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o640)
+
+    def test_recovery_chmod_race_refuses_same_size_edit_with_restored_mtime(self):
+        self.path.chmod(0o640)
+        record = self.interrupted_publication()
+        before = self.path.stat()
+        real_chmod = os.fchmod
+        def chmod(fd, mode):
+            real_chmod(fd, mode)
+            self.path.write_text('bad')
+            os.utime(self.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        with self.m.directory_target(self.path) as target:
+            expected = target.generation(target.stat())
+            with mock.patch.object(self.m.os, 'fchmod', side_effect=chmod), \
+                    mock.patch.object(self.m.os, 'replace') as replace:
+                with self.assertRaisesRegex(OSError, 'changed during mode recovery'):
+                    target.atomic_write('stale retry', expected=expected)
+        replace.assert_not_called()
+        self.assertEqual(self.path.read_text(), 'bad')
+        self.assertTrue(record.exists())

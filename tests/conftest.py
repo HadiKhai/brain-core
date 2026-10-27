@@ -9,6 +9,8 @@ import pytest
 
 
 def pytest_addoption(parser):
+    parser.addoption('--serial-after-parallel', action='store_true',
+                     help='apply the canonical serial tail to selected unit files too')
     parser.addoption('--completed-results', metavar='PATH',
                      help='create an exclusive JSONL stream of test phases and completions')
     parser.addoption('--duration-order', metavar='PATH',
@@ -75,8 +77,8 @@ def pytest_xdist_auto_num_workers(config):
 
 @pytest.hookimpl(tryfirst=True, optionalhook=True)
 def pytest_xdist_make_scheduler(config, log):
-    if config.option.collectonly or not any(
-            Path(arg.split('::', 1)[0]).name == 'test_brain.py' for arg in config.args):
+    if config.option.collectonly or not (config.getoption('--serial-after-parallel') or any(
+            Path(arg.split('::', 1)[0]).name == 'test_brain.py' for arg in config.args)):
         return None
     from xdist.scheduler.load import LoadScheduling
     from lanes import SERIAL_CLASSES, SERIAL_TESTS

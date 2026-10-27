@@ -3204,3 +3204,85 @@ binding order is preserved. The streaming hash helper selects SHA-1 inside its
 constructor from a None default instead of encoding a callable as a bare symbol.
 The executing scanner/cache module code is captured too, including top-level
 initializers, so a global-only source upgrade also changes the loaded identity.
+
+## D40004: Poll opted-in preview operations without relaxing call bounds
+
+Private adapter registrations may declare `operation_deadlines` per lifecycle
+operation type. These operations use one identity-bound start and read-only status
+polls; unlisted operations keep the existing direct protocol. Each invocation
+retains its ten-second cap, while one monotonic deadline includes all polling and
+identity checks. Only a valid quiescent terminal method result can complete a
+lifecycle step. Expiry, lost operation ids, crashes and binding changes preserve
+pending intent without replay, rollback or release. Product drivers own durable
+execution and reconciliation; the transport creates no second lifecycle engine.
+The same absolute deadline reaches request encoding and subprocess creation, so
+serialization and scheduling time cannot renew the remaining operation budget.
+
+## D40006: Select per-change test consumers and keep a separate full release gate
+
+A node can opt into a project-owned `verify_change` command for native readiness
+(`ready --record`, handback, and `brain gate`). `verify` remains the complete
+release-batch and nightly command. The native runner supplies the exact local
+integration base and candidate head as `BRAIN_VERIFY_BASE` and `BRAIN_VERIFY_HEAD`.
+It binds the readiness packet to all verification configuration, inputs, ports
+and the candidate. A selected pass is change evidence and emits no full-pass fact
+or adoptable full receipt. `full-run`, `brain gate --train`, `brain gate --nightly`
+and the merge train always execute the complete command, bypassing both selection
+mechanisms. Configure nightly execution with the complete gate; ordinary change
+readiness never replaces the release batch's full run before its tag.
+
+For this repository, set `verify_change=python3 -B tests/per_change_gate.py` and
+retain the complete canonical pytest command in `verify`. The command always
+runs lane coverage and the native guard before its selected unit tests, stops on
+the first failure, and preserves the canonical serial tail after parallel tests.
+`--plan --base <commit>` prints selection and its measured duration without
+running tests. Root/shared inputs, unsupported or removed paths, unavailable Git
+history, invalid source or incomplete ownership select the complete suite.
+Configuring both `verify_change` and generic verify lanes also chooses the full
+command rather than combining two independent selection mechanisms.
+
+The source-derived import map is the repository's existing `tests/lanes.py` map:
+relative core imports are followed transitively; test helper imports and embedded
+Python are scanned; definition-time changes affect every lane's startup identity.
+Compare a selective module's startup AST with its integration-base source before
+narrowing its consumers. Changed or unavailable startup identity selects full.
+The fixture loader imports every module, and most core modules form a strongly
+connected graph. Keep these modules nonselective. Only the separately audited
+`train` dispatch/call boundary can narrow module-body changes; test-file changes
+also select importing helper consumers. Unknown/new dependencies cannot silently
+reduce coverage: `check_lanes.py` requires complete canonical ownership and
+nonselective module inputs. Selection reads source on every invocation, uses
+NUL-delimited Git paths, disables rename heuristics and optional Git locks, and
+includes staged, unstaged and untracked inputs. There is no time-based cache.
+
+## Recover atomic publication from durable intended-mode records
+
+Atomic publication persists a private intended-mode record alongside the staging file
+before applying its mode and renaming. The record binds the destination name, device,
+inode, size, modification timestamp and content digest to the intended mode. A writer
+recovers a matching published inode before deriving the next publication's mode;
+readers never repair permissions. Recovery refuses unsafe records or changed content,
+retains intent on failure, and caps private targets at 0600. Active publication records
+are locked, and successful publication removes its owned record only after directory
+sync. Unpublished staging and records for other inodes are left for reconciliation;
+recovery never promotes them. Chmod failures still abort publication and attempt
+private cleanup, preserving the original failure if cleanup also fails.
+
+## D40008: Fence task mutations by their validation dependencies
+
+Task mutations fence records from the target node and nodes reached through
+its prospective dependency, parent and successor graph. Completion artifacts
+and code proof homes are selected from that same graph. Code completion fences
+local main and replacement refs (including every Git symbolic-ref chain link),
+packed refs, Git
+configuration and ancestry metadata in both worktree and common directories.
+Unrelated branch refs are excluded from this task-specific fence; other Git
+publication fences retain their broader scope.
+
+Validation still runs outside the instance writer lock. After reacquiring that
+lock, publication compares fresh generations of every selected input before
+saving. Relevant drift refuses without writing the prepared task. Automatic
+retries are not needed to tolerate unrelated builder commits and are omitted
+so genuine validation conflicts remain explicit. Requirements are read once per
+validation pass, using a local snapshot protected by the same generation fence,
+instead of rereading the entire requirement directory for each task row.

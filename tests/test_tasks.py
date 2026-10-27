@@ -11,6 +11,226 @@ from brain.instance import Instance
 
 
 class Tasks(Scenario):
+    def assert_home_prepare_commit(self, *, symbolic=False, linked=False, move_main=False):
+        home = self.tmp / 'home'
+        self.repo(home, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        (home / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=home)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        tasks._m_common.write_fm(self.root / 'node.md',
+            {'id': 'root', 'owners': 'sample', 'home': str(home)}, '')
+        self.n = self.inst.node('root')
+        self.add('DONE-1', status='done', baseline_sha=base, merge_sha=head,
+                 code_path='engine.py', scope=['engine.py'], evidence=['Tests passed'])
+        if symbolic:
+            self.git('branch', 'stable', cwd=home)
+            self.git('symbolic-ref', 'refs/heads/main', 'refs/heads/stable', cwd=home)
+        if linked:
+            linked_home = self.tmp / 'linked-home'
+            self.git('worktree', 'add', '-qb', 'job/linked', str(linked_home), cwd=home)
+            tasks._m_common.write_fm(self.root / 'node.md',
+                {'id': 'root', 'owners': 'sample', 'home': str(linked_home)}, '')
+            self.n = self.inst.node('root')
+        self.git('checkout', '-qb', 'job/builder', cwd=home)
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            self.assertIsNone(tasks._m_instance._LOCK['fh'])
+            result = prepare(*args, **kwargs)
+            self.git('commit', '--allow-empty', '-qm', 'Unrelated builder commit', cwd=home)
+            if move_main:
+                self.git('update-ref', 'refs/heads/stable' if symbolic else 'refs/heads/main', base, cwd=home)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed):
+            if move_main:
+                with self.assertRaises(SystemExit):
+                    self.add('NEW-1', depends_on=['DONE-1'])
+            else:
+                self.add('NEW-1', depends_on=['DONE-1'])
+        self.assertEqual('NEW-1' in tasks.read_records(self.n), not move_main)
+
+    def test_unrelated_home_branch_commit_during_prepare_allows_task_write(self):
+        self.assert_home_prepare_commit()
+
+    def test_linked_home_unrelated_commit_during_prepare_allows_task_write(self):
+        self.assert_home_prepare_commit(linked=True)
+
+    def test_linked_home_main_change_during_prepare_refuses(self):
+        self.assert_home_prepare_commit(linked=True, move_main=True)
+
+    def test_symbolic_main_target_change_during_prepare_refuses(self):
+        self.assert_home_prepare_commit(symbolic=True, move_main=True)
+
+    def test_symbolic_main_intermediate_repoint_and_restore_refuses(self):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add('DONE-1', status='done', baseline_sha=base, merge_sha=head,
+                 code_path='engine.py', scope=['engine.py'], evidence=['Tests passed'])
+        self.git('branch', 'stable', cwd=self.root)
+        self.git('branch', 'alternate', base, cwd=self.root)
+        self.git('symbolic-ref', 'refs/heads/middle', 'refs/heads/stable', cwd=self.root)
+        self.git('symbolic-ref', 'refs/heads/main', 'refs/heads/middle', cwd=self.root)
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('symbolic-ref', 'refs/heads/middle', 'refs/heads/alternate', cwd=self.root)
+            self.git('symbolic-ref', 'refs/heads/middle', 'refs/heads/stable', cwd=self.root)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1', depends_on=['DONE-1'])
+        self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
+    def test_symbolic_replacement_target_change_during_prepare_refuses(self):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add('DONE-1', status='done', baseline_sha=base, merge_sha=head,
+                 code_path='engine.py', scope=['engine.py'], evidence=['Tests passed'])
+        replacement = self.git('commit-tree', head + '^{tree}', '-p', base,
+                               '-m', 'Replacement fixture change', cwd=self.root).strip()
+        self.git('branch', 'replacement-target', replacement, cwd=self.root)
+        self.git('symbolic-ref', 'refs/replace/' + head, 'refs/heads/replacement-target', cwd=self.root)
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('update-ref', 'refs/heads/replacement-target', base, cwd=self.root)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1', depends_on=['DONE-1'])
+        self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
+    def test_task_entry_points_work_while_home_builder_commits(self):
+        import os
+        import subprocess
+        import time
+        root = self.init('demo')
+        home = self.repo(self.tmp / 'app', {'engine.py': 'value = 1\n'})
+        self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        (home / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=home)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.b(root, 'task', 'add', 'app', 'DONE-1', 'status=done', 'baseline_sha=' + base, 'merge_sha=' + head,
+               'code_path=engine.py', 'scope=engine.py', 'evidence=Tests passed', '--title', 'Delivered')
+        self.git('checkout', '-qb', 'job/builder', cwd=home)
+        # The child signals each real commit; no network or shared instance.
+        signal = self.tmp / 'builder-count'
+        script = ("import pathlib, subprocess, sys, time\n"
+                  "count = 0\n"
+                  "while True:\n"
+                  " subprocess.run(['git', 'commit', '--allow-empty', '-qm', 'Builder tick'], check=True)\n"
+                  " count += 1\n"
+                  " pathlib.Path(sys.argv[1] + '.tmp').write_text(str(count))\n"
+                  " pathlib.Path(sys.argv[1] + '.tmp').replace(sys.argv[1])\n"
+                  " time.sleep(0.02)\n")
+        builder = subprocess.Popen([sys.executable, '-B', '-c', script, str(signal)],
+                                   cwd=home, env=self.env, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE)
+        try:
+            deadline = time.monotonic() + 5
+            while not signal.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(signal.exists(), 'builder must commit before task commands')
+            before = int(signal.read_text())
+            self.b(root, 'task', 'add', 'app', 'JOB-1', 'status=ready', '--title', 'Start directly')
+            self.b(root, 'task', 'add', 'app', 'WT-1', 'status=ready', '--title', 'Start worktree')
+            from brain import jobs
+            inst = Instance(root)
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                jobs.job_started(inst, inst.node('app'), 'job/direct', 'codex', task_id='JOB-1')
+            self.b(root, 'wt', 'add', 'app', 'job/task', '--task-id', 'WT-1', '--no-setup')
+            rows = tasks.read_records(Instance(root).node('app'))
+            self.assertEqual(rows['JOB-1']['status'], 'in-progress')
+            self.assertEqual(rows['WT-1']['status'], 'in-progress')
+            self.assertGreater(int(signal.read_text()), before)
+            self.assertIsNone(builder.poll())
+        finally:
+            builder.terminate()
+            builder.communicate(timeout=5)
+
+    def test_unrelated_external_home_is_not_a_mutation_input(self):
+        peer = self.peer_node('unrelated')
+        home = self.repo(self.tmp / 'unrelated-home')
+        tasks._m_common.write_fm(peer['dir'] / 'node.md',
+            {'id': 'unrelated', 'owners': 'sample', 'home': str(home)}, '')
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('commit', '--allow-empty', '-qm', 'Unrelated main commit', cwd=home)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed):
+            self.add()
+        self.assertIn('APP-1', tasks.read_records(self.n))
+
+    def test_transitive_cross_node_completion_main_change_refuses(self):
+        producer = self.peer_node('producer')
+        home = self.repo(self.tmp / 'producer-home', {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        (home / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=home)
+        self.git('commit', '-qm', 'Deliver fixture change', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        tasks._m_common.write_fm(producer['dir'] / 'node.md',
+            {'id': 'producer', 'owners': 'sample', 'home': str(home)}, '')
+        producer = self.inst.node('producer')
+        tasks.mutate(self.inst, producer, 'CODE-1', {'title': 'Deliver', 'status': 'done',
+            'baseline_sha': base, 'merge_sha': head, 'code_path': 'engine.py',
+            'scope': ['engine.py'], 'evidence': ['Tests passed']}, create=True)
+        self.ops_done(self.n)
+        tasks.mutate(self.inst, self.n, 'OPS-1', {'depends_on': ['producer:CODE-1']})
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            self.git('update-ref', 'refs/heads/main', base, cwd=home)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1', depends_on=['OPS-1'])
+        self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
+    def test_validation_reads_requirement_snapshot_once_per_prepare(self):
+        tasks.requirement_add(self.inst, self.n, 'REQ-1', 'Exact words', self.inst.now(), 'notes.md:1')
+        self.add('BASE-1', requirement='REQ-1')
+        read = tasks.read_records
+        with mock.patch.object(tasks, 'read_records', wraps=read) as reads:
+            tasks.prepare_mutation(self.inst, self.n, 'NEW-1',
+                                   {'title': 'New task', 'requirement': 'REQ-1', 'depends_on': ['BASE-1']}, create=True)
+        self.assertEqual(sum(call.args[1:2] == ('requirements',) for call in reads.call_args_list), 1)
+
+    def test_requirement_change_during_prepare_refuses(self):
+        tasks.requirement_add(self.inst, self.n, 'REQ-1', 'Exact words', self.inst.now(), 'notes.md:1')
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            (self.n['dir'] / 'requirements/REQ-1.md').unlink()
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1', requirement='REQ-1')
+        self.assertNotIn('NEW-1', tasks.read_records(self.n))
+
+    def test_target_record_change_during_prepare_refuses_without_lost_update(self):
+        self.add('BASE-1')
+        prepare = tasks.prepare_mutation
+        def changed(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            concurrent = tasks.read_records(self.n)['BASE-1']
+            concurrent['title'] = 'Concurrent update'
+            tasks.save_record(self.n, concurrent)
+            return result
+        with mock.patch.object(tasks, 'prepare_mutation', side_effect=changed), self.assertRaises(SystemExit):
+            self.add('NEW-1', depends_on=['BASE-1'])
+        rows = tasks.read_records(self.n)
+        self.assertNotIn('NEW-1', rows)
+        self.assertEqual(rows['BASE-1']['title'], 'Concurrent update')
+
     def assert_conversion_rechecks_internal_main(self, child=False, normalized_status=False):
         self.repo(self.root, {'engine.py': 'value = 1\n'})
         base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
