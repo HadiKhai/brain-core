@@ -759,10 +759,12 @@ class Command:
         changed = self.changes(after)
         if success:
             maintenance_ok, views = True, {}
+            maintenance_error = None
             try:
                 views = maintain(self, changed)
-            except (Exception, SystemExit):
+            except (Exception, SystemExit) as error:
                 maintenance_ok = False
+                maintenance_error = str(error) or type(error).__name__
                 print('brain: state saved; generated status maintenance needs repair', file=__import__('sys').stderr)
             # snapshot rendering may itself deliver queued hook questions.
             fold_hooks(self.inst)
@@ -782,7 +784,8 @@ class Command:
                         'invalidate': [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]}
             append(self.inst, self.node, 'commit', self.ref, data, scrub=False)
             if self.command == 'status' and not data.get('maintenance_ok'):
-                common.die('status refresh maintenance refused; generated view needs repair; retry from fresh state')
+                reason = f'; cause: {maintenance_error}' if maintenance_error is not None else ''
+                common.die('status refresh maintenance refused; generated view needs repair; retry from fresh state' + reason)
         elif not changed:
             append(self.inst, self.node, "abort", self.ref, {"command": self.command})
         # Persisted partial changes require reconciliation, never a false commit.

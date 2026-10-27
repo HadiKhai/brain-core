@@ -875,7 +875,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         events = __import__('importlib').import_module(loader.package_name + '.events')
         inst = m.Instance(root)
         with mock.patch.object(events, 'maintain', side_effect=ValueError('concurrent input changed')):
-            with self.assertRaisesRegex(SystemExit, 'status refresh maintenance refused'):
+            with self.assertRaisesRegex(SystemExit, 'status refresh maintenance refused.*cause: concurrent input changed'):
                 with m.brain_lock(inst), events.Command(root, command='status'):
                     pass
         commit = events.read(inst)[-1]
