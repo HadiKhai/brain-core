@@ -23,6 +23,9 @@ class UsageCache(Scenario):
 
     def test_ui_discovery_cache_reuses_headers_and_invalidates_restored_mtime(self):
         path, model, read = self.discovery_fixture()
+        # Instance creation renders status, whose facts sections fill the derived
+        # database; start without it so discovery alone is shown not to create it.
+        (self.root / '.brain/usage.sqlite').unlink()
         first = read()
         self.assertEqual(len(first), 1)
         module = self.m._owners['codex_index']
