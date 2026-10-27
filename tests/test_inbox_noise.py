@@ -390,3 +390,19 @@ class InboxNoise(Scenario):
             notices.archive_plan(self.inst, n, reminders.lifecycle_read(self.inst))
         self.assertEqual(source.read_text(), notice)
         self.assertEqual(target.read_text(), 'Original bytes\n')
+
+    def test_archive_marker_without_retained_source_cannot_discard_a_line(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source, archive = self.root / 'inbox.md', self.root / 'inbox-archive.md'
+        notice = '- 2026-10-25 15:42 +00:00 from machine: command completed: command completed successfully\n'
+        source.write_text(notice)
+        notices.expire(self.inst, [n])
+        state = reminders.lifecycle_read(self.inst)
+        first = notices.archive_plan(self.inst, n, state)
+        archive.write_text(first['archive_text'].splitlines()[0] + '\n')
+        notices.publish_archive(notices.archive_plan(self.inst, n, state))
+        self.assertEqual(source.read_text(), '')
+        self.assertIn(notice, archive.read_text())
+        self.assertIn('"expired": true', archive.read_text())

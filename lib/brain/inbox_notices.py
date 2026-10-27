@@ -70,9 +70,10 @@ def archive_plan(inst, n, data):
         # Proof and original bytes survive even if the following inbox replacement fails.
         digest = hashlib.sha256(raw.encode()).hexdigest()
         marker = '<!-- inbox-archive:' + record['id'] + ':' + digest + ' -->'
-        if marker not in old:
-            additions.append(marker + '\n<!-- episode ' + json.dumps(record, sort_keys=True) + ' -->\n' +
-                             raw + ('' if raw.endswith('\n') else '\n'))
+        entry = (marker + '\n<!-- episode ' + json.dumps(record, sort_keys=True) + ' -->\n' +
+                 raw + ('' if raw.endswith('\n') else '\n'))
+        if entry not in old:
+            additions.append(entry)
         episodes.append(record['id'])
     archived = old + (('\n' if old and not old.endswith('\n') else '') + ''.join(additions))
     return {'source': source, 'archive': archive, 'inbox_text': ''.join(kept),
