@@ -53,8 +53,8 @@ class Watcher(Scenario):
         try:
             with mock.patch.object(m, 'spend_sources', return_value=([('codex', cfg)], {cfg}, set())), \
                     mock.patch.object(m, 'watch_scan', side_effect=scan):
-                m.wake_snapshot(inst, inst.node('root'), [])
-                m.wake_snapshot(inst, inst.node('root'), [])
+                m.watch_groups(inst)
+                m.watch_groups(inst)
             self.assertNotEqual(observed[0], observed[1])
         finally:
             resume.set()

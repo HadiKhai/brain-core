@@ -333,27 +333,13 @@ def wake_history_parse(data):
     return value['deliveries']
 
 
-def wake_group_items(inst, n, scan=None):
-    """One watch scan per delivery attempt; `scan` memoizes it, including its failure."""
-    from . import watch as _m_watch
-    if scan is not None and 'groups' in scan:
-        groups = scan['groups']
-    else:
-        try:
-            groups = _m_watch.watch_groups(inst)
-        except (Exception, SystemExit):
-            groups = None
-        if scan is not None:
-            scan['groups'] = groups
-    if groups is None:
-        raise ValueError('watch scan failed')
-    return groups.get(n['id'], {}).get('items', [])
+def wake_delivery_items(inst, n, pending):
+    """Identities of the queued requests; legacy/direct ones keep their opaque reason keys.
 
-
-def wake_delivery_items(inst, n, pending, scan=None):
-    """Legacy/direct requests have empty queue files; resolve their opaque reason keys."""
+    The drain runs no watch scan: a request without parseable metadata is
+    delivered under its opaque key, as when a scan fails.
+    """
     refs = []
-    names = set()
     for path in pending:
         try:
             value = json.loads(path.read_text())
@@ -364,25 +350,11 @@ def wake_delivery_items(inst, n, pending, scan=None):
                 raise ValueError('unknown wake kind')
             refs.extend(wake_item_refs(items))
         except (OSError, ValueError, KeyError, TypeError):
-            names.add(path.stem)
-    if not names:
-        try:
-            return wake_item_refs(refs)
-        except ValueError:
-            return []  # conflicting records still deliver an opaque request for every pending file
-    try:
-        items = wake_group_items(inst, n, scan)
-    except ValueError:
-        items = []  # legacy metadata recovery must not block a question's transport
-    for i in items:
-        if 'reason' in i:
-            key = hashlib.sha256((i.get('source', n['id']) + '\0' + i['reason']).encode()).hexdigest()
-            if key in names:
-                refs.append(i)
+            pass  # an unparsed request is still delivered under its opaque key
     try:
         return wake_item_refs(refs)
     except ValueError:
-        return []  # preserve ambiguous queue bytes and use opaque request keys
+        return []  # conflicting records still deliver an opaque request for every pending file
 
 
 def wake_reason_items(inst, n, reason):
@@ -405,42 +377,16 @@ def wake_reason_items(inst, n, reason):
                           and reason in (i.get('reason'), i.get('legacy_reason')))
 
 
-def wake_snapshot(inst, n, refs, scan=None, fence=None):
-    """The display snapshot a delivery acknowledges as shown.
+def wake_snapshot(inst, n, refs):
+    """What a delivery acknowledges as shown: only the refs it delivered.
 
-    Taken after the send, it is `fence`d by what was known before it: the watch
-    source signature must be unchanged and each item already known. Otherwise
-    only the delivered refs are acknowledged; a later need can only wake again.
+    Undelivered or newer needs stay pending and cause a later wake: an extra
+    wake, never hidden work. No watch scan runs on the delivery path.
     """
     try:
-        items = wake_group_items(inst, n, scan)
+        return wake_item_refs(refs)
     except ValueError:
-        items = []  # a display snapshot must never gate delivery
-    if fence is not None:
-        generation, known = fence
-        groups = (scan or {}).get('groups')
-        if (generation is None or groups is None or getattr(groups, 'stale', False)
-                or getattr(groups, 'source_generation', None) != generation):
-            items = []
-        known = known | {i['id'] for i in refs}
-        items = [i for i in items if i['id'] in known]
-    try:
-        return wake_item_refs(items + refs)
-    except ValueError:
-        return []  # a contradictory display snapshot cannot block an opaque wake
-
-
-def wake_known_before(inst):
-    """Identities the watcher had already published before a send; unknown evidence proves none."""
-    from . import watch as _m_watch
-    try:
-        state = _m_watch.watch_state(inst)
-        items = state.get('items', [])
-        return frozenset(state.get('seen', [])) | frozenset(
-            i['id'] for i in (items if isinstance(items, list) else [])
-            if isinstance(i, dict) and isinstance(i.get('id'), str))
-    except (OSError, ValueError):
-        return frozenset()
+        return []  # a contradictory snapshot cannot block an opaque wake
 
 
 def wake_previous_items(directory):
@@ -912,16 +858,10 @@ def wake_drain(inst, n, once=False):
                             broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
                         history = []
                     # Recheck the transport generation before reserving a turn or
-                    # recording a delivery attempt. No watch scan precedes the send:
-                    # unparsed requests keep their opaque keys, as when a scan fails,
-                    # and the display snapshot is taken after the send, fenced.
-                    from . import watch as _m_watch
+                    # recording a delivery attempt. No watch scan precedes the send.
                     generation = _m_instance.state_signature(current, target)
-                    try:
-                        fence = (_m_watch.watch_source_signature(current), wake_known_before(current))
-                    except (Exception, SystemExit):
-                        fence = (None, frozenset())  # an unknown source state acknowledges only the delivered refs
-                    refs = wake_delivery_items(current, target, pending, {'groups': None})
+                    refs = wake_delivery_items(current, target, pending)
+                    snapshot = wake_snapshot(current, target, refs)
                     latest = _m_instance.Instance(inst.root)
                     latest_target = latest.node(target['id'])
                     if _m_instance.state_signature(latest, latest_target) != generation:
@@ -930,7 +870,7 @@ def wake_drain(inst, n, once=False):
                     if action == 'hold':
                         attempted.update(path.name for path in pending)
                         return
-                    # Until the post-send snapshot exists, a first delivery compares with nothing.
+                    # A first delivery compares with nothing: its snapshot holds only the delivered refs.
                     before = history[-1].get('snapshot', history[-1]['items']) if history else []
                     _m_common.atomic_write(last, str(WAKE_CLOCK.time()), private=True)  # failures are rate-limited too
                     inflight = directory / 'inflight.json'
@@ -954,15 +894,6 @@ def wake_drain(inst, n, once=False):
                         for item in refs:
                             if item['kind'] in WAKE_TERMINAL_KINDS:
                                 wake_accept_write(wake_terminal_receipt(current, item['id']), 'delivered\n')
-                        snapshot = wake_snapshot(current, target, refs, {}, fence)
-                        if not history:
-                            # An upgraded watcher already knows old queued/delivered identities.
-                            # Do not bring those back merely because delivery logs are new.
-                            try:
-                                known = set(_m_watch.watch_state(current).get('seen', [])) - {i['id'] for i in refs}
-                            except (OSError, ValueError):
-                                known = set()
-                            before = [i for i in snapshot if i['id'] in known]
                         try:
                             wake_ack_shown(current, target, snapshot)
                         except OSError:
