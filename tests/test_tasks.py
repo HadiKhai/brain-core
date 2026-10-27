@@ -390,6 +390,23 @@ class Tasks(Scenario):
         self.assertEqual(out['next']['id'], 'APP-3')
         self.assertIn('tasks: valid', self.b(root, 'task', 'check', 'root'))
 
+    def test_cli_dependency_add_set_clear_and_invalid_graph_leave_records_intact(self):
+        root = self.init('demo')
+        self.b(root, 'task', 'add', 'root', 'BASE', '--title', 'Base work')
+        self.b(root, 'task', 'add', 'root', 'FOLLOW', 'depends_on=BASE', '--title', 'Waits on base')
+        self.b(root, 'task', 'add', 'root', 'MISSING', 'depends_on=ABSENT', '--title', 'Missing reference', ok=False)
+        n = Instance(root).node('root')
+        self.assertNotIn('MISSING', tasks.read_records(n))
+        before = {p: p.read_bytes() for p in (root / 'tasks').glob('*.md')}
+        for ident, deps in [('BASE', 'FOLLOW'), ('FOLLOW', 'ABSENT'), ('BASE', 'root:FOLLOW')]:
+            self.b(root, 'task', 'set', 'root', ident, 'depends_on=' + deps, ok=False)
+            self.assertEqual(before, {p: p.read_bytes() for p in before})
+        self.b(root, 'task', 'set', 'root', 'FOLLOW', 'depends_on=')
+        self.b(root, 'task', 'set', 'root', 'BASE', 'depends_on=FOLLOW')
+        rows = tasks.read_records(n)
+        self.assertEqual(rows['BASE']['depends_on'], ['FOLLOW'])
+        self.assertEqual(rows['FOLLOW']['depends_on'], [])
+
     def test_job_start_requires_ready_task_and_records_exact_job(self):
         from brain import jobs
         self.add(status='ready')
@@ -442,7 +459,7 @@ class Tasks(Scenario):
         with mock.patch.object(sync, 'integration_packet', return_value={'verify_result': 0, 'head': head, 'main': base}):
             tasks.job_closed(self.inst, self.n, row)
         row = tasks.read_records(self.n)['APP-1']
-        self.assertEqual(row['status'], 'merged')
+        self.assertEqual(row['status'], 'done')
         self.assertEqual(row['merge_sha'], head)
         self.assertEqual(row['code_path'], 'engine.py')
 
@@ -501,8 +518,8 @@ class Tasks(Scenario):
         train, jobs, path, data = self.train_fixture(unlinked=True)
         train.finish(self.inst, self.n, path, data)
         row = tasks.read_records(self.n)['APP-1']
-        self.assertEqual(row['status'], 'merged')
-        self.assertEqual(row['merge_sha'], data['accepted'][0]['head'])
+        self.assertEqual(row['status'], 'done')
+        self.assertEqual(row['merge_sha'], data['tip'])
         self.assertEqual(row['code_path'], 'engine0.py')
         self.assertEqual(row['attempts'][0]['state'], 'closed')
         self.assertTrue(all(r['Ended'] for r in jobs.read_jobs(self.n)))
@@ -515,7 +532,7 @@ class Tasks(Scenario):
         tasks.mutate(self.inst, self.n, 'APP-2', {'depends_on': ['APP-1', 'root:APP-1']})
         train.finish(self.inst, self.n, path, data)
         rows = tasks.read_records(self.n)
-        self.assertEqual([r['status'] for r in rows.values()], ['merged', 'merged'])
+        self.assertEqual([r['status'] for r in rows.values()], ['done', 'done'])
         self.assertEqual([r['attempts'][0]['state'] for r in rows.values()], ['closed', 'closed'])
         tasks.validate(self.n, rows)
         tasks.mutate(self.inst, self.n, 'APP-2', {'priority': 'P1'})
@@ -558,7 +575,7 @@ class Tasks(Scenario):
         # Reconciliation runs with main unoccupied; instance records stay intact.
         self.git('checkout', '--detach', '-q', cwd=self.root)
         train.run_train(self.inst, self.n, self.root, 'false', argparse.Namespace(jobs=None))
-        self.assertEqual([r['status'] for r in tasks.read_records(self.n).values()], ['merged', 'merged'])
+        self.assertEqual([r['status'] for r in tasks.read_records(self.n).values()], ['done', 'done'])
         completed = tasks.read_records(self.n)['APP-1']
         metadata = {'event_pending', 'landing_event'}
         self.assertEqual({k: v for k, v in completed.items() if k not in metadata},
@@ -607,7 +624,7 @@ class Tasks(Scenario):
         with mock.patch.object(task_linear, 'request') as request, mock.patch.object(tasks, 'emit_task_landed', side_effect=emit):
             train.finish(self.inst, self.n, path, data)
         request.assert_not_called()
-        self.assertEqual(observed, [['merged', 'merged'], ['merged', 'merged']])
+        self.assertEqual(observed, [['done', 'done'], ['done', 'done']])
         self.assertEqual(tasks.read_records(self.n)['APP-1']['provider_pending'], 'completed')
 
     def test_train_finish_validates_entire_batch_before_any_task_write(self):
@@ -1362,6 +1379,50 @@ class Tasks(Scenario):
         self.assertEqual(len(facts), 1)
         task_reconcile.reconcile(self.inst, [self.n], apply=True)
         self.assertEqual(len([e for e in events.facts(self.inst, self.n) if e['data'].get('fact_type') == 'task_landed']), 1)
+
+    def test_reconcile_multiple_nodes_landings_and_dependents_make_one_real_commit(self):
+        from brain import events, jobs, task_reconcile
+        self.repo(self.root)
+        (self.root / '.git/info/exclude').write_text('.brain/\n')
+        peer = self.peer_node('producer')
+        home = self.repo(self.tmp / 'producer-home')
+        tasks._m_common.write_fm(peer['dir'] / 'node.md',
+                                 {'id': 'producer', 'owners': 'sample', 'home': str(home)}, '')
+        peer = self.inst.node('producer')
+        for node in (self.n, peer):
+            home = node['home_path']
+            base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+            (home / 'engine.py').write_text('VALUE = 1\n')
+            self.git('add', 'engine.py', cwd=home)
+            self.git('commit', '-qm', 'Deliver fixture engine', cwd=home)
+            head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+            ledger = []
+            for index in range(2):
+                job = {'Job': 'job/delivered-' + str(index), 'Started': self.inst.now(),
+                       'Ended': self.inst.now(), 'Outcome': 'merged', 'Base commit': base, 'Head commit': head}
+                key = jobs.job_key(job)
+                ledger.append(job)
+                tasks.mutate(self.inst, node, 'IMPORTED-' + str(index),
+                    {'title': 'Imported work', 'job': key, 'branch': job['Job'], 'provenance': ['job:' + key]}, create=True)
+            jobs.write_jobs(self.inst, node, ledger)
+        self.add('FOLLOW', status='blocked', depends_on=['IMPORTED-0', 'producer:IMPORTED-1'])
+        self.commit.stop()  # Assert actual Git commits, including synchronous event consumers.
+        before = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        with mock.patch.object(self.inst, '_commit', wraps=self.inst._commit) as commits:
+            task_reconcile.reconcile(self.inst, [self.n, peer], apply=True)
+        self.assertEqual(commits.call_count, 1)
+        self.assertEqual(self.git('rev-list', '--count', before + '..HEAD', cwd=self.root).strip(), '1')
+        for node in (self.n, peer):
+            rows = tasks.read_records(node)
+            self.assertEqual([rows['IMPORTED-' + str(i)]['status'] for i in range(2)], ['done', 'done'])
+            self.assertTrue(all(rows['IMPORTED-' + str(i)].get('landing_event') for i in range(2)))
+            self.assertEqual(len([e for e in events.facts(self.inst, node) if e['data'].get('fact_type') == 'task_landed']), 2)
+        self.assertEqual(tasks.read_records(self.n)['FOLLOW']['status'], 'ready')
+        self.assertEqual(self.git('status', '--porcelain', cwd=self.root).strip(), '')
+        self.assertEqual(events.journal(self.inst).state['pending_landings'], {})
+        after = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        task_reconcile.reconcile(self.inst, [self.n, peer], apply=True)
+        self.assertEqual(self.git('rev-parse', 'HEAD', cwd=self.root).strip(), after)
 
     def test_add_validates_only_an_unlinked_record_and_its_exact_requirement(self):
         self.add('DEPENDENCY')

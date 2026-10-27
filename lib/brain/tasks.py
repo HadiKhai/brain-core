@@ -543,17 +543,22 @@ def job_closed(inst, n, row):
     head = row.get('Head commit') or packet.get('head', '')
     if row.get('Outcome') == 'merged' and packet.get('verify_result') == 0 and head == packet.get('head'):
         base = packet.get('integration_base') or packet.get('main')
-        paths = _m_common.git('diff', '--name-only', base or head + '^', head, cwd=n['home_path']).stdout.splitlines()
-        if paths:
-            changes = {'status': 'merged', 'merge_sha': head, 'code_path': ', '.join(paths),
-                       'evidence': ['Verified job ' + row['Job'] + ' at ' + inst.now()], 'park_reason': '', 'resume': ''}
+        main = _m_common.git('rev-parse', '--verify', 'refs/heads/main^{commit}', cwd=n['home_path']).stdout.strip()
+        diff = _m_common.git('diff', '--name-only', base or head + '^', head, cwd=n['home_path'])
+        if (diff.returncode == 0 and diff.stdout.strip() and SHA.fullmatch(main) and
+                _m_common.git('merge-base', '--is-ancestor', head, main, cwd=n['home_path']).returncode == 0):
+            changes = {'status': 'done', 'merge_sha': main, 'code_path': ', '.join(diff.stdout.splitlines()),
+                       'baseline_sha': current.get('baseline_sha') or base or '',
+                       'evidence': list(dict.fromkeys(current['evidence'] + [
+                           'Verified job ' + row['Job'] + ' at ' + head + '; landed on main ' + main])),
+                       'park_reason': '', 'resume': ''}
     from . import task_flow as _m_flow
     if changes['status'] == 'parked':
         changes.update(_m_flow.park_fields(inst))
     # Existing task proof remains unchanged if the job endpoint is not on main.
     try:
         mutate(inst, n, ident, changes, provider=True)
-        if changes['status'] == 'merged':
+        if changes['status'] == 'done':
             provider_job_state(inst, n, ident, 'completed')
     except ValueError:
         mutate(inst, n, ident, {'status': 'parked', 'park_reason': 'Landing evidence is incomplete',
@@ -608,7 +613,8 @@ def train_finished(inst, n, rows, data):
             diff = _m_common.git('diff', '--name-only', entry['base'], entry['head'], cwd=n['home_path'])
             if diff.returncode == 0 and diff.stdout.strip():
                 evidence = 'Verified train ' + data['batch'] + ' at ' + tip
-                row.update(status='merged', merge_sha=entry['head'], code_path=', '.join(diff.stdout.splitlines()),
+                row.update(status='done', merge_sha=tip, code_path=', '.join(diff.stdout.splitlines()),
+                           baseline_sha=row.get('baseline_sha') or entry['base'],
                            evidence=list(dict.fromkeys(row['evidence'] + [evidence])), park_reason='', resume='')
         row.update(train_completion=receipt, updated=data['ended'], last_progress_at=data['ended'])
         changed.add(ident)
@@ -617,7 +623,7 @@ def train_finished(inst, n, rows, data):
     while True:
         failed = []
         for ident in changed:
-            if records[ident]['status'] == 'merged':
+            if records[ident]['status'] == 'done':
                 try:
                     _m_flow.completion(n, records[ident], records=records)
                 except (ValueError, OSError):
@@ -630,7 +636,7 @@ def train_finished(inst, n, rows, data):
     validate(n, records)  # no task writes until the full prospective graph passes
     for ident in sorted(changed):
         row = records[ident]
-        if row['status'] == 'merged':
+        if row['status'] == 'done':
             row['event_pending'] = 'task_landed'
             if row.get('source') == 'linear':
                 row['provider_pending'] = 'completed'

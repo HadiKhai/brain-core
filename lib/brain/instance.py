@@ -165,6 +165,10 @@ class Instance:
 
     def commit(self, paths, msg):
         """Commit `paths` plus what this command wrote. Other uncommitted work stays as it is."""
+        batch = getattr(self, '_commit_batch', None)
+        if batch is not None:
+            batch.extend(paths)
+            return
         if not (self.root / ".git").exists():
             return
         root = self.root.resolve()
@@ -186,6 +190,25 @@ class Instance:
             return
         with brain_lock(self):
             self._commit(root, sorted(set(want)), msg)
+
+    @contextlib.contextmanager
+    def commit_batch(self, msg):
+        """One commit for a locked publication and its synchronous event consumers.
+
+        Files and journal facts remain durable as they are written. A failed
+        publication leaves them available for recovery without committing a
+        partial batch. Nested consumers share this instance's pending paths.
+        """
+        with brain_lock(self):
+            if getattr(self, '_commit_batch', None) is not None:
+                yield
+                return
+            paths = self._commit_batch = []
+            try:
+                yield
+            finally:
+                self._commit_batch = None
+            self.commit(paths, msg)
 
     def commit_settings_batch(self, paths, msg):
         """Explicit named-path boundary: no ambient TOUCHED paths enter a settings batch.

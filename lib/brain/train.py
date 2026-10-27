@@ -230,6 +230,7 @@ def finish(inst, n, path, data):
         row.update({"Ended": data["ended"], "Outcome": "merged", "Batch": data["batch"],
                     "Commits": str(entry["commits"]), "Lesson check": "required",
                     "Base commit": entry["base"], "Head commit": entry["head"],
+                    "Main commit": data.get("tip", ""),
                     "Hours": f"{_m_status.elapsed(started, ended) / 3600:.1f}" if started and ended else ""})
     _m_jobs.write_jobs(inst, n, rows)  # one atomic ledger replacement, all jobs or none
     _m_tasks.train_finished(inst, n, rows, data)

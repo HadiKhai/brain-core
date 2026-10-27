@@ -71,7 +71,8 @@ export function Tasks({ s, go, node }: { s: RecordData; go: Go; node?: string })
   const rows = useMemo(() => taskRows(s), [s]);
   const graph = useMemo(() => taskGraph(rows), [rows]);
   const scoped = useMemo(() => rows.filter(t => !node || t.node === node), [rows, node]);
-  const filtered = useMemo(() => filterTasks(scoped, node || filterNode, owner, query, dropped), [scoped, node, filterNode, owner, query, dropped]);
+  const available = useMemo(() => filterTasks(scoped, "", "", "", dropped), [scoped, dropped]);
+  const filtered = useMemo(() => filterTasks(available, node || filterNode, owner, query, dropped), [available, node, filterNode, owner, query, dropped]);
   const owners = [...new Set(scoped.map(t => String(t.owner || "")).filter(Boolean))].sort();
   const nodes = list(s.nodes).filter(n => scoped.some(t => t.node === n.id));
   const errors = list(s.nodes).filter(n => (!node || n.id === node) && n.tasks?.error);
@@ -83,7 +84,7 @@ export function Tasks({ s, go, node }: { s: RecordData; go: Go; node?: string })
       {!node && <Choice tooltips={false} name="Filter tasks by node" value={filterNode} onChange={setFilterNode} options={[{ value: "", label: "All nodes" }, ...nodes.map(n => ({ value: n.id, label: n.title }))]} />}
       <Choice tooltips={false} name="Filter tasks by owner" value={owner} onChange={setOwner} options={[{ value: "", label: "All owners" }, ...owners.map(o => ({ value: o, label: o }))]} />
       <Button variant={dropped ? "secondary" : "outline"} size="sm" aria-pressed={dropped} onClick={() => setDropped(v => !v)}>Show dropped</Button>
-      <small>{filtered.length} of {scoped.length} tasks · {scoped.reduce((sum, t) => sum + (t.attempt_count || 0), 0)} attempts{!dropped ? " · dropped hidden" : ""}</small>
+      <small>{filtered.length} of {available.length} tasks · {available.reduce((sum, t) => sum + (t.attempt_count || 0), 0)} attempts{!dropped ? " · dropped hidden" : ""}</small>
     </div>
     {s.brain?.filling_in && <p className="task-loading" role="status">Task snapshot loaded; refreshing workspace details…</p>}
     <SectionTabs value={view} onValue={setView} tabs={[

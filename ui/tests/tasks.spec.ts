@@ -16,17 +16,45 @@ test("kanban keeps five columns, hides dropped by default and opens the exact jo
   await expect(tasks.locator('.task-column')).toHaveCount(5);
   await expect(tasks.getByRole('region', { name: 'Parked tasks' })).toContainText('Narrow the parser contract');
   await expect(tasks.getByRole('region', { name: 'Parked tasks' })).toContainText('Reconcile an old delivery claim');
-  await expect(tasks).toContainText('6 of 7 tasks · 2 attempts · dropped hidden');
+  await expect(tasks).toContainText('6 of 6 tasks · 2 attempts · dropped hidden');
   await expect(tasks.getByRole('region', { name: 'Done tasks' })).not.toContainText('old delivery claim');
   await expect(tasks.locator('[data-task-id="APP-1"]')).toContainText('Unlocks 1 downstream: APP-2');
   await expect(tasks.locator('[data-task-id="APP-1"]')).toContainText('job/navigation');
   await tasks.getByRole('button', { name: 'Show dropped' }).click();
+  await expect(tasks).toContainText('7 of 7 tasks · 2 attempts');
   await expect(tasks.getByRole('region', { name: 'Dropped tasks' })).toContainText('Retain the obsolete preview');
   await expect(tasks.getByRole('region', { name: 'Done tasks' })).not.toContainText('obsolete');
   await shot(page, 'tasks-board');
   await tasks.getByRole('button', { name: 'View job' }).click();
   await expect(page).toHaveURL(/node=field-guide/);
   await expect(page).toHaveURL(/thread=job%2Fnavigation/);
+});
+
+test("canvas match totals and attempts exclude dropped records until toggled", async ({ page }) => {
+  await page.route('**/snapshot?scenario=tasks', async route => {
+    const response = await route.fetch();
+    const html = (await response.text()).replace('</head>', `<script>
+      const rows = window.__STATE__.nodes[1].tasks.rows;
+      const seed = rows.find(t => t.status === 'dropped');
+      seed.attempt_count = 100;
+      rows.push(...Array.from({length:1306}, (_, i) => ({...seed, id:'DROPPED-'+i})));
+      </script></head>`);
+    await route.fulfill({ response, body: html });
+  });
+  await page.goto('/snapshot?scenario=tasks#view=tasks');
+  const tasks = page.locator('[data-page=tasks]');
+  await expect(tasks).toContainText('6 of 6 tasks · 2 attempts · dropped hidden');
+  await tasks.getByRole('tab', { name: 'Canvas', exact: true }).click();
+  await tasks.getByRole('button', { name: 'Show all 6 tasks', exact: true }).click();
+  await expect(tasks.getByRole('group', { name: 'Canvas controls' })).toContainText('Show all 6 tasks');
+  await tasks.getByRole('textbox', { name: 'Search tasks' }).fill('obsolete preview');
+  await expect(tasks).toContainText('0 of 6 tasks');
+  await expect(tasks).toContainText('No tasks to draw.');
+  await tasks.getByRole('button', { name: 'Show dropped', exact: true }).click();
+  await expect(tasks).toContainText('1307 of 1313 tasks · 130702 attempts');
+  await expect(tasks.getByRole('button', { name: 'Show all 1307 tasks', exact: true })).toBeVisible();
+  await tasks.getByRole('button', { name: 'Show dropped', exact: true }).click();
+  await expect(tasks).toContainText('0 of 6 tasks · 2 attempts · dropped hidden');
 });
 
 test("canvas directs edges, highlights downstream and opens task details with pan and zoom", async ({ page }) => {
