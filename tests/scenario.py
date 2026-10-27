@@ -219,8 +219,7 @@ class Scenario(unittest.TestCase):
         self.addCleanup(restore_gate_environment)
         for key in gate_keys:
             os.environ.pop(key, None)
-        self.tmp = Path(tempfile.mkdtemp(prefix="brain-test-",
-                                       dir=getattr(self, 'temporary_parent', None))).resolve()
+        self.tmp = Path(tempfile.mkdtemp(prefix="brain-test-")).resolve()
         if getattr(self, 'retain_rehearsal_evidence', False):
             self.start_native_evidence()
         self.env = {**os.environ, "HOME": str(self.tmp), "BRAIN_NO_REEXEC": "1",

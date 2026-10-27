@@ -13,9 +13,9 @@ from . import nodes as _m_nodes
 from . import worktrees as _m_worktrees
 
 
-# Binary GiB. Logical file bytes;
+# Decimal GB, matching the ordinary-check operator threshold. Logical file bytes;
 # no content reads, allocated-block accounting, or APFS clone-size claims.
-REPORT_WARNING_BYTES = 1024 ** 3
+REPORT_WARNING_BYTES = 1_000_000_000
 REPORT_SIZE_ENTRIES = 10000
 REPORT_SIZE_SECONDS = 0.1
 
@@ -84,7 +84,7 @@ def report_size_warnings(inst, nodes):
                     elif entry.is_dir(follow_symlinks=False):
                         total, known = size(Path(entry.path))
                         if total > REPORT_WARNING_BYTES:
-                            warnings.append(label + '/' + entry.name + ': report folder exceeds 1 GiB; review retained bulk copies')
+                            warnings.append(label + '/' + entry.name + ': report folder exceeds 1 GB; review retained bulk copies')
                         elif not known:
                             warnings.append(label + '/' + entry.name + ': size unknown (metadata budget or unreadable)')
         except OSError:

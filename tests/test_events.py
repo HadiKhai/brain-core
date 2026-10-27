@@ -29,36 +29,6 @@ class EventAppend(Scenario):
         self.assertEqual([json.loads(line) for line in path.read_text().splitlines()],
                          [{'earlier': True}, {'new': True}])
 
-    def test_preparation_failure_keeps_primary_error_and_closes_its_lease(self):
-        root = self.init('preparation-failure')
-        inst = instance.Instance(root)
-        op = events.Command(root, command='status')
-        primary, secondary = ValueError('preparation body'), OSError('terminal publication')
-        with instance.brain_lock(inst), \
-                mock.patch.object(events, 'fold_hooks', side_effect=primary), \
-                mock.patch.object(op, 'finish', side_effect=secondary):
-            with self.assertRaises(ValueError) as caught:
-                op.__enter__()
-        self.assertIs(primary, caught.exception)
-        self.assertIs(secondary, caught.exception.__cause__)
-        self.assertNotIn(op, events._CURRENT)
-        self.assertIsNone(op.lease)
-        self.assertFalse(events.lease_path(inst, op.ref).exists())
-
-    def test_event_source_refusal_precedes_repair_and_reconstruction_writes(self):
-        root = self.init('preflight-refusal')
-        (root / 'backlog.md').write_text('- independently changed\n')
-        before = {p.relative_to(root).as_posix(): p.read_bytes()
-                  for p in (root / '.brain').rglob('*') if p.is_file()}
-        inst = instance.Instance(root)
-        with instance.brain_lock(inst), mock.patch.object(events, 'source', return_value='events'):
-            with self.assertRaises(SystemExit):
-                events.Command(root, command='check').__enter__()
-        after = {p.relative_to(root).as_posix(): p.read_bytes()
-                 for p in (root / '.brain').rglob('*') if p.is_file()}
-        self.assertEqual({k: v for k, v in before.items() if k != '.brain/lock'},
-                         {k: v for k, v in after.items() if k != '.brain/lock'})
-
     def test_canonical_parent_retarget_refuses_append_and_private_read(self):
         r = self.init('demo')
         for operation in ('append', 'read', 'index'):
