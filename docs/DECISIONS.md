@@ -3037,3 +3037,14 @@ clocks and their own receipt/contract/attempt modification times). Stale rows ke
 recorded final usage where available; unavailable live observations remain unknown.
 The memo scope names accounting reads only; mutation guards remain fresh. Parser
 changes and moving refresh computation outside the writer lock are separate work.
+
+## 2026-10-27: Batch direct wake observations inside each watcher scan
+
+The watcher entry point owns a command read snapshot even when called directly
+by a wake drain, pending-item revalidation or delivery snapshot. This shares
+transcript discovery, job attribution and repeated Git display reads across the
+jobs in that scan. Each standalone call gets a fresh scope; existing due/watch
+callers retain their enclosing command scope. Communication reconciliation runs
+before the snapshot. Source-signature and receipt-generation checks still run
+before publication, so cached reads cannot authorize a changed source state.
+The scope stores no cross-command watcher output or delivery authority.
