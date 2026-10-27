@@ -3025,6 +3025,17 @@ An authenticated browser startup may seed its first response from the existing p
 
 Concurrent explicit JSON waiters first attempt the fill lock without blocking. A follower joins the existing owner, then consumes its newly published validated complete generation. It never queues another rebuild; failed or unpublished owners fail closed for the follower. The source-bound input-index work is parked separately while this urgent 7.3a change is reviewed.
 
+## 2026-10-27: Allow overlapping handback attempt creation
+
+Creating a handback attempt fingerprints its refs and verification inputs without
+holding the instance writer lock. It fences the ledger, policy, local bindings,
+Git metadata and selected inputs across that read, then writes the replacement
+attempt under the retaken lock. The previous attempt is an output being replaced,
+not a binding input: another enqueue may replace it during the unlocked read
+without invalidating creation. Both queue requests remain durable; the last
+attempt published owns the current job, and an older queued attempt still fails
+the runner's identity check. Completion publication continues to fence the exact
+attempt, and lease ownership and PID birth-stamp checks remain unchanged.
 
 ## D40009: Bound live accounting to command and job observations
 
