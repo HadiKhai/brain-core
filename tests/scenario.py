@@ -34,6 +34,7 @@ _core_bytecode = {}
 _runtime_bytecode = None
 _bytecode_lock = threading.RLock()
 _git_directories = {}
+_cli_context_lock = threading.RLock()
 
 
 @lru_cache(maxsize=8)
@@ -249,6 +250,7 @@ class _FixtureTemplate:
 class Scenario(unittest.TestCase):
     fixture_init_in_process = False
     fixture_templates = False
+    cli_in_process = False
     def setUp(self):
         # A real verify may enclose the test runner. Its descriptor stays open and
         # locked; its environment proof must not identify our temporary instances.
@@ -367,21 +369,80 @@ class Scenario(unittest.TestCase):
         return result
 
     # helpers
-    def run_(self, args, cwd, ok=True, brain=None):
-        # Existing scenarios assert complete UI data; the default JSON CLI may
-        # now return an honest initial observation while its fill is running.
-        if args and args[0] == 'ui' and '--json' in args and '--wait' not in args:
-            args = [*args, '--wait']
-        launcher = Path(brain or (cwd / 'core/bin/brain'))
-        cache = fixture_runtime_cache(launcher.resolve().parent.parent)
-        r = subprocess.run([sys.executable, '-B', '-X', 'pycache_prefix=' + str(cache),
-                            str(launcher), *args], cwd=cwd,
-                           env=self.env, capture_output=True, text=True)
+    def run_(self, args, cwd, ok=True, brain=None, *, native=False):
+        r = self.command_result(args, cwd, brain, native=native)
         if ok is True and r.returncode:
             self.fail(f"brain {' '.join(args)} failed:\n{r.stdout}\n{r.stderr}")
         if ok is False and not r.returncode:
             self.fail(f"brain {' '.join(args)} should have failed:\n{r.stdout}")
         return r.stdout + r.stderr
+
+    def command_result(self, args, cwd, brain=None, *, native=False):
+        # Existing scenarios require a complete UI observation.
+        if args and args[0] == 'ui' and '--json' in args and '--wait' not in args:
+            args = [*args, '--wait']
+        launcher = Path(brain or (cwd / 'core/bin/brain'))
+        cache = fixture_runtime_cache(launcher.resolve().parent.parent)
+        command = [sys.executable, '-B', '-X', 'pycache_prefix=' + str(cache), str(launcher), *args]
+        if self._can_run_in_process(launcher, native):
+            return self._in_process_result(args, cwd, launcher, command)
+        return subprocess.run(command, cwd=cwd, env=self.env, capture_output=True, text=True)
+
+    def _can_run_in_process(self, launcher, native=False):
+        # Exact-class opt-in: a future subclass must audit its own boundaries.
+        if (native or not type(self).__dict__.get('cli_in_process', False)
+                or self.env.get('BRAIN_NO_REEXEC') != '1'
+                or getattr(self, '_evidence', None)
+                or getattr(self, 'retain_rehearsal_evidence', False)
+                or hasattr(self, '_native_retention')
+                or self.env.get('BRAIN_REHEARSAL_EVIDENCE_DIR')
+                or os.environ.get('BRAIN_REHEARSAL_EVIDENCE_DIR')):
+            return False
+        for module in list(sys.modules.values()):
+            name = getattr(module, '__name__', '')
+            for suffix, variable in (('.rehearse', '_retention_children'),
+                                     ('.rehearse_transactions', '_validation_retainer')):
+                if name.endswith(suffix):
+                    context = getattr(module, variable, None)
+                    if context is not None and context.get() is not None:
+                        return False
+        package = launcher.resolve().parent.parent / 'lib/brain'
+        required = ('__init__', 'cli', 'common', 'instance', 'jobs', 'events')
+        try:
+            return (all((package / (name + '.py')).is_file() for name in required)
+                    and launcher.read_bytes() == (CORE / 'bin/brain').read_bytes())
+        except OSError:
+            return False
+
+    def _in_process_result(self, args, cwd, launcher, command):
+        """Text-only audited commands; fresh main, never native child evidence."""
+        stdout, stderr = io.StringIO(newline=None), io.StringIO(newline=None)
+        code = 0
+        try:
+            with _cli_context_lock, contextlib.redirect_stdout(stdout), \
+                    contextlib.redirect_stderr(stderr), \
+                    mock.patch.object(sys, 'stdin', io.StringIO()), \
+                    mock.patch.object(sys, 'argv', [str(launcher), *args]), \
+                    mock.patch.object(sys, 'path', list(sys.path)), \
+                    mock.patch.object(sys, 'meta_path', list(sys.meta_path)), \
+                    mock.patch.object(sys, 'pycache_prefix', self.env.get('PYTHONPYCACHEPREFIX')), \
+                    self._fixture_module(cwd, launcher) as module:
+                try:
+                    module.main()
+                except SystemExit as error:
+                    if error.code is None:
+                        code = 0
+                    elif isinstance(error.code, int):
+                        code = error.code & 255
+                    else:
+                        print(error.code, file=stderr)
+                        code = 1
+        except Exception as error:
+            raise AssertionError('in-process brain command raised: ' + ' '.join(args)
+                                 + '\n' + stdout.getvalue() + stderr.getvalue()) from error
+        result = subprocess.CompletedProcess(command, code, stdout.getvalue(), stderr.getvalue())
+        result.in_process = True
+        return result
 
     def git(self, *args, cwd):
         r = subprocess.run(["git", "-c", "protocol.file.allow=always", *args], cwd=cwd, env=self.env,

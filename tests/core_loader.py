@@ -22,7 +22,20 @@ def _compiled_source(path, source):
     # Cache only immutable code, never a module or its initialized globals. Read
     # the source on every load: even same-size edits with restored mtimes count.
     # Bounding this cache also bounds retention of temporary installed cores.
-    return compile(source, path, 'exec', dont_inherit=True)
+    return _source_filename(_compiled_template(source), path)
+
+
+@lru_cache(maxsize=256)
+def _compiled_template(source):
+    # Independent fixture paths contain the same immutable source bytes. Compile
+    # once, then give every nested code object its actual owning filename.
+    return compile(source, '<fixture-source>', 'exec', dont_inherit=True)
+
+
+def _source_filename(code, path):
+    constants = tuple(_source_filename(value, path) if isinstance(value, types.CodeType) else value
+                      for value in code.co_consts)
+    return code.replace(co_filename=path, co_consts=constants)
 
 
 class _FixtureSourceLoader(importlib.machinery.SourceFileLoader):

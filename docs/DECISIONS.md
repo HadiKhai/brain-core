@@ -2941,3 +2941,17 @@ kernel flock refusal before asserting proposals remain unchanged. Keep the
 native children and all existing result, commit and isolation assertions.
 Set both Git fixture dates explicitly across sync boundaries instead of sleeping
 for Git's second resolution; product time and unrelated clocks remain real.
+
+## D28005: Opt audited text commands into a fresh in-process CLI
+
+Keep asserted commands on real subprocesses by default. Explicit class opt-ins
+may call a freshly loaded modular main for pure file/Git scenarios, returning
+separate normalized text streams and shell-visible SystemExit status. Restore
+environment, cwd, argv, import paths, standard streams and bytecode settings
+on success and failure; remove only that command's owned module namespace.
+Native evidence, retention contexts, re-execution, custom launchers and inherited
+opt-ins keep real subprocesses, with an explicit per-call native escape.
+
+Share only immutable compiled source across identical fixture copies; recursively
+bind nested code filenames to each actual source path. Module globals, locks,
+context variables and initialized caches are always newly constructed per call.

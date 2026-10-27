@@ -29,6 +29,7 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class History(Scenario):
+    cli_in_process = True
     """brain history: past sessions about a home, extracted without a model into batches readers finish."""
     fixture_init_in_process = True
     fixture_templates = True
@@ -682,6 +683,7 @@ class History(Scenario):
 
 
 class HistorySizes(History):
+    cli_in_process = True
     fixture_templates = True
     # Both History.setUp and the extra instance below only construct fixtures;
     # history, containment and Git assertions still use their original paths.

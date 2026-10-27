@@ -29,6 +29,118 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def result_core(self):
+        core, package = self.fixture_source()
+        (core / 'bin/brain').write_bytes((CORE / 'bin/brain').read_bytes())
+        for name in ('common', 'instance', 'events'):
+            (package / (name + '.py')).write_text('')
+        (package / 'cli.py').write_text(
+            'import os,sys\nfrom pathlib import Path\n'
+            'loaded = os.environ.get("BRAIN_RESULT_TEST")\ncalls = []\n'
+            'def main():\n'
+            ' mode = sys.argv[1]\n calls.append(mode)\n'
+            ' if mode == "pid":\n  print(os.getpid()); return\n'
+            ' print(len(calls), loaded, Path.cwd())\n'
+            ' sys.stdout.write("first\\r\\nsecond\\r")\n'
+            ' sys.stderr.write("error\\r\\n")\n'
+            ' if mode == "mutate":\n'
+            '  os.environ.clear(); os.chdir("/"); sys.argv.append("changed")\n'
+            '  sys.path.clear(); sys.meta_path.clear(); sys.pycache_prefix = "changed"\n'
+            '  sys.dont_write_bytecode = False\n'
+            '  raise RuntimeError("injected command failure")\n'
+            ' if mode == "string": raise SystemExit("refused")\n'
+            ' if mode == "object": raise SystemExit({"reason": "refused"})\n'
+            ' if mode == "none": raise SystemExit(None)\n'
+            ' if mode != "normal": raise SystemExit(int(mode))\n')
+        return core, package
+
+    def test_asserted_main_results_match_native_streams_exits_and_fresh_state(self):
+        core, _ = self.result_core()
+        launcher = core / 'bin/brain'
+        self.env['BRAIN_RESULT_TEST'] = 'fixture import environment'
+        for mode in ('normal', 'none', '0', '7', '-1', '257', 'string', 'object'):
+            with self.subTest(mode=mode):
+                native = self.command_result([mode], self.tmp, launcher, native=True)
+                result = self._in_process_result([mode], self.tmp, launcher, native.args)
+                self.assertTrue(result.in_process)
+                self.assertFalse(hasattr(result, 'pid'))
+                self.assertEqual((result.args, result.returncode, result.stdout, result.stderr),
+                                 (native.args, native.returncode, native.stdout, native.stderr))
+                self.assertIn('1 fixture import environment', result.stdout)
+        with mock.patch.object(type(self), 'cli_in_process', True):
+            self.assertIn('refused', self.run_(['string'], self.tmp, ok=False, brain=launcher))
+            with self.assertRaisesRegex(AssertionError, 'should have failed'):
+                self.run_(['normal'], self.tmp, ok=False, brain=launcher)
+            with self.assertRaisesRegex(AssertionError, 'refused'):
+                self.run_(['string'], self.tmp, brain=launcher)
+
+    def test_asserted_main_restores_globals_and_owned_imports_on_command_and_load_failure(self):
+        core, package = self.result_core()
+        environment, cwd = dict(os.environ), Path.cwd()
+        saved = {name: getattr(sys, name) for name in
+                 ('argv', 'path', 'meta_path', 'stdin', 'stdout', 'stderr', 'dont_write_bytecode', 'pycache_prefix')}
+        contents = {name: list(saved[name]) for name in ('argv', 'path', 'meta_path')}
+        foreign = type(sys)('_brain_fixture_foreign_result')
+        with mock.patch.dict(sys.modules, {foreign.__name__: foreign}):
+            before = {k: v for k, v in sys.modules.items() if k.startswith('_brain_fixture_')}
+            for failure in ('command', 'import'):
+                if failure == 'import':
+                    (package / 'cli.py').write_text('invalid source !!!\n')
+                with self.assertRaisesRegex(AssertionError, 'in-process brain command raised') as raised:
+                    self._in_process_result(['mutate'], self.tmp, core / 'bin/brain', ['fixture'])
+                self.assertIsInstance(raised.exception.__cause__, RuntimeError if failure == 'command' else SyntaxError)
+                if failure == 'command':
+                    self.assertIn('first\nsecond\nerror\n', str(raised.exception))
+                self.assertEqual(os.environ, environment)
+                self.assertEqual(Path.cwd(), cwd)
+                for name, value in saved.items():
+                    self.assertIs(getattr(sys, name), value)
+                for name, values in contents.items():
+                    self.assertEqual(getattr(sys, name), values)
+                self.assertEqual({k: v for k, v in sys.modules.items() if k.startswith('_brain_fixture_')}, before)
+        self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_asserted_main_keeps_evidence_inherited_opt_in_and_launcher_overrides_native(self):
+        # A focused test_cli.py run need not import the ordinary brain package.
+        with self._fixture_module(self.tmp, CORE / 'bin/brain') as module:
+            return self.assert_native_retention_fallbacks(module)
+
+    def assert_native_retention_fallbacks(self, module):
+        rehearse = sys.modules[module._owners['main'].__package__ + '.rehearse']
+        rehearse_transactions = sys.modules[module._owners['main'].__package__ + '.rehearse_transactions']
+        core, _ = self.result_core()
+        launcher = core / 'bin/brain'
+        def native(case=self, **options):
+            result = case.command_result(['pid'], self.tmp, launcher, **options)
+            self.assertFalse(getattr(result, 'in_process', False))
+            self.assertNotEqual(int(result.stdout), os.getpid())
+        with mock.patch.object(type(self), 'cli_in_process', True):
+            result = self.command_result(['pid'], self.tmp, launcher)
+            self.assertTrue(result.in_process)
+            self.assertEqual(int(result.stdout), os.getpid())
+            native(native=True)
+            class Inherited(type(self)):
+                pass
+            inherited = Inherited()
+            inherited.tmp, inherited.env = self.tmp, self.env
+            native(inherited)
+            for attribute, value in (('_evidence', {'retained': True}),
+                                     ('retain_rehearsal_evidence', True), ('_native_retention', object())):
+                with mock.patch.object(self, attribute, value, create=True):
+                    native()
+            for variable, value in (('BRAIN_NO_REEXEC', ''), ('BRAIN_REHEARSAL_EVIDENCE_DIR', str(self.tmp))):
+                with mock.patch.dict(self.env, {variable: value}):
+                    native()
+            for context, value in ((rehearse._retention_children, []),
+                                   (rehearse_transactions._validation_retainer, object())):
+                token = context.set(value)
+                try:
+                    native()
+                finally:
+                    context.reset(token)
+            launcher.write_text(launcher.read_text() + '\n# custom launcher contract\n')
+            native()
+
     def test_cached_setup_relocates_worktrees_and_never_shares_mutable_state(self):
         import scenario
         built = []
@@ -377,6 +489,21 @@ class FixtureSetup(Scenario):
         self.assertEqual(second.remember.__code__.co_filename, str(package / 'state.py'))
         self.assertEqual(sys.meta_path, before)
         self.assertEqual(list(core.rglob('__pycache__')), [])
+
+    def test_identical_source_compiles_once_across_paths_with_nested_filenames_preserved(self):
+        source = b'def outer():\n def inner(): return 42\n return inner\n'
+        with mock.patch('builtins.compile', wraps=compile) as compile_source:
+            first = core_loader._compiled_source('/owned/first/state.py', source)
+            second = core_loader._compiled_source('/owned/second/state.py', source)
+        self.assertEqual(compile_source.call_count, 1)
+        left, right = {}, {}
+        exec(first, left)
+        exec(second, right)
+        for namespace, path in ((left, '/owned/first/state.py'), (right, '/owned/second/state.py')):
+            self.assertEqual(namespace['outer'].__code__.co_filename, path)
+            self.assertEqual(namespace['outer']().__code__.co_filename, path)
+            self.assertEqual(namespace['outer']()(), 42)
+        self.assertIsNot(left['outer'], right['outer'])
 
     def test_compiled_source_observes_same_metadata_edits_and_restores_failed_imports(self):
         core, package = self.fixture_source()
