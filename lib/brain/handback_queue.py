@@ -12,6 +12,10 @@ import json
 import os
 import re
 import stat
+import hashlib
+import subprocess
+import sys
+import time
 
 from . import common as _m_common
 from . import instance as _m_instance
@@ -25,6 +29,358 @@ from . import lifecycle_identity as _m_lifecycle_identity
 QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report', 'reviews',
               'need_human', 'restart', 'reverify', 'full_receipt')
 QUEUE_LEASE = contextvars.ContextVar('brain_queue_lease', default=None)
+
+# v2 transport is instance-scoped. The v1 checked-handback runner below keeps
+# its ownership/binding protocol; unchecked intents never enter that runner.
+PATCH_FIELDS = frozenset(('title', 'description', 'kind', 'priority', 'order',
+                          'estimate', 'spent', 'external_url', 'next_action'))
+MAX_INTENT = 65536
+
+
+def intent_bytes(value):
+    return (json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
+
+
+def intent_hash(value):
+    return hashlib.sha256(intent_bytes(value)).hexdigest()
+
+
+def intent_path(inst, name):
+    return inst.root / '.brain' / 'write-queue' / name
+
+
+def intent_id(identity):
+    if not isinstance(identity, str) or not re.fullmatch('[0-9a-f]{32}', identity):
+        raise ValueError('invalid write request ID')
+    return identity
+
+
+def intent_read(inst, name):
+    from . import events
+    return json.loads(events.private_read(intent_path(inst, name)))
+
+
+def intent_store(inst, name, data, exclusive=False):
+    path = intent_path(inst, name)
+    raw = intent_bytes(data)
+    with _m_common.directory_target(path, create=True, private=True) as target:
+        if not exclusive:
+            target.atomic_write(raw.decode())
+            return
+        fd = target.open(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            if os.write(fd, raw) != len(raw):
+                raise OSError('short write request; preserve evidence')
+            os.fsync(fd)
+            os.fsync(target.fd)
+        finally:
+            os.close(fd)
+
+
+def submit_intent(inst, payload, identity=None, start=True):
+    """Durable acceptance only. No instance lock, event operation or attempt."""
+    from . import events
+    identity = intent_id(identity or os.urandom(16).hex())
+    data = dict(version=2, id=identity, payload=payload, hash=intent_hash(payload))
+    if len(intent_bytes(data)) > MAX_INTENT:
+        raise ValueError('write request exceeds 64 KiB')
+    try:
+        intent_store(inst, identity + '.request', data, exclusive=True)
+    except FileExistsError:
+        if intent_read(inst, identity + '.request') != data:
+            raise ValueError('write request ID already has a different payload')
+    # The byte position of this one O_APPEND line establishes monotonic order.
+    # Repeated identical IDs are transport retries, not additional applications.
+    events.append_line(intent_path(inst, 'index'), dict(id=identity, hash=data['hash']))
+    if start:
+        start_intent_drainer(inst)
+    return data
+
+
+def intent_index(inst):
+    """Never skip a short/corrupt line or missing immutable payload."""
+    from . import events
+    try:
+        with _m_common.directory_target(intent_path(inst, 'index'), private=True) as target:
+            fd = target.open()
+            try:
+                # A stable prefix may grow while producers append. Replacement
+                # is forbidden, growth is not a corrupt-snapshot condition.
+                size = os.fstat(fd).st_size
+                chunks, remaining = [], size
+                while remaining:
+                    chunk = os.read(fd, remaining)
+                    if not chunk:
+                        raise ValueError('blocked write queue: truncated index')
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                target.check_file(fd)
+                raw = b''.join(chunks)
+            finally:
+                os.close(fd)
+    except FileNotFoundError:
+        return []
+    rows, seen, offset = [], set(), 0
+    for line in raw.splitlines(keepends=True):
+        if not line.endswith(b'\n') or len(line) > 256:
+            raise ValueError('blocked write queue: short or oversized index line')
+        try:
+            entry = json.loads(line)
+            identity = intent_id(entry['id'])
+            data = intent_read(inst, identity + '.request')
+            if (set(entry) != {'id', 'hash'} or data.get('version') != 2 or data.get('id') != identity
+                    or data.get('hash') != entry['hash'] or intent_hash(data['payload']) != entry['hash']):
+                raise ValueError('request hash mismatch')
+        except (KeyError, TypeError, ValueError, OSError) as error:
+            raise ValueError('blocked write queue: invalid index/request evidence') from error
+        if identity not in seen:
+            rows.append((offset, data))
+            seen.add(identity)
+        offset += len(line)
+    return rows
+
+
+def intent_receipt(inst, identity):
+    try:
+        result = intent_read(inst, intent_id(identity) + '.receipt')
+    except FileNotFoundError:
+        return None
+    request = intent_read(inst, identity + '.request')
+    if (result.get('id') != identity or result.get('hash') != request.get('hash')
+            or result.get('state') not in ('applied', 'rejected') or type(result.get('sequence')) is not int):
+        raise ValueError('blocked write queue: invalid receipt')
+    return result
+
+
+def intent_lease(inst):
+    """Return a held independent lease, or None. Never wait behind a producer."""
+    with _m_common.directory_target(intent_path(inst, 'applier.lease'), create=True, private=True) as target:
+        fd = target.open(os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            target.check_file(fd)
+            return fd
+        except BlockingIOError:
+            os.close(fd)
+            return None
+        except BaseException:
+            os.close(fd)
+            raise
+
+
+def start_intent_drainer(inst):
+    fd = intent_lease(inst)
+    if fd is None:
+        return
+    try:
+        env = {**os.environ, 'BRAIN_ROOT': str(inst.root), 'BRAIN_NO_REEXEC': '1'}
+        env.pop('BRAIN_LOCK_HELD', None)
+        subprocess.Popen([sys.executable, '-B', str(_m_common.ENTRY_POINT), 'queue', 'drain',
+                          '--lease-fd', str(fd)], env=env, pass_fds=(fd,),
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    finally:
+        os.close(fd)
+
+
+def fast_intent(a, root):
+    """Route only the explicitly queueable public CLI forms, before outer lock."""
+    from . import tasks, guard
+    name = a.f.__name__
+    payload = None
+    inst = _m_instance.Instance(root)
+    if name == 'cmd_inbox' and getattr(a, 'add', None):
+        n = inst.node(a.id or 'root')
+        text = _m_nodes.import_text(' '.join(a.add.split()), guard.never_terms(n))
+        payload = dict(kind='inbox', node=n['id'], text=text, at=inst.now())
+    elif name == 'cmd_task' and a.action == 'set':
+        changes = tasks.command_changes(a)
+        if changes and set(changes) <= PATCH_FIELDS:
+            n = inst.node(a.node)
+            guard.no_terms_in(n, json.dumps(changes), 'task patch')
+            payload = dict(kind='task', node=n['id'], task=a.task_id, changes=changes)
+    elif name == 'cmd_handback' and getattr(a, 'enqueue', False):
+        n = inst.node(a.id)
+        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch)
+        if not row:
+            raise ValueError('no open job for handback')
+        _m_jobs.validate_handback_options(a, row=row)
+        from . import briefs
+        checked = a.state == 'done' and not briefs.import_job(row['Job']) and (
+            a.reviews is not None or getattr(a, 'record', False))
+        if not checked:
+            args = {key: getattr(a, key, None) for key in QUEUE_ARGS}
+            guard.no_terms_in(n, json.dumps(args), 'handback request')
+            payload = dict(kind='handback', node=n['id'], job_key=_m_jobs.job_key(row), args=args)
+    if payload is None:
+        return False
+    if payload['kind'] == 'inbox' and getattr(a, 'request_id', None):
+        try:
+            previous = intent_read(inst, intent_id(a.request_id) + '.request')
+            payload['at'] = previous['payload']['at']
+        except FileNotFoundError:
+            pass
+    data = submit_intent(inst, payload, getattr(a, 'request_id', None))
+    if getattr(a, 'json', False):
+        print(json.dumps(dict(state='queued', request_id=data['id'])))
+    else:
+        print(data['id'])
+    return True
+
+
+def apply_intent(inst, data):
+    from . import tasks, transitions, guard
+    payload, identity = data['payload'], data['id']
+    n = inst.node(payload['node'])
+    guard.no_terms_in(n, json.dumps(payload), 'write request')
+    if _m_common.outward_links(inst.root):
+        raise ValueError('unsafe instance links; write request rejected')
+    if payload['kind'] == 'inbox':
+        marker = '<!-- write-request:' + identity + ' -->'
+        # Archives retain the marker. A death after append must not resurrect it.
+        archived = any(marker in p.read_text() for p in n['dir'].glob('inbox-archive*.md'))
+        if not archived:
+            transitions.inbox_append(n['dir'], '- ' + payload['at'] + ' from brain: ' +
+                                     payload['text'] + ' ' + marker + '\n', marker)
+        _m_common.touch(n['dir'] / 'inbox.md')
+        inst.commit([], n['id'] + ': inbox item')
+    elif payload['kind'] == 'task':
+        if not payload['changes'] or not set(payload['changes']) <= PATCH_FIELDS:
+            raise ValueError('task gate fields cannot be queued')
+        name = identity + '.prepared'
+        try:
+            prepared = intent_read(inst, name)
+        except FileNotFoundError:
+            before = tasks.read_records(n, ident=payload['task']).get(payload['task'])
+            row, closed = tasks.prepare_mutation(inst, n, payload['task'], payload['changes'])
+            if closed:
+                raise ValueError('task completion cannot be queued')
+            row['description'] = row.get('description', '').strip()
+            prepared = dict(before=before, after=row, hash=data['hash'])
+            intent_store(inst, name, prepared, exclusive=True)
+        if prepared.get('hash') != data['hash']:
+            raise ValueError('prepared request identity changed')
+        current = tasks.read_records(n, ident=payload['task']).get(payload['task'])
+        if current == prepared['before']:
+            tasks.save_record(n, prepared['after'])
+        elif current != prepared['after']:
+            raise RuntimeError('task drift after preparation; retain blocked request')
+        inst.commit([], n['id'] + ': task ' + payload['task'])
+    elif payload['kind'] == 'handback':
+        apply_handback_intent(inst, n, data)
+    else:
+        raise ValueError('unsupported write request kind')
+
+
+def apply_handback_intent(inst, n, request):
+    """Unchecked native publication, with durable effects retained for replay."""
+    from . import tasks, transitions, events, hosts
+    payload = request['payload']
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], payload['args']['branch'])
+    if not row or _m_jobs.job_key(row) != payload['job_key']:
+        raise ValueError('job changed before queued message application')
+    try:
+        prepared = intent_read(inst, request['id'] + '.prepared')
+    except FileNotFoundError:
+        args = argparse.Namespace(**payload['args'], enqueue=False, _intent_request=request)
+        _m_jobs.validate_handback_options(args, row=row)
+        # The immutable intent is deliberately bound at application time, never
+        # represented as a v1 submission-time verifier binding.
+        _m_jobs.cmd_handback(args)
+        return
+    if prepared.get('hash') != request['hash'] or prepared.get('job_key') != payload['job_key']:
+        raise RuntimeError('handback preparation identity changed')
+    data = prepared['after']
+    with _m_instance.brain_lock(inst):
+        current = _m_jobs.read_handback(n, row)
+        if current == prepared['before']:
+            events.write_record(inst, n, 'handback', _m_jobs.job_key(row), json.dumps(data, indent=2) + '\n')
+        elif current != data:
+            raise RuntimeError('handback drift after preparation; retain blocked request')
+        _m_common.touch(_m_jobs.handback_file(n, row))
+        _m_attempts.finish_attempt(inst, n, row, data['attempt_id'], 'terminal')
+        if prepared['inbox_question']:
+            bullet = ('- ' + data['at'] + ' from worker ' + prepared['branch'] + ': ' + data['state'] +
+                      ': ' + prepared['message'] + ' <!-- wake:' + data['wake_id'] + ' --> ' + prepared['marker'] + '\n')
+            marker = prepared['marker']
+            archived = any(marker in p.read_text() for p in n['dir'].glob('inbox-archive*.md'))
+            if not archived:
+                transitions.inbox_append(n['dir'], bullet, marker)
+            _m_common.touch(n['dir'] / 'inbox.md')
+        tasks.handback_event(inst, n, row, data)  # failure event uses the saved attempt ID
+        inst.commit([], n['id'] + ': worker hand-back')
+    _m_instance.unlock()
+    if prepared['inbox_question'] or data['state'] == 'blocked' and not prepared['need']:
+        hosts.request_wake(inst, n, 'wake:' + data['wake_id'])
+
+
+def drain_intents(inst, lease_fd=None):
+    from . import events
+    fd = intent_lease(inst) if lease_fd is None else lease_fd
+    if fd is None:
+        return
+    blocked = False
+    try:
+        with _m_common.directory_target(intent_path(inst, 'applier.lease'), private=True) as target:
+            target.check_file(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        while True:
+            pending = [(seq, data) for seq, data in intent_index(inst) if not intent_receipt(inst, data['id'])]
+            if not pending:
+                break
+            sequence, data = pending[0]
+            state, reason = 'applied', ''
+            with _m_instance.brain_lock(inst):
+                current = _m_instance.Instance(inst.root)
+                args = argparse.Namespace(cmd='queue', action='apply', id=data['payload']['node'], f=cmd_intent_queue)
+                try:
+                    with events.Command(inst.root, args):
+                        apply_intent(current, data)
+                except (ValueError, SystemExit) as error:
+                    # Rejection is terminal only when no prepared primary effect
+                    # exists. Partial application always remains blocked/replayable.
+                    if intent_path(inst, data['id'] + '.prepared').exists():
+                        raise RuntimeError('prepared application needs recovery') from error
+                    state, reason = 'rejected', str(error)
+                with _m_instance.brain_lock(inst):
+                    intent_store(inst, data['id'] + '.receipt', dict(id=data['id'], hash=data['hash'],
+                                 sequence=sequence, state=state, reason=reason), exclusive=True)
+        path = intent_path(inst, 'blocked')
+        with _m_common.directory_target(path, private=True) as target:
+            info = target.stat()
+            if info:
+                target.unlink_owned(path.name, (info.st_dev, info.st_ino))
+    except (OSError, ValueError, RuntimeError) as error:
+        blocked = True
+        intent_store(inst, 'blocked', dict(state='blocked', reason=str(error)))
+        raise
+    finally:
+        os.close(fd)
+        # Release then inspect: a producer that saw the old lease is covered;
+        # a producer arriving after this inspection acquires the free lease itself.
+        if not blocked and any(not intent_receipt(inst, d['id']) for _, d in intent_index(inst)):
+            start_intent_drainer(inst)
+
+
+def cmd_intent_queue(a):
+    inst = _m_instance.Instance(_m_nodes.find_root())
+    if a.action == 'drain':
+        drain_intents(inst, getattr(a, 'lease_fd', None))
+        return
+    identity = intent_id(a.id)
+    deadline = time.monotonic() + a.timeout
+    while True:
+        receipt = intent_receipt(inst, identity)
+        if receipt:
+            print(json.dumps(receipt, sort_keys=True))
+            if receipt['state'] != 'applied':
+                raise SystemExit(1)
+            return
+        if intent_path(inst, 'blocked').exists():
+            _m_common.die('write queue blocked; inspect .brain/write-queue/blocked')
+        if time.monotonic() >= deadline:
+            _m_common.die('write request pending; retain its ID and wait again')
+        time.sleep(0.025)
 
 
 def queue_owned_context(n, request, fd=None):

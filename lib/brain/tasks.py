@@ -475,6 +475,7 @@ def register(sub):
             p.add_argument('task_id')
         if action in ('add', 'set'):
             p.add_argument('fields', nargs='*')
+            p.add_argument('--request-id', help='metadata set retries: same payload-bound queue ID; queue wait ID before dependent reads')
         p.add_argument('--title')
         p.add_argument('--status', choices=STATUSES)
         p.add_argument('--owner')

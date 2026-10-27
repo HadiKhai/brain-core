@@ -176,6 +176,8 @@ def writes(a):
         # Requests publish with O_EXCL; drains serialize on their own per-node lock.
         # Neither may queue behind an instance writer, or hold it during a wait/send.
         return False
+    if name == 'cmd_gate_queue' and a.action in ('wait', 'drain'):
+        return False  # receipt reads / applier-owned per-record transactions
     if name == "cmd_machine":
         return a.action == "sample" or a.yes
     if name == "cmd_status":
@@ -392,6 +394,7 @@ def _main():
     cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
         opt('--add', help='append a screened inbox item'),
+        opt('--request-id', help='retry --add with the same payload-bound ID; queue wait ID before dependent reads'),
         opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
     cmd('inbox-seen', _Command('inbox_notices', 'cmd_inbox_seen'),
         'mark one owning node inbox episode handled, recording the action and retaining its source',
@@ -416,7 +419,8 @@ def _main():
         "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
         opt("--summary", required=True, help="nonempty one-line worker result"),
         opt("--question", help="one-line choice, required for question state"),
-        opt("--enqueue", action="store_true", help="durably queue this request and return its ID; explicit foreground runner required"),
+        opt("--enqueue", action="store_true", help="queue unchecked messages with a self-starting applier; checked requests use the foreground runner"),
+        opt('--request-id', help='retry an unchecked queued message using the same payload-bound ID'),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
         opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),
@@ -425,8 +429,10 @@ def _main():
         opt("--full-receipt", help="adopt a native exact-candidate full-run receipt without rerunning"),
         opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
     cmd("queue", _Command("queue_priority", "cmd_gate_queue"), "run one hand-back or explicitly reorder queued native verify tokens",
-        opt("action", choices=['run'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
+        opt("action", choices=['run', 'wait', 'drain'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
         opt('--request-id'), opt('--node'), opt('--move'), opt('--before'),
+        opt('--timeout', type=float, default=300, help='queue wait ID: receipt barrier before reading or depending on a queued write'),
+        opt('--lease-fd', type=int, help=argparse.SUPPRESS),
         opt('--recover', action='store_true', help='recover an exact queue run only after recorded processes are absent; live or unknown processes stay retained'))
     cmd("dispatch", _Command("dispatcher", "cmd_dispatch"), "bounded read-only plan of explicit root/operator asks; empty scan is silent",
         opt('--limit', type=int, default=50), opt('--node-limit', type=int, default=200),
@@ -735,6 +741,12 @@ def _main():
         a.f = read_handler
     root = _m_nodes.try_find_root() if writes(a) else None
     if root:
+        from . import handback_queue
+        try:
+            if handback_queue.fast_intent(a, root):
+                return
+        except (OSError, ValueError) as error:
+            _m_common.die(str(error))
         # Reject malformed arguments before lock admission or journal preparation.
         # Handlers still validate current authority and mutable state under lock.
         if a.f.__name__ in ('cmd_item_accept', 'cmd_specialist_accept'):

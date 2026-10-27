@@ -23,6 +23,12 @@ def move_verify_before(inst, n, token, before):
 
 
 def cmd_gate_queue(a):
+    if a.action in ('wait', 'drain'):
+        if (a.move or a.before or a.node or a.once or a.request_id or a.recover
+                or a.action == 'wait' and (not a.id or a.lease_fd is not None)
+                or a.action == 'drain' and a.id or not 0 <= a.timeout < float('inf')):
+            _m_common.die('queue wait ID [--timeout SECONDS] or queue drain')
+        return _m_handback_queue.cmd_intent_queue(a)
     if not getattr(a, 'move', None):
         if getattr(a, 'before', None):
             _m_common.die('--before requires --move')

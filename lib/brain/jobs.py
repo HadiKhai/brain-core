@@ -411,6 +411,10 @@ def publish_handback(a):
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
         if request:
             data['queue_publication'] = {'request': request['id'], 'lease': request['lease']}
+        intent = getattr(a, '_intent_request', None)
+        if intent:
+            data['write_request'] = intent['id']
+            data['ready'], data['ready_reasons'] = None, []
         if duration is not None:
             data["verify_duration"] = duration
             prior_wait = forecast_number(previous.get("admission_wait_seconds_total"))
@@ -468,6 +472,13 @@ def publish_handback(a):
                 _m_common.die('queued job or attempt changed; preserve running evidence')
             if not _m_queue.queue_terminal(inst, n, claim['id'], claim['lease'], 'terminal'):
                 _m_common.die('queue publication refused; preserve running evidence')
+        if intent:
+            from . import handback_queue as _m_queue
+            prepared = dict(hash=intent['hash'], before=read_handback(n, current), after=data,
+                            job_key=job_key(current), inbox_question=bool(inbox_question),
+                            message=message if inbox_question else '', marker=marker if inbox_question else '',
+                            need=need, branch=a.branch)
+            _m_queue.intent_store(inst, intent['id'] + '.prepared', prepared, exclusive=True)
         f.parent.mkdir(exist_ok=True)
         from . import events
         events.write_record(inst, n, "handback", job_key(row), json.dumps(data, indent=2) + "\n")

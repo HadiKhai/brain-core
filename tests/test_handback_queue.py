@@ -36,6 +36,90 @@ class HandbackLifecycle(Scenario):
         before = m.state_signature(inst, extra=paths)
         self.git('commit', '--allow-empty', '-qm', 'Selected target changed', cwd=home)
         self.assertNotEqual(before, m.state_signature(inst, extra=paths))
+    def test_write_intent_identity_order_and_corruption_are_fail_closed(self):
+        m, inst, n, row = self.fixture()
+        payload = dict(kind='inbox', node='root', text='same text', at=inst.now())
+        first = m.submit_intent(inst, payload, start=False)
+        m.submit_intent(inst, payload, identity=first['id'], start=False)
+        second = m.submit_intent(inst, payload, start=False)
+        indexed = m.intent_index(inst)
+        self.assertEqual([data['id'] for _, data in indexed], [first['id'], second['id']])
+        self.assertLess(indexed[0][0], indexed[1][0])
+        with self.assertRaisesRegex(ValueError, 'different payload'):
+            m.submit_intent(inst, {**payload, 'text': 'changed'}, identity=first['id'], start=False)
+        with open(m.intent_path(inst, 'index'), 'ab') as stream:
+            stream.write(b'{"id":')
+        with self.assertRaisesRegex(ValueError, 'blocked'):
+            m.intent_index(inst)
+        self.assertIsNone(m.intent_receipt(inst, first['id']))
+
+    def test_write_intents_apply_in_order_and_inbox_dedupes_by_identity(self):
+        m, inst, n, row = self.fixture()
+        payload = dict(kind='inbox', node='root', text='same text', at=inst.now())
+        first = m.submit_intent(inst, payload, start=False)
+        second = m.submit_intent(inst, payload, start=False)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            m.drain_intents(inst)
+            m.submit_intent(inst, payload, identity=first['id'], start=False)
+            m.drain_intents(inst)
+        text = (n['dir'] / 'inbox.md').read_text()
+        self.assertEqual(text.count('same text'), 2)
+        self.assertEqual(text.count(first['id']), 1)
+        self.assertEqual(text.count(second['id']), 1)
+        self.assertLess(m.intent_receipt(inst, first['id'])['sequence'], m.intent_receipt(inst, second['id'])['sequence'])
+        self.assertEqual(m.intent_receipt(inst, second['id'])['state'], 'applied')
+
+    def test_write_task_replay_compares_before_after_and_refuses_drift(self):
+        m, inst, n, row = self.fixture()
+        m.mutate(inst, n, 'TASK1', {'title': 'Before', 'owner': 'fixture'}, create=True)
+        request = m.submit_intent(inst, dict(kind='task', node='root', task='TASK1', changes={'title': 'After'}), start=False)
+        save = m.save_record
+        def killed(*args, **kwargs):
+            save(*args, **kwargs)
+            raise RuntimeError('owned kill after primary write')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            with mock.patch.object(m, 'save_record', side_effect=killed), self.assertRaises(RuntimeError):
+                m.drain_intents(inst)
+            self.assertIsNone(m.intent_receipt(inst, request['id']))
+            self.assertEqual(m.read_records(n)['TASK1']['title'], 'After')
+            m.drain_intents(inst)
+            self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'applied')
+            later = m.submit_intent(inst, dict(kind='task', node='root', task='TASK1', changes={'title': 'Later'}), start=False)
+            before = m.read_records(n)['TASK1']
+            m.intent_store(inst, later['id'] + '.prepared', dict(hash=later['hash'], before=before,
+                           after={**before, 'title': 'Later'}), exclusive=True)
+            save(n, {**before, 'title': 'Independent synchronous edit'})
+            with self.assertRaisesRegex(RuntimeError, 'drift'):
+                m.drain_intents(inst)
+            self.assertIsNone(m.intent_receipt(inst, later['id']))
+            self.assertEqual(m.read_records(n)['TASK1']['title'], 'Independent synchronous edit')
+
+    def test_write_fast_route_never_acquires_instance_lock_and_keeps_gates_sync(self):
+        m, inst, n, row = self.fixture()
+        args = argparse.Namespace(f=m.cmd_task, action='set', node='root', task_id='TASK1', fields=['priority=P1'],
+                                  title=None, status=None, owner=None, json=False, request_id=None)
+        with mock.patch.object(m, 'brain_lock', side_effect=AssertionError('producer acquired instance lock')), \
+                mock.patch.object(m, 'start_intent_drainer'), contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(m.fast_intent(args, inst.root))
+            for fields in (['status=ready'], ['owner=someone'], ['depends_on=TASK2'], ['hold=reason'],
+                           ['authority=operator'], ['contract=path'], ['priority=P1', 'status=ready']):
+                args.fields = fields
+                self.assertFalse(m.fast_intent(args, inst.root), fields)
+
+    def test_write_applier_lease_is_exclusive_and_submission_starts_detached(self):
+        m, inst, n, row = self.fixture()
+        fd = m.intent_lease(inst)
+        try:
+            self.assertIsNone(m.intent_lease(inst))
+            with mock.patch.object(subprocess, 'Popen') as launch:
+                m.start_intent_drainer(inst)
+                launch.assert_not_called()
+        finally:
+            os.close(fd)
+        with mock.patch.object(subprocess, 'Popen') as launch:
+            m.start_intent_drainer(inst)
+            self.assertTrue(launch.call_args.kwargs['start_new_session'])
+            self.assertEqual(len(launch.call_args.kwargs['pass_fds']), 1)
 
     def test_attempt_binding_ignores_other_branch_commits_but_fences_own_branch(self):
         m, inst, n, row = self.fixture()
