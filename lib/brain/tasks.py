@@ -429,6 +429,18 @@ def cmd_task(a):
         _m_common.die(str(error))
 
 
+def patch_parser(parser):
+    """Metadata admission and full task dispatch share the exact set grammar."""
+    parser.add_argument('node')
+    parser.add_argument('task_id')
+    parser.add_argument('fields', nargs='*')
+    parser.add_argument('--request-id', help='metadata set retries: same payload-bound queue ID; queue wait ID before dependent reads')
+    parser.add_argument('--title')
+    parser.add_argument('--status', choices=STATUSES)
+    parser.add_argument('--owner')
+    parser.add_argument('--json', action='store_true')
+
+
 def register(sub):
     parser = sub.add_parser('task', help='node-local tasks, dependencies and completion evidence')
     actions = parser.add_subparsers(dest='action', required=True)
@@ -470,6 +482,10 @@ def register(sub):
     req.set_defaults(f=cmd_requirement)
     for action in ('add', 'set', 'show', 'list', 'next', 'graph', 'check'):
         p = actions.add_parser(action)
+        if action == 'set':
+            patch_parser(p)
+            p.set_defaults(f=cmd_task)
+            continue
         p.add_argument('node')
         if action in ('add', 'set', 'show'):
             p.add_argument('task_id')

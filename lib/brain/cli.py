@@ -226,9 +226,67 @@ def command_read(a):
             not writes(a) or (name == 'cmd_inbox' and not getattr(a, 'add', None)))
 
 
+def queueable_command(cmd, name):
+    """The same public option schema for full dispatch and the admission parser."""
+    opt = lambda *n, **kw: (n, kw)  # noqa: E731
+    if name == 'inbox':
+        return cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
+        opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
+        opt('--add', help='append a screened inbox item'),
+        opt('--request-id', help='retry --add with the same payload-bound ID; queue wait ID before dependent reads'),
+        opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
+    return cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
+        "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
+        opt("--summary", required=True, help="nonempty one-line worker result"),
+        opt("--question", help="one-line choice, required for question state"),
+        opt("--enqueue", action="store_true", help="queue unchecked messages with a self-starting applier; checked requests use the foreground runner"),
+        opt('--request-id', help='retry an unchecked queued message using the same payload-bound ID'),
+        opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
+        opt("--need-human", help="question or blocked need to append to the node inbox"),
+        opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
+            "still proves this commit)"),
+        opt("--full-receipt", help="adopt a native exact-candidate full-run receipt without rerunning"),
+        opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
+
+
+def fast_write_arguments():
+    """Avoid building unrelated command parsers on the measured producer path."""
+    argv = sys.argv[1:]
+    if not argv:
+        return None
+    name = argv[0]
+    if name == 'task' and len(argv) > 1 and argv[1] == 'set':
+        parser = argparse.ArgumentParser(prog='brain task set')
+        _m_tasks.patch_parser(parser)
+        parser.set_defaults(f=_m_tasks.cmd_task, action='set', cmd='task')
+        return parser.parse_args(argv[2:])
+    if not (name == 'inbox' and any(a == '--add' or a.startswith('--add=') for a in argv[1:])
+            or name == 'handback' and '--enqueue' in argv[1:]):
+        return None
+    def selected(command, fn, help_text, *specs):
+        parser = argparse.ArgumentParser(prog='brain ' + command, description=help_text)
+        for spec in specs:
+            names, kw = spec if isinstance(spec, tuple) else ((spec,), {})
+            parser.add_argument(*names, **kw)
+        parser.set_defaults(f=fn, cmd=command)
+        return parser
+    return queueable_command(selected, name).parse_args(argv[1:])
+
+
 def _main():
     take_brain_flag()
     reexec_into_instance_core()
+    candidate = fast_write_arguments()
+    if candidate is not None:
+        root = _m_nodes.try_find_root()
+        if root:
+            from . import handback_queue
+            try:
+                if handback_queue.fast_intent(candidate, root):
+                    return
+            except (OSError, ValueError) as error:
+                _m_common.die(str(error))
     ap = argparse.ArgumentParser(prog="brain", description=__doc__.splitlines()[0])
     ap.add_argument("-b", "--brain", metavar="NAME", help="use this brain (when this machine has several; "
                     "default: the one whose folders you are in, else `brain use`)")
@@ -391,11 +449,7 @@ def _main():
         opt('--handled', action='store_true', help='also show current handled reminders and their reasons'),
         opt("id", nargs="?"), opt("--json", action="store_true"),
         opt("--quiet", action="store_true", help="no output; exit 1 for node actions, including its held work, 0 otherwise"))
-    cmd("inbox", _m_status.cmd_inbox, "needs in a node's subtree (default: calling node); --new remembers per reporter",
-        opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
-        opt('--add', help='append a screened inbox item'),
-        opt('--request-id', help='retry --add with the same payload-bound ID; queue wait ID before dependent reads'),
-        opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
+    queueable_command(cmd, 'inbox')
     cmd('inbox-seen', _Command('inbox_notices', 'cmd_inbox_seen'),
         'mark one owning node inbox episode handled, recording the action and retaining its source',
         'id', 'item_id', 'reason')
@@ -415,19 +469,7 @@ def _main():
         opt('--operator', action='store_true', help='root only: aggregate retained notices once per local delivery day'))
     cmd("msg", _m_messages.cmd_msg, "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_messages.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
-    cmd("handback", _m_jobs.cmd_handback, "done/blocked/question hand-back; worker messages are start/done/blocked/question",
-        "id", opt("--branch", required=True), opt("--state", choices=["done", "failed", "blocked", "question"], required=True),
-        opt("--summary", required=True, help="nonempty one-line worker result"),
-        opt("--question", help="one-line choice, required for question state"),
-        opt("--enqueue", action="store_true", help="queue unchecked messages with a self-starting applier; checked requests use the foreground runner"),
-        opt('--request-id', help='retry an unchecked queued message using the same payload-bound ID'),
-        opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
-        opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
-        opt("--need-human", help="question or blocked need to append to the node inbox"),
-        opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
-            "still proves this commit)"),
-        opt("--full-receipt", help="adopt a native exact-candidate full-run receipt without rerunning"),
-        opt("--reverify", action="store_true", help="run verify even when an earlier green run still proves it"))
+    queueable_command(cmd, 'handback')
     cmd("queue", _Command("queue_priority", "cmd_gate_queue"), "run one hand-back or explicitly reorder queued native verify tokens",
         opt("action", choices=['run', 'wait', 'drain'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),
         opt('--request-id'), opt('--node'), opt('--move'), opt('--before'),
