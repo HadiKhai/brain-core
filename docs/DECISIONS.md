@@ -2893,3 +2893,22 @@ are locked, and successful publication removes its owned record only after direc
 sync. Unpublished staging and records for other inodes are left for reconciliation;
 recovery never promotes them. Chmod failures still abort publication and attempt
 private cleanup, preserving the original failure if cleanup also fails.
+
+## D40008: Fence task mutations by their validation dependencies
+
+Task mutations fence records from the target node and nodes reached through
+its prospective dependency, parent and successor graph. Completion artifacts
+and code proof homes are selected from that same graph. Code completion fences
+local main and replacement refs (including every Git symbolic-ref chain link),
+packed refs, Git
+configuration and ancestry metadata in both worktree and common directories.
+Unrelated branch refs are excluded from this task-specific fence; other Git
+publication fences retain their broader scope.
+
+Validation still runs outside the instance writer lock. After reacquiring that
+lock, publication compares fresh generations of every selected input before
+saving. Relevant drift refuses without writing the prepared task. Automatic
+retries are not needed to tolerate unrelated builder commits and are omitted
+so genuine validation conflicts remain explicit. Requirements are read once per
+validation pass, using a local snapshot protected by the same generation fence,
+instead of rereading the entire requirement directory for each task row.

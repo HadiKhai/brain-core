@@ -343,11 +343,12 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
     return h.digest()
 
 
-def git_state_paths(home):
+def git_state_paths(home, *, task_proof=False):
     """Mutable ref/config generations, including linked-worktree common refs.
 
     Git objects are immutable; traversing them would turn a recheck into a scan.
     Keep both the logical metadata entry and its resolved target in the fence.
+    Task completion reads main and replacement refs, never unrelated branches.
     """
     marker = Path(home) / '.git'
     paths = [marker] if not marker.is_dir() else []
@@ -363,11 +364,34 @@ def git_state_paths(home):
             base = (Path(home) / value).resolve()
             bases.append(base)
             paths.extend((base / 'commondir', (base / 'commondir').resolve()))
+    replace_base = os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/').rstrip('/')
+    refs = {'refs/heads/main', replace_base} if task_proof else {'refs'}
+    if task_proof:
+        pending = ['refs/heads/main']
+        # Loose replacement refs may be Git symbolic refs, including broken
+        # ones omitted by for-each-ref. Packed refs cannot be symbolic; a
+        # reftable generation already fences all its ref updates.
+        for base in bases:
+            directory = base / replace_base
+            if directory.is_dir():
+                pending.extend(p.relative_to(base).as_posix() for p in directory.rglob('*') if p.is_file())
+        seen = set()
+        while pending:
+            ref = pending.pop()
+            if ref in seen:
+                continue
+            seen.add(ref)
+            refs.add(ref)
+            result = _m_common.git('symbolic-ref', '--no-recurse', '-q', ref,
+                                   cwd=home, env=dict(os.environ))
+            target = result.stdout.strip()
+            if result.returncode == 0 and target and not Path(target).is_absolute() and '..' not in Path(target).parts:
+                pending.append(target)
     for base in bases:
-        for name in ('HEAD', 'refs', 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
+        for name in ('HEAD', *sorted(refs), 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
             path = base / name
             paths.extend((path, path.resolve()))
-            if name == 'refs' and path.is_dir():
+            if name in ('refs', replace_base) and path.is_dir():
                 paths.extend(p.resolve() for p in path.rglob('*') if p.is_symlink())
     return paths
 

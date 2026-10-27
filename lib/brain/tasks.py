@@ -106,7 +106,7 @@ def normalize(changes):
 
 
 def validate(n, records):
-    jobs = None
+    jobs = requirements = None
     for ident, row in records.items():
         record_path(n, ident)
         if not isinstance(row.get('title'), str) or not row['title'].strip():
@@ -142,8 +142,11 @@ def validate(n, records):
         for link in row['decisions']:
             if not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', link):
                 raise ValueError('decision links use repo:D123 or private:D-123')
-        if row.get('requirement') and row['requirement'] not in read_records(n, 'requirements'):
-            raise ValueError(ident + ': requirement not found')
+        if row.get('requirement'):
+            if requirements is None:
+                requirements = read_records(n, 'requirements')
+            if row['requirement'] not in requirements:
+                raise ValueError(ident + ': requirement not found')
         if row['status'] in ('in-progress', 'in-review', 'testing') and not external:
             if jobs is None:
                 from . import jobs as _m_jobs
@@ -177,28 +180,42 @@ def mutation_paths(inst, target=None, changes=None, ident=None):
             path = node['dir'] / relative
             if not path.is_dir():  # directory artifacts are invalid; never traverse their contents
                 paths.extend((path, path.resolve()))
-    for node in inst.nodes():
+    from . import task_flow as _m_flow
+    nodes = {node['id']: node for node in inst.nodes()}
+    selected = list(nodes) if target is None else [target]
+    cache, visited, proof_nodes = {}, set(), set()
+
+    def visit(node, row):
+        key = (node['id'], row['id'])
+        if key in visited:
+            return
+        visited.add(key)
+        artifact(node, row.get('completion_receipt'))
+        if row.get('status') in ('merged', 'done') and row.get('completion_kind', 'merge') == 'merge':
+            proof_nodes.add(node['id'])
+        for ref in _m_flow.links(row):
+            peer, dep, _ = _m_flow.resolve(node, ref, cache.get(node['id']), cache)
+            if dep is not None:
+                visit(peer, dep)
+
+    for node_id in selected:
+        node = nodes[node_id]
+        cache[node_id] = read_records(node)
+        if target == node_id and ident is not None:
+            # Include implicit completion-kind conversions and normalized status.
+            effective = {'status': 'backlog', 'completion_kind': 'merge',
+                         **cache[node_id].get(ident, {}), **normalize(changes or {}), 'id': ident}
+            cache[node_id] = {**cache[node_id], ident: effective}
+        for row in cache[node_id].values():
+            visit(node, row)
+    for node_id in cache:
+        node = nodes[node_id]
         paths.extend(node['dir'] / name for name in
                      ('tasks', 'requirements', 'job-ledger.md', 'job-handbacks', 'job-attempts'))
-        try:
-            records = read_records(node)
-        except (OSError, ValueError):
-            # The unchanged validator refuses malformed required task sources.
-            # An unrelated damaged node must not broaden this task's authority
-            # or prevent observing the sources which can actually validate.
-            records = {}
-        if target == node['id'] and ident is not None:
-            # Fence the same effective row the validator will see. A completed
-            # task can change completion kind without repeating its status.
-            effective = {'status': 'backlog', 'completion_kind': 'merge',
-                         **records.get(ident, {}), **normalize(changes or {})}
-            records = {**records, ident: effective}
-        code_proof = False
-        for row in records.values():
-            artifact(node, row.get('completion_receipt'))
-            code_proof |= row.get('status') in ('merged', 'done') and row.get('completion_kind', 'merge') == 'merge'
-        if node.get('home_path') and (node.get('external') or code_proof):
-            paths.extend(_m_instance.git_state_paths(node['home_path']))
+    for node_id in sorted(proof_nodes):
+        node = nodes[node_id]
+        if node.get('home_path'):
+            paths.extend(_m_instance.git_state_paths(node['home_path'], task_proof=True))
     return paths
 
 
