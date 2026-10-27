@@ -341,7 +341,7 @@ def _upgrade_node_gate_busy(inst, n):
                     return []
                 return [(n["id"], "in-flight node gate")]
             row = _m_gate_lock.gate_metadata(held.fileno())
-            if _m_gate_lock.gate_stale_holder(row):
+            if _m_gate_lock.gate_abandoned(row):
                 print(f"upgrade: stale node gate holder pid {row['pid']}; released lock is idle",
                       file=sys.stderr)
         return []

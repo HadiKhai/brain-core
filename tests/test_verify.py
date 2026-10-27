@@ -59,7 +59,6 @@ class WorkerReadyPackets(Scenario):
             for module, name, value in [
                 (importlib.import_module(m.verify_env.__module__.rsplit('.', 1)[0] + '.rehearse'),
                  'read_evidence', mock.Mock(return_value=None)),
-                (owner['_m_instance'], 'unlock', mock.Mock()),
                 (owner['_m_nodes'], 'ensure_gitignore', mock.Mock()),
                 (owner['_m_common'], 'git', mock.Mock(return_value=mock.Mock(stdout='', returncode=0))),
                 (owner['_m_lanes'], 'tracked_files', mock.Mock(return_value={'fixture.txt': ['100644', 'digest']})),
@@ -654,9 +653,15 @@ class VerifyLogs(Scenario):
         result, path, output = self.run_verify(setup, 'print("case fixture")')
         self.assertEqual(result, 0)
         self.assertEqual(path.read_text(), 'case fixture\n')
-        with mock.patch.object(m, 'history_fd_path', return_value=None), contextlib.redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
+        # Instance state (gate writer lock, machine samples) keeps its real
+        # folders, so the refusal must come from verify's log containment.
+        real, root = m.history_fd_path, Path(os.path.realpath(inst.root))
+        state = lambda where: where is not None and (Path(where) == root or root / '.brain' in (Path(where), *Path(where).parents))
+        unknown = lambda fd: (lambda where: where if state(where) else None)(real(fd))
+        with mock.patch.object(m, 'history_fd_path', side_effect=unknown), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as refused:
                 self.run_verify(setup, 'pass')  # fail closed: unknown location is no containment evidence
+        self.assertIn("verify can't locate a home/checkout folder", str(refused.exception.code))
 
     def test_handback_keeps_operator_gitignore_edits_uncommitted(self):
         r, home, wt = self.job()

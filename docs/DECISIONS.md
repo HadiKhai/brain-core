@@ -3619,3 +3619,13 @@ Each instance still gets independent files and fresh module state.
 The asserted gate commands, native lane execution, descriptor
 checks and environment restoration continue through their original paths. This
 removes repeated setup CLI startup from the existing 30-second subprocess bound.
+
+## 2026-10-28: Report only abandoned gate holders
+
+An in-process gate owner marks its holder row `released` when it closes its
+descriptor, so the next acquisition and the upgrade idle guard report a stale
+holder only when a dead holder never marked its close. Released is never idle
+while the flock is held: a surviving child still keeps the gate busy, and a
+dead owner with a held descriptor is still reported. The mark is best-effort
+and takes no instance lock, so unwinding never waits on or fails over it.
+Gate phase writes take the instance lock by root, as gate paths do.

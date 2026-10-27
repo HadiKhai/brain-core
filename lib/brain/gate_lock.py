@@ -39,6 +39,11 @@ def gate_stale_holder(row):
     return stamp is None or (stamp != 'unknown' and row.get('owner_stamp') not in (None, 'unknown', stamp))
 
 
+def gate_abandoned(row):
+    """A dead holder that never marked its own close may have crashed."""
+    return row.get('phase') != 'released' and gate_stale_holder(row)
+
+
 def gate_waiting(row, node):
     who = row.get('phase_owner')
     return (row.get('node') == node and row.get('phase') == 'waiting-for-admission'
@@ -65,7 +70,8 @@ def gate_state_lock(inst):
     with _PHASE_LOCK:
         already_held = _m_instance._LOCK['fh'] is not None
         try:
-            with _m_instance.brain_lock(inst):
+            # Gates are identified by root alone, like gate_path.
+            with _m_instance.brain_lock(inst.root):
                 yield
         finally:
             if not already_held:
@@ -192,7 +198,7 @@ def gate_acquire(inst, node, env, label):
             _m_common.die('gate-lock: lock path changed while waiting')
         with gate_state_lock(inst):
             holder = gate_metadata(fd)
-            if gate_stale_holder(holder):
+            if gate_abandoned(holder):
                 print('gate-lock: stale holder pid ' + str(holder['pid']) +
                       '; reclaiming released gate', file=sys.stderr, flush=True)
             os.fchmod(fd, 0o600)
@@ -221,6 +227,19 @@ def node_gate(inst, n, env, label):
         ACTIVE_GATE.reset(active)
         if owned:
             # Close, never unlock: a surviving child retains the same ownership.
+            # Released is never idle while the flock is held, so this best-effort
+            # mark needs no instance lock; it only spares the next holder a
+            # stale-holder report after an ordinary close.
+            row = gate_metadata(fd)
+            if row.get('pid') == os.getpid():
+                row.update(phase='released')
+                row.pop('phase_owner', None)
+                data = (json.dumps(row) + '\n').encode()
+                try:
+                    if len(data) <= 4096 and os.pwrite(fd, data, 0) == len(data):
+                        os.ftruncate(fd, len(data))
+                except OSError:
+                    pass
             os.close(fd)
 
 
