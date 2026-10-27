@@ -358,6 +358,10 @@ class WorkerFailureCatch(Scenario):
         self.unknown = False
         self.send_status = 'failed'
         self.on_send = lambda: None
+        self.active_attempt = None
+        self.provider_turns = []
+        self.deliveries = []
+        self.send_receipts = {}
 
     def rpc(self, name, args):
         self.calls.append((name, dict(args)))
@@ -376,15 +380,40 @@ class WorkerFailureCatch(Scenario):
             self.on_pending()
             return {'requestIds': self.pending if args['threadId'] == 'worker' else []}
         if name == 't3_thread_send':
-            self.on_send()
-            run = 'continued-' + str(len(self.sends()))
-            self.thread.update(latestRunId=run, status=self.send_status,
-                               activeRunId=run if self.send_status == 'running' else None)
-            self.error_run = run
+            request = args['clientRequestId']
+            if request in self.send_receipts:
+                return dict(self.send_receipts[request])
+            self.on_send()  # an external run can start in the accepted read-to-send gap
+            # Installed latestSteerableRun requires a running run, active attempt,
+            # AND a running provider turn; status alone is insufficient.
+            steerable = self.thread['status'] == 'running' and self.active_attempt is not None and any(
+                turn['runAttemptId'] == self.active_attempt and turn['status'] == 'running'
+                for turn in self.provider_turns)
+            mode = args['mode']
+            if mode in ('steer', 'restart') and not steerable:
+                raise self.m.HostRPCError('thread_not_sendable: no steerable run')
+            if mode in ('auto', 'steer') and steerable:
+                run, delivery = self.thread['latestRunId'], 'steered'
+            elif mode == 'auto':
+                run, delivery = 'continued-' + str(len(self.deliveries) + 1), 'started'
+                self.start_run(run, self.send_status)
+            else:
+                self.fail('unsupported fake dispatch mode: ' + mode)
+            response = {'threadId': args['threadId'], 'runId': run, 'delivery': delivery}
+            self.deliveries.append(dict(response))
+            self.send_receipts[request] = dict(response)
             if self.unknown:
                 raise self.m.HostRPCError('fixture unknown outcome')
-            return {'threadId': args['threadId'], 'runId': run, 'delivery': 'started'}
+            return response
         self.fail('unexpected native call ' + name)
+
+    def start_run(self, run, status='running', provider_running=True):
+        self.thread.update(latestRunId=run, status=status, activeRunId=run if status == 'running' else None)
+        self.active_attempt = 'attempt-' + run if status == 'running' else None
+        self.provider_turns = ([{'runAttemptId': self.active_attempt,
+                                 'status': 'running' if provider_running else 'completed'}]
+                               if self.active_attempt is not None else [])
+        self.error_run = run
 
     def advance(self, seconds):
         import datetime
@@ -431,7 +460,7 @@ class WorkerFailureCatch(Scenario):
         self.assertEqual(self.inbox().count('worker run failed'), 1)
         self.assertEqual({a['threadId'] for a in self.sends()}, {'worker'})
         self.assertEqual(len({a['clientRequestId'] for a in self.sends()}), 3)
-        self.assertEqual({a['mode'] for a in self.sends()}, {'steer'})
+        self.assertEqual({a['mode'] for a in self.sends()}, {'auto'})
         self.assertEqual({a['message'] for a in self.sends()}, {
             'resume your task from your state note; the host failed your last turn on at capacity'})
         receipts = list((self.root / '.brain/wake').glob('failure-*.json'))
@@ -727,3 +756,64 @@ class WorkerFailureCatch(Scenario):
             with self.assertRaises(OSError):
                 self.m.resume_failure(self.inst, record, rpc=self.rpc)
         self.assertEqual(self.calls, [])
+
+    def test_installed_fake_dispatch_auto_starts_inactive_and_dedupes_request(self):
+        self.send_status = 'running'
+        args = {'threadId': 'worker', 'mode': 'auto', 'message': 'fixture', 'clientRequestId': 'fixture-start'}
+        result = self.rpc('t3_thread_send', args)
+        self.assertEqual(result['delivery'], 'started')
+        self.assertEqual(self.thread['status'], 'running')
+        self.assertEqual(self.rpc('t3_thread_send', args), result)
+        self.assertEqual(len(self.deliveries), 1)
+
+    def test_installed_fake_dispatch_auto_steers_running_provider_turn(self):
+        self.start_run('operator-run')
+        result = self.rpc('t3_thread_send', {'threadId': 'worker', 'mode': 'auto', 'message': 'fixture',
+                                           'clientRequestId': 'fixture-steer'})
+        self.assertEqual((result['delivery'], result['runId']), ('steered', 'operator-run'))
+        self.assertEqual(self.thread['latestRunId'], 'operator-run')
+
+    def test_installed_fake_dispatch_steer_refuses_failed_inactive_thread(self):
+        with self.assertRaisesRegex(self.m.HostRPCError, 'thread_not_sendable'):
+            self.rpc('t3_thread_send', {'threadId': 'worker', 'mode': 'steer', 'message': 'fixture',
+                                       'clientRequestId': 'fixture-refuse'})
+        self.assertEqual(self.deliveries, [])
+        self.assertEqual(self.thread['latestRunId'], 'failed-run')
+
+    def test_installed_fake_steer_requires_active_attempt_and_running_provider_turn(self):
+        self.start_run('operator-run', provider_running=False)
+        args = {'threadId': 'worker', 'mode': 'steer', 'message': 'fixture', 'clientRequestId': 'fixture-refuse'}
+        with self.assertRaisesRegex(self.m.HostRPCError, 'thread_not_sendable'):
+            self.rpc('t3_thread_send', args)
+        self.start_run('operator-run')
+        self.active_attempt = None
+        with self.assertRaisesRegex(self.m.HostRPCError, 'thread_not_sendable'):
+            self.rpc('t3_thread_send', args)
+        self.assertEqual(self.deliveries, [])
+
+    def test_accepted_read_to_send_race_adds_one_message_then_replay_sends_nothing(self):
+        self.tick()
+        original = self.m.host_export_runs(self.inst)[0]
+        self.advance(60)
+        self.on_send = lambda: self.start_run('operator-run')
+        self.m.resume_failure(self.inst, original, rpc=self.rpc)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(self.deliveries[0]['delivery'], 'steered')
+        self.assertEqual(self.deliveries[0]['runId'], 'operator-run')
+        self.assertEqual(self.sends()[0]['mode'], 'auto')
+        self.advance(2000)
+        self.m.resume_failure(self.inst, original, rpc=self.rpc)
+        self.assertEqual(len(self.sends()), 1)
+        self.assertEqual(len(self.deliveries), 1)
+
+    def test_local_project_rebinding_cancels_resume_before_final_read(self):
+        self.tick()
+        self.advance(60)
+        original = self.m.host_export_runs(self.inst)[0]
+        def rebind_project():
+            fresh = self.m.Instance(self.root)
+            fresh.local_of('root')['home_project'] = 'replacement-project'
+            fresh.save_local()
+        self.on_pending = rebind_project
+        self.m.resume_failure(self.inst, original, rpc=self.rpc)
+        self.assertEqual(self.sends(), [])

@@ -170,6 +170,9 @@ def failure_owned(inst, record):
                 if not r.get('Ended') and _m_jobs.job_key(r) == record['job_key']), None)
     if n['archived'] or row is None or _m_jobs.job_signal(inst, n, row, strict=True):
         return None
+    project = n['local'].get('home_project') or n['local'].get('host_project')
+    if record.get('project') != project:
+        return None
     tid = record['thread']
     for node in inst.nodes():
         if tid in _m_jobs.thread_reference_ids(node['local'].get('coordinator', '')):
@@ -183,8 +186,7 @@ def failure_owned(inst, record):
             return None
     bound = n['local'].get('workers', {}).get(record['job_key'])
     if record.get('discovered'):
-        project = n['local'].get('home_project') or n['local'].get('host_project')
-        if (record.get('ambiguous') or record.get('project') != project or record.get('branch') != row['Job']
+        if (record.get('ambiguous') or record.get('branch') != row['Job']
                 or bound and _m_jobs.thread_reference_ids(bound) != {tid}):
             return None
     elif not isinstance(bound, str) or _m_jobs.thread_reference_ids(bound) != {tid}:
@@ -247,7 +249,7 @@ def resume_failure(inst, record, rpc=None):
             # reconciles it independently of the next host snapshot or process.
             failure_publish(inst, receipt)
             response = rpc('t3_thread_send', {
-                'threadId': record['thread'], 'mode': 'steer',
+                'threadId': record['thread'], 'mode': 'auto',
                 'clientRequestId': 'failure-' + _m_jobs.digest([record['thread'], record['run']]),
                 'message': 'resume your task from your state note; the host failed your last turn on ' + record['category']})
             if (not isinstance(response, dict) or response.get('threadId') != record['thread']

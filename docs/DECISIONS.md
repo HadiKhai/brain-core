@@ -2831,3 +2831,26 @@ next minute because the previous export finished after its tick began, so it is
 removed. The existing export lock still excludes concurrent publications. Explicit
 `wt add --thread` ownership is rechecked globally under the reacquired writer lock
 before binding, including changes in other nodes during released admission.
+
+## D574: Auto dispatch resumes an inactive failed thread
+
+The coordinator approved `mode=auto` on 2026-10-27 after installed-host source
+review established that `steer` requires a running run, an active attempt and a
+running provider turn. An inactive failed thread is not steerable. This supersedes
+only D573's mode choice: the exact failed/latestRunId check, screened text,
+thread+run claim and idempotency key, nonblocking local writer fence, continuation
+backoffs and durable escalation remain in force. Local thread or project rebinding
+cancels the pending action. Queue-only dispatch remains excluded.
+
+With `auto`, the installed host starts a continuation when inactive and steers an
+existing provider turn if one started during the explicitly accepted read-to-send
+race. Its worst case remains one extra resume message to that just-started run;
+replay of the claimed failed thread/run sends nothing. An atomic expected-run host
+guard remains a follow-up, not a prerequisite. No model/runtime selection changes.
+
+The fake host now enforces these dispatch predicates: auto starts when inactive,
+auto steers a running provider turn, and steer is refused when inactive or missing
+an active attempt/provider turn. Focused checks cover the accepted last-moment
+race and replay as well as failed continuation IDs, backoff, success, unknown
+outcomes, durable escalation, directory-sync faults and local lock/rebind fences.
+These fake-host checks do not attest live bridge, provider or launchd latency.
