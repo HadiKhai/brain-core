@@ -1983,6 +1983,27 @@ def rehearsal_commands(nodes):
     return commands, jobs
 
 
+def rehearsal_copy_parent(inst, n):
+    from . import worktrees as _m_worktrees
+    workbench = _m_worktrees.workbench(inst, n)
+    # A declared workbench must remain a source operand, never contain its own
+    # frozen clone. Use a private sibling, separate from watched scratch paths.
+    parent = workbench.parent / (workbench.name + '-rehearsal-copies')
+    declaration = getattr(inst, 'local', {}).get('rehearse_external', {})
+    roots = declaration.get('roots', []) if isinstance(declaration, dict) else []
+    protected = [getattr(inst, 'root', None), n.get('home_path')]
+    if isinstance(roots, list):
+        protected.extend(value for value in roots if isinstance(value, str))
+    physical = parent.resolve()
+    for value in protected:
+        if value is not None:
+            source = Path(value).expanduser().resolve()
+            if physical == source or source in physical.parents or physical in source.parents:
+                raise RehearsalError('rehearsal copies overlap source',
+                                     code='rehearsal-copies-overlap-source')
+    return parent
+
+
 def rehearse(inst, n, branch, local_diff_dir=None):
     if not n['external']:
         raise RehearsalError('rehearsal needs an external core home and workbench', code='rehearsal-needs-an-external-core-home-and-workbench')
@@ -1992,7 +2013,8 @@ def rehearse(inst, n, branch, local_diff_dir=None):
         raise RehearsalError('candidate branch or cached integration main missing', code='candidate-branch-or-cached-integration-main-missing')
     # Probe admission before any candidate is executed. The sandbox protects live
     # homes even when local.json points to them; they are read-only observations.
-    with _m_rehearse_external.OwnedCopies() as copies:
+    with _m_rehearse_external.OwnedCopies(parent=rehearsal_copy_parent(inst, n),
+                                        persistent=True) as copies:
         folder = copies.bulk
         copies.record(head=head, main=main, integration_base=integration_base)
         sandbox_self_check(folder)

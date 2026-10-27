@@ -21,6 +21,65 @@ class OwnedCopyLifecycle(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.parent = Path(self.temp.name).resolve()
 
+    def test_persistent_copy_root_refuses_temp_and_realpath_aliases_before_start(self):
+        from types import SimpleNamespace
+        aged = self.parent / 'aged'
+        aged.mkdir()
+        alias = self.parent / 'aged-alias'
+        alias.symlink_to(aged, target_is_directory=True)
+        with mock.patch.dict(os.environ, {'TMPDIR': str(aged)}), \
+                mock.patch.object(rehearse_external.tempfile, 'mkdtemp') as allocate, \
+                mock.patch.object(rehearse_external.OwnedCopies, 'start_guardian') as start:
+            for path in (aged, aged / 'run', alias / 'run', Path('/var/folders/sample/run'),
+                         Path('/private/var/folders/sample/run')):
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'temporary rehearsal'):
+                    rehearse_external.OwnedCopies(parent=path, persistent=True)
+            allocate.assert_not_called()
+            start.assert_not_called()
+            node = dict(external=True, home_path=self.parent / 'candidate',
+                        local=dict(workbench=str(aged / 'workbench')))
+            with mock.patch.object(rehearse._m_verify, 'ready_refs', return_value=('a', 'b')), \
+                    mock.patch.object(rehearse._m_verify, 'integration_parent', return_value='b'), \
+                    mock.patch.object(rehearse, 'sandbox_self_check') as sandbox:
+                with self.assertRaisesRegex(ValueError, 'temporary rehearsal'):
+                    rehearse.rehearse(SimpleNamespace(), node, 'sample')
+                sandbox.assert_not_called()
+            self.assertEqual([], list(aged.iterdir()))
+
+    def test_persistent_workbench_copy_preserves_timestamps_and_cleans_owned_bulk(self):
+        from test_rehearse import persistent_fixture_directory
+        from types import SimpleNamespace
+        work = persistent_fixture_directory(self)
+        home = work / 'candidate'
+        node = dict(external=True, home_path=home, local={})
+        parent = rehearse.rehearsal_copy_parent(SimpleNamespace(), node)
+        self.assertEqual(home.parent / 'candidate-work-rehearsal-copies', parent)
+        original = self.parent / 'original'
+        original.mkdir()
+        source = original / 'old'
+        source.write_bytes(b'sample old content')
+        os.utime(source, ns=(946684800000000000, 946684800000000000))
+        before = source.stat()
+        with rehearse_external.OwnedCopies(parent=parent, persistent=True) as owner:
+            self.assertEqual(parent.resolve(), owner.root.parent)
+            self.assertEqual(0o700, parent.stat().st_mode & 0o777)
+            rehearse.copy_tree(original, owner.bulk / 'copy')
+            self.assertEqual(before.st_mtime_ns, (owner.bulk / 'copy/old').stat().st_mtime_ns)
+            self.assertEqual(b'sample old content', (owner.bulk / 'copy/old').read_bytes())
+        self.assertFalse(owner.bulk.exists())
+        self.assertEqual(['cleanup.json'], [p.name for p in owner.root.iterdir()])
+        self.assertEqual('removed', json.loads((owner.root / 'cleanup.json').read_text())['state'])
+        self.assertEqual(b'sample old content', source.read_bytes())
+
+    def test_copy_parent_refuses_overlap_with_declared_sources(self):
+        from types import SimpleNamespace
+        node = dict(external=True, home_path=self.parent / 'candidate', local={})
+        selected = self.parent / 'candidate-work-rehearsal-copies'
+        for source in (selected, selected.parent, selected / 'nested'):
+            inst = SimpleNamespace(local=dict(rehearse_external=dict(roots=[str(source)])))
+            with self.subTest(source=source), self.assertRaisesRegex(rehearse.RehearsalError, 'overlap source'):
+                rehearse.rehearsal_copy_parent(inst, node)
+
     def test_frozen_accounting_uses_only_attested_aggregates(self):
         import contextlib
         import hashlib
@@ -706,7 +765,7 @@ class DeclaredExternalSnapshot(Scenario):
             rehearse_external.without_provider_bindings(inst)
 
     def test_comparison_uses_captured_operands_during_peer_publication(self):
-        inst, home, tree = self.fixture()
+        inst, home, tree = self.fixture(persistent=True)
         (home / 'bin').mkdir()
         (home / 'bin/brain').write_text('fixture')
         self.git('add', '.', cwd=home)
@@ -717,6 +776,11 @@ class DeclaredExternalSnapshot(Scenario):
         (inst.root / '.brain/local.json').write_text(json.dumps(inst.local))
         original = rehearse.snapshot(inst.root)
         observed = []
+        selected = rehearse.rehearsal_copy_parent(inst, inst.node('app'))
+        self.assertEqual(bench.parent / (bench.name + '-rehearsal-copies'), selected)
+        self.assertNotIn(bench, selected.parents)
+        def sandbox(folder):
+            self.assertEqual(selected.resolve(), folder.parent.parent)
         def lane(source, core, folder, nodes, commands, **kwargs):
             captured = instance.Instance(source).node('app')
             observed.append(rehearse.snapshot(captured['home_path']))
@@ -726,7 +790,7 @@ class DeclaredExternalSnapshot(Scenario):
             (bench / 'peer-report').write_text('peer report ' + str(len(observed)))
             return {'hook': dict(text='', code=0, timeout=False, unexpected=0, seconds=.01)}
         with mock.patch.dict('os.environ', self.env), \
-                mock.patch.object(rehearse, 'sandbox_self_check'), \
+                mock.patch.object(rehearse, 'sandbox_self_check', side_effect=sandbox), \
                 mock.patch.object(rehearse, 'sandbox_prefix', return_value=[]), \
                 mock.patch.object(rehearse, 'probe_delivery', return_value=[]), \
                 mock.patch.object(rehearse._m_verify, 'ready_refs', return_value=(head, head)), \
@@ -766,9 +830,13 @@ class DeclaredExternalSnapshot(Scenario):
         self.assertFalse(failed.bulk.exists())
         self.assertEqual(original, rehearse.snapshot(home))
 
-    def fixture(self):
+    def fixture(self, persistent=False):
         root = self.init('demo')
-        home = self.repo(self.tmp / 'source')
+        base = self.tmp
+        if persistent:
+            from test_rehearse import persistent_fixture_directory
+            base = persistent_fixture_directory(self)
+        home = self.repo(base / 'source')
         self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
         self.b(root, 'wt', 'add', 'app', 'job/sample', '--no-setup')
         inst = instance.Instance(root)
