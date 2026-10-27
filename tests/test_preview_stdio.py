@@ -254,7 +254,8 @@ if method in ('start', 'status'):
         if saved['binding'] != binding: sys.exit(8)
         if mode == 'crash': sys.exit(7)
         if mode == 'slow-call': time.sleep(3)
-        state = ('pending' if mode == 'timeout' or time.time() - saved['started'] < .4
+        duration = 11 if mode == 'slow-success' else .4
+        state = ('pending' if mode == 'timeout' or time.time() - saved['started'] < duration
                  else 'failed' if mode == 'failure' else 'done')
     if mode == 'foreign' and method == 'status': value['ownership']['resource'] = 'foreign'
     if mode == 'unquiescent' and method == 'status': value['quiescent'] = False
@@ -297,9 +298,10 @@ class PreviewLongOperations(Scenario):
             return m.landed_preview(m.Instance(root), m.Instance(root).node('root'), head)
 
     def test_slow_operation_exceeds_individual_call_budget_and_preserves_binding(self):
-        root, _, head, m = self.fixture()
-        with mock.patch.object(m, 'CALL_SECONDS', .3):
-            result = self.reconcile(root, head, m)
+        root, _, head, m = self.fixture('slow-success', {'migration': 30})
+        started = time.monotonic()
+        result = self.reconcile(root, head, m)
+        self.assertGreater(time.monotonic() - started, m.CALL_SECONDS)
         self.assertEqual(result['state'], 'succeeded')
         calls = self.calls()
         long = [call for call in calls if call['method'] in ('start', 'status')]
