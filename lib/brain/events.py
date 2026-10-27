@@ -456,13 +456,21 @@ def replay(inst, records=None):
     return state['resources'], {k: v for k, v in views.items() if v is not None}, state['opened']
 
 
-def resources(inst, *, paths_only=False):
-    """Tracked resource hashes, or paths without body reads for a stamp fence.
+def resources(inst, content=True, *, paths_only=False):
+    """Content hashes only. Git, external homes, reports, source imports and caches are outside this stream.
 
-    Git, external homes, reports, source imports and caches are outside this stream.
-    Path discovery repeats on each fence check to detect additions and removals.
+    `paths_only=True` discovers paths without reading their contents or stamps.
+    `content=False` keeps the same file set but records each file's identity and
+    change clocks instead of its bytes: an in-process change detector, never stored.
     """
     result = {}
+    def value(path, private=False):
+        if paths_only:
+            return None
+        if content:
+            return digest(private_read(path) if private else path.read_bytes())
+        st = os.stat(path, follow_symlinks=False)
+        return [st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
     def walk(folder, deep=False):
         for p in sorted(folder.iterdir()):
             if p.is_dir() and not p.is_symlink():
@@ -474,12 +482,12 @@ def resources(inst, *, paths_only=False):
                     walk(p, True)
             elif p.is_file() and p.suffix in (".md", ".json", ".txt", ".sh"):
                 rel = p.relative_to(inst.root).as_posix()
-                result[rel] = None if paths_only else digest(p.read_bytes())
+                result[rel] = value(p)
     walk(inst.root)
     for name in ("local.json", "inbox-seen.json"):
         path = inst.root / ".brain" / name
         if _stamp(path):
-            result[".brain/" + name] = None if paths_only else digest(private_read(path))
+            result[".brain/" + name] = value(path, private=True)
     # Ready packets are Brain-owned state in workbenches, not external Git operations.
     for n in inst.nodes():
         wb = n["local"].get("workbench")
@@ -487,7 +495,7 @@ def resources(inst, *, paths_only=False):
             folder = Path(wb).expanduser() / "scratch/ready"
             if folder.is_dir():
                 for path in folder.glob("*.json"):
-                    result["@ready/" + n["id"] + "/" + path.name] = None if paths_only else digest(path.read_bytes())
+                    result["@ready/" + n["id"] + "/" + path.name] = value(path)
     return result
 
 

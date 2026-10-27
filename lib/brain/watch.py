@@ -162,14 +162,23 @@ def watch_text_identity(item):
     return ' '.join(text.split())
 
 
-def watch_source_signature(inst):
-    """Recheck scan sources without recomputing transcript/Git projections."""
+def watch_source_signature(inst, layout=None):
+    """Recheck scan sources without recomputing transcript/Git projections.
+
+    `layout` keeps each home's Git metadata paths for one process's repeated
+    checks; the paths are still restated every time, and new homes are added.
+    State files are compared by identity and change clocks, not by their bytes.
+    """
     from . import events
     nodes = list(inst.nodes())
     paths = [n['dir'] / name for n in nodes for name in ('tasks', 'requirements')]
+    layout = {} if layout is None else layout
     for n in nodes:
         if n.get('external') and n.get('home_path'):
-            paths.extend(_m_instance.git_state_paths(n['home_path']))
+            home = str(n['home_path'])
+            if home not in layout:
+                layout[home] = _m_instance.git_state_paths(n['home_path'])
+            paths.extend(layout[home])
     paths += [inst.root / '.brain' / name for name in (
         'communications.json', 'worker-runs.json', 'host-observations.json',
         'host-tasks.json', 'machine.json', 'rotation')]
@@ -177,7 +186,7 @@ def watch_source_signature(inst):
     # resources includes ledgers, inbox/status, handbacks/attempts and legacy
     # ready packets. It deliberately excludes transcripts, Git objects and caches.
     return (_m_instance.state_signature(inst, nodes, extra=paths),
-            _m_jobs.digest(events.resources(inst)))
+            _m_jobs.digest(events.resources(inst, content=False)))
 
 
 def watch_untracked(groups, generation=None):
@@ -195,11 +204,12 @@ def watch_untracked(groups, generation=None):
 
 
 class WatchGroups(dict):
-    def __init__(self, values, revision, generation=None, stale=False):
+    def __init__(self, values, revision, generation=None, stale=False, layout=None):
         super().__init__(values)
         self.receipt_revision = revision
         self.source_generation = generation
         self.stale = stale
+        self.source_layout = layout
 
 
 def watch_receipt_revision(inst):
@@ -211,9 +221,10 @@ def watch_receipt_revision(inst):
 def watch_due_episodes(inst, scan):
     """Persist opaque receipts while ordinary due needs remain open.
 
-    Readers and drains serialize the source scan and reconciliation together,
-    so an older scan cannot erase a newer receipt. A scan closes absent needs.
-    Machine and direct producer episodes already have their own receipts.
+    The source scan runs before the receipt lock; only reconciliation holds it.
+    Each receipt records when its scan started, so an older scan finishing after
+    a newer one is stale and cannot erase a newer receipt. A scan closes absent
+    needs. Machine and direct producer episodes already have their own receipts.
     """
     import fcntl
     path = inst.root / '.brain/wake/due-episodes.json'
@@ -222,29 +233,37 @@ def watch_due_episodes(inst, scan):
         raise ValueError('unsafe due episode state')
     path.parent.mkdir(exist_ok=True)
     _m_common.safe_target(lock)
+    started = time.time_ns()
+    layout = {}
+    generation = watch_source_signature(inst, layout)
+    groups = scan()
+    if watch_source_signature(inst, layout) != generation:
+        return WatchGroups({}, None, generation, stale=True, layout=layout)
+    entries = [i for group in groups.values() for i in group['items']
+               if ('reason' not in i or i['kind'] == 'overdue-question') and i['kind'] not in
+               ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
     fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'a+') as stream:
         if os.fstat(stream.fileno()).st_nlink != 1:
             raise ValueError('linked due episode lock')
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        generation = watch_source_signature(inst)
-        groups = scan()
-        if watch_source_signature(inst) != generation:
-            return WatchGroups({}, None, generation, stale=True)
-        entries = [i for group in groups.values() for i in group['items']
-                   if ('reason' not in i or i['kind'] == 'overdue-question') and i['kind'] not in
-                   ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
+        with _m_timings.phase('episode_lock_wait'):
+            fcntl.flock(stream, fcntl.LOCK_EX)
         _m_common.safe_target(path)
         try:
             data = watch_read(path, {'version': 1, 'open': {}})
             if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
                     or type(data.get('overdue_episodes', False)) is not bool
+                    or type(data.get('scanned', 0)) is not int
                     or any(not re.fullmatch(r'[0-9a-f]{64}', k)
                            or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
                            for k, v in data['open'].items())):
                 raise ValueError('invalid due episode state')
         except (OSError, ValueError):
             return watch_untracked(groups, generation)  # preserve evidence and fail open until repaired
+        # A receipt from a scan that started later already reflects newer sources.
+        # A start in the future means the clock moved back; it cannot fence forever.
+        if started < data.get('scanned', 0) <= time.time_ns():
+            return WatchGroups({}, None, generation, stale=True, layout=layout)
         # Preserve pre-upgrade acknowledgements rather than replaying the backlog.
         try:
             legacy_seen = set(watch_state(inst).get('seen', []))
@@ -267,11 +286,11 @@ def watch_due_episodes(inst, scan):
             # Atomic replacement supplies a new generation even for an unchanged
             # scan, without extending the existing receipt schema.
             _m_machine.machine_publish(inst, path, json.dumps(
-                {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
+                {'version': 1, 'open': current, 'overdue_episodes': True, 'scanned': started}, sort_keys=True) + '\n')
             revision = watch_receipt_revision(inst)
         except OSError:
             return watch_untracked(groups, generation)  # unpublished identities cannot prove resolution
-    return WatchGroups(groups, revision, generation)
+    return WatchGroups(groups, revision, generation, layout=layout)
 
 
 def watch_items(inst, n):
@@ -720,7 +739,7 @@ def watch_precomputed_publication(inst, groups):
     revision = getattr(groups, 'receipt_revision', None)
     generation = getattr(groups, 'source_generation', None)
     if (getattr(groups, 'stale', False) or generation is not None and
-            watch_source_signature(inst) != generation):
+            watch_source_signature(inst, getattr(groups, 'source_layout', None)) != generation):
         yield False
         return
     if revision is None:
@@ -859,18 +878,29 @@ def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
 def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
     """Share the sampler's short, nonblocking instance-lock discipline."""
     import fcntl
+    from . import command_reads
     folder = inst.root / '.brain'
-    if _m_common.outward_links(inst.root):
-        _m_common.die('watch: unsafe instance links; no wake sent')
-    if _m_instance._LOCK['fh'] is not None:
-        if not quiet:
-            print('watch: skipped; instance busy')
-        return
-    generation = _m_instance.state_signature(inst, list(inst.nodes()))
-    if groups is None:
-        from . import command_reads
-        with command_reads.snapshot(), _m_timings.phase('watch_compute'):
-            groups = watch_groups(inst)
+    # The scan reuses this link audit; the publication audits again just before its lock.
+    with command_reads.scope(_m_common.outward_links):
+        if _m_common.outward_links(inst.root):
+            _m_common.die('watch: unsafe instance links; no wake sent')
+        if _m_instance._LOCK['fh'] is not None:
+            if not quiet:
+                print('watch: skipped; instance busy')
+            return
+        generation = _m_instance.state_signature(inst, list(inst.nodes()))
+        if groups is None:
+            with command_reads.snapshot(), _m_timings.phase('watch_compute'):
+                groups = watch_groups(inst)
+    with command_reads.scope(_m_common.outward_links):
+        if _m_common.outward_links(inst.root):
+            _m_common.die('watch: unsafe instance links; no wake sent')
+        watch_locked_publish(inst, folder, generation, kinds, quiet, sources, groups)
+
+
+def watch_locked_publish(inst, folder, generation, kinds, quiet, sources, groups):
+    """Publish under the short instance lock; per-file targets are still checked on write."""
+    import fcntl
     _m_common.safe_target(folder / 'lock')
     fd = os.open(folder / 'lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'r+') as stream:

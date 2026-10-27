@@ -136,8 +136,20 @@ class TermBlobReader:
         return data
 
 
+_NEVER_CACHE = {}
+
+
 def never_terms(n):
     """[(term, label)] for a node: its own never-name.txt and its ancestors'. The label never shows the term."""
+    chain, m = [], n
+    while m:
+        f = m["dir"] / NEVER_FILE
+        chain.append((m["id"], str(f), _m_common.file_stamp(f)))
+        m = m["parent"]
+    # Reuse only for the same ancestry whose files (or absences) keep their stamps.
+    key = tuple(chain)
+    if key in _NEVER_CACHE:
+        return list(_NEVER_CACHE[key])
     out, m = [], n
     while m:
         f = m["dir"] / NEVER_FILE
@@ -149,7 +161,12 @@ def never_terms(n):
                     k += 1
                     out.append((t, f"term {k} of {m['id']}/{NEVER_FILE}"))
         m = m["parent"]
-    return [(t, redact(label, out)) for t, label in out]  # even a node's own id may hold one of its words
+    result = [(t, redact(label, out)) for t, label in out]  # even a node's own id may hold one of its words
+    if tuple((nid, path, _m_common.file_stamp(path)) for nid, path, _ in chain) == key:
+        if len(_NEVER_CACHE) >= 1024:
+            _NEVER_CACHE.clear()
+        _NEVER_CACHE[key] = tuple(result)  # unchanged while read, so the stamps describe these terms
+    return result
 
 
 def governance_text(text, principals=(), drop=False):

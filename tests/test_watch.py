@@ -185,6 +185,29 @@ class Watcher(Scenario):
             self.assertFalse(list(directory.glob('*.pending')), 'retired episode must not be restored')
             self.assertEqual(seen.read_bytes(), acknowledged)
 
+    def test_scan_runs_outside_receipt_lock_and_overtaken_scan_is_stale(self):
+        import fcntl
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        lock = inst.root / '.brain/wake/due-episodes.lock'
+        def items(present):
+            return [{'id': m.watch_digest(['fixture-need']), 'node': 'root', 'kind': 'blocked-overdue',
+                     'text': 'Choose a fixture color'}] if present else []
+        newer = {}
+        def older_scan():
+            with open(lock, 'a+') as stream:  # no receipt lock is held while sources are scanned
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(stream, fcntl.LOCK_UN)
+            newer['groups'] = m.watch_due_episodes(inst, lambda: {'root': {
+                'node': root, 'command': 'fixture-send', 'items': items(True)}})
+            return {'root': {'node': root, 'command': 'fixture-send', 'items': items(False)}}
+        older = m.watch_due_episodes(inst, older_scan)
+        self.assertTrue(older.stale)
+        self.assertIsNone(older.receipt_revision)
+        current = newer['groups']['root']['items'][0]['id']
+        receipt = json.loads((inst.root / '.brain/wake/due-episodes.json').read_text())
+        self.assertEqual(list(receipt['open'].values()), [current], 'an older scan must not close a newer receipt')
+
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
         line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose a color <!-- host-question:color -->'

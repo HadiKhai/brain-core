@@ -404,10 +404,12 @@ def git_state_paths(home, *, task_proof=False, refs=None, include_head=True):
     # an ancestor repository, and linked worktrees/bare homes have other layouts.
     # Supplying the unchanged environment bypasses display-query memoization;
     # this is a publication recheck, never a cached layout observation.
-    for flag in ('--absolute-git-dir', '--git-common-dir'):
-        result = _m_common.git('rev-parse', flag, cwd=home, env=dict(os.environ))
-        value = result.stdout.strip()
-        if result.returncode == 0 and value:
+    # One process answers both questions, in flag order, one line each.
+    result = _m_common.git('rev-parse', '--absolute-git-dir', '--git-common-dir', cwd=home, env=dict(os.environ))
+    values = result.stdout.splitlines() if result.returncode == 0 else []
+    for value in values[:2] if len(values) == 2 else []:
+        value = value.strip()
+        if value:
             base = (Path(home) / value).resolve()
             bases.append(base)
             paths.extend((base / 'commondir', (base / 'commondir').resolve()))

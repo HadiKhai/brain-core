@@ -115,17 +115,44 @@ def touch(*paths):
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.S)
 
 
+def file_stamp(path):
+    """Identity and both change clocks of a regular file, or None: an input fingerprint."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+_FM_CACHE = {}
+
+
 def read_fm(path):
+    # Parsed frontmatter is reused only while the file keeps the stamp taken
+    # before reading it; any rewrite changes its change clock and misses.
+    key = str(path)
+    stamp = file_stamp(path)
+    hit = _FM_CACHE.get(key) if stamp else None
+    if hit and hit[0] == stamp:
+        return dict(hit[1]), hit[2]
     text = Path(path).read_text()
     m = FRONTMATTER_RE.match(text)
     if not m:
-        return {}, text
-    fm = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            k, v = line.split(":", 1)
-            fm[k.strip()] = v.strip()
-    return fm, m.group(2)
+        fm, body = {}, text
+    else:
+        fm = {}
+        for line in m.group(1).splitlines():
+            if ":" in line:
+                k, v = line.split(":", 1)
+                fm[k.strip()] = v.strip()
+        body = m.group(2)
+    if stamp:
+        if len(_FM_CACHE) >= 8192:
+            _FM_CACHE.clear()
+        _FM_CACHE[key] = (stamp, dict(fm), body)
+    return fm, body
 
 
 def write_fm(path, fm, body):
