@@ -343,11 +343,12 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
     return h.digest()
 
 
-def git_state_paths(home):
+def git_state_paths(home, *, task_proof=False):
     """Mutable ref/config generations, including linked-worktree common refs.
 
     Git objects are immutable; traversing them would turn a recheck into a scan.
     Keep both the logical metadata entry and its resolved target in the fence.
+    Task completion reads main and replacement refs, never unrelated branches.
     """
     marker = Path(home) / '.git'
     paths = [marker] if not marker.is_dir() else []
@@ -363,11 +364,21 @@ def git_state_paths(home):
             base = (Path(home) / value).resolve()
             bases.append(base)
             paths.extend((base / 'commondir', (base / 'commondir').resolve()))
+    main_ref = None
+    if task_proof:
+        # main may itself be symbolic; follow the ref Git resolves for proof.
+        result = _m_common.git('symbolic-ref', '-q', 'refs/heads/main', cwd=home, env=dict(os.environ))
+        if result.returncode == 0 and result.stdout.strip().startswith('refs/'):
+            main_ref = result.stdout.strip()
     for base in bases:
-        for name in ('HEAD', 'refs', 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
+        if main_ref:
+            path = base / main_ref
+            paths.extend((path, path.resolve()))
+        refs = ('refs/heads/main', 'refs/replace') if task_proof else ('refs',)
+        for name in ('HEAD', *refs, 'packed-refs', 'reftable', 'shallow', 'info/grafts', 'config'):
             path = base / name
             paths.extend((path, path.resolve()))
-            if name == 'refs' and path.is_dir():
+            if name in ('refs', 'refs/replace') and path.is_dir():
                 paths.extend(p.resolve() for p in path.rglob('*') if p.is_symlink())
     return paths
 

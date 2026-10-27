@@ -2830,3 +2830,19 @@ adding a worktree. A minute boundary can otherwise refresh root's generated
 `Facts refreshed` timestamp without committing it, leaving setup dirty before
 the handback under test. This fixture correction retains the pre-handback stamp
 clear and every strict assertion; production hourly coalescing is unchanged.
+
+## D40008: Fence task mutations by their validation dependencies
+
+Task mutations fence records from the target node and nodes reached through
+its prospective dependency, parent and successor graph. Completion artifacts
+and code proof homes are selected from that same graph. Code completion fences
+local main (including its symbolic target), packed and replacement refs, Git
+configuration and ancestry metadata in both worktree and common directories.
+Unrelated branch refs are excluded from this task-specific fence; other Git
+publication fences retain their broader scope.
+
+Validation still runs outside the instance writer lock. After reacquiring that
+lock, publication compares fresh generations of every selected input before
+saving. Relevant drift refuses without writing the prepared task. Automatic
+retries are not needed to tolerate unrelated builder commits and are omitted
+so genuine validation conflicts remain explicit.
