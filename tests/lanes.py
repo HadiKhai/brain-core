@@ -55,7 +55,7 @@ LANE_TESTS.update({
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py', 'test_rehearse_external.py'),
     'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py', 'test_digest.py', 'test_ui_fill.py'),
     'watch': ('test_watch.py', 'test_watch_extension.py', 'test_decision_gate.py'),
-    'verify': ('test_verify.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py', 'test_ready_policies.py', 'test_verify_ownership.py'),
+    'verify': ('test_verify.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py', 'test_ready_policies.py', 'test_verify_ownership.py', 'test_per_change_gate.py'),
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
     'messages': ('test_messages.py', 'test_worker_message_guard.py', 'test_communication_policy.py'),
@@ -70,7 +70,7 @@ OUTSIDE_JOB_LANES = {
     'ui-checks.js': 'browser assertions; separate browser verification',
     'ui-fitness.js': 'browser layout assertions; separate browser verification',
 }
-SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'lanes.py', 'check_lanes.py', 'dashboard_acceptance.py')
+SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'lanes.py', 'check_lanes.py', 'per_change_gate.py', 'dashboard_acceptance.py')
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
@@ -90,7 +90,7 @@ SHARED_INPUTS = (
     'lib/brain/settings_batch.py', 'lib/brain/metadata_recovery.py', 'lib/brain/dispatcher.py',
     'lib/brain/host_rpc.py', 'lib/brain/host_lifecycle.py', 'lib/brain/worker_lifecycle.py', 'lib/brain/coordinator_lifecycle.py',
     'lib/brain/__init__.py', 'tests/scenario.py', 'tests/core_loader.py',
-    'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py',
+    'tests/conftest.py', 'tests/lanes.py', 'tests/check_lanes.py', 'tests/per_change_gate.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
     'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt', 'pytest.ini',
 )
@@ -109,6 +109,8 @@ def imports(tree):
             found.update(a.name.split('.')[1] for a in node.names if a.name.startswith('brain.'))
         elif isinstance(node, ast.ImportFrom) and node.module == 'brain':
             found.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and (node.module or '').startswith('brain.'):
+            found.add(node.module.split('.')[1])
     return found
 
 
@@ -186,7 +188,7 @@ def test_targets(root, files):
 
 
 def source_inputs(tree, train_symbols):
-    uses_train, helpers = False, set()
+    uses_train, helpers = 'train' in imports(tree), set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Attribute) and node.attr in train_symbols
                 and not (isinstance(node.value, ast.Name) and node.value.id == 'self')):

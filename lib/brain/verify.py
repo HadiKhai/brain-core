@@ -308,7 +308,7 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
             reasons.append("main moved; return to worker to rebase and verify again")
         w = n["local"].get("worktrees", {}).get(branch)
         lanes_configured = bool(n["fm"].get("verify_lanes") or n["fm"].get("verify_lanes_from"))
-        cheap = display and lanes_configured
+        cheap = display and lanes_configured and packet.get('verify_scope') != 'full'
         if not cheap and isinstance(w, dict) and w.get("path") and Path(w["path"]).exists():
             files = verify_input_files(n, w)
             if packet.get("inputs") != verify_inputs(n, w, files):  # every readiness reader comes through here
@@ -317,6 +317,8 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
         if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
                 or packet["verify_result"] != 0:
             reasons.append("node verify missing, changed or failed")
+        if not verification_config_valid(n, packet):
+            reasons.append('per-change/full verification configuration changed; hand back again')
         port_context = packet.get('verify_port_context')
         rounds = packet.get('review_rounds')
         reverify = shlex.join(['brain', 'handback', n['id'], '--branch', branch, '--state', 'done',
@@ -329,7 +331,9 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
             reasons.append('recorded verify port environment missing or invalid; run ' + reverify)
         elif port_context['export_port'] != (n['fm'].get('verify_export_port') == 'true'):
             reasons.append('verify port export policy changed; run ' + reverify)
-        if cheap:
+        if packet.get('verify_scope') == 'full':
+            pass  # The complete command covers every lane, without running its map.
+        elif cheap:
             try:
                 _m_lanes.recorded_lane_environment({}, packet.get('verify_lane_env'))
             except ValueError as error:
@@ -404,7 +408,8 @@ def verify_reuse(n, branch, previous, head, main, verify, cwd, inputs=None, port
     (verify_skip globs, e.g. docs/*,*.md). (verified head, changed paths) or None."""
     p = previous if isinstance(previous, dict) else {}
     sha = lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", v)
-    if not (p.get("version") == 1 and p.get("node") == n["id"] and p.get("branch") == branch
+    if not (verification_config_valid(n, p)
+            and p.get("version") == 1 and p.get("node") == n["id"] and p.get("branch") == branch
             and p.get("verify_command") == verify and type(p.get("verify_result")) is int and p["verify_result"] == 0
             and packet_main_matches(n, p, main) and type(p.get("review_rounds")) is int and p["review_rounds"] >= 1
             and isinstance(p.get("checked_at"), str) and sha(p.get("head")) and p.get("inputs") == inputs
@@ -633,7 +638,7 @@ def run_cheap_checks(inst, n, branch, w, env):
 
 def run_verify(inst, n, branch, verify, w, env):
     with _m_gate_lock.node_gate(inst, n, env, branch) as gate_env, verification_resources(inst, n) as resources:
-        if verify == n.get('fm', {}).get('verify', '').strip():
+        if verify in {n.get('fm', {}).get(key, '').strip() for key in ('verify', 'verify_change')}:
             cheap = run_cheap_checks(inst, n, branch, w, gate_env)
             if cheap and cheap[0]:
                 resources['failed'] = True
@@ -940,7 +945,14 @@ def moved_ref_details(n, branch, head, head_after, main, main_after, integration
         if old != new))
 
 
-def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_receipt=None):
+def verification_config_valid(n, packet):
+    explicit = packet.get('verify_scope') in ('change', 'full')
+    if n['fm'].get('verify_change', '').strip() or explicit:
+        return explicit and packet.get('verify_config_hash') == _m_lanes.lane_config_hash(n)
+    return packet.get('verify_scope') is None
+
+
+def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_receipt=None, full=False):
     reasons, head, main = ready_preflight(n, branch)
     reasons.extend(ready_policy_reasons(inst, n, branch, head, previous))
     from . import rehearse as _m_rehearse
@@ -959,9 +971,17 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     if previous and previous.get("integration_base", previous.get("main")) != integration_base:
         reverify = True
     env = verify_env(n, branch, w)
+    change = n['fm'].get('verify_change', '').strip()
+    # A complete gate must never be replaced by lanes or by a per-change command.
+    # Combining two selection mechanisms is unknown: use the complete command.
+    lanes_configured = bool(n['fm'].get('verify_lanes') or n['fm'].get('verify_lanes_from'))
+    full = full or full_receipt is not None or bool(change and lanes_configured)
+    change = change if not full and not lanes_configured else ''
+    env = {**env, 'BRAIN_ROOT': str(inst.root), 'BRAIN_VERIFY_BASE': integration_base, 'BRAIN_VERIFY_HEAD': head,
+           'BRAIN_VERIFY_SCOPE': 'change' if change else 'full'}
     port_context = verify_port_context(n, env)
     try:
-        snap = _m_lanes.lane_snapshot(n, w, env, inputs)
+        snap = None if full or change else _m_lanes.lane_snapshot(n, w, env, inputs)
         if snap:
             _m_guard.no_terms_in(n, json.dumps(snap['lanes'], ensure_ascii=False), 'verify lane map')
             snap['check'] = n['fm'].get('verify_lanes_check', '').strip()
@@ -979,7 +999,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
         except (OSError, ValueError, KeyError, TypeError):
             return None, ['full receipt missing, changed, failed or stale; run full-run on this exact candidate']
         return packet, []
-    reuse = None if reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
+    reuse = None if full or reverify or snap or (previous or {}).get('verify_lanes') is not None else verify_reuse(n, branch, previous, head, main, verify, w["path"], inputs, port_context)
     # Do not sweep an operator's dirty .gitignore into
     # the worker hand-back commit just because we added the local-output exclusion.
     gi = inst.root / ".gitignore"
@@ -996,7 +1016,8 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
         print(f"verify: reused the green run of {base[:12]}"
               + (f": since then only {len(changed)} file(s) under verify_skip changed" if changed else
                  ": nothing changed since") + " (--reverify runs it again)")
-        return {"version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
+        return {**{key: previous[key] for key in ('verify_scope', 'verify_config_hash') if key in previous},
+                "version": 1, "node": n["id"], "branch": branch, "head": head, "main": main,
                 "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": 0, "verified_head": base, "verify_reused": True,
                 "inputs": inputs, "input_files_ref": input_ref, "verify_log": previous.get("verify_log"), "rehearsal": rehearsal,
                 "verify_port_context": port_context,
@@ -1007,7 +1028,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
         result = lane_evidence['verify_result']
         log_path = next((r['log'] for r in reversed(lane_evidence['verify_lanes']) if r.get('log')), None)
     else:
-        result, log_path = run_verify(inst, n, branch, verify, w, env)
+        result, log_path = run_verify(inst, n, branch, change or verify, w, env)
     after, head_after, main_after = ready_preflight(n, branch)
     after_files = verify_input_files(n, w)
     input_reasons = ([verify_input_reason(n, input_files, after_files, during=True)]
@@ -1034,10 +1055,13 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
               "integration_base": integration_base, "verify_command": verify, "verify_cheap": n["fm"].get("verify_cheap", "").strip(), "verify_result": result, "verify_log": log_path, "verified_head": head,
               "inputs": inputs, "input_files_ref": input_ref, "review_rounds": reviews, "checked_at": _m_jobs.stamp(inst), "rehearsal": rehearsal}
     packet['verify_port_context'] = port_context
+    if full or change:
+        packet.update(verify_scope='change' if change else 'full',
+                      verify_config_hash=_m_lanes.lane_config_hash(n))
     if lane_evidence:
         packet.update(lane_evidence)
         show_lanes(n, packet)
-    elif result == 0:
+    elif result == 0 and not change:
         record_full_fact(inst, n, branch, head, main,
                          _m_jobs.digest([verify, inputs, port_context]), forced=reverify)
     return packet, []

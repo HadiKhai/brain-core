@@ -2876,3 +2876,39 @@ limit or persistent authority. Failed or malformed batches fall back to the
 individual Git reads, including local job-state observations. Read-only `ready`
 uses this scope; readiness recording and other write paths keep their existing
 reads and writes.
+## D40006: Select per-change test consumers and keep a separate full release gate
+
+A node can opt into a project-owned `verify_change` command for native readiness
+(`ready --record`, handback, and `brain gate`). `verify` remains the complete
+release-batch and nightly command. The native runner supplies the exact local
+integration base and candidate head as `BRAIN_VERIFY_BASE` and `BRAIN_VERIFY_HEAD`.
+It binds the readiness packet to all verification configuration, inputs, ports
+and the candidate. A selected pass is change evidence and emits no full-pass fact
+or adoptable full receipt. `full-run`, `brain gate --train`, `brain gate --nightly`
+and the merge train always execute the complete command, bypassing both selection
+mechanisms. Configure nightly execution with the complete gate; ordinary change
+readiness never replaces the release batch's full run before its tag.
+
+For this repository, set `verify_change=python3 -B tests/per_change_gate.py` and
+retain the complete canonical pytest command in `verify`. The command always
+runs lane coverage and the native guard before its selected unit tests, stops on
+the first failure, and preserves the canonical serial tail after parallel tests.
+`--plan --base <commit>` prints selection and its measured duration without
+running tests. Root/shared inputs, unsupported or removed paths, unavailable Git
+history, invalid source or incomplete ownership select the complete suite.
+Configuring both `verify_change` and generic verify lanes also chooses the full
+command rather than combining two independent selection mechanisms.
+
+The source-derived import map is the repository's existing `tests/lanes.py` map:
+relative core imports are followed transitively; test helper imports and embedded
+Python are scanned; definition-time changes affect every lane's startup identity.
+Compare a selective module's startup AST with its integration-base source before
+narrowing its consumers. Changed or unavailable startup identity selects full.
+The fixture loader imports every module, and most core modules form a strongly
+connected graph. Keep these modules nonselective. Only the separately audited
+`train` dispatch/call boundary can narrow module-body changes; test-file changes
+also select importing helper consumers. Unknown/new dependencies cannot silently
+reduce coverage: `check_lanes.py` requires complete canonical ownership and
+nonselective module inputs. Selection reads source on every invocation, uses
+NUL-delimited Git paths, disables rename heuristics and optional Git locks, and
+includes staged, unstaged and untracked inputs. There is no time-based cache.
