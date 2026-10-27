@@ -157,9 +157,9 @@ if __name__ == "__main__":
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self,*a,**kw):super().__init__(*a,directory=str(dist),**kw)
-        # The browser runner sets FIXTURE_QUIET so access lines do not bury its report; errors still print.
-        def log_message(self,*a):
-            if not os.environ.get('FIXTURE_QUIET'):super().log_message(*a)
+        # The browser runner sets FIXTURE_QUIET so access lines do not bury its report; log_error still prints.
+        def log_request(self,*a):
+            if not os.environ.get('FIXTURE_QUIET'):super().log_request(*a)
         def do_POST(self):
             if self.path!='/fixture/update':self.send_error(404);return
             data=json.loads(self.rfile.read(int(self.headers.get('Content-Length',0))))

@@ -309,8 +309,9 @@ test("job state separates its kind from the clamped readable description", async
 
 for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
   test(`${engine}: project page, reader scrim, focus, metadata, keyboard and activity`, async () => {
-    // A missing engine is a reported skip, never a pass: `npx playwright install ${engine}`.
-    test.skip(!existsSync(browserType.executablePath()), `${engine} engine not installed; this scenario did not run`);
+    // WebKit is optional: a missing engine is a reported skip, never a pass (`npx playwright install webkit`).
+    // Chromium is required and still fails loudly; its headless shell lives apart from executablePath().
+    test.skip(engine === "webkit" && !existsSync(browserType.executablePath()), "webkit engine not installed; this scenario did not run");
     const browser = await browserType.launch();
     const page = await browser.newPage();
     for (const width of [1440, 320]) {
