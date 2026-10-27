@@ -1251,9 +1251,9 @@ def maintain(op, changed):
         return getattr(op, "projected_views", {})
     from . import status, freshness
     dispatch_landings(op.inst)
-    freshness.maintain_indexes(op.inst, op.inst.nodes())
+    indexed = freshness.maintain_indexes(op.inst, op.inst.nodes())
     if (op.command == 'task' and getattr(op.args, '_open_task_added', False)
-            and not changed and not op.record_paths):
+            and not changed and not op.record_paths and not indexed):
         # Task files are outside this ledger/status projection. Preserve the
         # native command journal without re-reading every job's live usage.
         return {}
