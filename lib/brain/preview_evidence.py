@@ -128,7 +128,7 @@ def preview_receipt_skeleton(inst, node_id, branch):
         if result.returncode or not re.fullmatch(r'[0-9a-f]{40,64}', head):
             raise ValueError('preview receipt skeleton requires a current job branch head')
         binding = job_preview_binding(live, n, row, head)
-        return {'version': 1, 'scope': 'job', 'node': node_id,
+        data = {'version': 1, 'scope': 'job', 'node': node_id,
                 'job_key': _m_jobs.job_key(row), 'branch': branch, 'head': head,
                 'worktree_generation': binding['generation'],
                 'binding': {**{key: binding[key] for key in
@@ -139,9 +139,27 @@ def preview_receipt_skeleton(inst, node_id, branch):
                           'rendered': None, 'render_evidence': None,
                           'items': [{'page_item': None, 'source_ref': None, 'source_item': None}
                                     for _ in range(3)]}]}
+        return data, n, row
 
-    data = collect()
-    if collect() != data:
+    data, n, row = collect()
+    roots = [Path(data['binding'][key]) for key in ('home', 'worktree')]
+
+    def signature():
+        # Fence the final collection too: it may have loaded local/ledger data
+        # before a later Git query observes an authority mutation. Signature
+        # reads do not take a lock or publish a cache/observation.
+        paths = [n['dir'] / _m_jobs.JOBS_FILE, _m_jobs.contract_file(n, row)]
+        for root in roots:
+            paths.extend(_m_instance.git_state_paths(root))
+        identities = []
+        for root in roots:
+            stat = root.stat()
+            identities.append((stat.st_dev, stat.st_ino))
+        return _m_instance.state_signature(inst, n, extra=paths), identities
+
+    before = signature()
+    current, _, _ = collect()
+    if signature() != before or current != data:
         raise ValueError('preview receipt skeleton authority changed during read; retry')
     return data
 

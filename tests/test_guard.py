@@ -1027,6 +1027,57 @@ class JobPreviewReceipts(Scenario):
             with self.assertRaisesRegex(ValueError, 'authority changed during read'):
                 m.preview_receipt_skeleton(inst, 'web', 'job')
 
+    def test_skeleton_fences_one_shot_mutations_inside_the_final_collection(self):
+        m, inst, n, row, data = self.context()
+        original_local = inst.local_path.read_text()
+        original_ledger = (n['dir'] / m.JOBS_FILE).read_text()
+        contract = m.contract_file(n, row)
+        original_contract = contract.read_bytes() if contract.exists() else None
+        git = m.git
+        for mutation in ('binding', 'node', 'ledger', 'contract', 'git'):
+            with self.subTest(mutation=mutation):
+                calls = 0
+                restore = None
+                def change_once(*args, **kwargs):
+                    nonlocal calls, restore
+                    result = git(*args, **kwargs)
+                    if args == ('rev-parse', '--git-dir'):
+                        calls += 1
+                        if calls == 2:
+                            if mutation == 'binding':
+                                local = json.loads(original_local)
+                                local['nodes']['web']['worktrees']['job']['port'] += 1
+                                inst.local_path.write_text(json.dumps(local))
+                            elif mutation == 'node':
+                                path = n['dir'] / 'node.md'
+                                restore = (path, path.read_bytes())
+                                path.write_text(path.read_text() + '\nchanged during collection\n')
+                            elif mutation == 'ledger':
+                                (n['dir'] / m.JOBS_FILE).write_text(original_ledger + '\nchanged\n')
+                            elif mutation == 'contract':
+                                contract.parent.mkdir(parents=True, exist_ok=True)
+                                contract.write_text('## Preview URLs\nhttps://changed.example/\n')
+                            else:
+                                path = Path(git('rev-parse', '--absolute-git-dir',
+                                                cwd=n['home_path']).stdout.strip()) / 'config'
+                                restore = (path, path.read_bytes())
+                                path.write_text(path.read_text() + '\n# changed during collection\n')
+                    return result
+                try:
+                    with mock.patch.object(m, 'git', side_effect=change_once):
+                        with self.assertRaisesRegex(ValueError, 'authority changed during read'):
+                            m.preview_receipt_skeleton(inst, 'web', 'job')
+                    self.assertEqual(calls, 2)
+                finally:
+                    inst.local_path.write_text(original_local)
+                    (n['dir'] / m.JOBS_FILE).write_text(original_ledger)
+                    if original_contract is None:
+                        contract.unlink(missing_ok=True)
+                    else:
+                        contract.write_bytes(original_contract)
+                    if restore:
+                        restore[0].write_bytes(restore[1])
+
     def test_bound_port_accepts_own_job_and_exact_head_without_changing_node_urls(self):
         m, inst, n, row, data = self.context()
         before = json.dumps(n['local'], sort_keys=True)
