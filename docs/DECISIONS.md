@@ -3439,3 +3439,20 @@ callers retain their enclosing command scope. Communication reconciliation runs
 before the snapshot. Source-signature and receipt-generation checks still run
 before publication, so cached reads cannot authorize a changed source state.
 The scope stores no cross-command watcher output or delivery authority.
+
+## 2026-10-27: Reuse observations inside a fenced status computation
+
+An unlocked status computation shares repeated ledger and projection reads only
+inside its build callback. Input discovery and publication validation remain
+outside that scope. Each exact Git query may reuse its complete result while its
+dependency paths, generations and process environment are unchanged. Working-tree
+queries, unsupported revision grammar and output-file queries still execute
+normally. The existing semantic revalidation and final generation checks remain
+mandatory; a changed answer refuses publication. No cache survives a computation
+or grants writer, readiness or completion authority.
+
+Registered worktree tips and merged-branch names are queried in two batches.
+The merged-name answer preserves ancestry booleans across unrelated integration
+commits; malformed queries fall back to the individual checks. The explicit
+refresh prepares its comparison snapshot and replacement text in one fenced
+computation, then records comparison and publishes under the writer lock.

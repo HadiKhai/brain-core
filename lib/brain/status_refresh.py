@@ -50,6 +50,7 @@ class GitInputs:
         self.layouts = {}
         self.queries = {}
         self.pending = {}
+        self.results = {}
 
     def bases(self, cwd, env):
         cached = self.layouts.get(cwd)
@@ -168,9 +169,15 @@ class GitInputs:
         key = (args, str(cwd) if cwd is not None else None)
         if result is None:
             paths, replay = self.paths(args, key[1], env)
-            self.pending[key] = (paths, replay, generation(paths))
+            stamp = generation(paths)
+            environment = tuple(sorted((os.environ if env is None else env).items()))
+            self.pending[key] = (paths, replay, stamp, environment)
+            previous = self.queries.get(key)
+            if (not replay and not any(arg.startswith('--output') for arg in args) and previous is not None and
+                    previous[:4] == (env, paths, replay, stamp) and self.results[key][0] == environment):
+                return self.results[key][1]
             return
-        paths, replay, before = self.pending.pop(key)
+        paths, replay, before, environment = self.pending.pop(key)
         value = (result.returncode, result.stdout)
         discovered, _ = self.paths(args, key[1], env)
         if set(discovered) != set(paths):
@@ -185,6 +192,7 @@ class GitInputs:
         if key in self.queries and self.queries[key][-1] != value:
             common.die('status refresh inputs changed during computation; retry from fresh state')
         self.queries[key] = (env, paths, replay, after, value)
+        self.results[key] = (environment, result)
 
     def reread(self, args, cwd, env, paths):
         # A semantic reread may adopt new ref values, never a new dependency
@@ -356,13 +364,19 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
             observer = common._GIT_OBSERVER.set(git_inputs.observe)
             reads = common._GIT_READS.set(None)
             try:
-                from . import ui_readmodel, spend, status
+                from . import ui_readmodel, spend, status, jobs, command_reads
                 with ui_readmodel.observe(current), spend.spend_read_only(), status.machine_alert_snapshot() as alerts, timings.phase('refresh_compute'):
                     before_paths = tuple(sorted(set(paths())))
                     before = generation(before_paths)
                     before_directories = membership_paths(current, selected)
                     before_membership = generation(before_directories, shallow=True)
-                    result = build(current, node)
+                    # Repeated projections in this one fenced read share source
+                    # observations. Discovery and every publication guard stay
+                    # outside the scope; no result survives a compute boundary.
+                    with command_reads.scope(jobs.read_jobs, status.file_state, status.status_facts,
+                                             status.facts_meta, status.status_section, status.active_work,
+                                             status.inbox_lines, status.blocked_entries, status.pending_imports):
+                        result = build(current, node)
                     final_paths = tuple(sorted(set(paths())))
                     expected = generation(final_paths)
                     final_directories = membership_paths(current, selected)
