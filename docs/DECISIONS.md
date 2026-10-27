@@ -2969,3 +2969,6 @@ retain the captured cache, leave delivery results empty, and record
 `delivery not probed (rehearsal)` in diagnostic warnings. Command execution keeps
 its existing OS network boundary and strict comparison rules; a passing rehearsal
 does not certify webhook delivery.
+
+Baseline diagnostic fixtures assert the complete warning list, including the
+explicit skipped-delivery notice alongside their existing baseline warnings.
