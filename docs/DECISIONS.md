@@ -2746,3 +2746,7 @@ permissions, code or scan selection refuses reuse. `--wait` requests a fresh ful
 snapshot for scripts and release rehearsals. Cached UI observations grant no action
 or readiness authority: check, guard and the native readiness gates remain current
 and unchanged.
+
+Accounting regressions inspect the cache keyed to the measured job episode;
+fixture setup may retain an earlier episode's cache, so directory iteration is
+not a reliable selector for the aggregate under test.

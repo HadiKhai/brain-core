@@ -883,7 +883,10 @@ class Spend(Scenario):
                 used = m.job_usage(inst, node, row)
             self.assertEqual(used['processed'], 60)
             self.assertEqual(used['source'], 'transcripts: 1 session')
-            cache = next((self.r / '.brain/spend/jobs').glob('*.json'))
+            # Worktree creation can cache the original job episode before setUp
+            # moves its start time. Inspect the measured episode's exact key.
+            key = m._owners['job_usage']._m_jobs.digest([node['id'], m.job_key(row), ''])
+            cache = m.spend_cache_dir(inst) / 'jobs' / (key + '.json')
             self.assertEqual(json.loads(cache.read_text())['usage']['processed'], 60)
             with mock.patch.object(m, 'job_budget', return_value={'tokens': 40, 'hours': None}):
                 self.assertTrue(any('40-token budget' in x for x in m.runaway_jobs(inst, node)))
