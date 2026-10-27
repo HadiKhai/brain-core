@@ -143,6 +143,7 @@ def preview_receipt_skeleton(inst, node_id, branch):
 
     data, n, row = collect()
     roots = [Path(data['binding'][key]) for key in ('home', 'worktree')]
+    logical_roots = [n['home_path'], Path(n['local']['worktrees'][branch]['path']).expanduser()]
 
     def signature():
         # Fence the final collection too: it may have loaded local/ledger data
@@ -152,9 +153,11 @@ def preview_receipt_skeleton(inst, node_id, branch):
         for root in roots:
             paths.extend(_m_instance.git_state_paths(root))
         identities = []
-        for root in roots:
-            stat = root.stat()
-            identities.append((stat.st_dev, stat.st_ino))
+        # Canonical roots alone miss retargeted logical paths or their ancestors.
+        for root in [*roots, *logical_roots]:
+            resolved = root.resolve(strict=True)
+            stat = resolved.stat()
+            identities.append((str(resolved), stat.st_dev, stat.st_ino))
         return _m_instance.state_signature(inst, n, extra=paths), identities
 
     before = signature()

@@ -1078,6 +1078,48 @@ class JobPreviewReceipts(Scenario):
                     if restore:
                         restore[0].write_bytes(restore[1])
 
+    def test_skeleton_fences_logical_binding_symlink_retargets_in_final_collection(self):
+        m, inst, n, row, data = self.context()
+        original = json.loads(inst.local_path.read_text())
+        wt = Path(n['local']['worktrees']['job']['path'])
+        alternate = self.tmp / 'alternate'
+        alternate.mkdir()
+        (alternate / wt.name).mkdir()
+        link = self.tmp / 'binding-link'
+        git = m.git
+        for target in ('home', 'worktree', 'worktree-parent'):
+            with self.subTest(target=target):
+                local = json.loads(json.dumps(original))
+                link.symlink_to(n['home_path'] if target == 'home' else
+                                wt if target == 'worktree' else wt.parent,
+                                target_is_directory=True)
+                if target == 'home':
+                    local['nodes']['web']['home'] = str(link)
+                else:
+                    local['nodes']['web']['worktrees']['job']['path'] = str(
+                        link if target == 'worktree' else link / wt.name)
+                inst.local_path.write_text(json.dumps(local))
+                calls = 0
+                def retarget_once(*args, **kwargs):
+                    nonlocal calls
+                    result = git(*args, **kwargs)
+                    if args == ('rev-parse', '--git-dir'):
+                        calls += 1
+                        if calls == 2:
+                            link.unlink()
+                            link.symlink_to(alternate, target_is_directory=True)
+                    return result
+                try:
+                    # Unchanged symlinked bindings are supported.
+                    self.assertEqual(m.preview_receipt_skeleton(inst, 'web', 'job')['head'], data['head'])
+                    with mock.patch.object(m, 'git', side_effect=retarget_once):
+                        with self.assertRaisesRegex(ValueError, 'authority changed during read'):
+                            m.preview_receipt_skeleton(inst, 'web', 'job')
+                    self.assertEqual(calls, 2)
+                finally:
+                    link.unlink()
+                    inst.local_path.write_text(json.dumps(original))
+
     def test_bound_port_accepts_own_job_and_exact_head_without_changing_node_urls(self):
         m, inst, n, row, data = self.context()
         before = json.dumps(n['local'], sort_keys=True)
