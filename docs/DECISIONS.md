@@ -2972,3 +2972,15 @@ does not certify webhook delivery.
 
 Baseline diagnostic fixtures assert the complete warning list, including the
 explicit skipped-delivery notice alongside their existing baseline warnings.
+
+
+## Prove read observations during isolated rehearsal
+
+Read probes observe command telemetry through the same exact native append proof
+as mutations. Full synchronous UI probes additionally attest only native cache-lock
+creation and the cache producer's exact atomic payloads, private modes and file
+identities. Missing or altered observations grant no write permission; operational
+journal proofs and zero-residual assertions remain unchanged. UI privacy keys use
+a provider-permission signature separately from transcript discovery, allowing a
+frozen accounting adapter to bind the captured aggregate identity without opening
+provider roots or interpreting unavailable measurements as zero.

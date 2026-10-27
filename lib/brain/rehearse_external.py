@@ -658,6 +658,7 @@ def install_accounting(path, expected, clock):
     # reader's native unknown value must not fall through to provider files.
     spend.coordinator_measure = lambda inst, node: None
     spend.spend_input_signature = lambda inst: ('rehearsal-accounting-v1', expected, clock)
+    spend.spend_privacy_signature = lambda inst: ('rehearsal-accounting-v1', expected, clock)
     def refuse_discovery(inst):
         raise ValueError('provider accounting discovery is outside the frozen aggregate contract')
     spend.spend_sources = refuse_discovery

@@ -507,6 +507,12 @@ def spend_sources(inst):
     return [(s["runtime"], Path(s["config_dir"])) for s in sources], allowed, forbidden
 
 
+def spend_privacy_signature(inst):
+    """Provider permission declarations only; never discover transcript files."""
+    sources, allowed, forbidden = spend_sources(inst)
+    return ([(rt, str(cfg)) for rt, cfg in sources], sorted(map(str, allowed)), sorted(map(str, forbidden)))
+
+
 def claude_folder(path):
     """The folder Claude Code keeps a working folder's sessions in: every character but letters and digits
     becomes a dash; very long names are cut, with a suffix of their own."""

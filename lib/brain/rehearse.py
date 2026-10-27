@@ -1410,7 +1410,8 @@ try:
             sys.path.insert(0, str(library))
             from brain import events
             from rehearsal_transactions import install_observer
-            install_observer(events, os.environ['BRAIN_ROOT'], os.environ['BRAIN_REHEARSAL_TRANSACTIONS'])
+            install_observer(events, os.environ['BRAIN_ROOT'], os.environ['BRAIN_REHEARSAL_TRANSACTIONS'],
+                             read=os.environ.get('BRAIN_REHEARSAL_READ') == '1')
     if os.environ.get('BRAIN_REHEARSAL_NOW'):
         from rehearsal_clock import pin
         pin()
@@ -1538,16 +1539,21 @@ runpy.run_path(entry, run_name='__main__')
             raise RehearsalError('history capture owner changed')
         stream_dir = copy_owner.bulk / 'observer-history'
         stream_dir.mkdir(mode=0o700, exist_ok=True)
-    if kind in ('fix', 'refresh'):
+    if kind in ('read', 'fix', 'refresh'):
         _m_common.atomic_write(trace, '', private=True, create=True)
         env['BRAIN_REHEARSAL_TRANSACTIONS'] = str(trace)
+        if kind == 'read':
+            env['BRAIN_REHEARSAL_READ'] = '1'
         retention.bind_command_sources(core, bootstrap)
         retention.checkpoint(stage='capture-before', capture_before_metadata=capture_before_metadata,
                              trace_path=str(trace))
         try:
-            transaction_before = (_m_transactions.capture(brain, capture_before_metadata, stream_dir=stream_dir)
-                                  if stream_dir is not None else
-                                  _m_transactions.capture(brain, capture_before_metadata))
+            if kind == 'read':
+                transaction_before = _m_transactions.capture_read(brain)
+            else:
+                transaction_before = (_m_transactions.capture(brain, capture_before_metadata, stream_dir=stream_dir)
+                                      if stream_dir is not None else
+                                      _m_transactions.capture(brain, capture_before_metadata))
         finally:
             retention.checkpoint(before=transaction_before if sys.exc_info()[0] is None else 'UNKNOWN',
                                  capture_before_metadata=capture_before_metadata)
@@ -1648,12 +1654,16 @@ runpy.run_path(entry, run_name='__main__')
     transaction_verdict = 'unproven'
     diagnostics, capture_after_metadata = {}, {}
     validation_now, raw_trace_hex = None, None
-    if kind in ('fix', 'refresh'):
+    validator_command = args[0] if kind == 'read' else 'status' if kind == 'refresh' else 'check'
+    if kind in ('read', 'fix', 'refresh'):
         retention.checkpoint(stage='capture-after')
         try:
-            transaction_after = (_m_transactions.capture(brain, capture_after_metadata, stream_dir=stream_dir)
-                                 if stream_dir is not None else
-                                 _m_transactions.capture(brain, capture_after_metadata))
+            if kind == 'read':
+                transaction_after = _m_transactions.capture_read(brain)
+            else:
+                transaction_after = (_m_transactions.capture(brain, capture_after_metadata, stream_dir=stream_dir)
+                                     if stream_dir is not None else
+                                     _m_transactions.capture(brain, capture_after_metadata))
         finally:
             retention.checkpoint(after=transaction_after if sys.exc_info()[0] is None else 'UNKNOWN',
                                  capture_after_metadata=capture_after_metadata)
@@ -1671,12 +1681,16 @@ runpy.run_path(entry, run_name='__main__')
             validation_now = (datetime.datetime.fromisoformat(clock) if clock is not None else
                               datetime.datetime.now().astimezone())
             retention.checkpoint(stage='validate', validation_instant=validation_now.isoformat(),
-                                 validator_command='status' if kind == 'refresh' else 'check')
+                                 validator_command=validator_command)
             try:
-                proven, transaction_verdict = _m_transactions.validate(
-                    transaction_before, transaction_after, observations, p.pid,
-                    'status' if kind == 'refresh' else 'check',
-                    validation_now, diagnostics=diagnostics)
+                if kind == 'read':
+                    proven, transaction_verdict = _m_transactions.validate_read(
+                        transaction_before, transaction_after, observations, p.pid,
+                        validator_command, diagnostics=diagnostics)
+                else:
+                    proven, transaction_verdict = _m_transactions.validate(
+                        transaction_before, transaction_after, observations, p.pid,
+                        validator_command, validation_now, diagnostics=diagnostics)
                 retention.checkpoint(validator_result=dict(proven_paths=sorted(proven),
                                                            verdict=transaction_verdict))
             finally:
@@ -1693,7 +1707,7 @@ runpy.run_path(entry, run_name='__main__')
             denied_attempts=denied_attempts,
             transaction_evidence=dict(before=transaction_before, after=transaction_after,
                 observations=observations, owner_pid=p.pid, verdict=transaction_verdict,
-                validator_command='status' if kind == 'refresh' else 'check',
+                validator_command=validator_command,
                 validation_instant=validation_now.isoformat() if validation_now is not None else None,
                 diagnostics=diagnostics, capture_before_metadata=capture_before_metadata,
                 capture_after_metadata=capture_after_metadata, raw_trace_hex=raw_trace_hex)))

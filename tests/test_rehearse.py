@@ -1211,7 +1211,8 @@ class RehearsalCoverageFaultTypes(unittest.TestCase):
 class RehearsalCloneCaches(Scenario):
     temporary_parent = CORE.parent
     def test_frozen_aggregate_bootstrap_covers_read_and_ui_without_provider_discovery(self):
-        from brain import instance, rehearse_external
+        import copy
+        from brain import instance, rehearse_external, rehearse_transactions as transactions
         source = self.init('accounting-source')
         lane = self.tmp / 'accounting-clone'
         lane.mkdir()
@@ -1224,7 +1225,7 @@ class RehearsalCloneCaches(Scenario):
         (lane / 'rehearse-clock').write_text(clock)
         rehearsal.freeze_machine_inputs(inst, clock)
         accounting = rehearse_external.freeze_accounting(inst, clock, self.tmp / 'accounting.json')
-        for args in (['due', '--json'], ['ui', '--json'], ['status', 'root', '--refresh']):
+        for args in (['due', '--json'], ['ui', '--json', '--wait'], ['status', 'root', '--refresh']):
             with self.subTest(args=args):
                 raw = []
                 kind = 'refresh' if args[0] == 'status' else 'read'
@@ -1232,6 +1233,32 @@ class RehearsalCloneCaches(Scenario):
                                             raw_output=raw, accounting=accounting)
                 self.assertEqual(0, row['code'], raw[0]['stderr'])
                 self.assertEqual(0, row['unexpected'])
+                packet = raw[0]['transaction_evidence']
+                self.assertEqual('proven', row['transaction_evidence'])
+                if kind == 'read':
+                    def validate(after, observations, pid=packet['owner_pid']):
+                        return transactions.validate_read(packet['before'], after, observations, pid, args[0])
+                    self.assertEqual('proven', validate(packet['after'], packet['observations'])[1])
+                    self.assertEqual((set(), 'unproven'), validate(packet['after'], []))
+                    self.assertEqual((set(), 'unproven'), validate(packet['after'], packet['observations'],
+                                                                  packet['owner_pid'] + 100000))
+                    damaged = copy.deepcopy(packet['after'])
+                    damaged['timings/events.jsonl']['hex'] += b'x'.hex()
+                    self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+                    damaged = copy.deepcopy(packet['after'])
+                    damaged['timings/events.jsonl']['mode'] = 0o100644
+                    self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+                    if args[0] == 'ui':
+                        self.assertTrue(any(o['type'] == 'ui-cache' for o in packet['observations']))
+                        self.assertEqual((set(), 'unproven'), validate(packet['after'],
+                            [o for o in packet['observations'] if o['type'] != 'ui-cache']))
+                        for name in ('json-snapshot.json', 'json-fill-status.json', 'json-fill.lock'):
+                            damaged = copy.deepcopy(packet['after'])
+                            damaged['ui-cache/' + name]['hex'] += b'x'.hex()
+                            self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
+                        damaged = copy.deepcopy(packet['after'])
+                        damaged['ui-cache']['entries'].append('unobserved.json')
+                        self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
                 if args[0] == 'ui':
                     usage = json.loads(raw[0]['stdout'])['spend']
                     self.assertFalse(usage['complete'])

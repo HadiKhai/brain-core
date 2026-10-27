@@ -40,6 +40,11 @@ def digest(value):
 
 def capture_timing(root):
     """Exact private telemetry operands; unknown shapes grant no write authority."""
+    return capture_private(root, 'timings', ('events.jsonl',))
+
+
+def capture_private(root, folder, files):
+    """Capture bounded private regular files through retained directory descriptors."""
     result = {}
     try:
         brain = os.open(str(Path(root) / '.brain'), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -47,17 +52,19 @@ def capture_timing(root):
         return result
     try:
         try:
-            directory = os.open('timings', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=brain)
+            directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=brain)
         except FileNotFoundError:
             return result
         try:
             info = os.fstat(directory)
             require(stat.S_IMODE(info.st_mode) == 0o700 and info.st_uid == os.getuid())
             entries = sorted(os.listdir(directory))
-            result['timings'] = dict(directory=True, mode=info.st_mode, uid=info.st_uid,
+            result[folder] = dict(directory=True, mode=info.st_mode, uid=info.st_uid,
                                      dev=info.st_dev, ino=info.st_ino, entries=entries)
-            if 'events.jsonl' in entries:
-                fd = os.open('events.jsonl', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            for name in files:
+                if name not in entries:
+                    continue
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
                 try:
                     before = os.fstat(fd)
                     require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and
@@ -68,15 +75,15 @@ def capture_timing(root):
                         return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
                                 st.st_ctime_ns, st.st_mode, st.st_nlink, st.st_uid)
                     require(len(payload) == before.st_size and stable(before) == stable(os.fstat(fd)) and
-                            stable(before) == stable(os.stat('events.jsonl', dir_fd=directory, follow_symlinks=False)))
-                    result['timings/events.jsonl'] = dict(hex=payload.hex(), dev=before.st_dev, ino=before.st_ino,
+                            stable(before) == stable(os.stat(name, dir_fd=directory, follow_symlinks=False)))
+                    result[folder + '/' + name] = dict(hex=payload.hex(), dev=before.st_dev, ino=before.st_ino,
                         mtime=before.st_mtime_ns, mode=before.st_mode, uid=before.st_uid)
                 finally:
                     os.close(fd)
-            current = os.stat('timings', dir_fd=brain, follow_symlinks=False)
+            current = os.stat(folder, dir_fd=brain, follow_symlinks=False)
             require((info.st_dev, info.st_ino, info.st_mode, info.st_uid) ==
                     (current.st_dev, current.st_ino, current.st_mode, current.st_uid) and
-                    result['timings']['entries'] == sorted(os.listdir(directory)))
+                    result[folder]['entries'] == sorted(os.listdir(directory)))
         finally:
             os.close(directory)
         return result
@@ -117,6 +124,67 @@ def validate_timing(before, after, observations, owner_pid, command):
     require(len(payload) <= 16 * 1024)
     require(blob(new, 'timings/events.jsonl') == blob(old, 'timings/events.jsonl') + payload)
     return {'timings/events.jsonl'} | ({'timings'} if 'timings' not in old else set())
+
+
+UI_CACHE_FILES = ('json-fill.lock', 'json-snapshot.json', 'json-fill-status.json')
+
+
+def capture_read(root):
+    return {**capture_timing(root), **capture_private(root, 'ui-cache', UI_CACHE_FILES)}
+
+
+def validate_read(before, after, observations, owner_pid, command, diagnostics=None):
+    """Prove only native read observations; no operational journal permission."""
+    try:
+        require(before is not None and after is not None and isinstance(observations, list))
+        require(all(row['pid'] == owner_pid and row['type'] in ('telemetry', 'ui-cache')
+                    for row in observations))
+        proven = validate_timing(before, after, observations, owner_pid, command)
+        names = {'ui-cache', *('ui-cache/' + name for name in UI_CACHE_FILES)}
+        old, new = ({k: v for k, v in snap.items() if k in names} for snap in (before, after))
+        state, ui_proven = old, set()
+        for row in (o for o in observations if o['type'] == 'ui-cache'):
+            require(command == 'ui' and row['before'] == state)
+            current, name = row['after'], row['name']
+            require(name in UI_CACHE_FILES)
+            key = 'ui-cache/' + name
+            require(set(current) == set(state) | {'ui-cache', key})
+            require(all(current[k] == v for k, v in state.items() if k not in ('ui-cache', key)))
+            directory = current['ui-cache']
+            require(directory['directory'] is True and stat.S_IMODE(directory['mode']) == 0o700
+                    and directory['uid'] == os.getuid())
+            if 'ui-cache' in state:
+                prior = state['ui-cache']
+                require(all(prior[k] == directory[k] for k in ('dev', 'ino', 'mode', 'uid')))
+                require(directory['entries'] == sorted(set(prior['entries']) | {name}))
+            else:
+                require(directory['entries'] == [name])
+            file = current[key]
+            require(stat.S_ISREG(file['mode']) and stat.S_IMODE(file['mode']) == 0o600
+                    and file['uid'] == os.getuid())
+            require(blob(current, key) == bytes.fromhex(row['hex']))
+            if name == 'json-fill.lock':
+                require(row['hex'] == '')
+                if key in state:
+                    require(state[key] == file)
+            else:
+                require(isinstance(json.loads(bytes.fromhex(row['hex'])), dict))
+            ui_proven.add(key)
+            if 'ui-cache' not in state:
+                ui_proven.add('ui-cache')
+            state = current
+        require(state == new)
+        changed = {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+        if 'ui-cache' in before and 'ui-cache' in after:
+            changed.discard('ui-cache')
+        require(changed <= proven | ui_proven)
+        if diagnostics is not None:
+            diagnostics.update(checkpoint='read-complete', exception_category=None)
+        return {'brain/.brain/' + name for name in changed}, 'proven'
+    except (EvidenceError, OSError, ValueError, TypeError, KeyError, AttributeError):
+        if diagnostics is not None:
+            diagnostics.update(checkpoint='read-observations', exception_category='EvidenceError')
+        return set(), 'unproven'
 
 
 def capture(root, diagnostics=None, stream_dir=None):
@@ -842,7 +910,7 @@ def _validate(before, after, observations, owner_pid, command, now, diagnostics=
         return set(), 'unproven'
 
 
-def install_observer(events, root, trace):
+def install_observer(events, root, trace, read=False):
     """Observe native lifecycle calls; keep receipts outside product storage."""
     stack = []
     active_ops = []
@@ -898,6 +966,49 @@ def install_observer(events, root, trace):
 
     if timings is not None:
         timings.publish, events.append_line = timing_publish, timing_line
+    # Optional UI storage is observed at its native lock and atomic producers.
+    # Unknown files and writes outside those producers receive no evidence.
+    ui_name = events.__package__ + '.ui_json'
+    try:
+        ui_json = importlib.import_module(ui_name) if read else None
+    except ModuleNotFoundError as error:
+        if error.name != ui_name:
+            raise
+        ui_json = None
+    if ui_json is not None:
+        original_lock = ui_json.ui_json_fill_lock
+        original_write = ui_json._m_ui_readmodel.ReadModel.write
+        original_atomic = events.common.atomic_write
+        ui_active = []
+        def ui_capture():
+            return capture_private(root, 'ui-cache', UI_CACHE_FILES)
+        def ui_record(before, name, payload):
+            write_observation(dict(type='ui-cache', pid=os.getpid(), name=name, hex=payload.hex(),
+                                   before=before, after=ui_capture()))
+        @contextlib.contextmanager
+        def ui_lock(inst, blocking):
+            before = ui_capture() if inst.root == Path(root) else None
+            with original_lock(inst, blocking) as acquired:
+                if acquired and before is not None:
+                    ui_record(before, 'json-fill.lock', b'')
+                yield acquired
+        def ui_write(model, name, value):
+            ui_active.append(model.folder / (name + '.json') if model.inst.root == Path(root)
+                             and name in ('json-snapshot', 'json-fill-status') else None)
+            try:
+                return original_write(model, name, value)
+            finally:
+                ui_active.pop()
+        def ui_atomic(path, text, *args, **kwargs):
+            owned = bool(ui_active) and ui_active[-1] == Path(path)
+            before = ui_capture() if owned else None
+            result = original_atomic(path, text, *args, **kwargs)
+            if before is not None:
+                ui_record(before, Path(path).name, text.encode())
+            return result
+        ui_json.ui_json_fill_lock = ui_lock
+        ui_json._m_ui_readmodel.ReadModel.write = ui_write
+        events.common.atomic_write = ui_atomic
     def owner():
         op = active_ops[-1]
         fh = native_instance._LOCK['fh']
