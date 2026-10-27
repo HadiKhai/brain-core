@@ -3676,3 +3676,12 @@ observed on every command. No cached status section authorizes an action or skip
 the existing unlocked publication fence. Finished-job display uses a linear
 ordered lookup, retaining duplicate ledger keys rather than repeatedly hashing
 every ledger row for every due item.
+
+## 2026-10-28: Fence selected status projections as one batch
+
+Writers prepare every selected node's generated status view and text in one
+unlocked window, fenced on the union of their source records and integration
+refs. A concurrent change retries the complete batch for scoped writers; other
+writers refuse it. All prepared views then publish under the retained writer
+lock, so rendering a later node cannot cause an earlier stale view to overwrite
+a concurrent writer's journal evidence.

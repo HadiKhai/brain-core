@@ -1354,28 +1354,33 @@ WT_COMMANDS = ('wt_add', 'wt_setup', 'wt_rm', 'wt_prune')
 SCOPED_PROJECTIONS = ('set', 'handback', 'task', 'upgrade', *WT_COMMANDS)
 
 
-def released_view(op, n, known_of, inputs, prepare=None, retry=False):
+def released_view(op, n, known_of, inputs, prepare=None, retry=False, targets=None):
     """Render a generated view unlocked; a concurrent source change recomputes it.
 
     Retry is an explicit caller policy. Other callers refuse their first
     stale observation. Every attempt reloads the instance, node and merge
     baseline inside the fenced window. Exhaustion refuses maintenance; it never
     falls back to an unbounded render under the writer lock. A refused attempt
-    publishes nothing. Returns the view and node; op.inst becomes that instance.
+    publishes nothing. A selected batch shares one fence through publication,
+    so rendering a later node cannot leave an earlier view stale. Returns the
+    view (or target-to-view batch) and node; op.inst becomes that instance.
     """
     def render():
         current = instance.Instance(op.inst.root)
         node = current.node(n['id'])
+        selected = [current.node(nid) for nid in targets] if targets is not None else [node]
         from . import command_reads, status
         with command_reads.snapshot():
             if prepare is not None:
                 with ThreadPoolExecutor(max_workers=1) as pool:
                     sample = pool.submit(status._m_machine.machine_state, current)
-                    view = snapshot_view(current, node, known_of(node))
-                    prepare(current, node, view, sample.result())
+                    views = {target['id']: snapshot_view(current, target, known_of(target)) for target in selected}
+                    machine = sample.result()
+                    for target in selected:
+                        prepare(current, target, views[target['id']], machine)
             else:
-                view = snapshot_view(current, node, known_of(node))
-        return current, node, view
+                views = {target['id']: snapshot_view(current, target, known_of(target)) for target in selected}
+        return current, node, views if targets is not None else views[node['id']]
     for _ in range(RELEASED_PROJECTION_ATTEMPTS if retry else 1):
         try:
             with instance.released(op.inst, list(op.inst.nodes()), extra=inputs, retry=retry):
@@ -1387,6 +1392,28 @@ def released_view(op, n, known_of, inputs, prepare=None, retry=False):
         common.die('state changed during the unlocked step; retry from fresh state')
     op.inst = current
     return view, node
+
+
+def projection_inputs(op, selected):
+    scoped = op.command in SCOPED_PROJECTIONS
+    prefixes = [n['dir'].relative_to(op.inst.root).as_posix() for n in selected]
+    prefixes = ['' if prefix == '.' else prefix + '/' for prefix in prefixes]
+    paths = [op.inst.root / path for path in resources(op.inst, paths_only=True)
+             if not path.startswith('@ready/') and (not scoped or any(
+                 path.startswith(prefix) and not path[len(prefix):].startswith('nodes/') for prefix in prefixes))]
+    targets = {n['id'] for n in selected}
+    for node in op.inst.nodes():
+        paths.extend(node['dir'] / name for name in ('tasks', 'requirements'))
+        if node['id'] in targets and node.get('home_path'):
+            from . import verify
+            integration = verify.integration_ref(node['home_path'])
+            refs = {'refs/heads/' + branch for branch in node['local'].get('worktrees', {})}
+            refs.update((integration, 'refs/remotes/origin/HEAD'))
+            if integration.startswith('refs/remotes/origin/') and node['fm'].get('merge', 'local') != 'pr':
+                refs.add(integration.replace('refs/remotes/origin/', 'refs/heads/', 1))
+            paths.extend(instance.git_state_paths(node['home_path'], refs=refs - {''}, include_head=False))
+    paths.append(op.inst.root / '.brain/communications.json')
+    return paths
 
 
 def maintain(op, changed):
@@ -1426,6 +1453,8 @@ def maintain(op, changed):
         if not n['archived'] and node_ref(n['id']) in journal(op.inst).state['invalid']:
             selected[n['id']] = n
     prepared = {}
+    released_projection = op.command in ('set', 'handback', 'task', 'review', 'preview_receipt',
+                                         'report', 'workbench', 'upgrade', *WT_COMMANDS)
     if op.command == 'status' and selected:
         from . import status_refresh
         for n in selected.values():
@@ -1443,48 +1472,31 @@ def maintain(op, changed):
         prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
                                           targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)
                                           if any(source(op.inst, n) == 'events' for n in selected.values()) else ())
+    elif released_projection and selected:
+        if materialize:
+            for n in selected.values():
+                cap_now(op.inst, n)
+        def prepare(current, node, view, machine):
+            prepared[node['id']] = (view, status.refreshed_text(current, node, view, machine_snapshot=machine))
+        batch, _ = released_view(op, next(iter(selected.values())),
+                                 lambda node: status.facts_meta(node).get('merged', []),
+                                 lambda: projection_inputs(op, [op.inst.node(nid) for nid in selected]),
+                                 prepare=prepare if materialize else None,
+                                 retry=op.command in SCOPED_PROJECTIONS, targets=list(selected))
+        if not materialize:
+            prepared = {nid: (view, None) for nid, view in batch.items()}
     for n in selected.values():
         text = None
-        if materialize and op.command != 'status':
+        if materialize and op.command != 'status' and not released_projection:
             cap_now(op.inst, n)
         if op.command == 'status' or (op.command == 'check' and status.facts_meta(n)):
             # A requested refresh already consumed its merge baseline; retain that display.
             known = status.facts_meta(n).get('merged_before', [])
         else:
             known = status.facts_meta(n).get('merged', [])
-        if op.command == 'status':
+        if op.command == 'status' or released_projection:
+            n = op.inst.node(n['id'])
             view = prepared[n['id']][0]
-        elif op.command in ('set', 'handback', 'task', 'review', 'preview_receipt', 'report', 'workbench',
-                            'upgrade', *WT_COMMANDS):
-            # Status projection can scan worker transcripts. It grants no action
-            # authority, and must not hold up writers after terminal publication.
-            # A concurrent source change refuses this generated view; the normal
-            # maintenance-failure path invalidates it for an explicit refresh.
-            def projection_inputs():
-                prefix = n['dir'].relative_to(op.inst.root).as_posix()
-                prefix = '' if prefix == '.' else prefix + '/'
-                scoped = op.command in SCOPED_PROJECTIONS
-                paths = [op.inst.root / path for path in resources(op.inst, paths_only=True)
-                         if not path.startswith('@ready/') and (not scoped or
-                             path.startswith(prefix) and not path[len(prefix):].startswith('nodes/'))]
-                for node in op.inst.nodes():
-                    paths.extend(node['dir'] / name for name in ('tasks', 'requirements'))
-                    if node['id'] == n['id'] and node.get('home_path'):
-                        from . import verify
-                        integration = verify.integration_ref(node['home_path'])
-                        refs = {'refs/heads/' + branch for branch in node['local'].get('worktrees', {})}
-                        refs.update((integration, 'refs/remotes/origin/HEAD'))
-                        if integration.startswith('refs/remotes/origin/') and node['fm'].get('merge', 'local') != 'pr':
-                            refs.add(integration.replace('refs/remotes/origin/', 'refs/heads/', 1))
-                        paths.extend(instance.git_state_paths(node['home_path'], refs=refs - {''}, include_head=False))
-                paths.append(op.inst.root / '.brain/communications.json')
-                return paths
-            def prepare(current, node, view, machine):
-                nonlocal text
-                text = status.refreshed_text(current, node, view, machine_snapshot=machine)
-            view, n = released_view(op, n, lambda node: status.facts_meta(node).get('merged', []),
-                                    projection_inputs, prepare=prepare if materialize else None,
-                                    retry=op.command in SCOPED_PROJECTIONS)
         else:
             view = snapshot_view(op.inst, n, known)
         # During comparison, files supply new facts. After switching, a write materializes its
@@ -1494,7 +1506,7 @@ def maintain(op, changed):
         views[n['id']] = view
         if materialize:
             status.refresh_status(op.inst, n, view,
-                                  prepared_text=prepared[n['id']][1] if op.command == 'status' else text)
+                                  prepared_text=prepared[n['id']][1] if op.command == 'status' or released_projection else text)
             active_table(op.inst, n, view)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
             force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)

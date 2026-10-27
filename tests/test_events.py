@@ -18,6 +18,37 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_wt_retries_the_whole_projection_batch_when_an_earlier_node_changes(self):
+        root = self.init('batch-projection-race')
+        for nid in ('app', 'peer'):
+            self.b(root, 'new', nid, '--title', nid.title())
+        inst = instance.Instance(root)
+        original = events.snapshot_view
+        rendered, concurrent = [], []
+
+        def observed(current, node, known):
+            self.assertIsNone(instance._LOCK['fh'])
+            view = original(current, node, known)
+            rendered.append(node['id'])
+            if node['id'] == 'peer' and not concurrent:
+                self.b(root, 'inbox', 'app', '--add', 'concurrent question')
+                concurrent.append(self.records(root)[-1]['data']['views'][events.node_ref('app')])
+            return view
+
+        with mock.patch.object(events, 'snapshot_view', side_effect=observed):
+            with instance.brain_lock(inst), events.Command(root, command='wt_add', node='app'):
+                for nid in ('app', 'peer'):
+                    (root / 'nodes' / nid / 'backlog.md').write_text('- durable mutation\n')
+        self.assertEqual(rendered, ['app', 'peer', 'app', 'peer'])
+        last = self.records(root)[-1]['data']
+        self.assertTrue(last['maintenance_ok'])
+        app = last['views'][events.node_ref('app')]
+        self.assertEqual(app['comparison'], concurrent[0]['comparison'])
+        self.assertTrue(any(line.startswith('Due: 1') for line in app['facts']), app['facts'])
+        self.assertIn('concurrent question', (root / 'nodes/app/inbox.md').read_text())
+        self.assertEqual(events.events_view(inst, inst.node('app'))['comparison'], app['comparison'])
+        self.assertEqual(events.pending(self.records(root)), {})
+
     def test_projection_ref_fence_handles_reftable_storage_and_updates(self):
         root = self.init('reftable-fence')
         home = self.tmp / 'reftable-home'
