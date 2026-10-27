@@ -1063,10 +1063,8 @@ def display_time(inst, value):
     return _m_usage.usage_time(parsed.timestamp(), inst) if parsed else "unknown (legacy time)"
 
 
-@_m_command_reads.memo
-@_m_timings.timed("status_facts")
-def status_facts(inst, n, state, known_merges, metadata_only=False):
-    """The displayed facts only: no hidden git tips, file hashes or judgement timestamp."""
+def ledger_facts(inst, n, state, known_merges, metadata_only, sections, terms):
+    """Render independent ledger parts from freshly observed semantic inputs."""
     merged = {_m_jobs.job_key(r): r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"}
     for r in state["jobs"] or []:
         if not r["Ended"] and state["worktrees"].get(r["Job"], {}).get("merged"):
@@ -1076,72 +1074,106 @@ def status_facts(inst, n, state, known_merges, metadata_only=False):
         return t.timestamp() if t else 0
     new = sorted([r for key, r in merged.items() if key not in known_merges], key=merge_time, reverse=True)
     lines = ["Merged since previous refresh:"]
-    lines += [_m_guard.redact(f"- {r['Job']}: merged in local git; ledger still open" if r.get("local_merge") else
-                     f"- {display_time(inst, r['Ended'])}: {r['Job']} ({r['Commits'] or '?'} commits)", _m_guard.never_terms(n)) for r in new] or ["- None recorded."]
+    lines += sections.render('merges', [(r['Job'], r['Ended'], r['Commits'], r.get('local_merge')) for r in new], lambda: [
+        _m_guard.redact(f"- {r['Job']}: merged in local git; ledger still open" if r.get("local_merge") else
+                       f"- {display_time(inst, r['Ended'])}: {r['Job']} ({r['Commits'] or '?'} commits)", terms)
+        for r in new] or ["- None recorded."])
     lines += ["", "Open worktrees (this machine):"]
-    lines += [_m_guard.redact(f"- {b}: {'present' if w['exists'] else 'missing'}" + ("; merged in local git" if w["merged"] else ""),
-                     _m_guard.never_terms(n)) for b, w in state["worktrees"].items()] or ["- None."]
-    lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
+    lines += sections.render('worktrees', state['worktrees'], lambda: [
+        _m_guard.redact(f"- {b}: {'present' if w['exists'] else 'missing'}" +
+                       ("; merged in local git" if w["merged"] else ""), terms)
+        for b, w in state['worktrees'].items()] or ["- None."])
     from . import job_attempts as _m_attempts
     projections = [state.get('job_projections', {}).get(_m_jobs.job_key(r)) or _m_attempts.job_projection(inst, n, r)
                    for r in state['jobs'] or [] if not r['Ended']]
-    lines += [_m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " + ('runtime activity unknown; ' if p['state'] == 'open' else '') +
-                     ('summary retained in worker record' if metadata_only else (p['summary'] or ('last hand-back (historical): ' + p['historical_summary'] if p['historical_summary'] else 'summary not recorded'))) +
-                     f"; started {display_time(inst, p['ledger']['Started'])}; {p['ledger']['Reviews'] or '0'} reviews", _m_guard.never_terms(n))
-              for p in projections] or ["- None."]
-    lines += ['', 'Active work (generated from ledger and worker records; host activity unknown):', '',
-              '| Branch | State | Summary | Recorded queue | Next action |', '| --- | --- | --- | --- | --- |']
-    for p in projections[:8]:
-        queue = p['admission'] or p['queue']
-        queued = (str(queue.get('position') or 'unknown') + '; owner ' + str(queue.get('owner') or 'unknown')) if queue else 'unknown'
-        summary = 'retained in worker record' if metadata_only else p['summary'] or ('historical: ' + p['historical_summary'] if p['historical_summary'] else 'not recorded')
-        values = (p['branch'], p['state'], summary, queued, p['next_action'])
-        lines.append(_m_guard.redact('| ' + ' | '.join(_m_jobs.cell(v) for v in values) + ' |', _m_guard.never_terms(n)))
-    if len(projections) > 8:
-        lines.append(f'{len(projections) - 8} more open jobs; brain jobs --live lists all recorded rows.')
+    lines += ["", "Running jobs (open in ledger; a hand-back means the worker stopped):"]
+    lines += sections.render('running', projections, lambda: [
+        _m_guard.redact(f"- {p['branch']}: {p['state']}; host activity unknown; " +
+                       ('runtime activity unknown; ' if p['state'] == 'open' else '') +
+                       ('summary retained in worker record' if metadata_only else
+                        (p['summary'] or ('last hand-back (historical): ' + p['historical_summary']
+                                          if p['historical_summary'] else 'summary not recorded'))) +
+                       f"; started {display_time(inst, p['ledger']['Started'])}; {p['ledger']['Reviews'] or '0'} reviews", terms)
+        for p in projections] or ["- None."])
+    def active():
+        result = ['', 'Active work (generated from ledger and worker records; host activity unknown):', '',
+                  '| Branch | State | Summary | Recorded queue | Next action |', '| --- | --- | --- | --- | --- |']
+        for p in projections[:8]:
+            queue = p['admission'] or p['queue']
+            queued = (str(queue.get('position') or 'unknown') + '; owner ' + str(queue.get('owner') or 'unknown')) if queue else 'unknown'
+            summary = 'retained in worker record' if metadata_only else p['summary'] or ('historical: ' + p['historical_summary'] if p['historical_summary'] else 'not recorded')
+            values = (p['branch'], p['state'], summary, queued, p['next_action'])
+            result.append(_m_guard.redact('| ' + ' | '.join(_m_jobs.cell(v) for v in values) + ' |', terms))
+        if len(projections) > 8:
+            result.append(f'{len(projections) - 8} more open jobs; brain jobs --live lists all recorded rows.')
+        return result
+    lines += sections.render('active', projections, active)
     switches = [r for r in state['jobs'] or [] if r.get('Switches')]
     if switches:
         lines += ['', 'Runtime switches (recorded):']
-        lines += [_m_guard.redact(f"- {r['Job']}: {r['Switches']}", _m_guard.never_terms(n)) for r in switches]
-    delivery_lines = []
+        lines += sections.render('switches', switches, lambda: [
+            _m_guard.redact(f"- {r['Job']}: {r['Switches']}", terms) for r in switches])
+    deliveries = []
     for p in projections:
-        # Native precedence includes a versionless hand-back plus legacy ready packet.
+        # Packet precedence and source reads stay fresh, even on a section hit.
         packet = _m_verify.read_ready_packet(inst, n, p['branch'], p['ledger']) or {}
         rehearsal = packet.get('rehearsal')
         delivery = rehearsal.get('delivery') if isinstance(rehearsal, dict) else None
         if isinstance(delivery, list):
-            delivery_lines.append(_m_guard.redact(
-                f"- {p['branch']}: " + json.dumps(delivery, sort_keys=True), _m_guard.never_terms(n)))
-    if delivery_lines:
-        lines += ['', 'Rehearsal delivery (recorded ready evidence):', *delivery_lines]
+            deliveries.append((p['branch'], delivery))
+    if deliveries:
+        lines += ['', 'Rehearsal delivery (recorded ready evidence):']
+        lines += sections.render('delivery', deliveries, lambda: [
+            _m_guard.redact(f"- {branch}: " + json.dumps(delivery, sort_keys=True), terms)
+            for branch, delivery in deliveries])
     if state["jobs"] is None:
         lines += ["- Legacy ledger: running jobs unknown."]
     lines += ["", f"Closed jobs with unsettled threads: {len(_m_jobs.unsettled_jobs(state['jobs']))}"]
-    due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False, include_handled=True)
     lessons = sorted([r for r in state["jobs"] or [] if r["Ended"] and r["Outcome"] == "merged"], key=merge_time, reverse=True)
-    lines += ["", "Lesson outcomes (merged jobs):"]
-    lines += [_m_guard.redact(f"- {r['Job']}: " + (("recorded; see brain jobs" if metadata_only and r.get("Lessons") else r.get("Lessons")) or
-                     ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
-                      "legacy; outcome not required")), _m_guard.never_terms(n)) for r in lessons] or ["- None."]
+    lesson_lines = sections.render('lessons', lessons, lambda: [
+        _m_guard.redact(f"- {r['Job']}: " + (("recorded; see brain jobs" if metadata_only and r.get("Lessons") else r.get("Lessons")) or
+                       ("missing; coordinator must record outcome" if r.get("Lesson check") == "required" else
+                        "legacy; outcome not required")), terms) for r in lessons] or ["- None."])
+    forecast_lines = sections.render('forecasts', state['jobs'], lambda: [
+        "- " + _m_guard.redact(s, terms) for s in _m_jobs.forecast_lines(state['jobs'] or [])])
+    return lines, merged, lesson_lines, forecast_lines
+
+
+@_m_command_reads.memo
+@_m_timings.timed("status_facts")
+def status_facts(inst, n, state, known_merges, metadata_only=False):
+    """Incremental display only; time, tasks, inbox and readiness stay live."""
+    from . import facts_cache, usage_cache
+    terms = _m_guard.never_terms(n)
+    with usage_cache.database(inst, readonly=_m_spend._SPEND_READ_ONLY.get()) as cache:
+        sections = facts_cache.Sections(cache, n['id'], [inst.tz, metadata_only, terms])
+        lines, merged, lesson_lines, forecasts = ledger_facts(
+            inst, n, state, known_merges, metadata_only, sections, terms)
+    # These observations include time thresholds, source validation and lifecycle
+    # reconciliation. Never reuse them across commands or persist their results.
+    due = due_items(inst, n, (state, "", ""), include_stale=False, include_advice=False, include_handled=True)
+    lines += ["", "Lesson outcomes (merged jobs):", *lesson_lines]
     lines += ["", "Finished jobs awaiting coordinator:"]
     if metadata_only:
+        rows_by_key = {}
+        for row in state['jobs'] or []:
+            rows_by_key.setdefault(_m_jobs.job_key(row), []).append(row)
         lines += ["- " + r["Job"] + ": " + ("restart: compactions" if i['kind'] == 'restart' else
                   "restart: usage" if i['kind'] == 'job-restart' else
                   "ready to merge" if i.get("ready") else "finished; inspect hand-back")
                   for i in due if i["kind"] in ("handback", "restart", "job-restart")
-                  for r in state["jobs"] or [] if _m_jobs.job_key(r) == i.get("job")] or ["- None."]
+                  for r in rows_by_key.get(i.get('job'), [])] or ["- None."]
     else:
         lines += ["- " + i["text"] + (" (acknowledged; reason: " + i['handling']['reason'] +
                   '; resume: ' + (i['handling'].get('resume_condition') or i['handling'].get('until') or '') + ')'
                   if _m_reminders.reminder_handled(inst, i) else '')
                   for i in due if i["kind"] in ("handback", "restart", "job-restart")] or ["- None."]
-    forecasts = _m_jobs.forecast_lines(state["jobs"] or [])
     if forecasts:
-        lines += ["", "Forecasts (merged ledger durations):"] + ["- " + _m_guard.redact(s, _m_guard.never_terms(n)) for s in forecasts]
+        lines += ["", "Forecasts (merged ledger durations):", *forecasts]
     if missing_preview(n, state):
         lines += ["", "Preview: missing — merged code jobs need a local preview and screenshot tour."]
     if n["fm"].get("preview_url"):
-        lines += ["", _m_guard.redact("Published preview: " + n["fm"]["preview_url"], _m_guard.never_terms(n))]
+        lines += ["", _m_guard.redact("Published preview: " + n["fm"]["preview_url"], terms)]
     rules, roles, items = pending_imports(inst, n)
     if rules or roles or items:
         lines += ["", f"Imported, unreviewed (inactive): {rules} rule file(s), {roles} role(s), {items} proposed item(s)."]

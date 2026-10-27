@@ -2160,3 +2160,101 @@ class RenderedFingerprint(Scenario):
                 changed = list(samples)
                 changed[index] = re.sub(r'\d', lambda match: str((int(match[0]) + 1) % 10), text)
                 self.assertNotEqual(before, self.m.status_fingerprint(changed))
+
+
+class IncrementalFacts(Scenario):
+    """Exact semantic keys reuse display work; dynamic observations stay fresh."""
+
+    def setUp(self):
+        super().setUp()
+        loaded = core_loader.SourceFileLoader('incremental_facts', str(CORE / 'bin/brain')).load_module()
+        status = loaded._owners['status_facts']
+        instance, jobs = status._m_instance, status._m_jobs
+        self.m = status
+        self.jobs = jobs
+        self.root = self.tmp / 'facts'
+        self.root.mkdir()
+        (self.root / 'instance.md').write_text('---\nprincipals: sample\ntimezone: UTC\n---\n')
+        (self.root / 'node.md').write_text('---\nid: root\nowners: sample\nhome: none\n---\n')
+        self.inst = instance.Instance(self.root)
+        self.n = self.inst.node('root')
+        self.row = dict.fromkeys(jobs.JOB_COLS, '')
+        self.row.update(Job='job/one', Started='2026-10-20T10:00:00Z', Ended='2026-10-20T11:00:00Z',
+                        Outcome='merged', Commits='2', Lessons='none: fixture')
+        self.state = {'jobs': [self.row], 'worktrees': {}, 'handbacks': {}, 'inbox': []}
+        self.reads = contextlib.ExitStack()
+        self.addCleanup(self.reads.close)
+        self.due = self.reads.enter_context(mock.patch.object(status, 'due_items', return_value=[]))
+        self.human = self.reads.enter_context(mock.patch.object(status, 'attention_items', return_value=[]))
+        self.reads.enter_context(mock.patch.object(status, 'pending_imports', return_value=(0, 0, 0)))
+        self.reads.enter_context(mock.patch.object(status._m_learning, 'enforcement_metrics', return_value=[]))
+
+    def facts(self, known=(), metadata=True):
+        return self.m.status_facts(self.inst, self.n, self.state, known, metadata_only=metadata)
+
+    def test_unchanged_sections_skip_rendering_but_keep_time_dependent_reads_fresh(self):
+        first = self.facts()
+        with mock.patch.object(self.m, 'display_time', side_effect=AssertionError('unchanged merge recomputed')):
+            self.assertEqual(self.facts(), first)
+        self.assertEqual(self.due.call_count, 2)
+        self.assertEqual(self.human.call_count, 2)
+        self.due.return_value = [{'kind': 'task-stalled'}]
+        self.assertNotEqual(self.facts()[0], first[0])
+        self.assertIn('Due: 1', self.facts()[0][-1])
+
+    def test_changed_ledger_recomputes_only_dependent_sections(self):
+        first = self.facts()
+        self.row['Lessons'] = 'changed outcome'
+        with mock.patch.object(self.m, 'display_time', side_effect=AssertionError('unaffected merge recomputed')):
+            self.assertEqual(self.facts()[0], first[0])  # metadata hides lesson prose
+            self.row['Commits'] = '3'
+        self.assertNotEqual(self.facts()[0], first[0])
+        self.assertIn('- 2026-10-20 11:00 +00:00: job/one (3 commits)', self.facts()[0])
+
+    def test_baseline_mode_timezone_and_redaction_invalidate_their_strings(self):
+        first = self.facts()
+        self.assertNotEqual(self.facts(metadata=False)[0], first[0])
+        self.assertNotEqual(self.facts(known=[self.jobs.job_key(self.row)])[0], first[0])
+        self.inst.tz = 'Asia/Beirut'
+        self.assertNotEqual(self.facts()[0], first[0])
+        (self.root / 'never-name.txt').write_text('job/one\n')
+        self.assertNotIn('job/one', '\n'.join(self.facts()[0]))
+
+    def test_worktree_ref_state_and_order_are_observable(self):
+        self.state['worktrees'] = {'job/a': {'exists': True, 'merged': False, 'tip': 'a'},
+                                   'job/b': {'exists': False, 'merged': False, 'tip': 'b'}}
+        first = self.facts()
+        self.state['worktrees'] = dict(reversed(list(self.state['worktrees'].items())))
+        self.assertNotEqual(self.facts()[0], first[0])
+        first = self.facts()
+        self.state['worktrees']['job/a']['merged'] = True
+        self.assertNotEqual(self.facts()[0], first[0])
+
+    def test_duplicate_ledger_keys_keep_all_rows_and_legacy_none_is_distinct(self):
+        self.row['Ended'] = ''
+        self.row['Outcome'] = ''
+        self.state['jobs'].append(dict(self.row))
+        projection = {'branch': 'job/one', 'state': 'open', 'summary': '', 'historical_summary': None,
+                      'ledger': self.row, 'admission': None, 'queue': None, 'next_action': 'inspect'}
+        self.state['job_projections'] = {self.jobs.job_key(self.row): projection}
+        self.due.return_value = [{'kind': 'handback', 'job': self.jobs.job_key(self.row)}]
+        with mock.patch.object(self.m._m_verify, 'read_ready_packet', return_value=None):
+            lines = self.facts()[0]
+        self.assertEqual(lines.count('- job/one: finished; inspect hand-back'), 2)
+        self.state['jobs'] = None
+        self.assertIn('- Legacy ledger: running jobs unknown.', self.facts()[0])
+        self.state['jobs'] = []
+        self.assertNotIn('- Legacy ledger: running jobs unknown.', self.facts()[0])
+
+    def test_corrupt_or_unavailable_derived_database_recomputes(self):
+        first = self.facts()
+        database = self.root / '.brain/usage.sqlite'
+        database.write_bytes(b'broken cache')
+        self.assertEqual(self.facts(), first)
+        with mock.patch.object(self.m._m_common, 'directory_target', side_effect=OSError('unavailable')):
+            self.assertEqual(self.facts(), first)
+
+    def test_read_only_projection_does_not_create_a_derived_database(self):
+        with self.m._m_spend.spend_read_only():
+            self.facts()
+        self.assertFalse((self.root / '.brain/usage.sqlite').exists())
