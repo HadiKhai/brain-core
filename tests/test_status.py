@@ -516,6 +516,31 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertEqual((root / 'status.md').read_bytes(), original)
         self.assertIn('Hook question arriving', (root / 'inbox.md').read_text())
 
+    def test_refresh_refuses_new_library_member_during_git_validation(self):
+        root = self.init('alice')
+        self.git('branch', 'membership-probe', cwd=root)
+        (root / 'library').mkdir(exist_ok=True)
+        loader = core_loader.SourceFileLoader('refresh_membership_validation', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        reread, changed = refresh.GitInputs.reread, []
+        def interleave(observer, args, cwd, env, paths):
+            result = reread(observer, args, cwd, env, paths)
+            if args[-1] == 'membership-probe' and not changed:
+                changed.append(True)
+                (root / 'library/LATE.md').write_text('---\nid: LATE\nstatus: proposed\nsource_node: root\n---\nLate proposal.\n')
+            return result
+        def prepare(current, node):
+            text = m.refreshed_text(current, node)
+            refresh.common.git('rev-parse', '--verify', 'membership-probe', cwd=root)
+            return text
+        with mock.patch.object(refresh.GitInputs, 'reread', interleave):
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                refresh.compute(inst, inst.node('root'), prepare)
+        self.assertTrue(changed)
+        self.assertTrue((root / 'library/LATE.md').exists())
+
     def test_refresh_discovers_dynamic_inputs_unlocked_and_fences_the_set(self):
         root = self.init('alice')
         loader = core_loader.SourceFileLoader('refresh_dynamic_input_set', str(CORE / 'bin/brain'))

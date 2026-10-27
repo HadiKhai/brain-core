@@ -21,7 +21,7 @@ def requested(inst):
     return any(op.command == 'status' and op.inst.root == inst.root for op in events._CURRENT)
 
 
-def generation(paths):
+def generation(paths, shallow=False):
     """Cheap ref/config generations, including replacement-ref target aliases."""
     result = []
     def visit(path):
@@ -34,7 +34,7 @@ def generation(paths):
                            st.st_mtime_ns, st.st_ctime_ns))
             if stat.S_ISLNK(st.st_mode):
                 visit(path.resolve())
-            elif stat.S_ISDIR(st.st_mode):
+            elif stat.S_ISDIR(st.st_mode) and not shallow:
                 for child in sorted(path.iterdir()):
                     visit(child)
         except FileNotFoundError:
@@ -244,6 +244,9 @@ def input_paths(inst, n):
     for node in inst.nodes():
         paths.extend(node['dir'] / name for name in ('node.md', 'never-name.txt'))
         paths.extend((node['dir'] / 'specialists').glob('*/role.md'))
+        for child in (node['dir'] / 'nodes').glob('*'):
+            if child.is_dir():
+                paths.append(child / 'node.md')
     paths.extend(n['dir'] / name for name in (
         'status.md', 'brief.md', 'backlog.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md', 'job-handbacks',
         'job-attempts', 'job-contracts', 'job-trains', 'handback-queue', 'sources/import-proposals.md',
@@ -312,6 +315,23 @@ def input_paths(inst, n):
     return paths + [p.resolve() for p in paths] + aliases
 
 
+def membership_paths(inst, selected):
+    """Directory generations cover additions after the unlocked path discovery."""
+    paths = [inst.root / '.brain/teaching']
+    for node in inst.nodes():
+        paths.extend(node['dir'] / name for name in ('nodes', 'library', 'specialists'))
+    for directory, subdirs, _files in os.walk(inst.root):
+        subdirs[:] = [name for name in subdirs if name not in ('.git', '.brain') and
+                      not (name == 'core' and Path(directory) == inst.root)]
+        if Path(directory).name == 'library':
+            paths.append(Path(directory))
+    if any(node['id'] == 'root' for node in selected):
+        from . import hosts
+        paths.extend(hosts.wake_directory(inst, hosts.wake_target(inst, node)[0])
+                     for node in inst.nodes() if not node['archived'] and node['local'].get('coordinator'))
+    return tuple(sorted(set(paths)))
+
+
 def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     """Release physical ownership, prepare once, then refuse relevant drift.
 
@@ -340,22 +360,28 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
                 with ui_readmodel.observe(current), spend.spend_read_only(), status.machine_alert_snapshot() as alerts, timings.phase('refresh_compute'):
                     before_paths = tuple(sorted(set(paths())))
                     before = generation(before_paths)
+                    before_directories = membership_paths(current, selected)
+                    before_membership = generation(before_directories, shallow=True)
                     result = build(current, node)
                     final_paths = tuple(sorted(set(paths())))
                     expected = generation(final_paths)
-                    if before_paths != final_paths or before != expected or not status.machine_alerts_current(current, alerts):
+                    final_directories = membership_paths(current, selected)
+                    expected_membership = generation(final_directories, shallow=True)
+                    if (before_paths != final_paths or before != expected or before_directories != final_directories or
+                            before_membership != expected_membership or not status.machine_alerts_current(current, alerts)):
                         common.die('state changed during the unlocked step; retry from fresh state')
             finally:
                 common._GIT_OBSERVER.reset(observer)
                 common._GIT_READS.reset(reads)
                 _ACTIVE.reset(token)
         with timings.phase('refresh_revalidate'):
-            if generation(final_paths) != expected:
+            if generation(final_paths) != expected or generation(final_directories, shallow=True) != expected_membership:
                 common.die('state changed during the unlocked step; retry from fresh state')
             if any(path.is_dir() != existed for path, existed in bindings):
                 common.die('status refresh inputs changed during computation; retry from fresh state')
             git_inputs.validate()
-            if not status.machine_alerts_current(current, alerts) or generation(final_paths) != expected:
+            if (not status.machine_alerts_current(current, alerts) or generation(final_paths) != expected or
+                    generation(final_directories, shallow=True) != expected_membership):
                 common.die('state changed during the unlocked step; retry from fresh state')
             git_inputs.final_check()
         return result
