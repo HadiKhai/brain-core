@@ -50,18 +50,37 @@ class GitInputs:
         self.queries = {}
         self.pending = {}
 
-    def paths(self, args, cwd, env):
-        if cwd not in self.layouts:
+    def bases(self, cwd, env):
+        cached = self.layouts.get(cwd)
+        if cached is not None and generation(cached[1]) == cached[2]:
+            return cached[0]
+        markers = []
+        home = Path(cwd or Path.cwd())
+        for parent in (home, *home.parents):
+            markers.append(parent / '.git')
+            if (parent / '.git').exists():
+                break
+        marker_stamp = generation(markers)
+        def discover():
             # Bypass both the observer and display caches for layout discovery.
             token = common._GIT_OBSERVER.set(None)
             try:
-                result = common.git('rev-parse', '--absolute-git-dir', '--git-common-dir', cwd=cwd,
-                                    env=dict(os.environ) if env is None else env)
+                return common.git('rev-parse', '--absolute-git-dir', '--git-common-dir', cwd=cwd,
+                                  env=dict(os.environ) if env is None else env)
             finally:
                 common._GIT_OBSERVER.reset(token)
-            self.layouts[cwd] = [(Path(cwd or Path.cwd()) / line).resolve()
-                                 for line in result.stdout.splitlines()] if not result.returncode else []
-        bases = self.layouts[cwd]
+        first = discover()
+        bases = [(home / line).resolve() for line in first.stdout.splitlines()] if not first.returncode else []
+        layout_paths = markers + [base / 'commondir' for base in bases]
+        stamp = generation(layout_paths)
+        second = discover()
+        if (first.returncode, first.stdout) != (second.returncode, second.stdout) or generation(markers) != marker_stamp or generation(layout_paths) != stamp:
+            common.die('status refresh Git dependency bindings changed; retry from fresh state')
+        self.layouts[cwd] = (bases, layout_paths, stamp)
+        return bases
+
+    def paths(self, args, cwd, env):
+        bases = self.bases(cwd, env)
         paths = []
         home = Path(cwd or Path.cwd())
         for parent in (home, *home.parents):
@@ -86,6 +105,7 @@ class GitInputs:
         replay = command not in ('remote', 'symbolic-ref', 'rev-parse', 'merge-base', 'rev-list', 'log', 'for-each-ref', 'diff')
         revisions = query[1:query.index('--')] if '--' in query else query[1:]
         option_value = False
+        revision_count = 0
         for arg in revisions:
             if option_value:
                 option_value = False
@@ -96,6 +116,7 @@ class GitInputs:
             if arg.startswith('-'):
                 continue
             for revision in re.split(r'\.\.\.?', arg):
+                revision_count += 1
                 name = re.split(r'[~^:]', revision, maxsplit=1)[0]
                 if name.startswith('refs/') and not re.search(r'[\s{}?*\[\]\\]', name):
                     refs.add(name)
@@ -105,9 +126,16 @@ class GitInputs:
                     refs.add('refs/heads/main')
                 elif not re.fullmatch(r'[0-9a-f]{40,64}', name):
                     replay = True
+        mutable_diff = command == 'diff' and revision_count != 2
+        replay = replay or mutable_diff
+        if replay:
+            broad = True
+            refs.add('HEAD')
         for base in bases:
             paths.extend(base / name for name in ('config', 'config.worktree', 'commondir', 'packed-refs', 'reftable',
                          'shallow', 'info/grafts', os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/')))
+            if command in ('status', 'ls-files') or mutable_diff:
+                paths.append(base / 'index')
             if broad:
                 paths.append(base / 'refs')
             replacements = base / os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/')
@@ -132,7 +160,7 @@ class GitInputs:
                     pass
         # Worktree status/diffs with an implicit working tree need a real query
         # replay. They are uncommon preview checks, never completion DAG proofs.
-        replay = replay or command == 'status' or command == 'diff' and not any(re.fullmatch(r'[0-9a-f]{40,64}', a) for a in args)
+        replay = replay or command == 'status'
         return paths, replay
 
     def observe(self, args, cwd, env, result):
@@ -143,6 +171,9 @@ class GitInputs:
             return
         paths, replay, before = self.pending.pop(key)
         value = (result.returncode, result.stdout)
+        discovered, _ = self.paths(args, key[1], env)
+        if set(discovered) != set(paths):
+            common.die('status refresh Git dependency bindings changed; retry from fresh state')
         after = generation(paths)
         if before != after:
             # One unrelated commit may land during the query itself. Compare
@@ -155,6 +186,11 @@ class GitInputs:
         self.queries[key] = (env, paths, replay, after, value)
 
     def reread(self, args, cwd, env, paths):
+        # A semantic reread may adopt new ref values, never a new dependency
+        # topology with an obsolete closure (including moved .git bindings).
+        discovered, _ = self.paths(args, str(cwd) if cwd is not None else None, env)
+        if set(discovered) != set(paths):
+            common.die('status refresh Git dependency bindings changed; retry from fresh state')
         before = generation(paths)
         token = common._GIT_OBSERVER.set(None)
         try:
@@ -162,16 +198,30 @@ class GitInputs:
         finally:
             common._GIT_OBSERVER.reset(token)
         after = generation(paths)
-        if before != after:
+        discovered, _ = self.paths(args, str(cwd) if cwd is not None else None, env)
+        if set(discovered) != set(paths) or before != after:
             common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
         return (result.returncode, result.stdout), after
 
     def validate(self):
+        validated = []
         for (args, cwd), (env, paths, replay, stamp, before) in self.queries.items():
             if replay or generation(paths) != stamp:
-                after, _stamp = self.reread(args, cwd, env, paths)
+                after, stamp = self.reread(args, cwd, env, paths)
                 if after != before:
                     common.die('status refresh inputs changed during computation; retry from fresh state')
+            validated.append([args, cwd, env, paths, stamp, before])
+        # A later query must not invalidate an earlier answer. One final
+        # semantic check tolerates a single unrelated commit at this boundary;
+        # further generation drift refuses, without a validation retry loop.
+        for item in validated:
+            args, cwd, env, paths, stamp, before = item
+            if generation(paths) != stamp:
+                after, item[4] = self.reread(args, cwd, env, paths)
+                if after != before:
+                    common.die('status refresh inputs changed during computation; retry from fresh state')
+        if any(generation(item[3]) != item[4] for item in validated):
+            common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
 
 
 def input_paths(inst, n):
@@ -198,7 +248,9 @@ def input_paths(inst, n):
         receipt = json.loads(reports.preview_receipt_file(inst, n).read_text())
         for artifact in [receipt.get('tour'), *receipt.get('screenshots', [])]:
             if isinstance(artifact, dict) and isinstance(artifact.get('path'), str):
-                paths.append(Path(artifact['path']))
+                path = Path(artifact['path'])
+                if not path.is_dir():
+                    paths.append(path)
     except (OSError, ValueError, TypeError, AttributeError):
         pass  # the display retains an invalid/missing preview verdict
     paths.append(inst.root / '.brain/wake' / ('job-stalls-' + watch.watch_digest(n['id']) + '.json'))
@@ -223,7 +275,7 @@ def input_paths(inst, n):
                     receipt = (dep or {}).get('completion_receipt')
                     if isinstance(receipt, dict) and isinstance(receipt.get('artifact'), str):
                         relative = Path(receipt['artifact'])
-                        if not relative.is_absolute() and '..' not in relative.parts:
+                        if not relative.is_absolute() and '..' not in relative.parts and not (peer['dir'] / relative).is_dir():
                             paths.append(peer['dir'] / relative)
                 except ValueError:
                     pass  # the projection preserves the existing invalid-input verdict
@@ -233,7 +285,7 @@ def input_paths(inst, n):
         paths.append(verify.ready_path(inst, n, branch))
         root = Path(binding['path'])
         for pattern in common.lst(n['fm'].get('verify_inputs')) or common.lst(verify.VERIFY_INPUTS):
-            paths.extend(root.glob(pattern))
+            paths.extend(path for path in root.glob(pattern) if path.is_file())
     # Readers follow internal aliases; fence their physical source as well.
     aliases = [p.resolve() for path in paths if path.is_dir() for p in path.rglob('*') if p.is_symlink()]
     return paths + [p.resolve() for p in paths] + aliases

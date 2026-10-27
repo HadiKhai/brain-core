@@ -574,6 +574,75 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
             refresh.compute(inst, inst.node('app'), changed)
 
+    def test_refresh_refuses_retargeted_replacement_dependency_closure(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_replacement_retarget', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        (home / 'delivered.txt').write_text('delivery\n')
+        self.git('add', 'delivered.txt', cwd=home)
+        self.git('commit', '-qm', 'delivery', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        replacement = self.git('commit-tree', head + '^{tree}', '-p', base, '-m', 'replacement', cwd=home).strip()
+        for branch in ('replacement-a', 'replacement-b'):
+            self.git('branch', branch, replacement, cwd=home)
+        ref = 'refs/replace/' + head
+        self.git('symbolic-ref', ref, 'refs/heads/replacement-a', cwd=home)
+        run, retargeted = subprocess.run, []
+        def interleave(command, *args, **kwargs):
+            result = run(command, *args, **kwargs)
+            if 'diff' in command and not retargeted:
+                retargeted.append(True)
+                self.git('symbolic-ref', ref, 'refs/heads/replacement-b', cwd=home)
+            return result
+        def prepare(current, target):
+            answer = refresh.common.git('diff', '--name-only', base, head, cwd=home).stdout
+            self.git('update-ref', 'refs/heads/replacement-b', base, cwd=home)
+            return answer
+        with mock.patch.object(subprocess, 'run', side_effect=interleave):
+            with self.assertRaisesRegex(SystemExit, 'status refresh Git dependency bindings changed'):
+                refresh.compute(inst, inst.node('app'), prepare)
+        self.assertTrue(retargeted)
+
+    def test_refresh_rechecks_earlier_answers_after_later_validation(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_validation_interleaving', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('commit', '--allow-empty', '-qm', 'new target', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('branch', 'query-b', base, cwd=home)
+        reread = refresh.GitInputs.reread
+        for unrelated in (False, True):
+            with self.subTest(unrelated=unrelated):
+                self.git('update-ref', 'refs/heads/query-a', base, cwd=home)
+                changed = []
+                def interleave(observer, args, cwd, env, paths):
+                    result = reread(observer, args, cwd, env, paths)
+                    if args[-1] == 'query-b' and not changed:
+                        changed.append(True)
+                        if unrelated:
+                            self.git('commit', '--allow-empty', '-qm', 'unrelated late commit', cwd=home)
+                        else:
+                            self.git('update-ref', 'refs/heads/query-a', head, cwd=home)
+                    return result
+                def prepare(current, target):
+                    answer = (refresh.common.git('merge-base', '--is-ancestor', base, 'refs/heads/main', cwd=home).returncode
+                              if unrelated else refresh.common.git('rev-parse', '--verify', 'refs/heads/query-a', cwd=home).stdout)
+                    refresh.common.git('rev-parse', '--verify', 'query-b', cwd=home)
+                    return answer
+                with mock.patch.object(refresh.GitInputs, 'reread', interleave):
+                    if unrelated:
+                        self.assertEqual(refresh.compute(inst, inst.node('app'), prepare), 0)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+                            refresh.compute(inst, inst.node('app'), prepare)
+                self.assertTrue(changed)
+
     def test_refresh_reconciliation_fences_earlier_nodes_until_publication(self):
         root = self.init('alice')
         self.b(root, 'new', 'a', '--title', 'A')
