@@ -12,7 +12,11 @@ import core_loader
 
 
 class ReviewDiscipline(Scenario):
-    job = _test_verify.WorkerReadyPackets.job
+    fixture_init_in_process = True
+    fixture_templates = True
+
+    def job(self):
+        return self.cached_setup('review-job', lambda: _test_verify.WorkerReadyPackets.job(self))
 
     def review(self, root, *args, **kw):
         return self.b(root, "review", "a", "--branch", "job", "--built-by", "claude", *args, **kw)

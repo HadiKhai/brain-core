@@ -30,6 +30,7 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 class Workbench(Scenario):
     fixture_init_in_process = True
+    fixture_templates = True
     def test_first_ledger_runtime_matches_worker_route_before_brief(self):
         r = self.init("alice")
         home = self.repo(self.tmp / "app")

@@ -10,6 +10,7 @@ from scenario import Scenario, CORE
 
 class MergeTrain(Scenario):
     fixture_init_in_process = True
+    fixture_templates = True
 
     def test_launcher_help_defers_command_only_modules(self):
         script = """import runpy, sys

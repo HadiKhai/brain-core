@@ -911,6 +911,8 @@ cli.main()
 
 
 class NodeHygiene(Scenario):
+    fixture_init_in_process = True
+    fixture_templates = True
     def setUp(self):
         super().setUp()
         loader = core_loader.SourceFileLoader('brain_hygiene', str(CORE / 'bin/brain'))

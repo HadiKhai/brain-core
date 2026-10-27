@@ -11,15 +11,20 @@ from scenario import CORE, Scenario
 
 class WatchExtension(Scenario):
     fixture_init_in_process = True
+    fixture_templates = True
     def setUp(self):
         super().setUp()
         env = mock.patch.dict(os.environ, self.env)
         env.start()
         self.addCleanup(env.stop)
         self.m = core_loader.SourceFileLoader('extension_fixture', str(CORE / 'bin/brain')).load_module()
-        self.root = self.init('oak')
-        self.b(self.root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
+        self.root = self.cached_setup('watch-extension', self.watch_fixture)
         self.inst = self.m.Instance(self.root)
+
+    def watch_fixture(self):
+        root = self.init('oak')
+        self.b(root, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-send')
+        return root
 
     def watch(self):
         with contextlib.redirect_stdout(io.StringIO()):

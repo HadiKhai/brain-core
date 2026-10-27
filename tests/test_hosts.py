@@ -1003,10 +1003,13 @@ class QuestionWake(Scenario):
 
 class StopHook(Scenario):
     fixture_init_in_process = True
+    fixture_templates = True
 
     def test_hook_log_append_tightens_existing_mode_and_preserves_contents(self):
         r = self.init('alice')
-        time.sleep(1.1)
+        status = r / 'status.md'
+        stamp = status.stat().st_mtime - 2
+        os.utime(status, (stamp, stamp))
         (r / 'brief.md').write_text((r / 'brief.md').read_text() + '\nChanged fixture notes\n')
         log = r / '.brain/hooks.log'
         log.write_text('earlier fixture\n')
@@ -1515,7 +1518,8 @@ class StopHook(Scenario):
         self.b(r, "new", "a", "--title", "A")
         a = r / "nodes" / "a"
         self.assertIsNone(self.hook(r, a), "fresh, committed notes: let it stop")
-        time.sleep(1.1)
+        stamp = (a / 'status.md').stat().st_mtime - 2
+        os.utime(a / 'status.md', (stamp, stamp))
         (a / "brief.md").write_text((a / "brief.md").read_text() + "\nAudience: teenagers\n")
         out = self.hook(r, a)
         self.assertEqual(out["decision"], "block")

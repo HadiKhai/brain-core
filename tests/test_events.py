@@ -17,6 +17,8 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    fixture_init_in_process = True
+    fixture_templates = True
     def test_private_journal_append_tightens_existing_mode_before_new_data(self):
         r = self.init('alice')
         path = r / '.brain/fixture-journal.jsonl'
@@ -343,6 +345,7 @@ class EventAppend(Scenario):
 
 class EventViews(Scenario):
     fixture_init_in_process = True
+    fixture_templates = True
     def tracked_state(self, root, paths):
         return {name: ((root / name).read_bytes() if (root / name).exists() else None,
                        self.git('ls-files', '--stage', '--', name, cwd=root),

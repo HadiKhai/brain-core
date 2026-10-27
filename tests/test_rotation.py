@@ -8,6 +8,7 @@ from scenario import Scenario, CORE
 
 class Rotation(Scenario):
     fixture_init_in_process = True
+    fixture_templates = True
     def setUp(self):
         super().setUp()
         self.r = self.init('fixture')

@@ -2912,3 +2912,16 @@ retries are not needed to tolerate unrelated builder commits and are omitted
 so genuine validation conflicts remain explicit. Requirements are read once per
 validation pass, using a local snapshot protected by the same generation fence,
 instead of rereading the entire requirement directory for each task row.
+## D28003: Reuse independent scenario setup and the selected developer Git
+
+Audited scenario classes reuse private filesystem snapshots for repeated setup.
+Each test receives its own files, Git metadata, relocated machine bindings and
+fresh module state. Refresh time-sensitive spend inputs after cloning; keep
+asserted CLI calls, crash children, contention probes and verification subprocesses
+real. Keep installation and upgrade scenarios on their original setup path.
+
+On macOS, fixtures that select `/usr/bin/git` resolve the same developer Git once
+with `xcrun --find git` and prepend its directory to the fixture PATH. This removes
+repeated dispatcher launches while preserving custom Git installations and the
+original PATH on other platforms or lookup failures. Freshness tests set the
+status file's age directly instead of sleeping across the comparison threshold.

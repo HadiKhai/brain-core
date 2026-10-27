@@ -29,6 +29,8 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class WorkerReadyPackets(Scenario):
+    fixture_init_in_process = True
+    fixture_templates = True
     def test_port_changes_rerun_monolithic_and_lane_commands(self):
         m = core_loader.SourceFileLoader('brain_port_reuse', str(CORE / 'bin/brain')).load_module()
         owner = m.record_ready.__globals__
@@ -366,6 +368,8 @@ class ReadyFailureRegressions(Scenario):
 
 
 class VerifyLogs(Scenario):
+    fixture_init_in_process = True
+    fixture_templates = True
     job = WorkerReadyPackets.job
 
     def runner(self):
@@ -742,6 +746,8 @@ class VerifyLogs(Scenario):
 
 
 class VerifyInputDiagnostics(Scenario):
+    fixture_init_in_process = True
+    fixture_templates = True
     job = WorkerReadyPackets.job
     packet = WorkerReadyPackets.packet
 

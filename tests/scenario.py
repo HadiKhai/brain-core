@@ -22,6 +22,7 @@ import tempfile
 import time
 import unittest
 import types
+from functools import lru_cache
 from pathlib import Path
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
@@ -32,6 +33,27 @@ _core_template = None
 _core_bytecode = {}
 _runtime_bytecode = None
 _bytecode_lock = threading.RLock()
+
+
+@lru_cache(maxsize=8)
+def fixture_executable_path(path):
+    """Avoid Apple's Git dispatcher for fixtures using the selected developer Git.
+
+    Resolve once per worker; keep explicit Git installations and non-Darwin PATHs
+    unchanged. This selects the same executable as /usr/bin/git, with its real
+    hooks, locking, environment and subprocess boundaries intact.
+    """
+    if sys.platform != 'darwin' or shutil.which('git', path=path) != '/usr/bin/git':
+        return path
+    try:
+        result = subprocess.run(['/usr/bin/xcrun', '--find', 'git'], check=True,
+                                capture_output=True, text=True)
+        executable = Path(result.stdout.strip())
+        if executable.is_absolute() and executable.is_file() and os.access(executable, os.X_OK):
+            return str(executable.parent) + os.pathsep + path
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return path
 
 
 def compiled_fixture_core(source, identity):
@@ -229,7 +251,7 @@ class Scenario(unittest.TestCase):
                     "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
                     "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false",
                     "GIT_CONFIG_KEY_2": "gc.autoDetach", "GIT_CONFIG_VALUE_2": "false",
-                    "PATH": os.environ.get("PATH", ""),
+                    "PATH": fixture_executable_path(os.environ.get("PATH", "")),
                     "PYTHONPATH": str(CORE / "tests"), "BRAIN_USAGE_TESTING": "1",
                     "BRAIN_USAGE_TEST_NO_KEYCHAIN": "1", "BRAIN_MACHINE_TESTING": "1",
                     "BRAIN_MACHINE_READING": json.dumps({"cpus": 8, "load": [1, 1, 1],
@@ -481,7 +503,12 @@ class Scenario(unittest.TestCase):
 
 class AutonomyProject(Scenario):
     fixture_init_in_process = True
+    fixture_templates = True
+
     def project(self):
+        return self.cached_setup('autonomy-project', self.project_fixture)
+
+    def project_fixture(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'code' / 'app')
         self.fixture_b(r, 'new', 'app', '--title', 'App', '--home', str(home))
