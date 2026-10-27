@@ -2715,3 +2715,14 @@ and altered KPI values; all negative controls must be rejected before acceptance
 For first-data paint, derive the oracle from the actual HTTP response delivered to the
 app. Do not add a second state request to the measured navigation merely to obtain
 expected values; that changes the workload instead of observing the displayed reading.
+
+## D40004: Poll opted-in preview operations without relaxing call bounds
+
+Private adapter registrations may declare `operation_deadlines` per lifecycle
+operation type. These operations use one identity-bound start and read-only status
+polls; unlisted operations keep the existing direct protocol. Each invocation
+retains its ten-second cap, while one monotonic deadline includes all polling and
+identity checks. Only a valid quiescent terminal method result can complete a
+lifecycle step. Expiry, lost operation ids, crashes and binding changes preserve
+pending intent without replay, rollback or release. Product drivers own durable
+execution and reconciliation; the transport creates no second lifecycle engine.
