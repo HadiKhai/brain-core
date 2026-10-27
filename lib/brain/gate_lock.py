@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 from . import common as _m_common
 from . import instance as _m_instance
@@ -268,7 +269,6 @@ def gate_wrapper_admission(inst, node, env):
         ACTIVE_GATE.reset(active)
 
 
-
 def cmd_gate_lock(a):
     command = a.command[1:] if a.command[:1] == ['--'] else a.command
     if not command:
@@ -278,6 +278,7 @@ def cmd_gate_lock(a):
     fd, owned = gate_acquire(inst, n['id'], os.environ, a.label or command[0])
     child = None
     pending = []
+    delayed = {}
     handlers = {}
 
     def forward(signum, frame):
@@ -289,12 +290,16 @@ def cmd_gate_lock(a):
             except ProcessLookupError:
                 pass
 
+    def defer(signum, frame):
+        # A terminal signal already reaches the child in our process group.
+        # Give it time to exit before forwarding a wrapper-only signal once.
+        delayed.setdefault(signum, time.monotonic() + 2.0)
 
     try:
         os.set_inheritable(fd, True)
-        _m_core_releases.hold_pin(_m_common.CORE)  # the command keeps this release from prune
+        _m_core_releases.hold_pin(_m_common.CORE)  # the command retains this release through supervision/exec
         env = gate_environment(inst, n['id'], os.environ, fd)
-        if owned:  # an inherited gate's outer wrapper already admitted
+        if owned:  # nested wrappers retain the outer owner's admission
             gate_wrapper_admission(inst, n['id'], env)
         sys.stdout.flush()
         sys.stderr.flush()
@@ -305,12 +310,25 @@ def cmd_gate_lock(a):
                 if hasattr(signal, name):
                     signal.signal(getattr(signal, name), signal.SIG_DFL)
             os.execvpe(command[0], command, env)
-        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
-            handlers[signum] = signal.signal(signum, forward)
+        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM,
+                       signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM, signal.SIGVTALRM,
+                       signal.SIGPROF, signal.SIGWINCH):
+            if signal.getsignal(signum) == signal.SIG_IGN:
+                continue  # Preserve nohup and background-job dispositions across exec.
+            handler = defer if signum in (signal.SIGINT, signal.SIGQUIT) else forward
+            handlers[signum] = signal.signal(signum, handler)
         child = subprocess.Popen(command, env=env, close_fds=False)
         for signum in pending:
             forward(signum, None)
-        result = child.wait()
+        while True:
+            try:
+                result = child.wait(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                for signum, deadline in list(delayed.items()):
+                    if time.monotonic() >= deadline:
+                        del delayed[signum]
+                        forward(signum, None)
     except OSError as e:
         print('gate-lock: ' + str(e), file=sys.stderr)
         raise SystemExit(127 if e.errno == errno.ENOENT else 126)

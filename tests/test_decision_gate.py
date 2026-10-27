@@ -88,16 +88,26 @@ class DecisionGate(Scenario):
         self.assertTrue(self.m.wake_actionable_pending(self.inst, path))
         self.assertEqual(json.loads(path.read_text())['explicit_kinds'], True)
 
-    def start_gate(self, label, code, *args, node=None, cwd=None, env=None):
+    def start_gate(self, label, code, *args, node=None, cwd=None, env=None, new_session=False):
         p = subprocess.Popen([sys.executable, str(CORE / 'bin/brain'), 'gate-lock',
                               *(['--node', node] if node else []), '--label', label,
                               '--', sys.executable, '-u', '-c', code, *args], cwd=cwd or self.root,
                              env=env or self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True)
+                             stderr=subprocess.PIPE, text=True, start_new_session=new_session)
         def cleanup():
-            if p.poll() is None:
+            if new_session:
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    # Darwin can report EPERM for an already emptied group.
+                    # Never suppress a refusal while our supervisor is alive.
+                    if p.poll() is None:
+                        raise
+            elif p.poll() is None:
                 p.kill()
-            p.communicate()
+            p.communicate(timeout=5)
         self.addCleanup(cleanup)
         return p
 
@@ -327,6 +337,114 @@ with mock.patch.object(m,'machine_admit',side_effect=held):
         child.communicate(timeout=5)
         self.assertEqual(child.returncode, -signal.SIGTERM)
         self.assert_gate_released()
+
+    def test_group_interrupt_reaches_child_once_without_forwarding(self):
+        code = """import os,signal,time
+count=0
+def interrupted(signum, frame):
+ global count
+ count+=1
+signal.signal(signal.SIGINT,interrupted)
+signal.signal(signal.SIGQUIT,interrupted)
+print(os.getpgrp(),flush=True)
+while not count:
+ time.sleep(.01)
+time.sleep(.25)
+print(count,flush=True)
+"""
+        for signum in (signal.SIGINT, signal.SIGQUIT):
+            with self.subTest(signal=signum):
+                child = self.start_gate('group interrupt', code, new_session=True)
+                self.assertEqual(int(self.line(child.stdout)), child.pid)
+                os.killpg(child.pid, signum)
+                out, err = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 0, err)
+                self.assertEqual(out.strip(), '1')
+                self.assert_gate_released()
+
+    def test_direct_interrupt_forwards_once_after_two_second_grace(self):
+        code = """import signal,time,sys
+count=0
+def interrupted(signum, frame):
+ global count
+ count+=1
+ print("received",flush=True)
+signal.signal(signal.SIGINT,interrupted)
+signal.signal(signal.SIGQUIT,interrupted)
+print('ready',flush=True)
+while not count:
+ time.sleep(.01)
+sys.stdin.readline()
+print(count,flush=True)
+"""
+        for signum in (signal.SIGINT, signal.SIGQUIT):
+            with self.subTest(signal=signum):
+                child = self.start_gate('direct interrupt', code, new_session=True)
+                self.assertEqual(self.line(child.stdout), 'ready')
+                started = time.monotonic()
+                child.send_signal(signum)
+                # The child's output is a delivery acknowledgement. It must not
+                # arrive before the grace, and must arrive once after it.
+                self.assertEqual(select.select([child.stdout], [], [], 1.8)[0], [])
+                self.assertEqual(self.line(child.stdout), 'received')
+                self.assertGreaterEqual(time.monotonic() - started, 2.0)
+                out, err = child.communicate('\n', timeout=5)
+                self.assertEqual(child.returncode, 0, err)
+                self.assertEqual(out.strip(), '1')
+                self.assert_gate_released()
+
+    def test_direct_term_reaps_child_and_releases_gate_without_grace(self):
+        child = self.start_gate('direct TERM', "import os,signal; print(os.getpid(),flush=True); signal.pause()",
+                                new_session=True)
+        pid = int(self.line(child.stdout))
+        started = time.monotonic()
+        child.terminate()
+        out, err = child.communicate(timeout=1.8)
+        self.assertEqual(child.returncode, -signal.SIGTERM, err)
+        self.assertLess(time.monotonic() - started, 2.0)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assert_gate_released()
+
+    def test_cli_preserves_inherited_ignored_signals(self):
+        setup = """import os,signal,sys
+for signum in (signal.SIGHUP,signal.SIGINT,signal.SIGQUIT,signal.SIGTERM):
+ signal.signal(signum,signal.SIG_IGN)
+os.execv(sys.executable,[sys.executable,*sys.argv[1:]])
+"""
+        code = """import os,signal
+for signum in (signal.SIGHUP,signal.SIGINT,signal.SIGQUIT,signal.SIGTERM):
+ assert signal.getsignal(signum)==signal.SIG_IGN
+ os.kill(os.getpid(),signum)
+print(42)
+"""
+        result = subprocess.run([sys.executable, '-c', setup, str(CORE / 'bin/brain'), 'gate-lock', '--',
+                                 sys.executable, '-c', code], cwd=self.root, env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), '42')
+        self.assert_gate_released()
+
+    def test_other_catchable_signals_forward_immediately_and_release(self):
+        code = """import signal,sys
+def handled(signum,frame):
+ print('handled',flush=True)
+ raise SystemExit(0)
+signal.signal(int(sys.argv[1]),handled)
+print('ready',flush=True)
+while True:
+ signal.pause()
+"""
+        for signum in (signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM, signal.SIGVTALRM,
+                       signal.SIGPROF, signal.SIGWINCH):
+            with self.subTest(signal=signum):
+                child = self.start_gate('other signal', code, str(int(signum)), new_session=True)
+                self.assertEqual(self.line(child.stdout), 'ready')
+                child.send_signal(signum)
+                out, err = child.communicate(timeout=1.8)
+                self.assertEqual(child.returncode, 0, err)
+                self.assertEqual(out.strip(), 'handled')
+                self.assert_gate_released()
 
     def test_cli_preserves_callers_inheritable_descriptors(self):
         with (self.root / 'caller-input').open('w+b') as stream:
