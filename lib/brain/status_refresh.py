@@ -70,27 +70,51 @@ class GitInputs:
                 break
         # Object bytes are immutable, but replacement/ancestry/config generations
         # can change their meaning. Ref tips are included only when queried.
-        refs = set(re.findall(r'refs/[A-Za-z0-9_./-]+', ' '.join(args)))
+        refs = set()
         query = list(args)
         while query and (query[0] == '--no-optional-locks' or query[0] == '-c'):
             query = query[1:] if query[0] != '-c' else query[2:]
         command = query[0] if query else ''
-        if 'HEAD' in args or command == 'log':
+        if any(re.match(r'^HEAD(?:$|[~^:])', arg) for arg in args) or command == 'log':
             refs.add('HEAD')
         if 'main' in args:
             refs.add('refs/heads/main')
         broad = command == 'for-each-ref' or any(a in ('--all', '--branches') for a in args)
+        # Optimize only the native explicit-ref/SHA grammar. Unqualified names
+        # and other revision expressions fall back to replay, never partial
+        # dependency guesses. Valid ref names include Unicode, '+' and '@'.
+        replay = command not in ('remote', 'symbolic-ref', 'rev-parse', 'merge-base', 'rev-list', 'log', 'for-each-ref', 'diff')
+        revisions = query[1:query.index('--')] if '--' in query else query[1:]
+        for arg in revisions:
+            if arg.startswith('-'):
+                continue
+            for revision in re.split(r'\.\.\.?', arg):
+                name = re.split(r'[~^:]', revision, maxsplit=1)[0]
+                if name.startswith('refs/') and not re.search(r'[\s{}?*\[\]\\]', name):
+                    refs.add(name)
+                elif name == 'HEAD':
+                    refs.add('HEAD')
+                elif name == 'main':
+                    refs.add('refs/heads/main')
+                elif not re.fullmatch(r'[0-9a-f]{40,64}', name):
+                    replay = True
         for base in bases:
-            paths.extend(base / name for name in ('config', 'commondir', 'packed-refs', 'reftable',
+            paths.extend(base / name for name in ('config', 'config.worktree', 'commondir', 'packed-refs', 'reftable',
                          'shallow', 'info/grafts', os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/')))
             if broad:
                 paths.append(base / 'refs')
-            pending, seen = list(refs), set()
-            while pending:
-                ref = pending.pop()
-                if ref in seen:
-                    continue
-                seen.add(ref)
+            replacements = base / os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/')
+            if replacements.is_dir():
+                refs.update(p.relative_to(base).as_posix() for p in replacements.rglob('*') if p.is_file())
+        # A linked worktree's HEAD may point into common refs; replacement
+        # symbolic chains can likewise cross either metadata directory.
+        pending, seen = list(refs), set()
+        while pending:
+            ref = pending.pop()
+            if ref in seen:
+                continue
+            seen.add(ref)
+            for base in bases:
                 path = base / ref
                 paths.append(path)
                 try:
@@ -101,7 +125,7 @@ class GitInputs:
                     pass
         # Worktree status/diffs with an implicit working tree need a real query
         # replay. They are uncommon preview checks, never completion DAG proofs.
-        replay = command == 'status' or command == 'diff' and not any(re.fullmatch(r'[0-9a-f]{40,64}', a) for a in args)
+        replay = replay or command == 'status' or command == 'diff' and not any(re.fullmatch(r'[0-9a-f]{40,64}', a) for a in args)
         return paths, replay
 
     def observe(self, args, cwd, env, result):

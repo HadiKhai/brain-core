@@ -479,6 +479,49 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             refresh.compute(inst, node, changed)
         self.assertEqual((node['dir'] / 'status.md').read_bytes(), original)
 
+    def test_refresh_fences_complete_ref_names(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_complete_refs', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        common = refresh.common
+        inst = m.Instance(root)
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('commit', '--allow-empty', '-qm', 'concurrent target', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        for branch in ('job/fix+api', 'job/café'):
+            with self.subTest(branch=branch):
+                ref = 'refs/heads/' + branch
+                self.git('update-ref', ref, base, cwd=home)
+                def changed(current, target):
+                    answer = common.git('rev-parse', '--verify', ref, cwd=home).stdout
+                    self.git('update-ref', ref, head, cwd=home)
+                    return answer
+                with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+                    refresh.compute(inst, inst.node('app'), changed)
+
+    def test_refresh_fences_symbolic_replacement_targets(self):
+        root, home, wt = self.project()
+        loader = core_loader.SourceFileLoader('refresh_replacement_refs', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = __import__('importlib').import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        (home / 'delivered.txt').write_text('delivered change\n')
+        self.git('add', 'delivered.txt', cwd=home)
+        self.git('commit', '-qm', 'delivery', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        replacement = self.git('commit-tree', head + '^{tree}', '-p', base, '-m', 'replacement', cwd=home).strip()
+        self.git('branch', 'replacement-target', replacement, cwd=home)
+        self.git('symbolic-ref', 'refs/replace/' + head, 'refs/heads/replacement-target', cwd=home)
+        def changed(current, target):
+            answer = refresh.common.git('diff', '--name-only', base, head, cwd=home).stdout
+            self.assertIn('delivered.txt', answer)
+            self.git('update-ref', 'refs/heads/replacement-target', base, cwd=home)
+            return answer
+        with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+            refresh.compute(inst, inst.node('app'), changed)
+
     def test_refresh_reconciliation_fences_earlier_nodes_until_publication(self):
         root = self.init('alice')
         self.b(root, 'new', 'a', '--title', 'A')

@@ -485,10 +485,10 @@ def resources(inst):
     return result
 
 
-def resource_scope(inst, path):
+def resource_scope(inst, path, ordered_nodes=None):
     if path in ('.brain/local.json', '.brain/inbox-seen.json'):
         return '*'
-    for n in sorted(inst.nodes(), key=lambda n: len(n['dir'].parts), reverse=True):
+    for n in ordered_nodes if ordered_nodes is not None else sorted(inst.nodes(), key=lambda n: len(n['dir'].parts), reverse=True):
         prefix = n['dir'].relative_to(inst.root).as_posix()
         if path.startswith('@ready/' + n['id'] + '/') or prefix == '.' or path.startswith(prefix + '/'):
             return node_ref(n['id'])
@@ -496,7 +496,8 @@ def resource_scope(inst, path):
 
 
 def resource_list(inst, values, display=True):
-    rows = [{'id': digest(k.encode()), 'scope': resource_scope(inst, k), 'hash': v,
+    ordered_nodes = sorted(inst.nodes(), key=lambda n: len(n['dir'].parts), reverse=True)
+    rows = [{'id': digest(k.encode()), 'scope': resource_scope(inst, k, ordered_nodes), 'hash': v,
              **({'path': k} if display else {})} for k, v in sorted(values.items())]
     return screen(inst, rows) if display else rows
 
@@ -730,6 +731,8 @@ class Command:
                         'maintenance_ok': False,
                         'invalidate': [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]}
             append(self.inst, self.node, 'commit', self.ref, data, scrub=False)
+            if self.command == 'status' and not data.get('maintenance_ok'):
+                common.die('status refresh maintenance refused; generated view needs repair; retry from fresh state')
         elif not changed:
             append(self.inst, self.node, "abort", self.ref, {"command": self.command})
         # Persisted partial changes require reconciliation, never a false commit.
