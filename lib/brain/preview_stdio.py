@@ -21,6 +21,17 @@ JSON_LIMIT = 65536
 STDERR_LIMIT = 16384
 CALL_SECONDS = 10
 REGISTRATION_KEYS = {'version', 'name', 'protocol', 'executable', 'argv', 'checkout', 'head', 'files'}
+OPERATION_TYPES = {'acquire', 'backup', 'migration', 'restart', 'acceptance', 'rollback', 'release'}
+POLL_SECONDS = 0.1
+
+
+def operation_remaining(deadline):
+    if deadline is None:
+        return None
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise ValueError('preview operation deadline exceeded; outcome unknown')
+    return seconds
 
 
 def strict_json(raw):
@@ -61,7 +72,8 @@ def trusted_path(value, directory=False):
     return path
 
 
-def file_identity(path):
+def file_identity(path, deadline=None):
+    operation_remaining(deadline)
     path = trusted_path(str(path))
     with _m_common.directory_target(path) as target:
         with os.fdopen(target.open(), 'rb') as stream:
@@ -69,14 +81,17 @@ def file_identity(path):
             if before.st_size > 128 * 1024 * 1024:
                 raise ValueError('preview registered file exceeds identity limit')
             digest = hashlib.sha256()
-            deadline = time.monotonic() + CALL_SECONDS
+            hash_deadline = time.monotonic() + CALL_SECONDS
+            if deadline is not None:
+                hash_deadline = min(hash_deadline, deadline)
             for block in iter(lambda: stream.read(65536), b''):
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= hash_deadline:
                     raise ValueError('preview registered file identity timed out')
                 digest.update(block)
             target.check_file(stream.fileno())
             if target.generation(before) != target.generation(os.fstat(stream.fileno())):
                 raise ValueError('preview file changed while reading')
+            operation_remaining(deadline)
             return [before.st_dev, before.st_ino, digest.hexdigest()]
 
 
@@ -94,7 +109,8 @@ def private_json(path):
     return strict_json(raw)
 
 
-def checkout_identity(path, head):
+def checkout_identity(path, head, deadline=None):
+    operation_remaining(deadline)
     path = trusted_path(path, directory=True)
     # Explicit configuration cannot turn this read into an fsmonitor command.
     env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
@@ -103,20 +119,23 @@ def checkout_identity(path, head):
         try:
             output = bounded_process(['/usr/bin/git', '-c', 'core.fsmonitor=false',
                 '-c', 'core.untrackedCache=false', '-C', str(path), *args],
-                str(path), b'', env)
+                str(path), b'', env, operation_remaining(deadline), deadline=deadline)
         except subprocess.SubprocessError as error:
             raise ValueError('preview checkout identity unavailable') from error
+        operation_remaining(deadline)
         return output.decode('utf-8').strip()
     if git('rev-parse', '--show-toplevel') != str(path) or git('rev-parse', 'HEAD') != head:
         raise ValueError('preview checkout head mismatched')
     if git('status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'):
         raise ValueError('preview checkout must be clean')
     info = path.stat()
+    operation_remaining(deadline)
     return [info.st_dev, info.st_ino]
 
 
-def registration_identity(value):
-    if (not isinstance(value, dict) or set(value) != REGISTRATION_KEYS
+def registration_identity(value, deadline=None):
+    operation_remaining(deadline)
+    if (not isinstance(value, dict) or set(value) not in (REGISTRATION_KEYS, REGISTRATION_KEYS | {'operation_deadlines'})
             or type(value['version']) is not int or value['version'] != 1
             or not isinstance(value['name'], str) or not re.fullmatch('[a-z][a-z0-9_-]{0,63}', value['name'])
             or not isinstance(value['protocol'], str) or not value['protocol'].strip() or len(value['protocol']) > 256
@@ -125,7 +144,13 @@ def registration_identity(value):
             or any(not isinstance(arg, str) or not arg or len(arg) > 4096 or '\0' in arg for arg in value['argv'])
             or not isinstance(value['files'], dict) or not 1 <= len(value['files']) <= 32):
         raise ValueError('invalid version 1 preview registration')
-    checkout = checkout_identity(value['checkout'], value['head'])
+    if 'operation_deadlines' in value:
+        deadlines = value['operation_deadlines']
+        if (not isinstance(deadlines, dict) or not deadlines or not set(deadlines) <= OPERATION_TYPES
+                or any(type(seconds) is not int or not 1 <= seconds <= 86400
+                       for seconds in deadlines.values())):
+            raise ValueError('invalid preview operation deadlines')
+    checkout = checkout_identity(value['checkout'], value['head'], deadline)
     executable = trusted_path(value['executable'])
     if not os.access(executable, os.X_OK) or str(executable) not in value['files']:
         raise ValueError('preview executable requires a pinned digest and execute permission')
@@ -133,7 +158,7 @@ def registration_identity(value):
     for path, digest in value['files'].items():
         if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
             raise ValueError('invalid preview file digest')
-        identity = file_identity(path)
+        identity = file_identity(path, deadline)
         if identity[2] != digest:
             raise ValueError('preview registered file digest changed')
         files[path] = identity
@@ -142,6 +167,7 @@ def registration_identity(value):
     for arg in value['argv']:
         if arg.startswith('/') and arg not in files:
             raise ValueError('absolute preview argument requires a pinned file')
+    operation_remaining(deadline)
     return dict(checkout=checkout, files=files)
 
 
@@ -184,10 +210,13 @@ def bootstrap_preview_adapters(n, existing):
     return {**existing, value['name']: StdioPreviewAdapter(value, saved['identity'], path, saved)}
 
 
-def bounded_process(argv, cwd, raw, env):
+def bounded_process(argv, cwd, raw, env, seconds=None, deadline=None):
     """Join only our direct child; pipe EOF/exit never certify descendants."""
     output, errors = bytearray(), bytearray()
-    deadline = time.monotonic() + CALL_SECONDS
+    call_deadline = time.monotonic() + (CALL_SECONDS if seconds is None else min(CALL_SECONDS, seconds))
+    deadline = call_deadline if deadline is None else min(call_deadline, deadline)
+    if time.monotonic() >= deadline:
+        raise ValueError('preview operation deadline exceeded; outcome unknown')
     child = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, close_fds=True, env=env)
     try:
@@ -233,11 +262,13 @@ def bounded_process(argv, cwd, raw, env):
             stream.close()
 
 
-def bounded_call(argv, cwd, request):
+def bounded_call(argv, cwd, request, seconds=None, deadline=None):
+    operation_remaining(deadline)
     raw = (json.dumps(request, sort_keys=True, allow_nan=False) + '\n').encode('utf-8')
     if len(raw) > JSON_LIMIT:
         raise ValueError('preview request exceeds limit')
-    return strict_json(bounded_process(argv, cwd, raw, {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}))
+    return strict_json(bounded_process(argv, cwd, raw, {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, seconds,
+                                      deadline=deadline))
 
 
 class StdioPreviewAdapter:
@@ -246,29 +277,73 @@ class StdioPreviewAdapter:
         self.path, self.saved = path, saved
         self.protocol = registration['protocol']
 
-    def check(self):
-        if private_json(self.path) != self.saved or registration_identity(self.registration) != self.identity:
+    def check(self, deadline=None):
+        operation_remaining(deadline)
+        if private_json(self.path) != self.saved or registration_identity(self.registration, deadline) != self.identity:
             raise ValueError('preview registration changed')
+        operation_remaining(deadline)
 
-    def invoke(self, method, step, context):
-        self.check()
+    def exchange(self, method, step, context, operation=None, deadline=None):
+        operation_remaining(deadline)
+        self.check(deadline)
+        operation_remaining(deadline)
         binding = dict(version=1, adapter=self.registration['name'], protocol=self.protocol,
             request_id=os.urandom(16).hex(), method=method, step=step,
             context_sha256=hashlib.sha256(json.dumps(context, sort_keys=True,
                                                    allow_nan=False).encode('utf-8')).hexdigest())
+        if operation is not None:
+            binding['operation'] = dict(operation)
         response = bounded_call([self.registration['executable'], *self.registration['argv']],
-                                self.registration['checkout'], {**binding, 'context': context})
-        self.check()
+                                self.registration['checkout'], {**binding, 'context': context},
+                                operation_remaining(deadline), deadline=deadline)
+        self.check(deadline)
+        operation_remaining(deadline)
         if (not isinstance(response, dict) or set(response) != set(binding) | {'result'}
                 or type(response.get('version')) is not int
                 or any(response.get(key) != value for key, value in binding.items())):
             raise ValueError('preview response binding mismatched; effects unknown')
-        result = response['result']
+        if operation is not None and type(response['operation']['timeout_seconds']) is not int:
+            raise ValueError('preview operation binding mismatched; outcome unknown')
+        return response['result']
+
+    def invoke(self, method, step, context):
+        seconds = self.registration.get('operation_deadlines', {}).get(step if method == 'step' else method)
+        if seconds is None:
+            result = self.exchange(method, step, context)
+        else:
+            # One start only. Losing the process or handle remains an unknown
+            # lifecycle intent, never permission to restart the operation.
+            deadline = time.monotonic() + seconds
+            operation = dict(id=os.urandom(16).hex(), method=method, timeout_seconds=seconds)
+            call = 'start'
+            while True:
+                observation = self.exchange(call, step, context, operation, deadline)
+                if (not isinstance(observation, dict) or set(observation) != {'state', 'receipt', 'value'}
+                        or not isinstance(observation['state'], str)
+                        or observation['state'] not in ('pending', 'done', 'failed', 'unknown')
+                        or not isinstance(observation['receipt'], str)
+                        or not observation['receipt'].strip() or len(observation['receipt']) > 4096):
+                    raise ValueError('invalid preview operation observation; outcome unknown')
+                state, result = observation['state'], observation['value']
+                if state in ('pending', 'unknown'):
+                    if result is not None or state == 'unknown':
+                        raise ValueError('preview operation outcome unknown')
+                    time.sleep(min(POLL_SECONDS, max(0, deadline - time.monotonic())))
+                    call = 'status'
+                    continue
+                if (state == 'failed' and (method != 'step' or not isinstance(result, dict)
+                                          or result.get('ok') is not False)
+                        or state == 'done' and method == 'step'
+                        and (not isinstance(result, dict) or result.get('ok') is not True)):
+                    raise ValueError('invalid preview operation terminal state; outcome unknown')
+                break
         expected = ({'resource', 'host', 'run_id', 'lease', 'receipt'} if method == 'acquire' else
                     {'ok', 'receipt', 'ownership', 'quiescent'} if method == 'step' else
                     {'ownership', 'released', 'quiescent'})
         if not isinstance(result, dict) or set(result) != expected:
             raise ValueError('preview response result schema mismatched')
+        if seconds is not None and time.monotonic() >= deadline:
+            raise ValueError('preview operation deadline exceeded; outcome unknown')
         # The lifecycle engine validates ownership, receipts and product-asserted
         # quiescence. Transport success does not supply those assertions.
         return result

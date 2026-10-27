@@ -10,7 +10,7 @@ Registration is explicit, local and disabled by default. Installing core does
 not register a product. Keep registration packets, installed registrations,
 resource names and receipts out of shared repositories.
 
-Create a user-owned mode-0600 JSON packet with exactly these fields (example
+Create a user-owned mode-0600 JSON packet with these required fields (example
 paths and digests are placeholders):
 
 ```json
@@ -40,6 +40,9 @@ included in `files`; every absolute file argument must also be included. There
 are at most 32 arguments and 32 pinned files, each at most 128 MiB. Registration
 and installed JSON are each limited to 64 KiB. Duplicate JSON keys, unknown
 fields, nonfinite numbers and unsupported versions refuse.
+
+The optional `operation_deadlines` field enables the long-operation extension
+below. No other additional registration fields are accepted.
 
 This is a trusted executable boundary, not a sandbox. The operator must pin all
 driver code inputs, including runtime-loaded code, and trust the executable's
@@ -117,3 +120,78 @@ leave durable intent pending. Core joins or terminates and joins only its owned
 direct child; it neither kills descendants nor treats direct-child shutdown as
 product shutdown. No rollback, release or replay follows an unknown effect.
 Product-owned reconciliation remains a separate obligation.
+
+## Long operations: start and status
+
+An adapter may opt individual lifecycle operation types into asynchronous
+transport by adding `operation_deadlines` to its private registration packet:
+
+```json
+{"operation_deadlines": {"migration": 300, "backup": 120}}
+```
+
+Keys are `acquire`, `backup`, `migration`, `restart`, `acceptance`, `rollback`
+or `release` (lifecycle step names, not product-specific configured commands).
+Values are integer seconds from 1 through 86400; booleans are invalid. The map
+must be nonempty. An omitted type retains the existing direct method, schema
+and ten-second cap. Registrations without this field remain compatible.
+
+For an opted-in operation, core invokes `start` once, then `status` until a
+terminal response. Every invocation still sends one JSON value and EOF and
+must exit within ten seconds, including closing stdout/stderr. The adapter
+must arrange product-owned durable execution; it must not leave an inherited
+stdio pipe open in a background worker. Core supplies no daemon or listener.
+
+The request uses all version-1 fields above, with `method` equal to `start` or
+`status`, the original lifecycle `step` (null for acquire/release), and one
+additional field, `operation`, with exactly:
+
+| Field | Value |
+| --- | --- |
+| `id` | core-generated fresh 32-character lowercase hex operation id |
+| `method` | original `acquire`, `step` or `release` |
+| `timeout_seconds` | registered total deadline for this operation type |
+
+The same operation id, original method, step, timeout and unchanged context
+are sent on every poll; each call has its own fresh `request_id`. The response
+echoes every request field except `context`, exactly as for short calls,
+including the entire `operation` object, and adds only `result`. Core refuses
+any changed adapter, protocol, version, request, context or operation binding.
+Registration, checkout and pinned file identities are rechecked before and
+after every start/status invocation. Adapters must bind their durable operation
+record to this entire operation identity and context, including resource,
+host, run id, ownership, head and idempotency key when present. A foreign id or
+context must never read or start another operation. `status` is read-only;
+neither polling nor an unknown id authorizes starting or replaying work.
+
+The long-operation `result` has exactly `state`, `receipt` and `value`:
+
+| `state` | `value` and meaning |
+| --- | --- |
+| `pending` | null; execution is still in progress |
+| `done` | the original method's exact result object; a step must have `ok: true` |
+| `failed` | a step result with `ok: false`, exact ownership and `quiescent: true`; a known failure eligible for the existing rollback path |
+| `unknown` | null; the adapter cannot establish the outcome, including an unknown/lost operation id |
+
+`receipt` is always a nonempty string of at most 4096 characters, providing
+product-owned evidence for that observation. Terminal values retain all
+original receipt, ownership, release and quiescence requirements; an envelope
+receipt alone proves no success or quiescence. Acquire/release cannot report a
+known `failed` result: inability to prove ownership or release is `unknown`.
+`start` may return any of these states, acknowledging the supplied id through
+its echoed operation envelope. A pending start returns promptly; the operation
+id remains the handle for subsequent status calls.
+
+Core measures the total deadline with its monotonic clock starting immediately
+before the first start invocation (including identity checks and polling).
+Status calls and identity checks do not reset it. Each subprocess receives at
+most the remaining operation budget and the ten-second per-call cap. A result
+observed at or after the total deadline is **outcome unknown**, never success
+or known failure, even if its payload says done. Core stops polling at expiry;
+it does not claim cancellation, kill product descendants, rollback, release,
+restart a lost operation or replay a start. Transport errors, crashes mid-op,
+lost ids, malformed states, invalid evidence and identity changes also leave
+the existing durable lifecycle intent pending for product reconciliation.
+Interrupted core processes do not resume polling automatically; their pending
+intent continues to fence new work. This extension changes transport only,
+not the lifecycle sequence or the existing reconciliation authority.

@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+import types
 from unittest import mock
 
 from scenario import CORE, Scenario
@@ -216,3 +218,274 @@ class PreviewStdio(Scenario):
         m = core_loader.SourceFileLoader('stdio_input', str(CORE / 'bin/brain')).load_module()
         with self.assertRaisesRegex(ValueError, 'request exceeds'):
             m.bounded_call(['/missing-synthetic-driver'], str(self.tmp), dict(value='x'*65536))
+
+
+LONG_DRIVER = '''import json, os, sys, time
+from pathlib import Path
+request = json.load(sys.stdin)
+context = request.pop('context')
+folder = Path(__file__).parent.parent
+with (folder / 'calls.jsonl').open('a') as stream:
+    stream.write(json.dumps(dict(request, context=context, pid=os.getpid())) + '\\n')
+mode = sys.argv[1]
+method = request['method']
+original = request.get('operation', {}).get('method', method)
+ownership = {key: context[key] for key in ('resource', 'host', 'run_id')}
+ownership.update(lease='synthetic-lease', receipt='synthetic-owner')
+if original == 'acquire':
+    value = ownership
+elif original == 'release':
+    value = dict(ownership=context['ownership'], released=True, quiescent=True)
+else:
+    value = dict(ok=not (mode == 'failure' and request['step'] == 'migration'), receipt='synthetic-' + request['step'],
+                 ownership=context['ownership'], quiescent=True)
+result = value
+if method in ('start', 'status'):
+    record = folder / ('operation-' + request['operation']['id'] + '.json')
+    binding = dict(operation=request['operation'], context=context, step=request['step'])
+    if method == 'start':
+        if record.exists(): sys.exit(9)
+        record.write_text(json.dumps(dict(binding=binding, started=time.time())))
+        state = 'pending'
+    elif not record.exists() or mode == 'unknown':
+        state = 'unknown'
+    else:
+        saved = json.loads(record.read_text())
+        if saved['binding'] != binding: sys.exit(8)
+        if mode == 'crash': sys.exit(7)
+        if mode == 'slow-call': time.sleep(3)
+        duration = 11 if mode == 'slow-success' else .4
+        state = ('pending' if mode == 'timeout' or time.time() - saved['started'] < duration
+                 else 'failed' if mode == 'failure' else 'done')
+    if mode == 'foreign' and method == 'status': value['ownership']['resource'] = 'foreign'
+    if mode == 'unquiescent' and method == 'status': value['quiescent'] = False
+    if mode == 'failed-true' and method == 'status': state = 'failed'
+    if mode == 'done-false' and method == 'status': state = 'done'; value['ok'] = False
+    if mode == 'invalid-state' and method == 'status': state = 'success'
+    result = dict(state=state, receipt='synthetic-observation',
+                  value=value if state in ('done', 'failed', 'success') else None)
+    if mode == 'no-evidence' and method == 'status': result['receipt'] = ''
+    if mode == 'pending-value' and method == 'start': result['value'] = value
+    if mode.startswith('mismatch-') and method == 'status':
+        key = mode[len('mismatch-'):]
+        if key == 'operation': request[key]['id'] = 'f' * 32
+        elif key == 'timeout': request['operation']['timeout_seconds'] = float(request['operation']['timeout_seconds'])
+        elif key == 'version': request[key] = 2
+        else: request[key] = 'foreign'
+print(json.dumps(dict(request, result=result)))
+'''
+
+
+class PreviewLongOperations(Scenario):
+    command = PreviewStdio.command
+    calls = PreviewStdio.calls
+
+    def fixture(self, mode='success', deadlines=None):
+        root, product, _, packet, registration = PreviewStdio.fixture(self, mode, install=False)
+        (product / 'driver.py').write_text(LONG_DRIVER)
+        self.git('add', 'driver.py', cwd=product)
+        self.git('commit', '-m', 'synthetic long driver', cwd=product)
+        head = self.git('rev-parse', 'HEAD', cwd=product).strip()
+        registration.update(head=head, operation_deadlines=deadlines or {'migration': 3})
+        registration['files'][str(product / 'driver.py')] = hashlib.sha256(LONG_DRIVER.encode()).hexdigest()
+        packet.write_text(json.dumps(registration))
+        self.command(root, 'preview-adapter', 'root', '--register', str(packet))
+        m = core_loader.SourceFileLoader('long_preview', str(CORE / 'bin/brain')).load_module()
+        return root, product, head, m
+
+    def reconcile(self, root, head, m):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            return m.landed_preview(m.Instance(root), m.Instance(root).node('root'), head)
+
+    def test_slow_operation_exceeds_individual_call_budget_and_preserves_binding(self):
+        root, _, head, m = self.fixture('slow-success', {'migration': 30})
+        started = time.monotonic()
+        result = self.reconcile(root, head, m)
+        self.assertGreater(time.monotonic() - started, m.CALL_SECONDS)
+        self.assertEqual(result['state'], 'succeeded')
+        calls = self.calls()
+        long = [call for call in calls if call['method'] in ('start', 'status')]
+        self.assertEqual(long[0]['method'], 'start')
+        self.assertTrue(any(call['method'] == 'status' for call in long))
+        self.assertEqual(len({call['request_id'] for call in long}), len(long))
+        for call in long:
+            self.assertEqual(call['operation'], long[0]['operation'])
+            self.assertEqual(call['context'], long[0]['context'])
+            self.assertEqual(call['context_sha256'], long[0]['context_sha256'])
+        self.assertEqual([call['step'] or call['method'] for call in calls if call not in long],
+                         ['acquire', 'backup', 'restart', 'acceptance', 'release'])
+        self.assertEqual(self.reconcile(root, head, m), result)
+        self.assertEqual(len(self.calls()), len(calls))
+
+    def test_all_lifecycle_operation_types_can_opt_in(self):
+        root, _, head, m = self.fixture(deadlines={name: 3 for name in
+            ('acquire', 'backup', 'migration', 'restart', 'acceptance', 'rollback', 'release')})
+        result = self.reconcile(root, head, m)
+        self.assertEqual(result['state'], 'succeeded')
+        self.assertTrue(result['released'])
+        self.assertEqual([call['step'] or call['operation']['method'] for call in self.calls()
+                          if call['method'] == 'start'],
+                         ['acquire', 'backup', 'migration', 'restart', 'acceptance', 'release'])
+
+    def test_known_failure_rolls_back_and_releases(self):
+        root, _, head, m = self.fixture('failure')
+        result = self.reconcile(root, head, m)
+        self.assertEqual(result['state'], 'failed')
+        self.assertTrue(result['released'])
+        self.assertTrue(result['rolled_back'])
+        self.assertEqual([call['step'] for call in self.calls() if call['method'] == 'step'],
+                         ['backup', 'rollback'])
+
+    def unknown(self, mode, seconds=3):
+        root, _, head, m = self.fixture(mode, {'migration': seconds})
+        started = time.monotonic()
+        result = self.reconcile(root, head, m)
+        elapsed = time.monotonic() - started
+        self.assertEqual(result['state'], 'pending')
+        self.assertEqual(result['active_step'], 'migration')
+        self.assertFalse(result['released'])
+        self.assertIn(result['reason'], ('product step outcome unknown',
+                                       'product step did not confirm a bounded receipt'))
+        calls = self.calls()
+        self.assertEqual(sum(call['method'] == 'start' for call in calls), 1)
+        self.assertFalse(any(call['step'] == 'rollback' or call['method'] == 'release' for call in calls))
+        self.assertEqual(self.reconcile(root, head, m), result)
+        self.assertEqual(self.calls(), calls)
+        for call in calls:
+            with self.assertRaises(ProcessLookupError): os.kill(call['pid'], 0)
+        return elapsed
+
+    def test_total_deadline_is_not_reset_by_pending_status(self):
+        self.assertLess(self.unknown('timeout', 1), 5)
+
+    def test_status_subprocess_is_bounded_by_remaining_operation_time(self):
+        self.assertLess(self.unknown('slow-call', 1), 5)
+
+    def test_crash_mid_operation_is_unknown(self): self.unknown('crash')
+    def test_status_unknown_id_is_unknown(self): self.unknown('unknown')
+    def test_status_foreign_ownership_is_unknown(self): self.unknown('foreign')
+    def test_status_unconfirmed_quiescence_is_unknown(self): self.unknown('unquiescent')
+    def test_failed_state_cannot_claim_success(self): self.unknown('failed-true')
+    def test_done_state_cannot_hide_known_failure(self): self.unknown('done-false')
+    def test_invalid_status_state_is_unknown(self): self.unknown('invalid-state')
+    def test_status_requires_evidence(self): self.unknown('no-evidence')
+    def test_pending_cannot_supply_terminal_value(self): self.unknown('pending-value')
+    def test_operation_id_binding_mismatch_refuses(self): self.unknown('mismatch-operation')
+    def test_status_request_id_binding_mismatch_refuses(self): self.unknown('mismatch-request_id')
+    def test_status_context_binding_mismatch_refuses(self): self.unknown('mismatch-context_sha256')
+    def test_status_protocol_binding_mismatch_refuses(self): self.unknown('mismatch-protocol')
+    def test_status_version_binding_mismatch_refuses(self): self.unknown('mismatch-version')
+    def test_status_deadline_type_mismatch_refuses(self): self.unknown('mismatch-timeout')
+
+    def test_late_done_at_exact_deadline_is_unknown(self):
+        m = core_loader.SourceFileLoader('long_deadline', str(CORE / 'bin/brain')).load_module()
+        adapter = m.StdioPreviewAdapter(dict(name='synthetic', protocol='synthetic-v1',
+            executable='/not-invoked', argv=[], checkout=str(self.tmp),
+            operation_deadlines={'migration': 1}), {}, None, {})
+        clock = [0]
+        fake_time = types.SimpleNamespace(monotonic=lambda: clock[0])
+        def late(argv, cwd, request, seconds, deadline=None):
+            self.assertEqual(seconds, 1)
+            self.assertEqual(deadline, 1)
+            clock[0] = 1
+            return {**{k: v for k, v in request.items() if k != 'context'}, 'result': dict(
+                state='done', receipt='observed', value=dict(ok=True, receipt='done',
+                ownership={}, quiescent=True))}
+        with mock.patch.object(m._owners['StdioPreviewAdapter'], 'time', fake_time), \
+                mock.patch.object(adapter, 'check'), mock.patch.object(m, 'bounded_call', side_effect=late):
+            with self.assertRaisesRegex(ValueError, 'outcome unknown'):
+                adapter.step('migration', {})
+
+    def test_registration_change_after_start_refuses_without_status_or_replay(self):
+        root, _, head, m = self.fixture()
+        original = m.bounded_call
+        def replaced(argv, cwd, request, seconds=None, deadline=None):
+            response = original(argv, cwd, request, seconds, deadline=deadline)
+            if request['method'] == 'start':
+                path = root / '.brain/preview-adapter.json'
+                saved = json.loads(path.read_text())
+                saved['registration']['protocol'] = 'changed-v2'
+                path.write_text(json.dumps(saved))
+            return response
+        with mock.patch.object(m, 'bounded_call', side_effect=replaced):
+            result = self.reconcile(root, head, m)
+        self.assertEqual(result['state'], 'pending')
+        self.assertFalse(result['released'])
+        self.assertEqual([call['method'] for call in self.calls()], ['acquire', 'step', 'start'])
+
+    def test_unknown_status_handle_never_starts_work(self):
+        root, _, _, m = self.fixture()
+        saved = m.private_json(root / '.brain/preview-adapter.json')
+        adapter = m.StdioPreviewAdapter(saved['registration'], saved['identity'],
+                                       root / '.brain/preview-adapter.json', saved)
+        context = dict(resource='synthetic-resource', host='synthetic-host', run_id='synthetic-run', ownership={})
+        result = adapter.exchange('status', 'migration', context,
+                                  dict(id='0'*32, method='step', timeout_seconds=3), time.monotonic()+3)
+        self.assertEqual(result, dict(state='unknown', receipt='synthetic-observation', value=None))
+        self.assertEqual([call['method'] for call in self.calls()], ['status'])
+        self.assertEqual(list(self.tmp.glob('operation-*.json')), [])
+
+    def test_identity_git_calls_share_remaining_operation_deadline(self):
+        m = core_loader.SourceFileLoader('long_git_deadline', str(CORE / 'bin/brain')).load_module()
+        clock, budgets = [0], []
+        def git(argv, cwd, raw, env, seconds=None, deadline=None):
+            budgets.append((seconds, deadline))
+            clock[0] += .6
+            return str(self.tmp).encode() if '--show-toplevel' in argv else b'a' * 40
+        owner = m._owners['checkout_identity']
+        with mock.patch.object(owner, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                mock.patch.object(m, 'bounded_process', side_effect=git):
+            with self.assertRaisesRegex(ValueError, 'outcome unknown'):
+                m.checkout_identity(str(self.tmp), 'a'*40, deadline=1)
+        self.assertEqual(budgets, [(1, 1), (.4, 1)])
+
+    def test_request_serialization_cannot_start_a_child_after_operation_expiry(self):
+        m = core_loader.SourceFileLoader('long_serialization_deadline', str(CORE / 'bin/brain')).load_module()
+        adapter = m.StdioPreviewAdapter(dict(name='synthetic', protocol='synthetic-v1',
+            executable='/not-invoked', argv=[], checkout=str(self.tmp)), {}, None, {})
+        owner, clock = m._owners['StdioPreviewAdapter'], [0]
+        real_dumps = owner.json.dumps
+        def slow_encode(value, *args, **kwargs):
+            if isinstance(value, dict) and 'request_id' in value:
+                clock[0] = 2
+            return real_dumps(value, *args, **kwargs)
+        with mock.patch.object(owner, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                mock.patch.object(owner.json, 'dumps', side_effect=slow_encode), \
+                mock.patch.object(owner.subprocess, 'Popen') as spawn, mock.patch.object(adapter, 'check'):
+            with self.assertRaisesRegex(ValueError, 'outcome unknown'):
+                adapter.exchange('start', 'migration', {},
+                                 dict(id='0'*32, method='step', timeout_seconds=1), deadline=1)
+            spawn.assert_not_called()
+
+    def test_identity_hash_uses_operation_deadline_and_does_not_start_after_expiry(self):
+        m = core_loader.SourceFileLoader('long_hash_deadline', str(CORE / 'bin/brain')).load_module()
+        path = self.tmp / 'pinned-file'
+        path.write_bytes(b'x' * 131072)
+        owner = m._owners['file_identity']
+        real_sha256 = owner.hashlib.sha256
+        clock, updates = [0], []
+        class SlowDigest:
+            def __init__(self): self.inner = real_sha256()
+            def update(self, block):
+                updates.append(len(block))
+                self.inner.update(block)
+                clock[0] += 1
+            def hexdigest(self): return self.inner.hexdigest()
+        with mock.patch.object(owner, 'time', types.SimpleNamespace(monotonic=lambda: clock[0])), \
+                mock.patch.object(owner.hashlib, 'sha256', side_effect=SlowDigest):
+            with self.assertRaisesRegex(ValueError, 'identity timed out'):
+                m.file_identity(path, deadline=1)
+            with self.assertRaisesRegex(ValueError, 'outcome unknown'), \
+                    mock.patch.object(m, 'trusted_path') as trusted:
+                m.file_identity(path, deadline=1)
+            trusted.assert_not_called()
+        self.assertEqual(updates, [65536])
+
+    def test_deadline_registration_refuses_invalid_maps_before_driver_invocation(self):
+        root, _, _, packet, original = PreviewStdio.fixture(self, install=False)
+        for deadlines in ({}, {'migration': True}, {'migration': 0}, {'migration': 86401},
+                          {'migration': 1.5}, {'schema': 300}, [], None):
+            packet.write_text(json.dumps(dict(original, operation_deadlines=deadlines)))
+            self.command(root, 'preview-adapter', 'root', '--register', str(packet), ok=False)
+        self.assertFalse((root / '.brain/preview-adapter.json').exists())
+        self.assertEqual(self.calls(), [])
