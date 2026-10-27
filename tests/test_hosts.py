@@ -849,6 +849,21 @@ class QuestionWake(Scenario):
         self.assertAlmostEqual(sum(slept), 120)  # one window at most, as the drain bounds it
         self.assertEqual((directory / "last").read_text(), str(1000.0 + 86400), "only the drain repairs the window")
 
+    def test_name_recovery_and_snapshot_share_one_watch_scan(self):
+        self.enqueue("structured")
+        directory = self.module.wake_directory(self.inst, self.n)
+        (directory / "legacy.pending").write_text("")  # empty legacy metadata needs name recovery
+        scans = []
+        original = self.module.watch_groups
+        def counted(*args, **kwargs):
+            scans.append(args)
+            return original(*args, **kwargs)
+        with mock.patch.object(self.module, "watch_groups", side_effect=counted):
+            self.drain()
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(len(self.calls.read_text().splitlines()), 1)
+        self.assertFalse(list(directory.glob("*.pending")))
+
     def test_second_timer_exits_while_one_covers_the_opening(self):
         import fcntl
         self.enqueue("covered")

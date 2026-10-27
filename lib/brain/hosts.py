@@ -333,9 +333,25 @@ def wake_history_parse(data):
     return value['deliveries']
 
 
-def wake_delivery_items(inst, n, pending):
-    """Legacy/direct requests have empty queue files; resolve their opaque reason keys."""
+def wake_group_items(inst, n, scan=None):
+    """One watch scan per delivery attempt; `scan` memoizes it, including its failure."""
     from . import watch as _m_watch
+    if scan is not None and 'groups' in scan:
+        groups = scan['groups']
+    else:
+        try:
+            groups = _m_watch.watch_groups(inst)
+        except (Exception, SystemExit):
+            groups = None
+        if scan is not None:
+            scan['groups'] = groups
+    if groups is None:
+        raise ValueError('watch scan failed')
+    return groups.get(n['id'], {}).get('items', [])
+
+
+def wake_delivery_items(inst, n, pending, scan=None):
+    """Legacy/direct requests have empty queue files; resolve their opaque reason keys."""
     refs = []
     names = set()
     for path in pending:
@@ -355,8 +371,8 @@ def wake_delivery_items(inst, n, pending):
         except ValueError:
             return []  # conflicting records still deliver an opaque request for every pending file
     try:
-        items = _m_watch.watch_groups(inst).get(n['id'], {}).get('items', [])
-    except (Exception, SystemExit):
+        items = wake_group_items(inst, n, scan)
+    except ValueError:
         items = []  # legacy metadata recovery must not block a question's transport
     for i in items:
         if 'reason' in i:
@@ -389,11 +405,10 @@ def wake_reason_items(inst, n, reason):
                           and reason in (i.get('reason'), i.get('legacy_reason')))
 
 
-def wake_snapshot(inst, n, refs):
-    from . import watch as _m_watch
+def wake_snapshot(inst, n, refs, scan=None):
     try:
-        items = _m_watch.watch_groups(inst).get(n['id'], {}).get('items', [])
-    except (Exception, SystemExit):
+        items = wake_group_items(inst, n, scan)
+    except ValueError:
         items = []  # a display snapshot must never gate delivery
     try:
         return wake_item_refs(items + refs)
@@ -869,12 +884,14 @@ def wake_drain(inst, n, once=False):
                         if broken.exists():
                             broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
                         history = []
-                    refs = wake_delivery_items(current, target, pending)
                     # Projection can inspect transcripts and local repositories.
                     # Recheck the transport generation after that computation,
                     # before reserving a turn or recording a delivery attempt.
+                    # Name recovery and the display snapshot share one scan.
                     generation = _m_instance.state_signature(current, target)
-                    snapshot = wake_snapshot(current, target, refs)
+                    scan = {}
+                    refs = wake_delivery_items(current, target, pending, scan)
+                    snapshot = wake_snapshot(current, target, refs, scan)
                     latest = _m_instance.Instance(inst.root)
                     latest_target = latest.node(target['id'])
                     if _m_instance.state_signature(latest, latest_target) != generation:
