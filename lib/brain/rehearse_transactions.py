@@ -485,7 +485,7 @@ def _validate(before, after, observations, owner_pid, command, now, diagnostics=
         for name in set(after) - set(before):
             if name != 'status-archives':
                 require(after[name]['mode'] == (stat.S_IFDIR | 0o700 if after[name].get('directory')
-                                               else stat.S_IFREG | 0o600))
+                                               else stat.S_IFREG | events.common.publication_mode(private=True)))
         for snapshot in (before, after):
             if 'events-leases' in snapshot:
                 require(snapshot['events-leases'].get('directory') is True and
@@ -1591,7 +1591,8 @@ def projection_result(events, method, before, after, now):
             changed_cache = True
     require(after['archive'] == archive_hex)
     if archive_hex is not None:
-        require(after['modes']['status-archive.md'] == before['modes'].get('status-archive.md', stat.S_IFREG | 0o600))
+        require(after['modes']['status-archive.md'] == before['modes'].get(
+            'status-archive.md', stat.S_IFREG | events.common.publication_mode()))
     expected_cache = json.dumps(saved, sort_keys=True).encode() if changed_cache else raw_cache
     require(bytes.fromhex(after['cache'] or '') == expected_cache)
     return archive_hex, expected_cache

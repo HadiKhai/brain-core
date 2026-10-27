@@ -1274,6 +1274,67 @@ class RehearsalCloneCaches(Scenario):
         damaged['events-status-commits.json']['hex'] = b'{}'.hex()
         self.assertEqual((set(), 'unproven'), validate(damaged, packet['observations']))
 
+    def new_projection_files(self):
+        source = self.init('new-projection-source')
+        (source / 'status.md').write_text('# Demo\n\n## Now\n' +
+                                        ''.join('- item %d\n' % i for i in range(35)))
+        (source / 'status-archive.md').unlink(missing_ok=True)
+        self.git('add', 'status.md', cwd=source)
+        self.git('commit', '-m', 'fixture status baseline', cwd=source)
+        lane = self.tmp / 'new-projection-clone'
+        lane.mkdir()
+        rehearsal.copy_brain(source, lane / 'brain', self.tmp)
+        raw = []
+        row = rehearsal.run_command(lane / 'brain/core', lane,
+                                    ['status', 'root', '--refresh'], 'refresh', [], raw_output=raw)
+        self.assertEqual(0, row['code'])
+        packet = raw[0]['transaction_evidence']
+        self.assertEqual('proven', row['transaction_evidence'], packet['diagnostics'])
+        self.assertEqual(0, row['unexpected'])
+        return lane / 'brain', packet
+
+    def test_new_shared_projection_archive_uses_writer_publication_mode(self):
+        import copy
+        from brain import events, rehearse_transactions as transactions
+        root, packet = self.new_projection_files()
+        self.assertEqual({}, packet['before']['status-archives'])
+        self.assertEqual(stat.S_IFREG | 0o644, (root / 'status-archive.md').stat().st_mode)
+        self.assertIn('- item 34', (root / 'status-archive.md').read_text())
+        entered = next(o['packet'] for o in packet['observations']
+                       if o['type'] == 'projection-enter' and o['method'] == 'cap-now')
+        exited = next(o['packet'] for o in packet['observations']
+                      if o['type'] == 'projection-exit' and o['method'] == 'cap-now')
+        self.assertIsNone(entered['archive'])
+        self.assertNotIn('status-archive.md', entered['modes'])
+        self.assertEqual(stat.S_IFREG | 0o644, exited['modes']['status-archive.md'])
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        transactions.projection_result(events, 'cap-now', entered, exited, now)
+        wrong_mode = copy.deepcopy(exited)
+        wrong_mode['modes']['status-archive.md'] = stat.S_IFREG | 0o600
+        with self.assertRaises(transactions.EvidenceError):
+            transactions.projection_result(events, 'cap-now', entered, wrong_mode, now)
+        observations = copy.deepcopy(packet['observations'])
+        for observation in observations:
+            if observation['type'] == 'projection-exit' and observation['method'] == 'cap-now':
+                observation['packet']['modes']['status-archive.md'] = stat.S_IFREG | 0o600
+        damaged = copy.deepcopy(packet['after'])
+        damaged['status-archives']['status-archive.md']['mode'] = stat.S_IFREG | 0o600
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            packet['before'], damaged, observations, packet['owner_pid'], 'status', now))
+
+    def test_new_private_projection_index_uses_writer_publication_mode(self):
+        import copy
+        from brain import rehearse_transactions as transactions
+        root, packet = self.new_projection_files()
+        self.assertNotIn('events-index.json', packet['before'])
+        self.assertEqual(stat.S_IFREG | 0o600, (root / '.brain/events-index.json').stat().st_mode)
+        self.assertEqual(stat.S_IFREG | 0o644, (root / 'status-archive.md').stat().st_mode)
+        damaged = copy.deepcopy(packet['after'])
+        damaged['events-index.json']['mode'] = stat.S_IFREG | 0o644
+        now = datetime.datetime.fromisoformat(packet['validation_instant'])
+        self.assertEqual((set(), 'unproven'), transactions.validate(
+            packet['before'], damaged, packet['observations'], packet['owner_pid'], 'status', now))
+
     def test_multiple_interrupted_operations_consume_each_deleted_resource_once(self):
         from brain import events, instance
         source = self.init('interrupted-source')
