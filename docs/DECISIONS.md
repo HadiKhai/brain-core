@@ -3440,6 +3440,30 @@ before the snapshot. Source-signature and receipt-generation checks still run
 before publication, so cached reads cannot authorize a changed source state.
 The scope stores no cross-command watcher output or delivery authority.
 
+## 2026-10-27: Retain routine inbox notices outside open-ask counts
+
+Ordinary inbox reads archive answered episodes and routine notices older than
+24 hours, or notices with a matching delivery receipt from their owning node.
+Ancestor delivery receipts cannot close a child's notices. Only explicit machine
+completion, Docker report, FYI and landing formats qualify; question markers,
+question punctuation, actionable wording and unknown formats remain open.
+Undated Docker reports age from their Git introduction or uncommitted source
+mtime. Other undated lines require an explicit handling receipt.
+
+Archival reuses the native append lock and source/archive generation fences.
+It publishes exact retained source bytes and episode metadata before replacing
+the active inbox, persists episode identities before removal, and commits all
+successfully published inbox/archive pairs together once per batch, including
+when a later node refuses publication. Terminal delivery expiry is scoped to
+the owning reporter; an ancestor read cannot consume a child notice. Weekly sweeps and dashboard
+reads do not archive; dashboard inbox counts include only open asks.
+
+A coordinator can inspect IDs with `brain inbox <node> --json`, then record an
+answer with `brain answer <item-id> "<answer>"` or record completed action with
+`brain inbox-seen <node> <item-id> "<action taken>"`. The latter accepts only that
+node's own current episode, retains the action receipt and archives handled
+lines immediately. Reading an inbox without `--new` does not acknowledge FYIs.
+
 ## 2026-10-27: Batch event coverage and refuse malformed writes before admission
 
 Resource coverage maps opaque scope identities to one discovered node list per

@@ -388,6 +388,9 @@ def _main():
         opt("id", nargs="?"), opt("--json", action="store_true"), opt("--new", action="store_true"),
         opt('--add', help='append a screened inbox item'),
         opt('--weekly', action='store_true', help='read-only sweep of unresolved requests aged at least seven days'))
+    cmd('inbox-seen', _Command('inbox_notices', 'cmd_inbox_seen'),
+        'mark one owning node inbox episode handled, recording the action and retaining its source',
+        'id', 'item_id', 'reason')
     cmd('answer', _m_status.cmd_answer, 'record text for exactly one current inbox episode, retaining source/history',
         'item_id', 'text')
     cmd('index', _Command("freshness", "cmd_index"), 'configured upstream index freshness or opt-in native link generation', 'id',

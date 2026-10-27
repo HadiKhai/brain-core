@@ -1,6 +1,7 @@
 """Inbox visibility and coordinator-only advice; fabricated records and telemetry only."""
 import argparse
 import contextlib
+import datetime
 import io
 import json
 import os
@@ -247,22 +248,28 @@ class InboxNoise(Scenario):
         after = json.loads(self.b(self.root, 'due', 'root', '--json'))
         self.assertEqual([i['id'] for i in after if i['kind'] == 'job-landed'], [landed['id']])
 
-    def test_terminal_machine_notice_expires_after_delivery_without_changing_source(self):
+    def test_terminal_machine_notice_expires_on_delivery_then_archives_on_next_read(self):
         reminders = self.m._owners['lifecycle_read']
         path = self.root / 'inbox.md'
-        notice = '- 2026-10-25T15:41:07.261523+00:00 from machine: command completed: command completed successfully <!-- machine-wait:00ad91d121f4a41cac633f58bb1275f8:completed -->'
+        notice = '- ' + self.inst.now() + ' from machine: command completed: command completed successfully <!-- machine-wait:00ad91d121f4a41cac633f58bb1275f8:completed -->'
         question = '- 2026-10-25 15:42 +00:00 from worker: Which export? <!-- host-question:fixture -->'
         text = notice + '\n' + question + '\n'
         path.write_text(text)
-        first = self.inbox()
+        first = json.loads(self.b(self.root, 'inbox', 'root', '--new', '--json'))
         self.assertTrue(any('command completed' in i['text'] for i in first))
         second = self.inbox()
         self.assertFalse(any('command completed' in i['text'] for i in second))
         self.assertTrue(any('Which export?' in i['text'] for i in second))
-        self.assertEqual(path.read_text(), text)
+        self.assertEqual(path.read_text(), question + '\n')
+        self.assertIn((notice + '\n').encode(), (self.root / 'inbox-archive.md').read_bytes())
         inst = self.m.Instance(self.root)
         key = reminders.inbox_source_id(inst.node('root'), notice)
-        record = reminders.lifecycle_read(inst)['inbox']['root'][key]
+        record = next(json.loads(line[len('<!-- episode '):-len(' -->')])
+                      for line in (self.root / 'inbox-archive.md').read_text().splitlines()
+                      if line.startswith('<!-- episode '))
+        delivered = next(item for item in first if 'command completed' in item['text'])
+        self.assertEqual(record['id'], delivered['id'])
+        self.assertIn(key, reminders.lifecycle_read(inst)['inbox_retired']['root'])
         self.assertTrue(record['expired'])
         self.assertFalse(record['answered'])
         self.assertTrue(record['seen_at'])
@@ -289,7 +296,7 @@ class InboxNoise(Scenario):
         import argparse
         reminders = self.m._owners['lifecycle_read']
         path = self.root / 'inbox.md'
-        notice = '- 2026-10-25 15:40 +00:00 from machine: command completed: command completed successfully'
+        notice = '- ' + self.inst.now() + ' from machine: command completed: command completed successfully'
         path.write_text(notice + '\n')
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
                 mock.patch('sys.stdout.write', side_effect=BrokenPipeError):
@@ -531,3 +538,161 @@ class InboxNoise(Scenario):
         self.assertIn(queued[0].rstrip('\n'), current)
         self.assertIn(queued[0], source.read_text())
         self.assertEqual(list(self.m.hook_question_queue(n).glob('*.json')), [])
+
+
+    def test_autoarchive_aged_routine_notices_keeps_questions_and_exact_bytes(self):
+        notices = self.m._owners['terminal_notice']
+        n = self.inst.node('root')
+        now = self.inst.parse_time('2026-10-27T12:00Z')
+        aged = ['- 2026-10-26T11:59Z from worker: FYI: export is available',
+                '- 2026-10-26T11:59Z from notification: landing: export shipped <!-- communication:receipt -->',
+                '- 2026-10-26T11:59Z from machine: command completed: command completed successfully']
+        keep = ['- 2026-10-20T00:00Z from worker: Which export?',
+                '- 2026-10-20T00:00Z from worker: FYI: Choose an export <!-- host-question:ask -->',
+                '- 2026-10-20T00:00Z from notification: question: choose blue <!-- communication:question -->',
+                '- 2026-10-20T00:00Z from worker: FYI: please review the export',
+                '- 2026-10-26T12:00Z from worker: FYI: exactly 24 hours',
+                '- 2026-10-27T11:59Z from worker: landing: fresh export',
+                '- undated from worker: FYI: unknown age']
+        source = self.root / 'inbox.md'
+        source.write_bytes(('# Inbox\r\n' + '\r\n'.join(aged + keep) + '\r\n').encode())
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        with mock.patch.object(self.inst, 'now_dt', return_value=now):
+            self.assertEqual(notices.autoarchive(self.inst, [n]), 3)
+            self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
+        self.assertEqual(source.read_bytes(), ('# Inbox\r\n' + '\r\n'.join(keep) + '\r\n').encode())
+        archive = (self.root / 'inbox-archive.md').read_bytes()
+        for line in aged:
+            self.assertIn((line + '\r\n').encode(), archive)
+        self.assertEqual(archive.count(b'<!-- episode '), 3)
+        self.assertIn(b'routine-notice-24h-v1', archive)
+        self.assertEqual(self.git('rev-list', '--count', head + '..HEAD', cwd=self.root).strip(), '1')
+
+    def test_owner_seen_archives_fresh_notices_but_ancestor_seen_does_not(self):
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.new('project')
+        line = '- ' + self.inst.now() + ' from worker: FYI: export available'
+        question = '- ' + self.inst.now() + ' from worker: Which export?'
+        source = n['dir'] / 'inbox.md'
+        source.write_text(line + '\n' + question + '\n')
+        with reminders.lifecycle_store(self.inst) as data:
+            records = reminders.reconcile_requests(self.inst, n, [line, question], data)
+        seen = {r['id']: {'reported_at': self.inst.now()} for r in records.values()}
+        saved = self.root / '.brain/inbox-seen.json'
+        saved.write_text(json.dumps({'version': 2, 'reporters': {'root': seen}}))
+        self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
+        saved.write_text(json.dumps({'version': 2, 'reporters': {'project': seen}}))
+        self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
+        self.assertEqual(source.read_text(), question + '\n')
+        archive = (n['dir'] / 'inbox-archive.md').read_text()
+        self.assertIn('owner-inbox-seen-v1', archive)
+        # A recurrence has a different episode and cannot inherit the old seen receipt.
+        self.m.inbox_append(n['dir'], line + '\n')
+        self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
+        self.assertIn(line, source.read_text())
+
+    def test_inbox_seen_records_action_and_refuses_other_node_item(self):
+        n = self.new('project')
+        line = '- ' + self.inst.now() + ' from worker: Apply the export'
+        (n['dir'] / 'inbox.md').write_text(line + '\n')
+        items = [i for i in json.loads(self.b(self.root, 'inbox', n['id'], '--json')) if i['kind'] == 'inbox']
+        key = items[0]['id']
+        self.b(self.root, 'inbox-seen', 'root', key, 'Export applied', ok=False)
+        self.assertIn(line, (n['dir'] / 'inbox.md').read_text())
+        self.b(self.root, 'inbox-seen', n['id'], key, 'Export applied')
+        self.assertEqual((n['dir'] / 'inbox.md').read_text(), '')
+        data = self.m.lifecycle_read(self.inst)
+        self.assertEqual(data['answers'][-1]['answer'], 'Export applied')
+        self.assertEqual(data['answers'][-1]['disposition'], 'acted-on')
+        self.assertIn(line, (n['dir'] / 'inbox-archive.md').read_text())
+
+    def test_dashboard_counts_open_asks_and_weekly_read_preserves_sources(self):
+        source = self.root / 'inbox.md'
+        fyi = '- 2020-01-01T00:00Z from worker: FYI: export available'
+        question = '- 2020-01-01T00:00Z from worker: Which export?'
+        source.write_text(fyi + '\n' + question + '\n')
+        before = source.read_bytes()
+        state = json.loads(self.b(self.root, 'ui', '--json'))
+        self.assertEqual(next(n['inbox'] for n in state['nodes'] if n['id'] == 'root'), [question[2:]])
+        self.assertFalse(any(fyi[2:] in i['text'] for i in state['inbox'] + state['attention']))
+        routine = next(i for i in state['due'] if i['kind'] == 'inbox' and i['text'] == fyi[2:])
+        self.assertTrue(routine['informational'])
+        ask = next(i for i in state['due'] if i['kind'] == 'inbox' and i['text'] == question[2:])
+        self.assertFalse(ask.get('informational'))
+        self.b(self.root, 'inbox', 'root', '--weekly', '--json')
+        self.assertEqual(source.read_bytes(), before)
+        self.assertFalse((self.root / 'inbox-archive.md').exists())
+        self.inbox()
+        self.assertEqual(source.read_text(), question + '\n')
+
+    def test_autoarchive_docker_report_ages_from_source_and_batches_nodes(self):
+        notices = self.m._owners['terminal_notice']
+        root, child = self.inst.node('root'), self.new('project')
+        line = '- Docker leftovers (report only): stopped test resources <!-- docker-leftover:' + 'a' * 24 + ' -->'
+        (self.root / 'inbox.md').write_text(line + '\n')
+        os.utime(self.root / 'inbox.md', (1, 1))
+        fyi = '- 2020-01-01T00:00Z from worker: FYI: export available'
+        (child['dir'] / 'inbox.md').write_text(fyi + '\n')
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.assertEqual(notices.autoarchive(self.inst, [root, child]), 2)
+        self.assertEqual(self.git('rev-list', '--count', head + '..HEAD', cwd=self.root).strip(), '1')
+        self.assertIn(line, (self.root / 'inbox-archive.md').read_text())
+
+    def test_autoarchive_rejects_append_between_plan_and_publication(self):
+        notices = self.m._owners['terminal_notice']
+        n = self.inst.node('root')
+        line = '- 2020-01-01T00:00Z from worker: FYI: export available\n'
+        question = '- 2020-01-01T00:00Z from worker: Which export?\n'
+        source = self.root / 'inbox.md'
+        source.write_text(line)
+        publish = notices.publish_archive
+        def interleave(plan):
+            self.m.inbox_append(n['dir'], question)
+            publish(plan)
+        with mock.patch.object(notices, 'publish_archive', side_effect=interleave):
+            with self.assertRaisesRegex(OSError, 'inbox changed'):
+                notices.autoarchive(self.inst, [n])
+        self.assertEqual(source.read_text(), line + question)
+        self.assertFalse((self.root / 'inbox-archive.md').exists())
+        self.assertEqual(notices.autoarchive(self.inst, [n]), 1)
+        self.assertEqual(source.read_text(), question)
+
+
+    def test_root_delivery_does_not_archive_fresh_child_machine_completion(self):
+        child = self.new('project')
+        source = child['dir'] / 'inbox.md'
+        line = '- ' + self.inst.now() + ' from machine: command completed: command completed successfully\n'
+        source.write_text(line)
+        self.inbox()
+        self.inbox()
+        self.assertEqual(source.read_text(), line)
+        self.assertFalse((child['dir'] / 'inbox-archive.md').exists())
+        # An ancestor's read must leave the notice deliverable to its owner.
+        own = json.loads(self.b(self.root, 'inbox', child['id'], '--new', '--json'))
+        self.assertTrue(any(i['kind'] == 'inbox' and 'command completed' in i['text'] for i in own))
+        self.inbox()
+        self.assertEqual(source.read_text(), '')
+        self.assertIn(line, (child['dir'] / 'inbox-archive.md').read_text())
+
+    def test_autoarchive_commits_completed_nodes_when_later_publication_fails(self):
+        notices = self.m._owners['terminal_notice']
+        root, child = self.inst.node('root'), self.new('project')
+        line = '- 2020-01-01T00:00Z from worker: FYI: export available\n'
+        for n in [root, child]:
+            (n['dir'] / 'inbox.md').write_text(line)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        publish = notices.publish_archive
+        def fail_child(plan):
+            if plan['source'].parent == child['dir']:
+                raise OSError('second node unavailable')
+            publish(plan)
+        with mock.patch.object(notices, 'publish_archive', side_effect=fail_child):
+            with self.assertRaisesRegex(OSError, 'second node unavailable'):
+                notices.autoarchive(self.inst, [root, child])
+        self.assertEqual((self.root / 'inbox.md').read_text(), '')
+        self.assertIn(line, (self.root / 'inbox-archive.md').read_text())
+        self.assertEqual(self.git('rev-list', '--count', head + '..HEAD', cwd=self.root).strip(), '1')
+        self.assertEqual(self.git('status', '--porcelain', '--', 'inbox.md', 'inbox-archive.md', cwd=self.root), '')
+        self.assertEqual(notices.autoarchive(self.inst, [root, child]), 1)
+        self.assertEqual(self.git('status', '--porcelain', '--', 'inbox.md', 'inbox-archive.md', 'nodes/project/inbox.md', 'nodes/project/inbox-archive.md', cwd=self.root), '')
