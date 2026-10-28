@@ -39,7 +39,9 @@ class LiveView(Scenario):
         with (root / "nodes/app/inbox.md").open("a") as f:
             f.write("\n- 2026-01-01 00:00 +00:00 from worker: question: Which shape?\n")
         state = json.loads(self.b(root, "ui", "--json"))
-        for item in (i for i in state["inbox"] if i["node"] == "app" and i["kind"] in ("blocked-overdue", "inbox")):
+        items = [i for i in state["inbox"] if i["node"] == "app" and i["kind"] in ("blocked-overdue", "inbox")]
+        self.assertCountEqual([item["kind"] for item in items], ["blocked-overdue", "inbox"])
+        for item in items:
             due = next(d for d in state["due"] if d["node"] == "app" and d["kind"] == item["kind"])
             self.assertEqual(due.get("id"), item["id"])
 
