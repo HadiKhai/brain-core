@@ -164,6 +164,7 @@ def cached_worktree(inst, home, branch, w, n, cache, live=None):
     key = cache.worktree_keys.get(job)
     old = cache.worktrees.get(job)
     if old is None or old[0] != key:
+        cache.checked[job] = time.time()  # this row's own read time, taken as its reading begins
         cache.worktrees[job] = (key, {**ui_worktree(inst, home, branch, w, n), 'live': True})
     return cache.worktrees[job][1]
 
@@ -475,6 +476,7 @@ class UIStateCache:
     def __init__(self):
         self.nodes, self.due = {}, {}
         self.ready, self.worktrees, self.worktree_keys = {}, {}, {}
+        self.checked = {}  # job -> when its worktree row and readiness were read
         self.local_jobs = {}
         self.usage, self.usage_revision = {}, None
         self.problems, self.problem_key, self.problem_at = None, None, float('-inf')

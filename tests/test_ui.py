@@ -1265,19 +1265,22 @@ ui_json.ui_json_background(root, '[]')
         (root / 'nodes/meadow/tasks/.pending').write_text('')  # any task-folder change
         self.assertEqual(self.view_builds(root)[1], ['meadow', 'root'])  # another node's tasks may block
 
-    def test_stamp_changed_mid_build_never_publishes_that_view(self):
+    def test_stamp_changed_mid_build_delivers_but_never_caches_that_view(self):
         root = self.first_paint_root()
         self.view_builds(root)
         (root / 'nodes/meadow/status.md').write_text('## Now\nFirst edit.\n')
-        edits = []
-        def edit(n):  # the node moves once, after its view began reading
-            if n['id'] == 'meadow' and not edits:
-                edits.append(True)
+        def edit(n):  # the node moves after its stamp was taken, as its view begins reading
+            if n['id'] == 'meadow':
                 (root / 'nodes/meadow/status.md').write_text('## Now\nSecond edit, mid-build.\n')
         record, built, _, _ = self.view_builds(root, during=edit)
-        self.assertEqual(built, ['meadow', 'meadow'])  # the moved attempt is re-read from scratch
+        self.assertEqual(built, ['meadow'])  # one pass: no retry
         meadow = next(n for n in record['state']['nodes'] if n['id'] == 'meadow')
         self.assertEqual(meadow['status'], {'Now': 'Second edit, mid-build.'})
+        views = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('node-views')
+        self.assertEqual(sorted(views['nodes']), ['root'])  # only views whose stamp held are cached
+        self.assertNotIn('meadow', views['due'])
+        self.assertIsNone(views['problems'])
+        self.assertEqual(self.view_builds(root)[1], ['meadow'])  # the moved view is re-read next time
         self.assertEqual(self.view_builds(root)[1], [])
 
     def test_wake_lifecycle_change_refreshes_memoized_due_items(self):
@@ -1289,18 +1292,55 @@ ui_json.ui_json_background(root, '[]')
         self.assertEqual(built, [])  # node views hold; only due items re-read their lifecycle
         self.assertEqual(due, {'meadow', 'root'})
 
-    def test_inputs_that_keep_moving_deliver_and_save_nothing(self):
+    def test_delivery_succeeds_while_another_writer_churns(self):
         root = self.first_paint_root()
         first = self.view_builds(root)[0]
-        def edit(n):
-            if n['id'] == 'meadow':
-                (root / 'nodes/meadow/status.md').write_text('## Now\nEdit %s\n' % time.monotonic_ns())
-        (root / 'nodes/meadow/status.md').write_text('## Now\nMoving.\n')
-        record, built, _, _ = self.view_builds(root, during=edit)
-        self.assertIsNone(record)
-        self.assertEqual(built, ['meadow'] * 3)
+        def edit(n):  # another writer appends on every read, as a busy inbox does
+            with open(root / 'nodes/meadow/inbox.md', 'a') as f:
+                f.write('- note %s\n' % time.monotonic_ns())
+        for _ in range(2):
+            edit(None)  # it already moved since the last build
+            record, built, _, _ = self.view_builds(root, during=edit)
+            self.assertIsNotNone(record)
+            self.assertNotEqual(record['generation'], first['generation'])
+            self.assertIn('meadow', built)
+            self.assertLessEqual(len(built), 2)  # every view read at most once per pass
         saved = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('json-snapshot')
-        self.assertEqual(saved['generation'], first['generation'])  # the previous complete snapshot stays
+        self.assertEqual(saved['generation'], record['generation'])
+
+    def test_worktree_row_read_time_is_its_own(self):
+        ui = self.m._owners['ui_state']
+        package = ui.__package__
+        module = __import__(package + '.ui_json', fromlist=['snapshot'])
+        cache, job, read = ui.UIStateCache(), ('meadow', 'job/a'), []
+        cache.worktree_keys = {job: 'k1'}
+        def slow(*args, **kwargs):  # the row's reading begins late in the build
+            read.append(time.time())
+            return {'branch': 'job/a', 'dirty': 0}
+        build_started = time.time()
+        time.sleep(0.05)
+        with mock.patch.object(ui, 'ui_worktree', side_effect=slow):
+            before = time.time()
+            ui.cached_worktree(None, self.tmp, 'job/a', {'path': str(self.tmp)}, {'id': 'meadow'}, cache, live=True)
+        self.assertGreaterEqual(cache.checked[job], before)
+        self.assertGreater(cache.checked[job], build_started)
+        self.assertLessEqual(cache.checked[job], read[0])
+        with mock.patch.object(ui, 'ui_worktree', side_effect=slow):  # a hit keeps its earlier read time
+            ui.cached_worktree(None, self.tmp, 'job/a', {'path': str(self.tmp)}, {'id': 'meadow'}, cache, live=True)
+        self.assertEqual(len(read), 1)
+        # Persisted rows keep their own read time, and rows past the bound are re-read, not served.
+        root = self.first_paint_root()
+        inst, code = self.m.UIInstance(root), self.m.ui_code_version()
+        model, privacy = self.m.ReadModel(inst, code), module.ui_json_privacy_key(inst, code)
+        name = module.ui_json_job(job)
+        for age, served in ((20, True), (module.UI_JSON_WORKTREE_SECONDS + 5, False)):
+            at = time.time() - age
+            model.write('node-views', {'binding': model.binding(privacy), 'nodes': {},
+                                       'worktrees': {name: {'key': 'k1', 'at': at, 'row': {'branch': 'job/a'}}}})
+            views = ui.UIStateCache()
+            module.ui_json_views(inst, model, privacy, {}, {job: 'k1'}, views)
+            self.assertEqual(views.checked.get(job), at if served else None)
+            self.assertEqual(job in views.worktrees, served)
 
     def first_paint_root(self, name='alice'):
         root = self.tmp / name
