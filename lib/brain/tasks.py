@@ -943,23 +943,25 @@ def ui_tasks(inst, n):
     try:
         requirements = read_records(n, 'requirements')
         rows = []
-        for row in projection(n):
-            req = requirements.get(row.get('requirement'), {})
-            delivery = 'open'
-            if row['status'] in ('merged', 'done'):
-                from . import task_flow as _m_flow
-                try:
-                    _m_flow.completion(n, row)
-                    delivery = 'provider' if row.get('source') == 'linear' else 'verified'
-                except (OSError, ValueError):
-                    delivery = 'unproven'
-            from . import task_flow as _m_flow
-            holds = _m_flow.holds(inst, n, row) if row['status'] == 'ready' else []
-            row = {**row, 'delivery_state': delivery, 'attempt_count': len(row.get('attempts', [])),
-                   'dispatch_holds': holds,
-                   'ready_now': row['status'] == 'ready' and not row['blocked_by'] and not holds}
-            rows.append({**row, 'request': {'quote': req.get('quote', ''), 'at': req.get('at', ''),
-                                          'ref': req.get('ref', ''), 'date_basis': req.get('date_basis', 'source-timestamp')}})
+        from . import task_flow as _m_flow
+        projected = projection(n)
+        merged = [row for row in projected if row['status'] in ('merged', 'done') and row.get('source') != 'linear']
+        with _m_flow.delivery_reads(n, merged):
+            for row in projected:
+                req = requirements.get(row.get('requirement'), {})
+                delivery = 'open'
+                if row['status'] in ('merged', 'done'):
+                    try:
+                        _m_flow.completion(n, row)
+                        delivery = 'provider' if row.get('source') == 'linear' else 'verified'
+                    except (OSError, ValueError):
+                        delivery = 'unproven'
+                holds = _m_flow.holds(inst, n, row) if row['status'] == 'ready' else []
+                row = {**row, 'delivery_state': delivery, 'attempt_count': len(row.get('attempts', [])),
+                       'dispatch_holds': holds,
+                       'ready_now': row['status'] == 'ready' and not row['blocked_by'] and not holds}
+                rows.append({**row, 'request': {'quote': req.get('quote', ''), 'at': req.get('at', ''),
+                                              'ref': req.get('ref', ''), 'date_basis': req.get('date_basis', 'source-timestamp')}})
         terms = _m_guard.never_terms(n)
         def screen(value):
             if isinstance(value, str):

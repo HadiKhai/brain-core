@@ -1,12 +1,16 @@
 """Task visibility, dispatch and scoped evidence. No host calls or implicit unpause."""
+import contextlib
+import contextvars
 import datetime
 import hashlib
+import subprocess
 from pathlib import Path
 
 from . import common as _m_common
 from . import instance as _m_instance
 
 _m_tasks = _m_common.LazyModule(__package__, 'tasks')
+_DELIVERY = contextvars.ContextVar('task_delivery_reads', default=None)
 
 
 def instance_for(n):
@@ -88,6 +92,74 @@ def blockers(n, row, rows=None, seen=None):
     return result
 
 
+class DeliveryReads:
+    """One home's delivery git facts for a display pass, read once instead of per task.
+
+    Same answers as completion's per-task calls: main's ancestry from one rev-list,
+    and every candidate base..head diff from one diff-tree. A pair it could not
+    read in batch keeps the live per-task git diff.
+    """
+
+    def __init__(self, home, rows):
+        self.home = home
+        listed = _m_common.git('rev-list', '--parents', 'refs/heads/main', cwd=home)
+        self.parents = {} if listed.returncode else {
+            commit[0]: commit[1:] for commit in map(str.split, listed.stdout.splitlines()) if commit}
+        self.changed = {}
+        pairs = sorted({(r.get('baseline_sha', ''), r.get('merge_sha', '')) for r in rows
+                        if r.get('completion_kind', 'merge') == 'merge' and r.get('merge_sha') in self.parents
+                        and r.get('baseline_sha') != r.get('merge_sha') and self.ancestor(r.get('baseline_sha'), r['merge_sha'])})
+        # Porcelain-only diff settings would change the paths a batched diff-tree reports.
+        configured = _m_common.git('config', '--get-regexp',
+                                   r'^(diff\.(renames|relative|renamelimit|ignoresubmodules)|submodule\..*\.ignore)$', cwd=home)
+        if not pairs or configured.returncode != 1 or (Path(home) / '.gitmodules').exists():
+            return
+        # "<head> <base>" diffs base..head with porcelain's default renames and path
+        # quoting; --always gives every pair one header line, in order.
+        try:
+            result = subprocess.run(['git', '-C', str(home), 'diff-tree', '--stdin', '--always', '-r', '-M', '--name-only'],
+                                    input=''.join(f'{head} {base}\n' for base, head in pairs), capture_output=True,
+                                    text=True, errors='replace', check=False)
+        except OSError:
+            return
+        if result.returncode:
+            return
+        changed, index = {}, -1
+        for field in result.stdout.splitlines():
+            if index + 1 < len(pairs) and field == pairs[index + 1][1]:
+                index += 1
+                changed[pairs[index]] = set()
+            elif index < 0:
+                return
+            else:
+                changed[pairs[index]].add(field)
+        if index == len(pairs) - 1:
+            self.changed = changed
+
+    def ancestor(self, base, head):
+        """git merge-base --is-ancestor base head, for a head on main."""
+        pending, seen = [head], set()
+        while pending:
+            commit = pending.pop()
+            if commit == base:
+                return True
+            if commit not in seen:
+                seen.add(commit)
+                pending.extend(self.parents.get(commit, ()))
+        return False
+
+
+@contextlib.contextmanager
+def delivery_reads(n, rows):
+    """Display-only scope; acting commands keep completion's live per-task git calls."""
+    home = n.get('home_path')
+    token = _DELIVERY.set(DeliveryReads(home, rows) if home and rows else None)
+    try:
+        yield
+    finally:
+        _DELIVERY.reset(token)
+
+
 def completion(n, row, seen=None, records=None):
     """A code SHA, operational receipt and report artifact prove different work."""
     seen = set(seen or ())
@@ -107,11 +179,17 @@ def completion(n, row, seen=None, records=None):
         if not _m_tasks.SHA.fullmatch(head) or not _m_tasks.SHA.fullmatch(base) or head == base or not paths or not scopes:
             raise ValueError('code completion requires a changed baseline, delivering SHA, code paths and scope')
         home = n.get('home_path')
-        if not home or _m_common.git('merge-base', '--is-ancestor', head, 'refs/heads/main', cwd=home).returncode:
+        reads = _DELIVERY.get()
+        if reads is not None and reads.home != home:
+            reads = None
+        if not home or (head not in reads.parents if reads is not None else
+                        _m_common.git('merge-base', '--is-ancestor', head, 'refs/heads/main', cwd=home).returncode):
             raise ValueError('delivering SHA must be on intended local main')
-        if _m_common.git('merge-base', '--is-ancestor', base, head, cwd=home).returncode:
+        if (not reads.ancestor(base, head) if reads is not None else
+                _m_common.git('merge-base', '--is-ancestor', base, head, cwd=home).returncode):
             raise ValueError('completion baseline is not an ancestor of delivery')
-        changed = set(_m_common.git('diff', '--name-only', base, head, cwd=home).stdout.splitlines())
+        changed = (reads.changed[(base, head)] if reads is not None and (base, head) in reads.changed else
+                   set(_m_common.git('diff', '--name-only', base, head, cwd=home).stdout.splitlines()))
         if any(p not in changed for p in paths):
             raise ValueError('delivery code paths must actually change from the task baseline')
         for scope in scopes:

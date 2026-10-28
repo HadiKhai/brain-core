@@ -1563,6 +1563,61 @@ class Tasks(Scenario):
         snapshot = tasks.ui_tasks(self.inst, self.n)
         self.assertEqual(snapshot['rows'][0]['delivery_state'], 'unproven')
 
+    def test_snapshot_batches_delivery_reads_with_per_task_verdicts(self):
+        from brain import common, task_flow
+        self.repo(self.root, {'engine.py': 'value = 1\n', 'old.py': ''.join(f'line {i}\n' for i in range(40))})
+        def commit(message):
+            self.git('add', '-A', cwd=self.root)
+            self.git('commit', '-qm', message, cwd=self.root)
+            return self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        first = commit('Deliver engine')
+        (self.root / 'old.py').rename(self.root / 'new.py')
+        renamed = commit('Rename module')
+        self.git('checkout', '-qb', 'side', cwd=self.root)
+        (self.root / 'engine.py').write_text('value = 3\n')
+        side = commit('Unlanded side work')
+        self.git('checkout', '-q', 'main', cwd=self.root)
+        rows = {'ENGINE': (base, first, 'engine.py'), 'RENAME-NEW': (first, renamed, 'new.py')}
+        for ident, (old, new, path) in rows.items():
+            self.add(ident, status='done', baseline_sha=old, merge_sha=new, code_path=path, scope=[path],
+                     evidence=['Tests passed'])
+        # Recorded rows that no longer prove delivery: a rename source, an unlanded head, a foreign baseline.
+        for ident, (old, new, path) in {'RENAME-OLD': (first, renamed, 'old.py'), 'OFF-MAIN': (first, side, 'engine.py'),
+                                        'NOT-ANCESTOR': (side, renamed, 'new.py')}.items():
+            row = {**tasks.read_records(self.n)['ENGINE'], 'id': ident, 'baseline_sha': old, 'merge_sha': new,
+                   'code_path': path, 'scope': [path]}
+            tasks.save_record(self.n, row)
+        expected = {'ENGINE': 'verified', 'RENAME-NEW': 'verified', 'RENAME-OLD': 'unproven',
+                    'OFF-MAIN': 'unproven', 'NOT-ANCESTOR': 'unproven'}
+        live = {}
+        for row in tasks.read_records(self.n).values():
+            try:
+                task_flow.completion(self.n, row)
+                live[row['id']] = 'verified'
+            except ValueError:
+                live[row['id']] = 'unproven'
+        self.assertEqual(live, expected)
+        git, queries = common.git, []
+        def recorded(*args, **kwargs):
+            queries.append(args[0])
+            return git(*args, **kwargs)
+        with mock.patch.object(common, 'git', side_effect=recorded):
+            snapshot = tasks.ui_tasks(self.inst, self.n)
+        self.assertEqual({r['id']: r['delivery_state'] for r in snapshot['rows']}, expected)
+        self.assertNotIn('merge-base', queries)
+        self.assertNotIn('diff', queries)
+        # A porcelain-only diff setting keeps each task's live diff, with its own verdict.
+        self.git('config', 'diff.renames', 'false', cwd=self.root)
+        expected['RENAME-OLD'] = 'verified'
+        queries.clear()
+        with mock.patch.object(common, 'git', side_effect=recorded):
+            snapshot = tasks.ui_tasks(self.inst, self.n)
+        self.assertEqual({r['id']: r['delivery_state'] for r in snapshot['rows']}, expected)
+        self.assertIn('diff', queries)
+        self.assertNotIn('merge-base', queries)
+
     def test_shared_task_sync_keeps_public_default_and_existing_mode(self):
         from brain import task_linear
         self.linear_config()
