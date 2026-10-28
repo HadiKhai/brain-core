@@ -72,11 +72,20 @@ cli.main()
             self.assertTrue(marker.exists(), 'command did not compute its view unlocked')
             before = (root / 'nodes/app/status.md').read_bytes()
             if change == 'source':
-                # This real writer must finish while projection remains paused.
+                # Admission returns before apply; wait for this real writer's
+                # native receipt while projection remains paused.
                 writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'),
-                                         'inbox', 'app', '--add', 'concurrent question'],
+                                         'inbox', 'app', '--add', 'concurrent question', '--json'],
                                         cwd=root, env=env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
+                request_id = json.loads(writer.stdout)['request_id']
+                waited = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'),
+                                         'queue', 'wait', request_id, '--timeout', '10'],
+                                        cwd=root, env=env, capture_output=True, text=True, timeout=15)
+                self.assertEqual(waited.returncode, 0, waited.stdout + waited.stderr)
+                receipt = json.loads(waited.stdout)
+                self.assertEqual(receipt['id'], request_id)
+                self.assertEqual(receipt['state'], 'applied')
                 before = (root / 'nodes/app/status.md').read_bytes()
             elif change == 'binding':
                 writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'),
