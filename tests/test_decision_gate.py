@@ -245,13 +245,16 @@ def held(*args):
  return 'token'
 with mock.patch.object(m,'machine_admit',side_effect=held):
  m.machine_wait(inst=inst, node='maple', token='token', clock=time)
+ # The command's own admission made the gate running; later waits keep it busy.
+ m.machine_wait(inst=inst, node='maple', token='token', clock=time)
 """
         first = self.start_wrapper(self.wrapper_driver('admission=wait', command))
         out, err = first.communicate(timeout=10)
         self.assertEqual(first.returncode, 0, err)
-        self.assertEqual(out.strip(), b'waiting-for-admission []')
-        # The command's own admission made the gate running; it is sticky.
-        self.assertEqual(json.loads(self.gate_path('maple').read_text())['phase'], 'running')
+        self.assertEqual(out.strip().splitlines(),
+                         [b'waiting-for-admission []', b"running [('maple', 'in-flight node gate')]"])
+        # The supervisor marks its owned close only after the command has exited.
+        self.assertEqual(json.loads(self.gate_path('maple').read_text())['phase'], 'released')
 
     def test_failed_wrapper_admission_releases_gate_without_running_command(self):
         self.b(self.root, 'new', 'maple', '--title', 'Maple')
