@@ -491,7 +491,9 @@ class Watcher(Scenario):
             include = '\tpath = extra\n'
             for name, edit in (('config.worktree', lambda saved: '[core\n'),
                                ('config', lambda saved: '\ufeff[include]\n' + include + saved),
-                               ('config', lambda saved: saved + '[core] [include]\n' + include)):
+                               ('config', lambda saved: saved + '[core] [include]\n' + include),
+                               ('config', lambda saved: saved + '[core]\n\tWorkTree = ..\n'),
+                               ('config', lambda saved: saved + '[core] worktree=..\n')):
                 signature()
                 calls = asked(home)
                 path = home / '.git' / name
@@ -504,6 +506,23 @@ class Watcher(Scenario):
                     path.unlink()
                 else:
                     path.write_text(saved)
+            # Configuration Git takes from the environment always asks Git.
+            signature()
+            calls = asked(home)
+            with mock.patch.dict(os.environ, {'GIT_CONFIG_COUNT': '4', 'GIT_CONFIG_KEY_3': 'core.worktree',
+                                              'GIT_CONFIG_VALUE_3': str(home)}):
+                signature()
+                signature()
+            self.assertEqual(asked(home), calls + 2)
+            # Branches named like worktrees and extensions.worktreeConfig alone stay memoizable.
+            config = home / '.git/config'
+            saved = config.read_text()
+            config.write_text(saved + '[extensions]\n\tworktreeConfig = true\n[branch "worktree-a"]\n\tremote = .\n')
+            signature()
+            calls = asked(home)
+            signature()
+            self.assertEqual(asked(home), calls)
+            config.write_text(saved)
         # Inputs inside the settle window may postdate Git's read: never memoized.
         fresh = {}
         with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', 10 ** 30):

@@ -413,6 +413,11 @@ def git_location_inputs(home, values=None, settled=None):
     marker = Path(home) / '.git'
     if any(name in os.environ for name in GIT_LOCATION_ENV):
         return None
+    # Configuration from the environment (`git -c`, GIT_CONFIG_KEY_n) can name a worktree or include.
+    supplied = ' '.join(value for name, value in os.environ.items()
+                        if name == 'GIT_CONFIG_PARAMETERS' or name.startswith('GIT_CONFIG_KEY_')).lower()
+    if 'worktree' in supplied or 'include' in supplied:
+        return None
     try:
         own = os.path.realpath(marker)
         if values is not None and [os.path.realpath(Path(home) / value.strip()) for value in values] != [own, own]:
@@ -436,8 +441,10 @@ def git_location_inputs(home, values=None, settled=None):
         # outside these stamps; their repositories always ask Git.
         if os.path.lexists(marker / 'commondir') or os.path.lexists(marker / 'config.worktree'):
             return None
-        # Any spelling of an include section names the word; false positives only ask Git.
-        if b'include' in (marker / 'config').read_bytes().lower():
+        # Any spelling of an include section names the word, and core.worktree
+        # makes discovery enter another directory; false positives only ask Git.
+        config = (marker / 'config').read_bytes().lower()
+        if b'include' in config or re.search(rb'(?:^|[^a-z0-9.-])worktree\s*(?:=|$)', config, re.M):
             return None
     except OSError:
         return None
