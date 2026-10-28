@@ -4269,3 +4269,6 @@ reconciliation binds the payload hash and first index byte offset, deduplicating
 same-key transport retries. The optional workload driver defaults to a plan and
 uses only marked inbox additions and metadata patches on a unique proof task;
 legitimate handbacks and native readiness remain with their actual owners.
+Execution requires `--root` to be an instance itself, because Brain resolves
+`BRAIN_ROOT` upward. Conflicting call IDs never join on a shared request ID, and
+any positive lock count fails the bypass gate even when coverage is incomplete.

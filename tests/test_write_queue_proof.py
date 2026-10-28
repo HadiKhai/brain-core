@@ -88,6 +88,30 @@ class WriteQueueProof(unittest.TestCase):
         rows[0]['data']['lock_attempts'] = 1
         self.assertEqual(self.analyze(rows)['families']['task set']['lock_evidence'], 'FAIL')
 
+    def test_conflicting_call_ids_are_separate_invocations(self):
+        timing = self.event(request_id=self.ident, call_id='a', lock_attempts=0, lock_acquisitions=0)
+        call = self.event(kind='proof_call', request_id=self.ident, call_id='b', exit_code=0)
+        self.assertEqual(self.analyze([timing, call])['families']['task set']['lock_evidence'], 'UNKNOWN')
+        call['data']['call_id'] = 'a'
+        self.assertEqual(self.analyze([timing, call])['families']['task set']['lock_evidence'], 'PASS')
+        for row in (timing, call):
+            row['data'].update(success=False, lock_wait_failure=True)
+        call['data'].update(call_id='b', exit_code=1)
+        self.assertEqual(self.analyze([timing, call])['global_lock_failures']['confirmed'], 2)
+
+    def test_positive_lock_count_fails_despite_incomplete_coverage(self):
+        rows = [self.event(request_id=self.ident, lock_attempts=1),
+                self.event(kind='proof_call', request_id='b' * 32, exit_code=0)]
+        self.assertEqual(self.analyze(rows)['families']['task set']['lock_evidence'], 'FAIL')
+
+    def test_native_queue_phase_unix_timestamps_are_read(self):
+        inside = self.event('queue')
+        inside['ts'] = self.start.timestamp() + 60
+        outside = self.event('queue')
+        outside['ts'] = self.end.timestamp()
+        report = self.analyze([inside, outside])
+        self.assertEqual((report['errors'], report['observed_commands']['queue']['count']), ([], 1))
+
     def test_zero_wait_is_not_zero_acquisitions(self):
         report = self.analyze([self.event(lock_attempts=1, lock_acquisitions=1, lock_wait_s=0)])
         self.assertEqual(report['families']['task set']['lock_evidence'], 'FAIL')
@@ -281,6 +305,8 @@ class WriteQueueDriver(unittest.TestCase):
             node = root / 'nodes/brain-core/node.md'
             node.parent.mkdir(parents=True)
             node.write_text('fixture')
+            (root / 'node.md').write_text('fixture')
+            (root / 'instance.md').write_text('fixture')
             launcher = root / 'brain'
             launcher.write_text('#!' + sys.executable + '\nimport sys\n'
                                 'a=sys.argv\nprint(a[a.index("--request-id")+1] if "--request-id" in a else "ok")\n')
@@ -298,6 +324,21 @@ class WriteQueueDriver(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 driver.main(args)
             self.assertEqual(node.read_text(), 'fixture')
+
+    def test_execute_refuses_a_root_that_would_resolve_to_an_enclosing_instance(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / 'nested'
+            (root / 'nodes/brain-core').mkdir(parents=True)
+            (root / 'nodes/brain-core/node.md').write_text('fixture')
+            launcher = Path(folder) / 'brain'
+            launcher.write_text('#!/bin/sh\nexit 0\n')
+            launcher.chmod(0o700)
+            output = Path(folder) / 'calls.jsonl'
+            with mock.patch.object(driver.subprocess, 'run') as run, mock.patch('sys.stderr'), \
+                    self.assertRaises(SystemExit):
+                driver.main(['--root', str(root), '--brain', str(launcher), '--output', str(output), '--execute'])
+            run.assert_not_called()
+            self.assertFalse(output.exists())
 
     def test_plan_only_touches_marked_inbox_and_unique_dedicated_task(self):
         task, operations = driver.plan(6, 'abc')

@@ -78,8 +78,10 @@ def main(argv=None):
                               operations=[args for args, _ in operations],
                               refresh=['status', 'brain-core', '--refresh']), indent=2))
         return 0
-    if not a.output or not brain.is_file() or not (root / 'nodes/brain-core/node.md').is_file():
-        p.error('--execute requires --output, a launcher and a brain-core node in --root')
+    # Brain resolves BRAIN_ROOT upward, so --root must itself be an instance.
+    if not a.output or not brain.is_file() or not all(
+            (root / name).is_file() for name in ('instance.md', 'node.md', 'nodes/brain-core/node.md')):
+        p.error('--execute requires --output, a launcher and an instance root with a brain-core node')
     lock = threading.Lock()
     # Exclusive creation prevents overwriting earlier evidence or any live node file.
     with a.output.open('x', encoding='utf-8') as stream:

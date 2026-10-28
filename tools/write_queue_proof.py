@@ -22,6 +22,13 @@ def timestamp(value):
     return result
 
 
+def event_time(value):
+    # Native queue_phase rows record Unix seconds; other timing rows record ISO text.
+    if type(value) in (int, float) and math.isfinite(value):
+        return datetime.fromtimestamp(value, timezone.utc)
+    return timestamp(value)
+
+
 def number(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
@@ -136,7 +143,8 @@ def observation_groups(internal, calls):
             cid, rid = row.get('call_id'), row.get('request_id')
             same_call = (cid and cid == timing.get('call_id')
                          and internal_calls[cid] == caller_calls[cid] == 1)
-            same_request = (rid and rid == timing.get('request_id')
+            other = timing.get('call_id')
+            same_request = (rid and rid == timing.get('request_id') and not (cid and other and cid != other)
                             and internal_ids[rid] == caller_ids[rid] == 1
                             and family(row) is not None and family(row) == family(timing))
             if same_call or same_request:
@@ -148,6 +156,22 @@ def observation_groups(internal, calls):
             groups[match].append(row)
             used.add(match)
     return groups
+
+
+def each_call_timed(calls, timing):
+    """Give every caller its own timing for the same request; call IDs must not conflict."""
+    free = list(timing)
+    rid = SCHEMA['request_id']
+    def take(row, fits):
+        found = next((t for t in free if row.get(rid) and t.get(rid) == row.get(rid) and fits(t)), None)
+        if found is not None:
+            free.remove(found)
+        return found is not None
+    # Exact call IDs first, then callers that need an unlabelled timing, then unlabelled callers.
+    exact = [r for r in calls if r.get('call_id') and take(r, lambda t, c=r['call_id']: t.get('call_id') == c)]
+    labelled = [r for r in calls if r.get('call_id') and r not in exact]
+    return (all(take(r, lambda t: not t.get('call_id')) for r in labelled)
+            and all(take(r, lambda t: True) for r in calls if not r.get('call_id')))
 
 
 def global_failures(internal, calls):
@@ -181,7 +205,7 @@ def analyze(paths, queue, start, end, now=None):
                     row = json.loads(line)
                     if not isinstance(row, dict):
                         raise ValueError('expected event object')
-                    at = timestamp(row['ts'])
+                    at = event_time(row['ts'])
                     if not start <= at < end:
                         continue
                     data = row.get('data')
@@ -220,16 +244,13 @@ def analyze(paths, queue, start, end, now=None):
         timing = [r for r in internal if family(r) == name]
         attempts = [r.get(SCHEMA['attempts']) for r in timing]
         acquisitions = [r.get(SCHEMA['acquisitions']) for r in timing]
-        whole_ids = Counter(r.get(SCHEMA['request_id']) for r in whole)
-        timing_ids = Counter(r.get(SCHEMA['request_id']) for r in timing)
         covered = (bool(timing) and all(type(x) is int and x >= 0 for x in attempts + acquisitions)
-                   and (not whole or (None not in whole_ids
-                                      and all(count <= timing_ids[ident] for ident, count in whole_ids.items()))))
+                   and each_call_timed(whole, timing))
+        used = any(type(x) is int and x > 0 for x in attempts + acquisitions)
         stats = summary(whole)
         stats.update(internal=summary(timing), lock_attempts=sum(attempts) if covered else None,
                      lock_acquisitions=sum(acquisitions) if covered else None,
-                     lock_evidence='UNKNOWN' if not covered else
-                                   ('PASS' if sum(attempts + acquisitions) == 0 else 'FAIL'),
+                     lock_evidence='FAIL' if used else ('PASS' if covered else 'UNKNOWN'),
                      caller_latency='FAIL' if stats['at_least_1s'] or stats['nonzero_exits'] else
                                     ('PASS' if whole and stats['count'] == stats['timed']
                                      and all(r.get('duration_scope') == 'launch_to_exit'

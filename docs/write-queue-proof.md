@@ -1,7 +1,8 @@
 # Phase-one write queue proof
 
 The analyzer reads files directly. It imports no core modules, takes no instance
-lock and runs no instance commands. All timestamps require a UTC offset; windows
+lock and runs no instance commands. Text timestamps require a UTC offset; numeric
+event timestamps (native queue-phase rows) are Unix seconds. Windows
 include their start and exclude their end. Command samples use completion time.
 Percentiles use the nearest rank. A single caller at or above one second fails
 the caller latency bar, even when p99 is below one second.
@@ -24,7 +25,9 @@ python3 -B tools/write_queue_driver.py --root "$ROOT" --brain "$LAUNCHER" -n 200
 ```
 
 The default prints a plan without writing anything. Add `--execute` only with
-authority to write the target instance. It creates a uniquely named dedicated
+authority to write the target instance. `--root` must itself contain `instance.md`
+and `node.md`: Brain resolves `BRAIN_ROOT` upward, so a nested copy would write to
+its enclosing instance. It creates a uniquely named dedicated
 proof task, then issues exactly N alternating marked inbox additions and metadata
 task patches to the `brain-core` node, followed by one `status --refresh`. Setup
 is a separately timed task-add call. No handbacks, readiness, lifecycle changes,
@@ -71,12 +74,13 @@ Subcommands with explicit action/refresh/enqueue metadata enter the per-family
 internal series. No historical command-word aggregate is relabeled as a producer.
 
 Producer lock bypass requires explicit nonnegative integer `lock_attempts` and
-`lock_acquisitions`, with at least as many internal observations per request ID
-as externally measured invocations. One timing cannot cover multiple same-ID retries.
+`lock_acquisitions`, with a distinct internal observation for each externally
+measured invocation: same request ID, and no conflicting call ID. One timing cannot
+cover multiple same-ID retries. Any positive count fails, even with partial coverage.
 Zero rounded lock wait never proves bypass. `lock_wait_failure` classifies global
 failure causes across internal and caller outcomes; an unclassified failed call
 keeps the global zero-failure gate UNKNOWN. Observations with unique matching
-call IDs (or unique request IDs and matching family) count once; ambiguous retry
+call IDs (or unique request IDs, matching family and no conflicting call IDs) count once; ambiguous retry
 matches remain separate. The adapter allows these field names to change in one
 place when the producer instrumentation is committed. Failed calls with positive
 wait are reported as suspected, never invented as confirmed lock failures.
