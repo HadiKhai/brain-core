@@ -64,12 +64,12 @@ def generation(paths, shallow=False):
 
 class GitInputs:
     """Fence query dependencies without rerunning hundreds of immutable proofs."""
-    def __init__(self):
+    def __init__(self, observations=None):
         session = _INVOCATION.get()
         self.layouts = session['layouts'] if session is not None else {}
         self.queries = {}
         self.pending = {}
-        self.results = {}
+        self.results = {} if observations is None else observations
         self.invalid = set()
         self.memo = session['git'] if session is not None else {}
 
@@ -139,6 +139,10 @@ class GitInputs:
         # dependency guesses. Valid ref names include Unicode, '+' and '@'.
         replay = command not in ('remote', 'symbolic-ref', 'rev-parse', 'merge-base', 'rev-list', 'log', 'for-each-ref', 'diff')
         revisions = query[1:query.index('--')] if '--' in query else query[1:]
+        if command == 'rev-parse' and revisions == ['--path-format=absolute', '--git-path', 'index']:
+            # This query returns a layout path, never index contents. Its
+            # bindings/config/environment are already in the dependency fence.
+            revisions = []
         option_value = False
         revision_count = 0
         for arg in revisions:
@@ -208,8 +212,14 @@ class GitInputs:
             if previous is not None:
                 # A build observes one answer per query. The complete dependency
                 # set is still checked under ownership before it can publish.
+                result, entry = previous
+                if key in self.queries and self.queries[key][-1] != entry[-1]:
+                    self.invalid = {key}
+                    invalidate_views(self)
+                    common.die('status refresh inputs changed during computation; retry from fresh state')
+                self.queries[key] = entry
                 self.pending[key] = None
-                return previous
+                return result
             paths, replay = self.paths(args, key[1], env)
             before = generation(paths)
             # Only dependencies covered by the native revision grammar are
@@ -241,9 +251,13 @@ class GitInputs:
             invalidate_views(self)
             common.die('status refresh inputs changed during computation; retry from fresh state')
         self.queries[key] = (env, paths, replay, after, value)
-        if memo_key is not None and before == after:
-            self.memo[memo_key] = result
-            self.results[(key, context)] = result
+        if before == after:
+            # Share even replay-only observations within this fenced build.
+            # Each consuming view retains the original query evidence, and
+            # mutable worktree queries still replay before publication.
+            self.results[(key, context)] = (result, self.queries[key])
+            if memo_key is not None:
+                self.memo[memo_key] = result
 
     def absorb(self, other):
         for key, entry in other.queries.items():
@@ -485,7 +499,7 @@ def view(inst, node, build, variant=None, *, backlog_projection=False, reuse=Tru
         parent.absorb(cached[1])
         fence()
         return copy.deepcopy(cached[2])
-    inputs = GitInputs()
+    inputs = GitInputs(parent.results)
     token = common._GIT_OBSERVER.set(inputs.observe)
     try:
         result = build()
@@ -578,6 +592,8 @@ def fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
         from . import events
         owner = next((op for op in reversed(events._CURRENT) if isinstance(op, events.Command)
                       and op.inst.root == inst.root), None)
+        pending_before = (set(events.replay(inst)[2])
+                          if owner is not None and owner.command == 'status' else None)
         window = events.resources(inst) if owner is not None else None
         def attribute_window():
             # Runs after released() retook the lock: whatever moved is foreign.
@@ -644,6 +660,12 @@ def fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
                 common._GIT_READS.reset(reads)
                 _ACTIVE.reset(token)
         with timings.phase('refresh_revalidate'):
+            # A semantic backlog fence may allow harmless note appends, but
+            # cannot transfer a newly opened writer's pending bytes to us.
+            # Keep this operation fence separate from view identities so
+            # completed writers do not invalidate every unchanged display.
+            if pending_before is not None and set(events.replay(inst)[2]) - pending_before:
+                common.die('state changed during the unlocked step; retry from fresh state')
             if incremental:
                 # Each view owns its own source window. A write to a later node
                 # need not invalidate earlier, unchanged views. Discovery and

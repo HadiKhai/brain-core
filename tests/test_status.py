@@ -649,6 +649,69 @@ class AutonomyFacts(AutonomyProject):
         quiet = events.snapshot_view(m.Instance(root), m.Instance(root).node('app'))
         self.assertEqual(events.normalize(result['app']), events.normalize(quiet))
 
+    def test_refresh_snapshot_reuses_unchanged_work_despite_backlog_appends(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_backlog_notes')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        backlog = root / 'backlog.md'
+        backlog.write_text('# Backlog\n\n## Build order\n\n- [ ] Ship the fixture\n')
+        builds, attempts = [], []
+        original = events._snapshot_view
+        def counted(current, node, known=None):
+            builds.append(node['id'])
+            return original(current, node, known)
+        def prepare(current, node):
+            result = events.snapshot_view(current, node)
+            with backlog.open('a') as stream:
+                stream.write('\n- An appended note, without another runnable task.\n')
+            return result
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(events, '_snapshot_view', side_effect=counted), refresh.invocation():
+            for _ in range(3):
+                attempts.append(refresh.compute(inst, inst.node('root'), prepare, incremental=True))
+        self.assertEqual(builds, ['root'], 'unchanged runnable work must reuse the complete view')
+        self.assertEqual(attempts, [attempts[0]] * 3)
+        quiet = events.snapshot_view(m.Instance(root), m.Instance(root).node('root'))
+        self.assertEqual(events.normalize(attempts[-1]), events.normalize(quiet))
+
+    def test_refresh_shared_worktree_read_keeps_each_views_publication_fence(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_shared_worktree')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        query = ('status', '--porcelain', '--untracked-files=all')
+        index_query = ('rev-parse', '--path-format=absolute', '--git-path', 'index')
+        reads, index_reads, builds = [], [], []
+        native = refresh.common.subprocess.run
+        def counted(argv, *args, **kwargs):
+            if tuple(argv[-len(query):]) == query:
+                reads.append(True)
+            if tuple(argv[-len(index_query):]) == index_query:
+                index_reads.append(True)
+            return native(argv, *args, **kwargs)
+        def read():
+            builds.append(True)
+            return refresh.common.git(*query, cwd=root).stdout
+        def prepare(current, node):
+            return [refresh.view(current, node, read, variant) for variant in ('first', 'second')]
+        published = (root / 'status.md').read_bytes()
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(refresh.common.subprocess, 'run', side_effect=counted), refresh.invocation():
+            result = refresh.compute(inst, inst.node('root'), prepare, incremental=True)
+            self.assertEqual(result[0], result[1])
+            self.assertEqual(len(reads), 2, 'one shared read and one final worktree replay')
+            self.assertEqual(len(index_reads), 2, 'index-path discovery needs no separate replay')
+            def overtaken(current, node):
+                value = refresh.view(current, node, read, 'second')
+                self.assertEqual(value, result[1])
+                (root / 'new-untracked-source.txt').write_text('a meaningful worktree change\n')
+                return value
+            with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+                refresh.compute(inst, inst.node('root'), overtaken, incremental=True)
+        self.assertEqual(len(builds), 2, 'the second attempt reused its own fenced view')
+        self.assertEqual((root / 'status.md').read_bytes(), published)
+
     def test_refresh_retry_reuses_git_queries_but_observes_a_new_oid(self):
         root = self.init('alice')
         m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_git')
@@ -766,7 +829,9 @@ while not stop.exists():
             if not marker.exists():
                 self.assertIsNone(instance._LOCK['fh'])
                 marker.write_text('go')
-                time.sleep(.45)
+            # Every full view spans multiple writer appends, including retries.
+            # Success must follow the unchanged work projection, not a quiet gap.
+            time.sleep(.45)
             return result
         start = time.monotonic()
         try:
@@ -1315,13 +1380,13 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         root = self.init('alice')
         self.b(root, 'status', 'root', '--refresh')
         m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_locked')
-        backlog = root / 'backlog.md'
+        inbox = root / 'inbox.md'
         facts, locked = status.status_facts, []
         published = self.stable_facts(root)
         def contended(*args, **kwargs):
             result = facts(*args, **kwargs)
             if instance._LOCK['fh'] is None:
-                with backlog.open('a') as stream:  # a writer lands in every unlocked compute
+                with inbox.open('a') as stream:  # displayed work changes in every unlocked compute
                     stream.write('\n- concurrent item\n')
             else:
                 locked.append(instance.holding())

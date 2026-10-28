@@ -901,7 +901,8 @@ def snapshot_view(inst, n, known_merges=None):
     from . import status_refresh
     if not status_refresh.active() and (status_refresh.requested(inst) or instance._LOCK['fh'] is not None):
         return status_refresh.compute(inst, n, lambda current, node: snapshot_view(current, node, known_merges))
-    return status_refresh.view(inst, n, lambda: _snapshot_view(inst, n, known_merges), known_merges)
+    return status_refresh.view(inst, n, lambda: _snapshot_view(inst, n, known_merges), known_merges,
+                               backlog_projection=True)
 
 
 def _snapshot_view(inst, n, known_merges=None):
