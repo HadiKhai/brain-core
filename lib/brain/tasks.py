@@ -596,7 +596,9 @@ def prepare_start(n, task_id=None, branch=''):
         raise ValueError('task dispatch is held; explicit resume required')
     if row.get('unresolved_dependencies') or _m_flow.blockers(n, row, rows):
         raise ValueError('task dependencies are unfinished')
-    validate(n, rows)
+    # Starting this task must not re-prove unrelated completed deliveries.
+    # Dependency evidence above and the full graph check in validate still apply.
+    validate(n, rows, selected=task_id)
 
 
 def job_started(inst, n, row):

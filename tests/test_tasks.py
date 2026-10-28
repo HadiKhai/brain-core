@@ -901,6 +901,69 @@ class Tasks(Scenario):
         jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
         self.assertEqual(len(jobs.read_jobs(self.n)), 1)
 
+    def test_job_start_checks_only_bound_task_completion_and_keeps_ledger_identity(self):
+        from brain import jobs, task_flow
+        self.ops_done(self.n)
+        self.add(status='ready')
+        with mock.patch.object(task_flow, 'completion', wraps=task_flow.completion) as completion:
+            tasks.prepare_start(self.n, 'APP-1', 'job/example')
+            jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
+        completion.assert_not_called()
+        ledger = jobs.read_jobs(self.n)
+        task = tasks.read_records(self.n)['APP-1']
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger[0]['Task'], task['id'])
+        self.assertEqual(task['job'], jobs.job_key(ledger[0]))
+        self.assertEqual(task['branch'], ledger[0]['Job'])
+        self.assertEqual(task['status'], 'in-progress')
+        self.assertEqual(task['attempts'][0]['job'], jobs.job_key(ledger[0]))
+        self.assertEqual(task['attempts'][0]['state'], 'open')
+
+    def test_start_still_proves_local_and_cross_node_dependency_completions(self):
+        from brain import jobs, task_flow
+        peer = self.peer_node('producer')
+        self.ops_done(self.n)
+        self.ops_done(peer)
+        self.add(status='ready', depends_on=['OPS-1', 'producer:OPS-1'])
+        with mock.patch.object(task_flow, 'completion', wraps=task_flow.completion) as completion:
+            tasks.prepare_start(self.n, 'APP-1', 'job/example')
+        self.assertEqual({call.args[0]['id'] for call in completion.call_args_list}, {'root', 'producer'})
+        before = tasks.record_path(self.n, 'APP-1').read_bytes()
+        for node in (self.n, peer):
+            with self.subTest(node=node['id']):
+                row = tasks.read_records(node)['OPS-1']
+                receipt = row.pop('completion_receipt')
+                tasks.save_record(node, row)
+                with self.assertRaises(SystemExit):
+                    jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
+                self.assertEqual(tasks.record_path(self.n, 'APP-1').read_bytes(), before)
+                self.assertFalse(jobs.read_jobs(self.n))
+                tasks.save_record(node, {**row, 'completion_receipt': receipt})
+
+    def test_start_still_validates_selected_record_and_entire_dependency_graph(self):
+        self.add(status='ready')
+        row = tasks.read_records(self.n)['APP-1']
+        tasks.save_record(self.n, {**row, 'title': ''})
+        with self.assertRaisesRegex(ValueError, 'title required'):
+            tasks.prepare_start(self.n, 'APP-1', 'job/example')
+        tasks.save_record(self.n, row)
+        self.add('CYCLE-A')
+        self.add('CYCLE-B', depends_on=['CYCLE-A'])
+        other = tasks.read_records(self.n)['CYCLE-A']
+        tasks.save_record(self.n, {**other, 'depends_on': ['CYCLE-B']})
+        with self.assertRaisesRegex(ValueError, 'cycle'):
+            tasks.prepare_start(self.n, 'APP-1', 'job/example')
+
+    def test_start_refuses_missing_or_nonready_bound_task_before_ledger_write(self):
+        from brain import jobs
+        self.add()
+        before = tasks.record_path(self.n, 'APP-1').read_bytes()
+        for ident in ('MISSING', 'APP-1'):
+            with self.subTest(task=ident), self.assertRaises(SystemExit):
+                jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id=ident)
+            self.assertFalse(jobs.read_jobs(self.n))
+            self.assertEqual(tasks.record_path(self.n, 'APP-1').read_bytes(), before)
+
     def test_failure_identity_deduplication_parks_after_two_rounds(self):
         self.add(status='ready')
         tasks.event(self.inst, self.n, 'APP-1', 'round-1', 'Parser failed')
