@@ -87,6 +87,19 @@ def service_control(inst, action, yes=False):
             if action == 'install':
                 run(['systemctl', '--user', 'enable', '--now', path.name])
                 run(['systemctl', '--user', 'restart', path.name])
+    if action == 'uninstall':
+        # The invoking CLI is outside the stopped unit and its child teardown.
+        wake_fallback(inst)
+
+
+def wake_fallback(inst):
+    """After releasing the service lease, cover producers that saw it held."""
+    try:
+        _m_queue.intent_read(inst, 'blocked')
+    except FileNotFoundError:
+        if _m_queue.pending_intents(inst):
+            _m_queue.start_intent_drainer(inst)
+    # Retained application failures require explicit recovery, not an exit retry.
 
 
 def lease_identity(inst):
@@ -186,6 +199,7 @@ def run_service(inst, stop=None, interval=0.25):
         print('write queue service: another applier owns the lease; standing down')
         return False
     handlers = {}
+    clean_stop = False
     try:
         info = os.fstat(fd)
         stamp = _m_machine.process_stamp(os.getpid())
@@ -218,8 +232,11 @@ def run_service(inst, stop=None, interval=0.25):
             raise
         else:
             _m_queue.intent_store(inst, 'service.json', {**owner, 'state': 'stopped'})
+            clean_stop = True
         return True
     finally:
         for sig, handler in handlers.items():
             signal.signal(sig, handler)
         os.close(fd)
+        if clean_stop:
+            wake_fallback(inst)

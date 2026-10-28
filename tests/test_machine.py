@@ -2336,6 +2336,56 @@ class WriteQueueService(Scenario):
         self.assertEqual(self.queue.intent_receipt(self.inst, request['id'])['state'], 'applied')
         self.assertFalse(self.service.queue_health(self.inst)['failed'])
 
+    def test_graceful_stop_wakes_a_producer_that_saw_the_last_idle_lease(self):
+        stop = threading.Event()
+        start = mock.Mock()
+        queue_process = argparse.Namespace(Popen=start, DEVNULL=subprocess.DEVNULL)
+        request = []
+        def last_idle(interval):
+            request.append(self.queue.submit_intent(self.inst, dict(
+                kind='inbox', node='root', text='Arrived at service shutdown', at=self.inst.now())))
+            start.assert_not_called()  # the producer saw the service's held lease
+            stop.set()
+        with mock.patch.object(stop, 'wait', side_effect=last_idle), \
+                mock.patch.object(self.queue, 'subprocess', queue_process):
+            self.assertTrue(self.service.run_service(self.inst, stop))
+        start.assert_called_once()
+        self.assertIn('--lease-fd', start.call_args.args[0])
+        self.assertIsNone(self.queue.intent_receipt(self.inst, request[0]['id']))
+        fd = self.queue.intent_lease(self.inst)
+        self.assertIsNotNone(fd)
+        os.close(fd)
+
+    def test_uninstall_wakes_pending_work_after_manager_stop_outside_the_unit(self):
+        self.submit('Pending across service uninstall')
+        for platform in ('darwin', 'linux'):
+            stopped = []
+            start = mock.Mock()
+            queue_process = argparse.Namespace(Popen=start, DEVNULL=subprocess.DEVNULL)
+            with self.subTest(platform=platform), mock.patch.object(sys, 'platform', platform), \
+                    mock.patch.dict(os.environ, {'BRAIN_MACHINE_TESTING': '0'}), \
+                    mock.patch.object(self.queue, 'subprocess', queue_process), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                _, path, payload = self.service.service_spec(self.inst)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(payload)
+                def manager(args, **kwargs):
+                    if 'bootout' in args or '--now' in args:
+                        stopped.append(True)
+                    return subprocess.CompletedProcess(args, 0, '', '')
+                def spawn(args, **kwargs):
+                    self.assertEqual(stopped, [True])
+                    self.assertFalse(path.exists())
+                    self.assertIn('--lease-fd', args)
+                start.side_effect = spawn
+                with mock.patch.object(subprocess, 'run', side_effect=manager):
+                    self.service.service_control(self.inst, 'uninstall', True)
+                start.assert_called_once()
+        self.queue.intent_store(self.inst, 'blocked', dict(state='blocked', reason='retained failure'))
+        with mock.patch.object(self.queue, 'start_intent_drainer') as wake:
+            self.service.wake_fallback(self.inst)
+        wake.assert_not_called()
+
     def test_health_backlog_and_corruption_are_visible_in_both_views(self):
         request = self.submit('Backlog health')
         os.utime(self.queue.intent_path(self.inst, request['id'] + '.request'), (100, 100))

@@ -3799,3 +3799,9 @@ request payloads or acquiring the instance writer lock for telemetry.
 The long-lived applier imports the complete core before publishing its running
 state. An in-place core replacement cannot mix old queue code with later imports
 of new application modules; the next service restart loads the replacement code.
+
+Graceful shutdown releases the persistent lease before inspecting pending work
+and waking the fallback, covering producers that saw the final idle lease held.
+Uninstall repeats that handoff from the invoking CLI after supervisor teardown,
+outside the stopped unit's process group/cgroup. Retained blocked application
+evidence suppresses automatic retry on either handoff.
