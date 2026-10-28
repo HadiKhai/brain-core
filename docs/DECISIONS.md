@@ -4339,3 +4339,14 @@ Task aging and parked rows remain in due output and are excluded from watcher
 entries and pending wake delivery. Ready, unblocked, stalled and provider-pending
 tasks are recognized actionable kinds. Existing semantic identities and open
 receipts continue to determine when a real need changed or reopened.
+## 2026-10-28: Reconcile only overdue questions during due delivery
+
+The due command delivers overdue-question wakes, so its watcher scan can omit
+other kinds after an ordinary scan records which opaque receipt keys belong to
+overdue questions. Narrow scans reconcile those questions' pending requests and
+acknowledgements while retaining every other receipt and pending item. Only full
+watcher scans reconcile the other kinds. Legacy receipts take one full scan before
+using the narrow path; uncertain ownership never authorizes closing receipts.
+Both paths retain the source-generation and receipt-generation publication
+fences, and share episode identities across resolution and recurrence. Selected
+nodes still receive live worktree, readiness, policy and status checks.

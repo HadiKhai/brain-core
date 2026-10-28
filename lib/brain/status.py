@@ -1057,7 +1057,7 @@ def _due_tick(a, inst, nodes):
             # Preserve the watch receipt scan/reconciliation transaction, while
             # the instance lock covers only receipt and wake publication.
             with _m_timings.phase('watch_compute'):
-                groups = _m_watch.watch_groups(inst)
+                groups = _m_watch.watch_groups(inst, overdue_only=True)
             _m_watch.watch_once(inst, kinds=('overdue-question',), quiet=True,
                                 sources={n['id'] for n in escalation_nodes}, groups=groups)
     except (OSError, ValueError):

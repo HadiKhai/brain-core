@@ -490,6 +490,66 @@ class Watcher(Scenario):
                     self.assertEqual(json.loads(receipt.read_text())['open'], {})
                     self.assertNotIn(identity, json.loads(seen.read_text())['seen'])
                     wake.reset_mock()
+    def test_overdue_scan_preserves_other_receipts_pending_and_acknowledgements(self):
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        inbox = self.root / 'inbox.md'
+        line = '- 2020-01-01 00:00 +00:00 from runtime: choose a color <!-- host-question:color -->'
+        inbox.write_text(line + '\n')
+        ordinary = {'id': m.watch_digest(['ordinary']), 'node': 'root',
+                    'kind': 'blocked-overdue', 'text': 'Choose a fixture color'}
+        with mock.patch.object(m, 'watch_items', side_effect=lambda *a: [dict(ordinary)]), \
+                mock.patch.object(m, 'wake_start'):
+            full = m.watch_groups(inst)
+            identities = {i['kind']: i['id'] for i in full['root']['items']}
+            m.watch_once(inst, kinds={'blocked-overdue', 'overdue-question'}, quiet=True, groups=full)
+            directory = m.wake_directory(inst, root)
+            pending = {p.name: p.read_bytes() for p in directory.glob('*.pending')}
+            self.assertTrue(pending)
+            seen_path = self.root / '.brain/wake/due-seen.json'
+            seen = set(json.loads(seen_path.read_text())['seen'])
+            with mock.patch.object(m, 'watch_items', side_effect=AssertionError('unrelated inventory')):
+                narrow = m.watch_groups(inst, overdue_only=True)
+            self.assertFalse(narrow.complete)
+            self.assertEqual([i['id'] for i in narrow['root']['items']], [identities['overdue-question']])
+            m.watch_once(inst, kinds={'overdue-question'}, quiet=True, groups=narrow)
+            self.assertEqual({p.name: p.read_bytes() for p in directory.glob('*.pending')}, pending)
+            self.assertTrue(seen <= set(json.loads(seen_path.read_text())['seen']))
+            with self.assertRaisesRegex(ValueError, 'partial watcher inventory'):
+                m.watch_publish(inst, groups=narrow)
+            inbox.write_text('')
+            closed = m.watch_groups(inst, overdue_only=True)
+            receipt_path = self.root / '.brain/wake/due-episodes.json'
+            receipt = json.loads(receipt_path.read_text())
+            self.assertIn(identities['blocked-overdue'], receipt['open'].values())
+            self.assertNotIn(identities['overdue-question'], receipt['open'].values())
+            inbox.write_text(line + '\n')
+            reopened = m.watch_groups(inst, overdue_only=True)
+            new_id = reopened['root']['items'][0]['id']
+            self.assertNotEqual(new_id, identities['overdue-question'])
+            full = m.watch_groups(inst)
+            self.assertIn(new_id, [i['id'] for i in full['root']['items']])
+            self.assertIn(identities['blocked-overdue'], [i['id'] for i in full['root']['items']])
+
+    def test_overdue_scan_upgrades_legacy_and_refuses_overtaken_ownership(self):
+        m, inst = self.m, self.inst
+        receipt_path = self.root / '.brain/wake/due-episodes.json'
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        receipt_path.write_text(json.dumps({'version': 1, 'open': {}, 'overdue_episodes': True}))
+        with mock.patch.object(m, 'watch_items', return_value=[]) as inventory:
+            full = m.watch_groups(inst, overdue_only=True)
+            self.assertTrue(full.complete)
+            self.assertTrue(inventory.called)
+        self.assertIn('overdue_keys', json.loads(receipt_path.read_text()))
+        def replaced():
+            data = json.loads(receipt_path.read_text())
+            data.pop('overdue_keys')
+            receipt_path.write_text(json.dumps(data))
+            return {}
+        stale = m.watch_due_episodes(inst, replaced, overdue_only=True)
+        self.assertTrue(stale.stale)
+        self.assertFalse(stale.complete)
+        self.assertNotIn('overdue_keys', json.loads(receipt_path.read_text()))
 
     def test_stale_precomputed_scan_cannot_retire_new_pending_or_restore_closed_episode(self):
         m, inst = self.m, self.inst

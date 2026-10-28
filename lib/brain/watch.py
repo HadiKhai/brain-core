@@ -263,7 +263,7 @@ def watch_source_signature(inst, layout=None):
     return watch_digest([homes, sorted(generations.items())])
 
 
-def watch_untracked(groups, generation=None):
+def watch_untracked(groups, generation=None, *, complete=True):
     """Unknown episode state must not reuse a transport key and hide a new need."""
     for group in groups.values():
         group['episodes_known'] = False
@@ -274,17 +274,19 @@ def watch_untracked(groups, generation=None):
                 if item['kind'] == 'overdue-question':
                     item['legacy_reason'] = item['reason']
                     item['reason'] = 'overdue:' + item['id']
-    return WatchGroups(groups, None, generation)
+    return WatchGroups(groups, None, generation, complete=complete)
 
 
 class WatchGroups(dict):
-    def __init__(self, values, revision, generation=None, stale=False, layout=None, retained=()):
+    def __init__(self, values, revision, generation=None, stale=False, layout=None, retained=(), complete=True, retired=()):
         super().__init__(values)
         self.receipt_revision = revision
         self.source_generation = generation
         self.stale = stale
         self.source_layout = layout
         self.retained_ids = set(retained)
+        self.complete = complete
+        self.retired = frozenset(retired)
 
 
 def watch_receipt_revision(inst):
@@ -331,7 +333,7 @@ def watch_queue_unknown(inst, entries):
     return unknown
 
 
-def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None):
+def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None, overdue_only=False):
     """Persist opaque receipts while ordinary due needs remain open.
 
     The source scan runs before the receipt lock; only reconciliation holds it.
@@ -365,7 +367,7 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
             try:
                 acquire()  # fallback/background: admit before scanning sources
             except BlockingIOError:
-                return WatchGroups({}, None, stale=True)
+                return WatchGroups({}, None, stale=True, complete=not overdue_only)
         observed = watch_receipt_observed(inst)
         layout = {} if layout is None else layout
         generation = watch_source_signature(inst, layout)
@@ -373,9 +375,10 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
         entries = [i for group in groups.values() for i in group['items']
                    if ('reason' not in i or i['kind'] == 'overdue-question') and i['kind'] not in
                    ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
-        queue_unknown = watch_queue_unknown(inst, entries)
+        queue_unknown = set() if overdue_only else watch_queue_unknown(inst, entries)
         if watch_source_signature(inst, layout) != generation:
-            return WatchGroups({}, None, generation, stale=True, layout=layout)
+            return WatchGroups({}, None, generation, stale=True, layout=layout, complete=not overdue_only)
+        overdue_keys = [i['id'] for i in entries if i['kind'] == 'overdue-question']
         if not serialized:
             acquire()
         _m_common.safe_target(path)
@@ -390,11 +393,19 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
                            or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
                            for k, v in data['open'].items())):
                 raise ValueError('invalid due episode state')
+            previous_overdue = data.get('overdue_keys')
+            if previous_overdue is not None and (not isinstance(previous_overdue, list)
+                    or any(not isinstance(k, str) or k not in data['open'] for k in previous_overdue)):
+                raise ValueError('invalid overdue episode ownership')
+            if overdue_only and previous_overdue is None:
+                # A legacy/full writer may have replaced the ownership metadata
+                # during this scan. Do not guess which opaque receipts to close.
+                return WatchGroups({}, None, generation, stale=True, layout=layout, complete=False)
         except (OSError, ValueError):
-            return watch_untracked(groups, generation)  # preserve evidence and fail open until repaired
+            return watch_untracked(groups, generation, complete=not overdue_only)
         # Another reconciliation since this scan's observation may reflect newer sources.
         if observed is False or watch_receipt_observed(inst) != observed:
-            return WatchGroups({}, None, generation, stale=True, layout=layout)
+            return WatchGroups({}, None, generation, stale=True, layout=layout, complete=not overdue_only)
         # Preserve pre-upgrade acknowledgements rather than replaying the backlog.
         try:
             legacy_seen = set(watch_state(inst).get('seen', []))
@@ -402,7 +413,10 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
             legacy_seen = set()
         seen = legacy_seen if not path.exists() else set()
         overdue_seen = legacy_seen if not data.get('overdue_episodes') else set()
-        current = {}
+        # A narrow scan owns only overdue questions. Full scans still replace
+        # the entire inventory, including after upgrading a legacy receipt.
+        owned = set(previous_overdue or ())
+        current = {k: v for k, v in data['open'].items() if k not in owned} if overdue_only else {}
         for item in entries:
             key = item['id']
             acknowledged = key in seen or (item['kind'] == 'overdue-question' and
@@ -413,19 +427,24 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
             if item['kind'] == 'overdue-question':
                 item['legacy_reason'] = item['reason']
                 item['reason'] = 'overdue:' + item['id']
-        misses = {key: data.get('queue_unknown', {}).get(key, 0) + 1
-                  for key in queue_unknown & data['open'].keys()}
+        # A narrow overdue scan does not observe coordinator queues, so it
+        # preserves their unknown-read counters without advancing their age.
+        misses = (dict(data.get('queue_unknown', {})) if overdue_only else
+                  {key: data.get('queue_unknown', {}).get(key, 0) + 1
+                   for key in queue_unknown & data['open'].keys()})
         misses = {key: count for key, count in misses.items() if count <= 3}
         retained = {key: data['open'][key] for key in misses}
         current.update(retained)
         try:
             # Atomic replacement supplies a new generation even for an unchanged scan.
             _m_machine.machine_publish(inst, path, json.dumps(
-                {'version': 1, 'open': current, 'overdue_episodes': True, 'queue_unknown': misses}, sort_keys=True) + '\n')
+                {'version': 1, 'open': current, 'overdue_episodes': True,
+                 'overdue_keys': sorted(overdue_keys), 'queue_unknown': misses}, sort_keys=True) + '\n')
             revision = watch_receipt_revision(inst)
         except OSError:
-            return watch_untracked(groups, generation)  # unpublished identities cannot prove resolution
-    return WatchGroups(groups, revision, generation, layout=layout, retained=retained.values())
+            return watch_untracked(groups, generation, complete=not overdue_only)
+    retired = {data['open'][key] for key in owned - set(overdue_keys)} if overdue_only else set()
+    return WatchGroups(groups, revision, generation, layout=layout, retained=retained.values(), complete=not overdue_only, retired=retired)
 
 
 def watch_items(inst, n):
@@ -822,7 +841,7 @@ def watch_state_invalid(inst):
         return True
 
 
-def watch_groups(inst, nodes=None, episode_blocking=True):
+def watch_groups(inst, nodes=None, episode_blocking=True, *, overdue_only=False):
     """File-only wake queue; foreground waits, background defers unknown scans."""
     from . import command_reads, communication
     started = time.perf_counter()
@@ -831,19 +850,29 @@ def watch_groups(inst, nodes=None, episode_blocking=True):
     # scope. Batch their transcript/Git observations too. Each standalone scan
     # needs its own scope, including fallback after a failed first observation;
     # cached old reads must never acquire the fallback's newer source signature.
+    # Existing receipts are opaque. One ordinary scan first records which keys
+    # belong to overdue questions; later due invocations can reconcile just
+    # those keys without closing other kinds or recomputing their source facts.
+    narrow = False
+    if overdue_only and nodes is None:
+        try:
+            data = watch_read(inst.root / '.brain/wake/due-episodes.json', {})
+            narrow = isinstance(data.get('overdue_keys'), list)
+        except (OSError, ValueError):
+            pass
     def scan():
         from . import tasks
         with command_reads.snapshot(), tasks.record_scan(inst):
-            return watch_scan(inst, nodes)
+            return watch_scan(inst, nodes, overdue_only=True) if narrow else watch_scan(inst, nodes)
     layout = {}  # stamp-validated generations only; each scan still reads afresh
     try:
-        groups = watch_due_episodes(inst, scan, blocking=episode_blocking, layout=layout)
+        groups = watch_due_episodes(inst, scan, blocking=episode_blocking, layout=layout, overdue_only=narrow)
         if groups.stale and episode_blocking and not command_reads.active():
             # Overtaken (or sources moved): rescan fresh inside the receipt lock,
             # which no reconciliation can overtake. Only this rare second scan
             # holds the lock long. Inside an enclosing read scope a rescan would
             # reuse old reads, so those callers keep stale as unknown.
-            groups = watch_due_episodes(inst, scan, serialized=True, layout=layout)
+            groups = watch_due_episodes(inst, scan, serialized=True, layout=layout, overdue_only=narrow)
     except (OSError, ValueError):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
@@ -851,9 +880,9 @@ def watch_groups(inst, nodes=None, episode_blocking=True):
         generation = watch_source_signature(inst, layout)
         groups = scan()
         if watch_source_signature(inst, layout) != generation:
-            groups = WatchGroups({}, None, generation, stale=True, layout=layout)
+            groups = WatchGroups({}, None, generation, stale=True, layout=layout, complete=not narrow)
         else:
-            groups = watch_untracked(groups, generation)
+            groups = watch_untracked(groups, generation, complete=not narrow)
     if groups.stale:
         _m_timings.record('episode_deferred', time.perf_counter() - started)
     return groups
@@ -885,13 +914,13 @@ def watch_inbox_rollup(inst, group):
             visible.add(key(entry))
 
 
-def watch_scan(inst, nodes=None):
+def watch_scan(inst, nodes=None, *, overdue_only=False):
     """Collect facts with one inventory; receipt/publication fences stay fresh."""
     with inst.node_observation():
-        return watch_scan_observed(inst, nodes)
+        return watch_scan_observed(inst, nodes, overdue_only=overdue_only)
 
 
-def watch_scan_observed(inst, nodes=None):
+def watch_scan_observed(inst, nodes=None, *, overdue_only=False):
     # A supplied selection carries IDs, not reusable records from an older scan.
     selected = None if nodes is None else {n['id'] for n in nodes}
     nodes = [n for n in inst.nodes() if not n['archived'] and (selected is None or n['id'] in selected)]
@@ -900,7 +929,7 @@ def watch_scan_observed(inst, nodes=None):
         # Uncoordinated nodes route actionable work to root; root needs no explicit binding.
         target, command = _m_hosts.wake_target(inst, n)
         group = groups.setdefault(target['id'], {'node': target, 'items': [], 'command': command})
-        group['items'].extend({**i, 'node': n['id']} for i in watch_items(inst, n)
+        group['items'].extend({**i, 'node': n['id']} for i in ([] if overdue_only else watch_items(inst, n))
                               if target['id'] == n['id'] or i['kind'] not in
                               WATCH_LOCAL_KINDS)
         root = inst.node('root')
@@ -913,6 +942,8 @@ def watch_scan_observed(inst, nodes=None):
                                        'kind': 'overdue-question', 'node': n['id'],
                                        'reason': 'overdue:' + hashlib.sha256(line.encode()).hexdigest(),
                                        'text': 'Unanswered question past its threshold; inspect brain due root'})
+    if overdue_only:
+        return groups
     from . import communication as _m_communication
     from . import host_observations as _m_host_observations
     try:
@@ -1004,6 +1035,9 @@ def watch_run(inst, kinds=None, quiet=False, sources=None, groups=None):
 
 
 def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
+    if groups is not None and not getattr(groups, 'complete', True) and (
+            kinds is None or set(kinds) != {'overdue-question'}):
+        raise ValueError('partial watcher inventory can publish only overdue questions')
     path = inst.root / '.brain' / 'watch.json'
     try:
         state = watch_state(inst)
@@ -1025,10 +1059,18 @@ def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
     groups = watch_groups(inst, nodes) if groups is None else groups
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
     current_ids.update(getattr(groups, 'retained_ids', ()))
+    complete = getattr(groups, 'complete', True)
     for group in groups.values():
         if group.get('episodes_known', True):
             for pending in _m_hosts.wake_directory(inst, group['node']).glob('*.pending'):
-                _m_hosts.wake_retire_due_pending(pending, current_ids)
+                retained = set()
+                if not complete:
+                    try:
+                        _, refs = _m_hosts.wake_pending_value(pending)
+                        retained = {i['id'] for i in refs if i['kind'] != 'overdue-question'}
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue  # unknown pending work stays deliverable
+                _m_hosts.wake_retire_due_pending(pending, current_ids | retained)
     pending_ids = set()
     for pending in (inst.root / '.brain/wake').glob('*/*.pending'):
         try:
@@ -1037,7 +1079,10 @@ def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
                 pending_ids.update(i['id'] for i in refs if isinstance(i, dict) and isinstance(i.get('id'), str))
         except (OSError, ValueError, AttributeError):
             pass  # unidentified pending requests stay durable; they cannot own a known acknowledgement
-    seen.intersection_update(current_ids | pending_ids)
+    if complete:
+        seen.intersection_update(current_ids | pending_ids)
+    else:
+        seen.difference_update(getattr(groups, 'retired', ()) - pending_ids)
     current = []
     count = 0
     for group in groups.values():
