@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+import tempdirs
 
 
 def pytest_addoption(parser):
@@ -54,6 +55,7 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_configure(config):
+    tempdirs.configure()
     workers = getattr(config.option, 'numprocesses', 0)
     if isinstance(workers, int) and workers > (os.cpu_count() or 1):
         raise pytest.UsageError('workers exceed available CPU cores')
@@ -68,6 +70,10 @@ def pytest_configure(config):
             except OSError as error:
                 raise pytest.UsageError('cannot create completed-results: ' + str(error)) from error
         config.pluginmanager.register(CompletedResults(config, stream), 'completed-results-writer')
+
+
+def pytest_unconfigure(config):
+    tempdirs.cleanup()
 
 
 @pytest.hookimpl(optionalhook=True)

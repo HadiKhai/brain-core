@@ -19,12 +19,14 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import tempdirs
 import time
 import unittest
 import types
 from pathlib import Path
 
 CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.parent)
+tempdirs.configure()
 
 # Per-worker APFS template; instance state is always initialized anew. Checked
 # bytecode avoids recompiling unchanged core sources in every real CLI child.
@@ -207,6 +209,14 @@ class _FixtureTemplate:
 class Scenario(unittest.TestCase):
     fixture_init_in_process = False
     fixture_templates = False
+
+    def run(self, result=None):
+        try:
+            return super().run(result)
+        finally:
+            # unittest propagates KeyboardInterrupt before its normal cleanup.
+            self.doCleanups()
+
     def setUp(self):
         # A real verify may enclose the test runner. Its descriptor stays open and
         # locked; its environment proof must not identify our temporary instances.
@@ -220,7 +230,9 @@ class Scenario(unittest.TestCase):
         for key in gate_keys:
             os.environ.pop(key, None)
         self.tmp = Path(tempfile.mkdtemp(prefix="brain-test-",
-                                       dir=getattr(self, 'temporary_parent', None))).resolve()
+                                       dir=tempdirs.fixture_parent(
+                                           getattr(self, 'temporary_parent', None)))).resolve()
+        self.addCleanup(self._cleanup_fixture)
         if getattr(self, 'retain_rehearsal_evidence', False):
             self.start_native_evidence()
         self.env = {**os.environ, "HOME": str(self.tmp), "BRAIN_NO_REEXEC": "1",
@@ -244,6 +256,11 @@ class Scenario(unittest.TestCase):
         self.env['PYTHONDONTWRITEBYTECODE'] = '1'
 
     def tearDown(self):
+        self._cleanup_fixture()
+
+    def _cleanup_fixture(self):
+        if not self.tmp.exists():
+            return
         # Diagnostic finalizers must run before removal, not in addCleanup.
         retainers = getattr(self, '_before_fixture_delete', ())
         preserve = False
@@ -253,6 +270,7 @@ class Scenario(unittest.TestCase):
             except BaseException:
                 preserve = True  # Retention must not replace a test exception.
         if preserve:
+            tempdirs.retain(self.tmp)
             return
         try:
             shutil.rmtree(self.tmp, ignore_errors=True)

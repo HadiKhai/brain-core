@@ -29,6 +29,70 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class FixtureSetup(Scenario):
+    def test_run_cleanup_retries_errors_and_handles_missing_and_read_only_entries(self):
+        script = '''import os, pathlib, shutil, sys
+from unittest import mock
+import tempdirs
+root = tempdirs.configure()
+assert not (root / 'persistent.json').exists()
+persistent = tempdirs.fixture_parent(pathlib.Path(sys.argv[1]))
+locked = root / 'locked'
+locked.mkdir()
+(locked / 'sample').touch()
+locked.chmod(0)
+original = shutil.rmtree
+with mock.patch.object(shutil, 'rmtree', side_effect=PermissionError('sample busy cleanup')):
+    tempdirs.cleanup()
+assert root.exists() and persistent.exists()
+def racing(path, onerror):
+    path = pathlib.Path(path)
+    error = FileNotFoundError('sample concurrent removal')
+    onerror(os.unlink, str(path / 'already-gone'), (FileNotFoundError, error, None))
+    return original(path, onerror=onerror)
+with mock.patch.object(shutil, 'rmtree', side_effect=racing):
+    tempdirs.cleanup()
+assert not root.exists() and not persistent.exists()
+'''
+        env = dict(self.env)
+        env.pop('BRAIN_TEST_RUN_ROOT', None)
+        result = subprocess.run([sys.executable, '-B', '-c', script, str(self.tmp)],
+                                env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_fixture_directory_is_removed_after_success_failure_and_interrupt(self):
+        for stage in ('success', 'setup', 'test', 'interrupt'):
+            with self.subTest(stage=stage):
+                paths = []
+                class Probe(Scenario):
+                    def setUp(self):
+                        super().setUp()
+                        paths.append(self.tmp)
+                        if stage == 'setup':
+                            raise RuntimeError('sample setup failure')
+
+                    def runTest(self):
+                        if stage == 'test':
+                            raise AssertionError('sample test failure')
+                        if stage == 'interrupt':
+                            raise KeyboardInterrupt
+
+                case = Probe()
+                result = unittest.TestResult()
+                try:
+                    if stage == 'interrupt':
+                        with self.assertRaises(KeyboardInterrupt):
+                            case.run(result)
+                    else:
+                        case.run(result)
+                        self.assertEqual(result.wasSuccessful(), stage == 'success')
+                    self.assertEqual(len(paths), 1)
+                    self.assertFalse(paths[0].exists())
+                finally:
+                    # Explicit disposal also lets this regression run against
+                    # the old helper without leaving its injected setup leak.
+                    for path in paths:
+                        shutil.rmtree(path, ignore_errors=True)
+
     def test_cached_setup_relocates_worktrees_and_never_shares_mutable_state(self):
         import scenario
         built = []

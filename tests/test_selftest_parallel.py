@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from unittest import mock
 
 import core_loader
@@ -16,6 +17,43 @@ from scenario import CORE, Scenario
 
 
 class ParallelSelftest(Scenario):
+    def test_stale_root_recovers_outside_an_installed_instance(self):
+        folder, env, command = self.result_fixture(
+            'import os\nfrom pathlib import Path\n'
+            'def test_root():\n'
+            ' root = Path(os.environ["BRAIN_TEST_RUN_ROOT"])\n'
+            ' instance = Path(os.environ["BRAIN_CORE"]).parents[2]\n'
+            ' assert instance != root and instance not in root.parents\n'
+            ' Path("root.path").write_text(str(root))\n')
+        installed = self.tmp / 'instance/.brain/cores/sample'
+        installed.mkdir(parents=True)
+        env['BRAIN_CORE'] = str(installed)
+        env['BRAIN_TEST_RUN_ROOT'] = str(self.tmp / 'missing-root')
+        result = subprocess.run(command, cwd=folder, env=env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(Path((folder / 'root.path').read_text()).exists())
+
+    def test_session_root_removes_unmanaged_worker_directories(self):
+        source = ('import os, tempfile\nfrom pathlib import Path\n'
+            'def test_first():\n'
+            ' Path("first.path").write_text(tempfile.mkdtemp(prefix="brain-test-"))\n'
+            ' Path("first.worker").write_text(os.environ["PYTEST_XDIST_WORKER"])\n')
+        folder, env, command = self.result_fixture(source)
+        (folder / 'test_other.py').write_text(source.replace('first', 'second'))
+        command[-1] = '.'
+        # This child represents a fresh full-suite controller, with its own
+        # root rather than borrowing this enclosing focused run's root.
+        env.pop('BRAIN_TEST_RUN_ROOT', None)
+        result = subprocess.run(command + ['-n', '2', '--dist=loadfile', '--max-worker-restart=0'],
+                                cwd=folder, env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        paths = [Path((folder / name).read_text()) for name in ('first.path', 'second.path')]
+        self.assertNotEqual((folder / 'first.worker').read_text(), (folder / 'second.worker').read_text())
+        self.assertEqual(paths[0].parent, paths[1].parent)
+        self.assertTrue(paths[0].parent.parent.name.startswith('brain-test-run-'))
+        self.assertFalse(paths[0].parent.parent.exists())
+
     def test_explicit_serial_method_does_not_serialize_unrelated_class_methods(self):
         folder, env, command = self.result_fixture(
             'import time, unittest\nfrom pathlib import Path\n'
@@ -179,7 +217,7 @@ class ParallelSelftest(Scenario):
     def result_fixture(self, source):
         folder = self.tmp / 'results'
         folder.mkdir()
-        for name in ('pytest.ini', 'tests/conftest.py'):
+        for name in ('pytest.ini', 'tests/conftest.py', 'tests/tempdirs.py'):
             shutil.copyfile(CORE / name, folder / name.split('/')[-1])
         (folder / 'test_sample.py').write_text(source)
         env = dict(self.env)
