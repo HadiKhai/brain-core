@@ -715,20 +715,12 @@ def machine_terminal(inst, token, error=None, result=0):
     if inst is None:
         return
     outcome, reason = machine_exit_fields(error, result)
-    completed = False
     with machine_hold_store(inst) as data:
         row = data.get('waits', {}).get(token)
         if row is not None:
             if machine_terminal_row(row, token.clock.time(), outcome, reason):
-                completed = outcome == 'success'
                 if getattr(token, 'cleanup_errors', None):
                     row['cleanup_errors'] = list(token.cleanup_errors)
-    if completed:
-        # Report to the initiating shell after the durable outcome is published.
-        try:
-            print('machine care: command completed successfully', flush=True)
-        except OSError:
-            pass  # a closed output pipe cannot rewrite the recorded outcome
     try:
         machine_wait_notices(inst, token.clock.time())
     except (Exception, SystemExit):

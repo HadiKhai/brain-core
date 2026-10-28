@@ -2369,16 +2369,18 @@ class TerminalProducer(Scenario):
     def test_success_returns_to_caller_without_coordinator_notice_or_replay(self):
         inbox = self.root / 'inbox.md'
         before = inbox.read_bytes()
-        with mock.patch.object(self.m, 'request_wake') as wake, contextlib.redirect_stdout(io.StringIO()) as output:
-            with self.m.machine_run('heavy', self.inst, 'root', clock=self.clock) as token:
-                pass
-            self.m.machine_terminal(self.inst, token)
-            self.m.machine_wait_notices(self.inst, 100010.0)
-        self.assertEqual(output.getvalue().count('command completed successfully'), 1)
+        with mock.patch.object(self.m, 'request_wake') as wake, \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_heavy(argparse.Namespace(node='root'))
+            self.m.machine_wait_notices(self.inst)
+            self.m.machine_wait_notices(self.inst)
+        self.assertEqual(output.getvalue(), 'machine care: heavy work allowed (admission only)\n')
         wake.assert_not_called()
         self.assertEqual(inbox.read_bytes(), before)
-        self.assertEqual(self.waits()[token]['outcome'], 'success')
-        self.assertTrue(self.waits()[token]['notified_completed'])
+        row, = self.waits().values()
+        self.assertEqual(row['outcome'], 'success')
+        self.assertTrue(row['notified_completed'])
 
     def test_launch_failure_keeps_original_cause_once_and_retries_wake(self):
         with mock.patch.object(self.m, 'request_wake', side_effect=[False, True]) as wake:
