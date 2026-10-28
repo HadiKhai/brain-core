@@ -1,7 +1,5 @@
 """Parallel selftest selects one canonical suite without running it in this test."""
 import argparse
-import contextlib
-import io
 import os
 import json
 import shutil
@@ -187,7 +185,7 @@ class ParallelSelftest(Scenario):
                 m.cmd_selftest(argparse.Namespace(verbose=False, k=None))
         self.assertIn('unittest', execute.call_args.args[0])
 
-    def test_rehearse_from_worktree_keeps_selected_core_and_warns(self):
+    def test_rehearse_from_worktree_refuses_installed_core_switch(self):
         m = core_loader.SourceFileLoader('rehearse_reexec_fixture', str(CORE / 'bin/brain')).load_module()
         other = self.tmp / 'instance/core/bin/brain'
         other.parent.mkdir(parents=True)
@@ -199,10 +197,13 @@ class ParallelSelftest(Scenario):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(m, 'CORE', checkout), \
                 mock.patch.object(owner['_m_nodes'], 'try_find_root', return_value=self.tmp / 'instance'), \
                 mock.patch.object(m.sys, 'argv', ['brain', 'rehearse', 'app']), \
-                mock.patch.object(m.os, 'execv') as execute, contextlib.redirect_stderr(io.StringIO()) as output:
-            m.reexec_into_instance_core()
+                mock.patch.object(m.os, 'execv') as execute:
+            with self.assertRaises(SystemExit) as refused:
+                m.reexec_into_instance_core()
         execute.assert_not_called()
-        self.assertIn('current worktree', output.getvalue())
+        self.assertIn('refusing instance-core re-execution', str(refused.exception))
+        self.assertIn(str(checkout), str(refused.exception))
+        self.assertIn(str(other.parent.parent), str(refused.exception))
 
     def test_parallel_dispatch_steals_remaining_work_without_retries(self):
         m = core_loader.SourceFileLoader('stealing_selftest_fixture', str(CORE / 'bin/brain')).load_module()
