@@ -437,7 +437,9 @@ def watch_items(inst, n):
     state = {'jobs': rows, 'worktrees': worktrees, 'handbacks': signals, 'inbox': _m_status.inbox_lines(n)}
     visible = n['local'].get('wake_policy') == 'visible'
     own = _m_hosts.wake_target(inst, n)[0]['id'] == n['id']
-    evidence = _m_status.due_evidence(inst, n) if visible and own else (state, '', '')
+    # The canonical file state keys the memoized source inventory exactly as the
+    # coordinator rollup does, so a node shown with readiness is scanned once.
+    evidence = _m_status.due_evidence(inst, n) if visible and own else (_m_status.file_state(inst, n), '', '')
     items = _m_status.due_items(inst, n, evidence=evidence, include_stale=visible and own,
                                 include_ready=False, include_advice=visible and own) + _m_status.changes_due(inst, n)
     out = []

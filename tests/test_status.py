@@ -3275,6 +3275,29 @@ class RenderedFingerprint(Scenario):
         self.assertIn('A changed worker publication', next(i for i in changed if i['kind'] == 'handback')['text'])
         self.assertEqual(computed.count('sample'), 1)
 
+    def test_node_due_watch_scan_and_rollup_read_readiness_once(self):
+        status = self.m._owners['due_items']
+        def due(shared):
+            out = io.StringIO()
+            args = argparse.Namespace(id='sample', quiet=False, json=True)
+            observe = status._due_source_items
+            with mock.patch.dict(os.environ, {'BRAIN_ROOT': str(self.root)}), \
+                    mock.patch.object(status, '_due_source_items', observe if shared else observe.__wrapped__), \
+                    mock.patch.object(status._m_verify, 'due_ready_state',
+                                      wraps=status._m_verify.due_ready_state) as ready, \
+                    status._m_command_reads.snapshot(), contextlib.redirect_stdout(out):
+                status.cmd_due(args)
+            items = [{k: v for k, v in i.items() if k != 'age_hours'} for i in json.loads(out.getvalue())]
+            return items, ready.call_count
+        # The watch scan omits staleness and advice, so its due_once key differs
+        # from the rollup's; both must still observe the same source inventory.
+        expected, unshared = due(shared=False)
+        self.assertEqual(unshared, 2)
+        actual, calls = due(shared=True)
+        self.assertEqual(calls, 1)
+        self.assertEqual(actual, expected)
+        self.assertTrue(any(i['kind'] == 'handback' for i in actual))
+
     def test_due_once_readiness_share_keeps_watch_identities(self):
         status, watch = self.m._owners['due_items'], self.m._owners['watch_items']
         plain = watch.watch_items(self.inst, self.n)
