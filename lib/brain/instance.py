@@ -436,7 +436,8 @@ def git_location_inputs(home, values=None, settled=None):
         # outside these stamps; their repositories always ask Git.
         if os.path.lexists(marker / 'commondir') or os.path.lexists(marker / 'config.worktree'):
             return None
-        if re.search(rb'^\s*\[\s*include', (marker / 'config').read_bytes(), re.I | re.M):
+        # Any spelling of an include section names the word; false positives only ask Git.
+        if b'include' in (marker / 'config').read_bytes().lower():
             return None
     except OSError:
         return None

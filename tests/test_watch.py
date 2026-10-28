@@ -488,12 +488,15 @@ class Watcher(Scenario):
                 signature()
             self.assertEqual(asked(home), calls + 1)
             # Per-worktree config and config includes are read by Git but not stamped.
-            for name, text in (('config.worktree', '[core\n'), ('config', None)):
+            include = '\tpath = extra\n'
+            for name, edit in (('config.worktree', lambda saved: '[core\n'),
+                               ('config', lambda saved: '\ufeff[include]\n' + include + saved),
+                               ('config', lambda saved: saved + '[core] [include]\n' + include)):
                 signature()
                 calls = asked(home)
                 path = home / '.git' / name
                 saved = path.read_text() if path.exists() else None
-                path.write_text(text if text is not None else saved + '[include]\n\tpath = extra\n')
+                path.write_text(edit(saved))
                 signature()
                 signature()
                 self.assertEqual(asked(home), calls + 2, name + ' changes keep asking Git')
@@ -1131,12 +1134,12 @@ class Watcher(Scenario):
         scanned, resume = threading.Event(), threading.Event()
         original = self.m.watch_due_episodes
         errors = []
-        def paused(inst, scan):
+        def paused(inst, scan, **kwargs):
             if threading.current_thread().name == 'old-reader':
                 scanned.set()
                 if not resume.wait(10):
                     raise RuntimeError('fixture scan timeout')
-            return original(inst, scan)
+            return original(inst, scan, **kwargs)
         def old_reader():
             try:
                 self.m.watch_groups(self.m.Instance(self.root))
