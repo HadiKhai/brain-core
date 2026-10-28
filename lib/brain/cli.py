@@ -102,9 +102,7 @@ def reexec_into_instance_core():
     """`brain` on PATH points at one core; for another instance, use that instance's own core."""
     if os.environ.get("BRAIN_NO_REEXEC") or (len(sys.argv) > 1 and sys.argv[1] in ("init", "selftest")):
         return
-    if len(sys.argv) > 1 and sys.argv[1] in ('ui', 'rehearse') and (_m_common.CORE / '.git').is_file():
-        if sys.argv[1] == 'rehearse':
-            print('rehearse: using the current worktree core; instance-core re-execution disabled', file=sys.stderr)
+    if len(sys.argv) > 1 and sys.argv[1] == 'ui' and (_m_common.CORE / '.git').is_file():
         return  # an explicitly selected development worktree executes its own build
     root = _m_nodes.try_find_root()
     if not root:
@@ -112,6 +110,14 @@ def reexec_into_instance_core():
     other = root / "core" / "bin" / "brain"
     # A staged core's launcher already runs that instance's pinned release (core_releases.py).
     if other.exists() and other.resolve() not in (_m_common.ENTRY_POINT.resolve(), Path(sys.argv[0]).resolve()):
+        if (_m_common.CORE / '.git').is_file():
+            options = argparse.ArgumentParser(add_help=False)
+            options.add_argument('-a', '--all', action='store_true')
+            options.add_argument('command', nargs='?')
+            if options.parse_known_args(sys.argv[1:])[0].command == 'rehearse':
+                _m_common.die(f'rehearse: refusing instance-core re-execution from worktree core '
+                              f'{_m_common.CORE} into installed core {other.parent.parent}; '
+                              'set BRAIN_NO_REEXEC=1 explicitly to rehearse with the worktree core')
         os.environ["BRAIN_NO_REEXEC"] = "1"
         os.execv(sys.executable, [sys.executable, str(other), *sys.argv[1:]])
 

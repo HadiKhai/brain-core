@@ -653,6 +653,60 @@ class SettlementDocsHelp(unittest.TestCase):
 
 
 class EntryPoints(Scenario):
+    def test_worktree_rehearse_refuses_switch_and_preserves_explicit_core_selection(self):
+        loader = core_loader.SourceFileLoader('reexec_fixture', str(CORE / 'bin/brain'))
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+        package = loader.package_name
+        self.addCleanup(lambda: [sys.modules.pop(k) for k in list(sys.modules)
+                                 if k == package or k.startswith(package + '.')])
+        cli = sys.modules[package + '.cli']
+        common = sys.modules[package + '.common']
+        source = self.tmp / 'worktree'
+        source.mkdir()
+        (source / '.git').write_text('gitdir: fixture\n')
+        root = self.tmp / 'instance'
+        other = root / 'core/bin/brain'
+        other.parent.mkdir(parents=True)
+        other.touch()
+        entry = source / 'bin/brain'
+        env = {k: v for k, v in self.env.items() if k != 'BRAIN_NO_REEXEC'}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(common, 'CORE', source), \
+                mock.patch.object(common, 'ENTRY_POINT', entry), \
+                mock.patch.object(cli._m_nodes, 'try_find_root', return_value=root), \
+                mock.patch.object(cli._m_instance, 'brains_here', return_value=[('fixture', root)]):
+            for prefix in ([], ['-a'], ['--all'], ['-aa'], ['-b', 'fixture'], ['--brain=fixture']):
+                with self.subTest(prefix=prefix), \
+                        mock.patch.object(sys, 'argv', [str(entry), *prefix, 'rehearse', '--help']), \
+                        mock.patch.object(cli.os, 'execv') as execute:
+                    cli.take_brain_flag()
+                    with self.assertRaises(SystemExit) as refused:
+                        cli.reexec_into_instance_core()
+                    message = str(refused.exception)
+                    self.assertIn('refusing instance-core re-execution', message)
+                    self.assertIn(str(source), message)
+                    self.assertIn(str(other.parent.parent), message)
+                    self.assertIn('BRAIN_NO_REEXEC=1', message)
+                    execute.assert_not_called()
+                    self.assertNotIn('BRAIN_NO_REEXEC', os.environ)
+            with mock.patch.object(sys, 'argv', [str(entry), 'rehearse', '--help']), \
+                    mock.patch.object(cli.os, 'execv') as execute:
+                with mock.patch.dict(os.environ, {'BRAIN_NO_REEXEC': '1'}):
+                    cli.reexec_into_instance_core()
+                execute.assert_not_called()
+                with mock.patch.object(common, 'ENTRY_POINT', other):
+                    cli.reexec_into_instance_core()
+                execute.assert_not_called()
+            with mock.patch.object(sys, 'argv', [str(entry), 'ui', '--help']), \
+                    mock.patch.object(cli.os, 'execv') as execute:
+                cli.reexec_into_instance_core()
+                execute.assert_not_called()
+            with mock.patch.object(sys, 'argv', [str(entry), 'now']), \
+                    mock.patch.object(cli.os, 'execv') as execute:
+                cli.reexec_into_instance_core()
+                execute.assert_called_once_with(sys.executable, [sys.executable, str(other), 'now'])
+
     def test_global_pointer_is_added_once_and_removable(self):
         r = self.init("alice")
         claude_md = self.tmp / ".claude" / "CLAUDE.md"
