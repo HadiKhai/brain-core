@@ -475,6 +475,18 @@ class Watcher(Scenario):
                 signature()
                 signature()
             self.assertEqual(asked(home), calls + 2)
+            # Revoked access (an ACL leaves every stamp unchanged) makes Git look elsewhere.
+            signature()
+            calls = asked(home)
+            signature()
+            self.assertEqual(asked(home), calls, 'warm again')
+            objects = str(home / '.git/objects')
+            access = os.access
+            with mock.patch.object(owner.os, 'access',
+                                   side_effect=lambda path, mode, **k: False if os.fspath(path) == objects
+                                   else access(path, mode, **k)):
+                signature()
+            self.assertEqual(asked(home), calls + 1)
         # Inputs inside the settle window may postdate Git's read: never memoized.
         fresh = {}
         with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', 10 ** 30):

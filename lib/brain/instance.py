@@ -404,7 +404,7 @@ def git_location_inputs(home, values=None, settled=None):
     Only a real `.git` directory without commondir, which Git reports as both
     its own and common directory, is memoizable: that answer names a path, so
     it holds while the repository stays valid there (HEAD, objects, refs,
-    config). Gitfiles, symlinks, linked worktrees, environment overrides,
+    config, each still accessible: every hit rechecks access). Gitfiles, symlinks, linked worktrees, environment overrides,
     ancestor discovery and other owners (whose acceptance depends on global
     safe.directory policy) always ask Git. `settled` rejects a file changed
     so recently it may postdate Git's own read. Without `values`, only the
@@ -422,7 +422,9 @@ def git_location_inputs(home, values=None, settled=None):
                            (marker / 'refs', stat.S_ISDIR), (marker / 'HEAD', stat.S_ISREG),
                            (marker / 'config', stat.S_ISREG)):
             info = os.lstat(path)
-            if not kind(info.st_mode) or info.st_uid != os.geteuid():
+            # Git's discovery checks access, which ACLs change without a stamp.
+            access = os.R_OK | os.X_OK if kind is stat.S_ISDIR else os.R_OK
+            if not kind(info.st_mode) or info.st_uid != os.geteuid() or not os.access(path, access):
                 return None
             stamp = (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
             if kind is stat.S_ISREG:
