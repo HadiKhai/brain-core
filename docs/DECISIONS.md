@@ -4177,3 +4177,11 @@ attempt restores its original job identity, retaining its contract and handback;
 otherwise a task-free node creates a fresh identity. Historical completion rows
 stay closed and cannot be rebound, and ambiguous or absent task identities refuse recovery. Rebinding
 does not start setup, reset Git or manufacture verification evidence.
+
+## 2026-10-28: Treat null job baseline object IDs as absent metadata
+
+An absent start commit and Git's all-zero SHA-1 or SHA-256 object IDs use the
+same explicit ledger-closure path: record the landed tip's changed paths without
+attempting to diff a nonexistent baseline. They do not authorize automatic
+closure. A non-null baseline whose object is unavailable still refuses closure;
+this preserves the distinction between missing metadata and damaged history.

@@ -1899,6 +1899,28 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         self.assertEqual(final['Cause'],'Coordinator parked this synthetic job')
         self.assertTrue(home.is_dir())
 
+    def test_manual_landing_without_baseline_preserves_explicit_closure_evidence(self):
+        m, inst, n, row = self.fixture()
+        home = self.repo(self.tmp / 'code', {'feature.py': 'value = 1\n'})
+        self.git('branch', row['Job'], cwd=home)
+        n.update(home_path=home, external=True)
+        main = self.git('rev-parse', 'main', cwd=home).strip()
+        for start in (None, '', '0' * 40, '0' * 64):
+            with self.subTest(start=start):
+                n['local']['worktrees'] = {row['Job']: {} if start is None else {'start': start}}
+                closed = m.prepare_ledger_close(inst, n, row)
+                self.assertEqual(closed['Outcome'], 'merged')
+                self.assertEqual((closed['Head commit'], closed['Main commit']), (main, main))
+                self.assertEqual(json.loads(closed['Code paths']), ['feature.py'])
+                self.assertTrue(closed['Ended'])
+                self.assertEqual(list(m.manual_landing_candidates(n)), [])
+        # A non-null but unavailable baseline is corruption, not absent metadata.
+        n['local']['worktrees'][row['Job']]['start'] = 'f' * 40
+        before = (n['dir'] / m.JOBS_FILE).read_bytes()
+        with self.assertRaisesRegex(SystemExit, 'cannot read landed job code paths'):
+            m.prepare_ledger_close(inst, n, row)
+        self.assertEqual((n['dir'] / m.JOBS_FILE).read_bytes(), before)
+
     @contextlib.contextmanager
     def owned_takeover_fixture(self):
         m, inst, n, row = self.fixture()

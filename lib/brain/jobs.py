@@ -1078,6 +1078,12 @@ def record_land_check(inst, n, key, receipt):
         inst.commit([], f"{n['id']}: land-check evidence")
 
 
+def recorded_job_start(n, row):
+    start = n['local'].get('worktrees', {}).get(row['Job'], {}).get('start')
+    # Git's null object IDs denote an absent baseline, not a commit to diff.
+    return None if start in ('0' * 40, '0' * 64) else start
+
+
 def manual_landing(n, row):
     home = n.get('home_path')
     if not home:
@@ -1085,7 +1091,7 @@ def manual_landing(n, row):
     def ref(name):
         return _m_common.git('rev-parse', '--verify', '--quiet', name + '^{commit}', cwd=home).stdout.strip()
     head, main = ref('refs/heads/' + row['Job']), ref('refs/heads/main')
-    start = n['local'].get('worktrees', {}).get(row['Job'], {}).get('start')
+    start = recorded_job_start(n, row)
     if (head and main and head != start
             and _m_common.git('merge-base', '--is-ancestor', head, main, cwd=home).returncode == 0):
         return head, main
@@ -1102,7 +1108,7 @@ def prepare_ledger_close(inst, n, row, reason=None):
     if landed and not reason:
         row.update({'Outcome': 'merged', 'Head commit': landed[0], 'Main commit': landed[1],
                     'Lesson check': 'required', 'Cause': 'manual landing confirmed in local main'})
-        base = n['local'].get('worktrees', {}).get(row['Job'], {}).get('start')
+        base = recorded_job_start(n, row)
         # Delivered paths are Git facts, independent of verification/readiness.
         paths = (_m_common.git('diff', '--name-only', '-z', base, landed[0], cwd=n['home_path']) if base else
                  _m_common.git('diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-z',
@@ -1143,7 +1149,7 @@ def close_ledger_job(inst, n, branch, reason=None, preview=True):
 def manual_landing_candidates(n, branch=None):
     for row in read_jobs(n) or []:
         if (row.get('Ended') or _m_briefs.import_job(row['Job']) or branch and row['Job'] != branch
-                or not n['local'].get('worktrees', {}).get(row['Job'], {}).get('start')):
+                or not recorded_job_start(n, row)):
             continue
         if not publication_refusal(n, row) and manual_landing(n, row):
             yield row
