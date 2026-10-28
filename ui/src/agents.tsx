@@ -164,7 +164,7 @@ export function ThreadRow({ s, f, go, showProject = true, highlight = false }: {
       <div className="row-facts">
         {writing ? <Status>Writing now</Status> : null}
         <small><Server size={12} /> {w?.port ? `${w.port}${w.ports > 1 ? "–" + (w.port + w.ports - 1) : ""} · ${list(w.listening).length ? "listening" : "idle"}` : w ? "No port assigned" : "No local working copy"}</small>
-        {w && <small>{w.dirty ?? "Unknown"} changes · {w.ahead ?? "Unknown"} ahead · {w.wrote ? "wrote " + time(w.wrote, s.brain?.tz) : w.last ? "commit " + time(w.last, s.brain?.tz) : "activity not recorded"}</small>}
+        {w && <small>{w.dirty ?? "Unknown"} changes · {w.ahead ?? "Unknown"} ahead · {w.wrote ? "wrote " + time(w.wrote, s.brain?.tz) : w.last ? "commit " + time(w.last, s.brain?.tz) : "activity not recorded"}{typeof w.checked_age_seconds === "number" ? ` · checked ${w.checked_age_seconds} s ago` : ""}</small>}
         {l && <small>{Number(l.age_h || 0).toFixed(1)} h · {count(Number(l.Reviews || 0), "review")}{w?.ready ? " · " + (w.ready.ready ? "review checks passed" : "review checks pending") : ""}</small>}
       </div>
       <div className="row-actions">

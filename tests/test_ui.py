@@ -1269,21 +1269,29 @@ ui_json.ui_json_background(root, '[]')
         root = self.first_paint_root()
         self.view_builds(root)
         (root / 'nodes/meadow/status.md').write_text('## Now\nFirst edit.\n')
-        def edit(n):  # the node moves after its view began reading
-            if n['id'] == 'meadow':
+        edits = []
+        def edit(n):  # the node moves once, after its view began reading
+            if n['id'] == 'meadow' and not edits:
+                edits.append(True)
                 (root / 'nodes/meadow/status.md').write_text('## Now\nSecond edit, mid-build.\n')
-        moved, _, _, _ = self.view_builds(root, during=edit)
-        meadow = next(n for n in moved['state']['nodes'] if n['id'] == 'meadow')
-        self.assertEqual(meadow['status'], {'Now': 'Second edit, mid-build.'})  # the moved view was re-read
-        views = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('node-views')
-        self.assertEqual(sorted(views['nodes']), ['root'])  # only views whose stamp held are published
-        self.assertNotIn('meadow', views['due'])
-        self.assertIsNone(views['problems'])
-        record, built, problems, _ = self.view_builds(root)
-        self.assertEqual(built, ['meadow'])  # the mid-build view was not reused
-        self.assertEqual(problems, 1)
+        record, built, _, _ = self.view_builds(root, during=edit)
+        self.assertEqual(built, ['meadow', 'meadow'])  # the moved attempt is re-read from scratch
         meadow = next(n for n in record['state']['nodes'] if n['id'] == 'meadow')
         self.assertEqual(meadow['status'], {'Now': 'Second edit, mid-build.'})
+        self.assertEqual(self.view_builds(root)[1], [])
+
+    def test_inputs_that_keep_moving_deliver_and_save_nothing(self):
+        root = self.first_paint_root()
+        first = self.view_builds(root)[0]
+        def edit(n):
+            if n['id'] == 'meadow':
+                (root / 'nodes/meadow/status.md').write_text('## Now\nEdit %s\n' % time.monotonic_ns())
+        (root / 'nodes/meadow/status.md').write_text('## Now\nMoving.\n')
+        record, built, _, _ = self.view_builds(root, during=edit)
+        self.assertIsNone(record)
+        self.assertEqual(built, ['meadow'] * 3)
+        saved = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('json-snapshot')
+        self.assertEqual(saved['generation'], first['generation'])  # the previous complete snapshot stays
 
     def first_paint_root(self, name='alice'):
         root = self.tmp / name
