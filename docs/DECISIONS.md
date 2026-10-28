@@ -4281,3 +4281,15 @@ legitimate handbacks and native readiness remain with their actual owners.
 Execution requires `--root` to be an instance itself, because Brain resolves
 `BRAIN_ROOT` upward. Conflicting call IDs never join on a shared request ID, and
 any positive lock count fails the bypass gate even when coverage is incomplete.
+## D40011: Nodes own focused runner prefixes
+
+`verify_spec` is an executable argument prefix, independent of the full verify
+command. `spec-run --head <full-sha> -- <spec ids>` appends literal selectors to
+that prefix, rather than guessing how to replace a full runner's selectors or
+asking workers to reproduce its harness. The registered current worktree selects
+the job unless `--branch` is explicit. Exact-head runs require a clean tree before
+and after native heavy admission and after execution. An owned OS temporary
+directory spans execution and is removed on normal or exceptional exit. Existing
+node gating, resource cleanup and private scrubbed logs remain authoritative;
+the focused receipt never becomes full readiness evidence. Legacy explicit
+command execution remains available without the new exact-head assertion.

@@ -545,6 +545,17 @@ Then talk to it:
 
 ## Commands
 
+For focused specs, configure the node's runner argument prefix once, for example
+`brain set website 'verify_spec=python3 -B -m pytest -q -p no:cacheprovider'`.
+From a clean registered job worktree, run
+`brain spec-run website --head <full-sha> -- tests/test_search.py::Search::test_query`.
+Use `--branch <job>` when running from elsewhere. Spec ids are passed literally;
+runner options belong in `verify_spec`. The command waits for the node gate and
+native heavy admission, supplies an owned OS temporary directory, removes it on
+exit, and writes a private focused receipt in `spec-runs/`. It checks the head and
+clean tree again after admission and execution. Focused receipts do not establish
+readiness. The existing `--branch <job> --command <argv...>` form remains available.
+
 You mostly talk to coordinators, and they run `brain` for you. By hand:
 
 <details open>

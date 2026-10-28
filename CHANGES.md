@@ -26,6 +26,13 @@ repeating `--thread <id>` for every exported thread, including bound workers,
 reviewers and descendants. The same per-thread flags are required for `--all-closed`.
 Fresh exhaustive export validation remains required; missing bound threads refuse
 before evidence or ledger writes. See the host adapter for discovery and safety checks.
+## 2026-10-28: Exact-head focused spec runs
+
+Set a node's `verify_spec` to its focused runner argument prefix once. Workers can
+then use `brain spec-run <node> --head <full-sha> -- <spec ids>` from a clean
+registered job worktree. It reuses native heavy admission, cleanup and scrubbed
+logs, supplies an owned temporary directory and records focused receipts only.
+The explicit `--branch ... --command ...` form remains supported.
 
 ## 2026-10-28: Pinned core releases and own-node upgrades
 

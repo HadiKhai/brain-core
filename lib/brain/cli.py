@@ -682,7 +682,8 @@ def _main():
     gate_mode.add_argument('--train', action='store_true')
     gate_mode.add_argument('--nightly', action='store_true')
     cmd("spec-run", _Command("spec_run", "cmd_spec_run"), "run one focused command with native admission; never records full readiness", "id",
-        opt("--branch", required=True), opt("--command", nargs=argparse.REMAINDER, required=True))
+        opt("--branch"), opt("--head", help="exact clean worktree commit to test"),
+        opt("--command", nargs=argparse.REMAINDER), opt("specs", nargs="*"))
     cmd("ready", _Command("verify", "cmd_ready"), "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
         opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
         opt('--enqueue', action='store_true', help='with --record: queue verification and return a request ID'),
@@ -792,6 +793,8 @@ def _main():
     if extra:
         if getattr(a, "f", None) == _m_nodes.cmd_scrub and all(not p.startswith("-") for p in extra):
             a.paths.extend(extra)
+        elif getattr(getattr(a, 'f', None), '__name__', '') == 'cmd_spec_run' and extra[0] == '--':
+            a.specs.extend(extra[1:])
         else:
             ap.error("unrecognized arguments: " + " ".join(extra))
     handler = getattr(a, 'f', None)
