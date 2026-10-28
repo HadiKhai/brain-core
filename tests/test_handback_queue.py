@@ -187,8 +187,10 @@ class HandbackLifecycle(Scenario):
                     text='Concurrent producer', at=inst.now()), start=False))
             return result
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'BATCH_SECONDS', 1000), \
                 mock.patch.object(queue, 'apply_intent', side_effect=produce):
             self.assertTrue(queue.apply_view_batch(inst))
+            self.assertTrue(all(m.intent_receipt(inst, r['id']) for r in requests))
             self.assertIsNone(m.intent_receipt(inst, appended[0]['id']))
             m.drain_intents(inst)
         receipts = [m.intent_receipt(inst, r['id']) for r in requests + appended]

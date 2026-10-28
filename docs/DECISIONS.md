@@ -8,6 +8,9 @@ before application. Exhausting that prefix checks for producer appends; the
 next batch reads fresh queue evidence. No selection survives a batch or restart.
 This removes receipt-history scans per application while retaining the existing
 batch limits, receipt publication, projection and final lease-release handoff.
+Full index integrity is checked at snapshot selection and exhaustion or the next
+batch; each selected request is rechecked before its application. Corruption
+appended during a batch blocks after the already selected FIFO prefix.
 
 ## Writer maintenance prepares every generated view without physical lock ownership
 
