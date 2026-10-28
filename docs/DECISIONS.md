@@ -3956,3 +3956,27 @@ allows worker scheduling, while an explicit release event keeps subprocess work
 blocked until the partial state and event stream have been checked. The existing
 one-second partial-response assertion measures the ready server's response; full
 state equality and all runner/admission assertions remain required.
+
+## 2026-10-28: Plain handback admits through the write queue
+
+A plain `brain handback` now submits the same v2 write request as `--enqueue`,
+then waits for its receipt for a bounded deadline (`--wait`, default 10 s, at
+most 600). It never takes the instance lock while waiting. An applied receipt
+replays the applier's captured native stdout/stderr and exit code, so the caller
+sees what the direct command prints (worker message, or `ready` / `not ready`
+with exit 1). A rejected receipt dies with `handback not recorded: <reason>`.
+Still pending at the deadline prints `queued; applies shortly: <id>` and exits
+0. A blocked marker written after the submission, or an applier that could not
+start, exits nonzero with the ID: neither is "applies shortly".
+
+Cheap refusals (no open job, invalid options, guarded terms) stay at submission,
+before any request exists. Apply-time fences (job changed, binding drift) reach
+the caller through the rejected receipt. `--direct` keeps the old in-process
+path and excludes `--enqueue`, `--request-id` and `--wait`.
+
+One applier serves many callers, so its environment is not the caller's. The
+handback request therefore carries the caller's session IDs, and publication
+records those rather than the applier's. Requests without the field keep the
+earlier behaviour. Verification still runs in the applier's environment, as c56
+already bound it at application. The replayed output keeps the last 16 KiB per
+stream; the receipt validates both as strings.

@@ -222,9 +222,11 @@ def main():
             from . import handback_queue
             try:
                 with _m_timings.queue_phase(root, 'enqueue') as timing:
-                    timing['publish'] = handback_queue.fast_intent(candidate, root)
-                    if timing['publish']:
-                        return
+                    accepted = timing['publish'] = handback_queue.fast_intent(candidate, root)
+                if accepted:
+                    if callable(accepted):
+                        accepted()  # the default handback's receipt wait is not admission time
+                    return
             except (OSError, ValueError) as error:
                 _m_common.die(str(error))
     # A long-lived applier must not retain command profiler/accounting caches.
@@ -258,6 +260,9 @@ def queueable_command(cmd, name):
         opt("--summary", required=True, help="nonempty one-line worker result"),
         opt("--question", help="one-line choice, required for question state"),
         opt("--enqueue", action="store_true", help="return a request ID; queue wait ID returns the native checked verdict"),
+        opt("--direct", action="store_true", help="apply in this process instead of through the write queue"),
+        opt("--wait", type=float, metavar="SECONDS",
+            help="queued default: wait this long for the receipt (default 10), then print the request ID"),
         opt('--request-id', help='retry a queued handback using the same payload-bound ID'),
         opt('--record', action='store_true', help='with done --reviews N: record native readiness'),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
@@ -281,7 +286,7 @@ def fast_write_arguments():
         parser.set_defaults(f=_m_tasks.cmd_task, action='set', cmd='task')
         return parser.parse_args(argv[2:])
     if not (name == 'inbox' and any(a == '--add' or a.startswith('--add=') for a in argv[1:])
-            or name == 'handback' and '--enqueue' in argv[1:]):
+            or name == 'handback' and '--direct' not in argv[1:]):
         return None
     def selected(command, fn, help_text, *specs):
         parser = argparse.ArgumentParser(prog='brain ' + command, description=help_text)
@@ -813,7 +818,10 @@ def _main():
     if root:
         from . import handback_queue
         try:
-            if handback_queue.fast_intent(a, root):
+            accepted = handback_queue.fast_intent(a, root)
+            if accepted:
+                if callable(accepted):
+                    accepted()
                 return
         except (OSError, ValueError) as error:
             _m_common.die(str(error))

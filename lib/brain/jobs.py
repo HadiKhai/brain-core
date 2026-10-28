@@ -256,6 +256,11 @@ def validate_handback_text(a):
 def validate_handback_options(a, row=None):
     """Reject invalid completion flags before attempts, queueing or heavy work."""
     validate_handback_text(a)
+    if getattr(a, 'direct', False) and (getattr(a, 'enqueue', False) or getattr(a, 'request_id', None)
+                                        or getattr(a, 'wait', None) is not None):
+        _m_common.die('--direct applies in this process; it excludes --enqueue, --request-id and --wait')
+    if getattr(a, 'wait', None) is not None and (getattr(a, 'enqueue', False) or not 0 <= a.wait <= 600):
+        _m_common.die('--wait takes 0-600 seconds and goes with the default queued handback, not --enqueue')
     reviews = getattr(a, 'reviews', None)
     study = bool(row and not row.get('Ended') and row.get('Job') == getattr(a, 'branch', None)
                  and _m_briefs.import_job(row['Job']))
@@ -418,19 +423,22 @@ def publish_handback(a):
         if isinstance(packet, dict):
             packet.pop("input_files", None)  # never recommit an older experimental inline fingerprint map
         summary, question = validate_handback_text(a)
+        intent = getattr(a, '_intent_request', None)
+        own = (intent['payload']['sessions'] if intent and isinstance(intent['payload'].get('sessions'), list)
+               else _m_spend.spend_session_ids())  # a queued request carries its caller's sessions
+        own = [i for i in own if isinstance(i, str) and _m_spend.SESSION_ID.fullmatch(i)]
         data = {"version": 3, "job": row["Job"], "started": row["Started"], "state": a.state,
                 "summary": summary, "question": question, "attempt_id": a._attempt_id,
-                "sessions": list(dict.fromkeys(sessions + _m_spend.spend_session_ids()))[-20:],
+                "sessions": list(dict.fromkeys(sessions + own))[-20:],
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
         if request:
             data['queue_publication'] = {'request': request['id'], 'lease': request['lease']}
-        intent = getattr(a, '_intent_request', None)
         if intent:
             data['write_request'] = intent['id']
-            if not _m_queue.checked_handback(intent['payload']):
-                data['ready'], data['ready_reasons'] = None, []
+            if not _m_queue.checked_handback(intent['payload']) and not intent['payload'].get('carry_ready'):
+                data['ready'], data['ready_reasons'] = None, []  # explicit --enqueue messages carry no readiness
         if duration is not None:
             data["verify_duration"] = duration
             prior_wait = forecast_number(previous.get("admission_wait_seconds_total"))

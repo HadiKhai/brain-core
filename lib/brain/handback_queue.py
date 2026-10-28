@@ -26,6 +26,7 @@ _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_machine = _m_common.LazyModule(__package__, 'machine')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_lifecycle_identity = _m_common.LazyModule(__package__, 'lifecycle_identity')
+_m_spend = _m_common.LazyModule(__package__, 'spend')
 
 
 QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report', 'reviews',
@@ -37,6 +38,10 @@ QUEUE_LEASE = contextvars.ContextVar('brain_queue_lease', default=None)
 PATCH_FIELDS = frozenset(('title', 'description', 'kind', 'priority', 'order',
                           'estimate', 'spent', 'external_url', 'next_action'))
 MAX_INTENT = 65536
+# A plain handback waits this long for its receipt, then reports the queued ID.
+HANDBACK_WAIT = 10.0
+# Native application output replayed from a receipt keeps only its tail.
+MAX_REPLAY = 16384
 
 
 def intent_bytes(value):
@@ -185,7 +190,8 @@ def intent_receipt(inst, identity):
             or result.get('state') not in ('applied', 'rejected') or type(result.get('sequence')) is not int
             or result.get('view') not in ((None, 'pending', 'current', 'invalid') if result['state'] == 'applied'
                                           else (None,))
-            or ('nodes' in result) != (result.get('view') is not None)):
+            or ('nodes' in result) != (result.get('view') is not None)
+            or any(not isinstance(result.get(key, ''), str) for key in ('output', 'diagnostic'))):
         raise ValueError('blocked write queue: invalid receipt')
     nodes = result.get('nodes', [])
     # Legacy receipts (no view) were maintained synchronously. A view-bearing
@@ -326,17 +332,23 @@ def fast_intent(a, root):
                 return False  # effective completion proof retains synchronous refusal
             guard.no_terms_in(n, json.dumps(changes), 'task patch')
             payload = dict(kind='task', node=n['id'], task=a.task_id, changes=changes)
-    elif (name == 'cmd_handback' or name == 'cmd_ready' and getattr(a, 'record', False)) and getattr(a, 'enqueue', False):
+    elif (name == 'cmd_handback' and not getattr(a, 'direct', False)
+          or name == 'cmd_ready' and getattr(a, 'record', False) and getattr(a, 'enqueue', False)):
         if name == 'cmd_ready':
             a.state = 'done'
         n = inst.node(a.id)
+        # Cheap submit-time refusals; application revalidates under the lock.
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch)
         if not row:
             raise ValueError('no open job for handback')
         _m_jobs.validate_handback_options(a, row=row)
         args = {key: getattr(a, key, None) for key in QUEUE_ARGS}
         guard.no_terms_in(n, json.dumps(args), 'handback request')
-        payload = dict(kind='handback', node=n['id'], job_key=_m_jobs.job_key(row), args=args)
+        # The applier may serve many callers; spend belongs to this one.
+        payload = dict(kind='handback', node=n['id'], job_key=_m_jobs.job_key(row), args=args,
+                       sessions=_m_spend.spend_session_ids())
+        if name == 'cmd_handback' and not getattr(a, 'enqueue', False):
+            payload['carry_ready'] = True  # the plain form keeps --direct's readiness carry-forward
     if payload is None:
         return False
     if payload['kind'] == 'inbox' and getattr(a, 'request_id', None):
@@ -345,12 +357,64 @@ def fast_intent(a, root):
             payload['at'] = previous['payload']['at']
         except FileNotFoundError:
             pass
-    data = submit_intent(inst, payload, getattr(a, 'request_id', None))
+    since = time.time()
+    data = submit_intent(inst, payload, getattr(a, 'request_id', None), start=False)
+    started = True
+    try:
+        start_intent_drainer(inst)
+    except OSError:
+        started = False
+        print('write accepted; applier could not start: run brain queue drain, then queue wait ' + data['id'],
+              file=sys.stderr)
+    if name == 'cmd_handback' and not getattr(a, 'enqueue', False):
+        wait = HANDBACK_WAIT if getattr(a, 'wait', None) is None else a.wait
+        return lambda: await_handback(inst, n, data['id'], wait, started, since)
     if getattr(a, 'json', False):
         print(json.dumps(dict(state='queued', request_id=data['id'])))
     else:
         print(data['id'])
     return True
+
+
+def await_handback(inst, n, identity, wait, started=True, since=0.0):
+    """Bounded receipt wait for a plain handback. Never takes the instance lock.
+
+    Applied: replay the native output and exit code. Rejected: the refusal
+    reaches this caller. Still pending: the queued ID, never a false record.
+    """
+    from . import guard, timings
+    terms = guard.never_terms(n)
+    with timings.queue_phase(inst.root, 'wait'):
+        deadline = time.monotonic() + wait
+        while True:
+            receipt = intent_receipt(inst, identity)
+            if receipt or time.monotonic() >= deadline:
+                break
+            time.sleep(0.025)
+    if receipt is None:
+        try:
+            # A marker older than this submission may belong to a block that a
+            # later drain is already retrying; a fresh one is this queue now.
+            blocked = intent_path(inst, 'blocked').stat().st_mtime >= since
+        except FileNotFoundError:
+            blocked = False
+        if blocked:
+            _m_common.die('write queue blocked; handback ' + identity + ' not recorded yet: inspect '
+                          '.brain/write-queue/blocked, then brain queue wait ' + identity)
+        if not started:
+            _m_common.die('handback ' + identity + ' accepted, not recorded: run brain queue drain, '
+                          'then brain queue wait ' + identity)
+        print('queued; applies shortly: ' + identity + ' (brain queue wait ' + identity + ' shows its result)')
+        return
+    sys.stdout.write(receipt.get('output', ''))
+    sys.stdout.flush()
+    if receipt.get('diagnostic'):
+        sys.stderr.write(receipt['diagnostic'])
+    if receipt['state'] == 'rejected':
+        reason = (receipt.get('reason') or 'refused').removeprefix('brain: ')
+        _m_common.die(guard.redact('handback not recorded: ' + reason, terms))
+    if receipt.get('exit_code', 0):
+        raise _m_common.VerdictExit(receipt['exit_code'])
 
 
 def apply_intent(inst, data):
@@ -682,13 +746,14 @@ def apply_view_batch(inst):
             sequence, data = pending[0]
             state, reason = 'applied', ''
             verdict = None
-            diagnostic = io.StringIO()
+            diagnostic, output = io.StringIO(), io.StringIO()
             operation = None
             with intent_touched(), _m_instance.brain_lock(inst):
                 current = _m_instance.Instance(inst.root)
                 args = argparse.Namespace(cmd='queue', action='apply', id=data['payload']['node'], f=cmd_intent_queue)
                 try:
-                    with contextlib.redirect_stderr(diagnostic):
+                    # The native output belongs to the request's caller, via its receipt.
+                    with contextlib.redirect_stderr(diagnostic), contextlib.redirect_stdout(output):
                         if _m_common.outward_links(inst.root):
                             raise ValueError('unsafe instance links; write request rejected')
                         operation = events.Command(inst.root, args)
@@ -708,6 +773,10 @@ def apply_view_batch(inst):
                     validate_handback_verdict(verdict)
                 result = ({key: verdict[key] for key in ('ready', 'verdict', 'reasons', 'exit_code',
                            'attempt_id', 'binding') if key in verdict} if verdict else {})
+                if data['payload']['kind'] == 'handback':
+                    result['output'] = output.getvalue()[-MAX_REPLAY:]
+                    if state == 'applied':
+                        result['diagnostic'] = diagnostic.getvalue()[-MAX_REPLAY:]
                 receipt = dict(id=data['id'], hash=data['hash'], sequence=sequence, state=state,
                                reason=reason or '; '.join(result.get('reasons', [])), **result)
                 if state == 'applied':

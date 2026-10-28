@@ -597,6 +597,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain brief <id> [--branch B] --task-file F` | task, limits, routing, resume state and ranked usable lessons |
 | `brain brief <id> --small --task "..."` | a minutes-long, low-risk task without job ceremony |
 | `brain handback <id> --branch B --state done --summary "..." --reviews N --report P --lessons "..."` | one worker finishing step; every publication needs a one-line summary, question state also needs `--question` |
+| `brain handback <id> ... [--wait SECONDS]` | queued by default: waits up to 10 s for the receipt and prints its result, else `queued; applies shortly: <id>` |
+| `brain handback <id> ... --direct` | the old in-process hand-back, without the write queue |
 | `brain handback <id> ... --enqueue` | enqueue a hand-back; print a request ID without waiting for verification |
 | `brain queue wait <request-id> [--timeout SECONDS]` | read a durable result; checked handbacks exit 0 ready, 1 not ready; timeout stays pending |
 | `brain queue run <id> --once [--request-id ID]` | run one request through the native verifier; `--request-id ID --recover` explicitly reconciles proven local ownership |

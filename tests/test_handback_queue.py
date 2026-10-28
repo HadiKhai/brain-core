@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import hashlib
 from unittest import mock
 
@@ -1632,6 +1633,110 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         cli('queue','drain')
         self.assertEqual(json.loads(cli('queue','wait',identity)), receipt)
         self.assertEqual(path.read_bytes(),hb)
+
+    def default_cli(self, inst):
+        def cli(*args, ok=True, env=None):
+            result = subprocess.run([sys.executable, str(CORE / 'bin/brain'), *args], cwd=inst.root,
+                                    env=env or self.env, capture_output=True, text=True, timeout=PROCESS_BUDGET)
+            self.assertEqual(result.returncode == 0, ok, result.stdout + result.stderr)
+            return result
+        return cli
+
+    def test_default_handback_queues_waits_and_replays_the_applied_output(self):
+        m, inst, n, row = self.fixture()
+        cli = self.default_cli(inst)
+        base = ('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--lessons', 'none: fixture')
+        result = cli(*base, '--summary', 'Queued default', '--wait', str(PROCESS_BUDGET))
+        [(_, request)] = m.intent_index(inst)
+        receipt = m.intent_receipt(inst, request['id'])
+        self.assertEqual(receipt['state'], 'applied')
+        self.assertEqual(m.read_handback(n, row)['summary'], 'Queued default')
+        self.assertEqual(m.read_handback(n, row)['write_request'], request['id'])
+        # Applied within the deadline: the native output, never a queued notice.
+        self.assertEqual(result.stdout, receipt['output'])
+        self.assertIn('blocked', result.stdout)
+        self.assertNotIn('queued', result.stdout)
+        # --direct keeps the old in-process path: no request, same native message.
+        direct = cli(*base, '--summary', 'Direct result', '--direct')
+        self.assertEqual(len(m.intent_index(inst)), 1)
+        self.assertEqual(m.read_handback(n, row)['summary'], 'Direct result')
+        self.assertNotIn('write_request', m.read_handback(n, row))
+        self.assertEqual(direct.stdout.splitlines()[-1], result.stdout.splitlines()[-1])
+        for extra in (('--enqueue',), ('--wait', '1'), ('--request-id', 'a' * 32)):
+            refused = cli(*base, '--summary', 'Mixed', '--direct', *extra, ok=False)
+            self.assertIn('--direct applies in this process', refused.stderr)
+        refused = cli(*base, '--summary', 'Mixed', '--enqueue', '--wait', '1', ok=False)
+        self.assertIn('--wait takes', refused.stderr)
+        self.assertEqual(len(m.intent_index(inst)), 1)
+
+    def test_default_handback_past_its_deadline_reports_the_queued_id_honestly(self):
+        m, inst, n, row = self.fixture()
+        cli = self.default_cli(inst)
+        before = m.read_handback(n, row)
+        fd = m.intent_lease(inst)
+        try:
+            # A busy applier: admission returns within the bound, nothing applied.
+            result = cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked',
+                         '--summary', 'Pending result', '--lessons', 'none: fixture', '--wait', '0.2')
+            [(_, request)] = m.intent_index(inst)
+            self.assertEqual(result.stdout.strip(), 'queued; applies shortly: ' + request['id'] +
+                             ' (brain queue wait ' + request['id'] + ' shows its result)')
+            self.assertNotIn('recorded', result.stdout + result.stderr)
+            self.assertIsNone(m.intent_receipt(inst, request['id']))
+            self.assertEqual(m.read_handback(n, row), before)
+            # A block raised after this submission is not "applies shortly".
+            m.intent_store(inst, 'blocked', dict(state='blocked', reason='fixture'))
+            with mock.patch.object(m, 'brain_lock', side_effect=AssertionError('wait acquired lock')), \
+                    self.assertRaisesRegex(SystemExit, 'write queue blocked; handback ' + request['id']):
+                m.await_handback(inst, n, request['id'], 0, since=0.0)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                m.await_handback(inst, n, request['id'], 0, since=time.time() + 60)
+            self.assertIn('queued; applies shortly', out.getvalue())
+            with self.assertRaisesRegex(SystemExit, 'accepted, not recorded: run brain queue drain'):
+                m.await_handback(inst, n, request['id'], 0, started=False, since=time.time() + 60)
+            os.unlink(m.intent_path(inst, 'blocked'))
+        finally:
+            os.close(fd)
+        cli('queue', 'drain')
+        self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'applied')
+        self.assertEqual(m.read_handback(n, row)['summary'], 'Pending result')
+
+    def test_default_handback_refusals_reach_the_caller(self):
+        m, inst, n, row = self.fixture()
+        cli = self.default_cli(inst)
+        # Submit-time: no open job is refused before any request exists.
+        refused = cli('handback', 'root', '--branch', 'job/missing', '--state', 'blocked',
+                      '--summary', 'No job', '--lessons', 'none: fixture', ok=False)
+        self.assertIn('no open job for handback', refused.stderr)
+        self.assertEqual(m.intent_index(inst), [])
+        # Apply-time: the job fence refuses and the rejected receipt says so.
+        args = dict(id='root', branch=row['Job'], state='blocked', summary='Stale job', question=None,
+                    lessons='none: fixture', report=None, reviews=None, need_human=None,
+                    restart=None, reverify=False, full_receipt=None, record=None)
+        request = m.submit_intent(inst, dict(kind='handback', node='root', job_key='0' * 16, args=args,
+                                             sessions=[]), start=False)
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            m.drain_intents(inst)
+        self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'rejected')
+        with mock.patch.object(m, 'brain_lock', side_effect=AssertionError('wait acquired lock')), \
+                self.assertRaises(SystemExit) as exit:
+            m.await_handback(inst, n, request['id'], 0)
+        self.assertEqual(exit.exception.code, 'brain: handback not recorded: job changed before queued message application')
+        self.assertIsNone(m.read_handback(n, row))
+
+    def test_default_handback_keeps_the_callers_sessions_not_the_appliers(self):
+        m, inst, n, row = self.fixture()
+        cli = self.default_cli(inst)
+        fd = m.intent_lease(inst)
+        try:
+            cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--summary', 'Session result',
+                '--lessons', 'none: fixture', '--wait', '0', env={**self.env, 'CLAUDE_CODE_SESSION_ID': 'caller-session-1'})
+        finally:
+            os.close(fd)
+        [(_, request)] = m.intent_index(inst)
+        self.assertEqual(request['payload']['sessions'], ['caller-session-1'])
+        cli('queue', 'drain', env={**self.env, 'CLAUDE_CODE_SESSION_ID': 'applier-session-1'})
+        self.assertEqual(m.read_handback(n, row)['sessions'], ['caller-session-1'])
 
     def test_m3_cli_empty_scan_silent_then_one_synthetic_ask(self):
         m, inst, n, row = self.fixture()
