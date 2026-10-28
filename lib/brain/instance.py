@@ -97,10 +97,11 @@ class Instance:
             self._local_observed_stamp = stamp
 
     def save_local(self):
-        data = copy.deepcopy(self.local)
         with _m_common.durable_directory_target(self.local_path, private=True) as target:
-            target.atomic_write(json.dumps(data, indent=2, sort_keys=True) + "\n")
-        self._local_observed_data = data
+            data = json.dumps(self.local, indent=2, sort_keys=True)
+            target.atomic_write(data + "\n")
+        # Track the published value without detaching callers' live bindings.
+        self._local_observed_data = json.loads(data)
 
     def local_of(self, nid):
         return self.local["nodes"].setdefault(nid, {})
