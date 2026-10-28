@@ -329,20 +329,10 @@ def cmd_train(a):
 
 
 def reconcile_manual_landings(inst, n):
-    """Close only completed exact-head jobs whose commits are already in local main."""
-    closed = []
-    with _m_instance.brain_lock(inst):
-        current = _m_instance.Instance(inst.root).node(n['id'])
-        for row in _m_jobs.read_jobs(current) or []:
-            if row.get('Ended') or _m_briefs.import_job(row['Job']):
-                continue
-            if _m_jobs.publication_refusal(current, row) or not _m_jobs.manual_landing(current, row):
-                continue
-            state = _m_verify.ready_state(inst, current, row['Job'], train=True)
-            if not state['ready']:
-                continue
-            _m_jobs.close_ledger_job(inst, current, row['Job'], preview=False)
-            closed.append(_m_jobs.job_key(row))
+    """Reconcile Git completion even if a pre-landing ready packet is stale."""
+    closed = _m_jobs.reconcile_manual_landings(inst, n)
+    for row in _m_jobs.read_jobs(n) or []:
+        if _m_jobs.job_key(row) in closed:
             print('train: reconciled manual landing ' + row['Job'])
     if closed and 'preview_upgrade' in n['local']:
         from . import preview_upgrade as _m_preview_upgrade

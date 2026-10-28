@@ -4156,3 +4156,24 @@ configuration uses native queries. Worktree status and checkout identity always
 retain their native checks.
 Merge-tree checks remain native because configured merge drivers can depend on
 external state even when both commit IDs and repository configuration are fixed.
+
+## 2026-10-28: Reconcile job ledgers from local Git ancestry
+
+Ordinary `jobs` inspection and the landing entry point reconcile open jobs whose
+current branch tips are ancestors of local main. A branch still at its recorded
+creation tip stays open. Missing refs, diverged tips and unresolved train
+publication journals never authorize automatic closure. Missing recorded start
+commits also leave jobs open. Candidate discovery stays lock-free; only a possible
+closure enters the normal writer transaction, with uncached authority reads and
+closure status maintenance. Closure records the
+delivered head, observed main commit and changed code paths without fabricating
+verification or readiness evidence. The explicit `jobs --live` projection remains
+read-only. Repeated reconciliation preserves the original completion record.
+
+`jobs <node> --rebind <branch>` restores a missing ledger row only for an existing
+linked checkout matching that node's registered worktree binding. It preserves
+checkout contents and rejects conflicting ownership. A unique active task's open
+attempt restores its original job identity, retaining its contract and handback;
+otherwise a task-free node creates a fresh identity. Historical completion rows
+stay closed and cannot be rebound, and ambiguous or absent task identities refuse recovery. Rebinding
+does not start setup, reset Git or manufacture verification evidence.

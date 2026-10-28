@@ -25,6 +25,62 @@ WT_PORT_BASE = 4100
 SETUP_FILE = "worktree-setup.sh"  # in a node folder: prepares each new worktree (env files, installs)
 
 
+def rebind_job(inst, node, branch):
+    """Recover missing ledger ownership from a registered, still-linked checkout."""
+    from . import job_adoption
+    with _m_instance.brain_lock(inst):
+        inst = _m_instance.Instance(inst.root)
+        n, home = git_home(inst, node)
+        _m_guard.no_terms_in(n, branch, 'rebound branch')
+        if _m_common.git('check-ref-format', '--branch', branch, cwd=home).returncode:
+            _m_common.die('rebind refused: invalid branch')
+        try:
+            path, _ = job_adoption.adoption_checkout(home, branch)
+        except ValueError as error:
+            _m_common.die(str(error))
+        binding = n['local'].get('worktrees', {}).get(branch)
+        if not binding or Path(binding['path']).resolve() != path:
+            _m_common.die('rebind refused: branch needs its registered worktree binding')
+        for other in inst.nodes():
+            for name, record in other['local'].get('worktrees', {}).items():
+                if Path(record['path']).resolve() == path and (other['id'] != node or name != branch):
+                    _m_common.die('rebind refused: checkout also belongs to another job')
+        rows = _m_jobs.ledger_rows(n)
+        if rows is None:
+            _m_common.die('rebind refused: unrecognized job ledger')
+        row = _m_jobs.open_job(rows, branch)
+        if row:
+            print('already bound: ' + branch + ' (' + _m_jobs.job_key(row) + ')')
+            return
+        # Never reopen historical completion or reuse its verification proof.
+        # A surviving active task attempt can restore the original immutable
+        # identity, including its contract and worker-owned handback.
+        tasks = _m_tasks.read_records(n)
+        linked = [task for task in tasks.values() if task.get('branch') == branch
+                  and task.get('status') in ('in-progress', 'in-review', 'testing')]
+        if len(linked) > 1 or tasks and not linked:
+            _m_common.die('rebind refused: no unique active task for this branch')
+        if not linked and any(old['Job'] == branch for old in rows):
+            _m_common.die('rebind refused: historical job binding exists; use a new branch')
+        row = {'Job': branch, 'Started': inst.now_dt().isoformat(), 'Reviews': '0',
+               'Runtime': n['fm'].get('runtime', ''), 'Rebound': inst.now()}
+        if linked:
+            task = linked[0]
+            attempts = [attempt for attempt in task.get('attempts', [])
+                        if attempt.get('job') == task.get('job') and attempt.get('state') == 'open'
+                        and attempt.get('branch') == branch]
+            if (len(attempts) != 1 or not inst.parse_time(attempts[0].get('started'))
+                    or _m_jobs.job_identity(branch, attempts[0]['started']) != task.get('job')):
+                _m_common.die('rebind refused: active task attempt identity is missing or ambiguous')
+            row.update(Started=attempts[0]['started'], Task=task['id'])
+        if any(_m_jobs.job_key(old) == _m_jobs.job_key(row) for old in rows):
+            _m_common.die('rebind refused: historical job identity must stay closed')
+        rows.append(row)
+        _m_jobs.write_jobs(inst, n, rows)
+        inst.commit([], f"{n['id']}: missing ledger job rebound")
+        print('rebound: ' + branch + ' (' + _m_jobs.job_key(row) + ')')
+
+
 def job_where(n, branch):
     """Resolve a brief's registered job worktree, or its usual node/home directory."""
     w = n["local"].get("worktrees", {}).get(branch) if branch else None

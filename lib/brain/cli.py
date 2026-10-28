@@ -203,7 +203,7 @@ def writes(a):
         return bool(a.fix)
     if name == "cmd_jobs":
         return a.start or a.close or bool(getattr(a, "settled", False)) or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
-            or bool(a.usage_file)
+            or bool(a.usage_file) or bool(getattr(a, 'rebind', None)) or bool(getattr(a, '_reconcile_landings', False))
     if name == "cmd_ready":
         return a.record
     if name in ("cmd_principal", "cmd_schedule"):
@@ -436,6 +436,7 @@ def _main():
         opt("--switch", help="record provider switch: old -> new: reason"),
         opt("--start", action="store_true", help="coordinator: start an import study or adopt an existing --thread"),
         opt("--thread", help="with --start/--branch: adopt an existing worker and its linked Git checkout"),
+        opt("--rebind", metavar="BRANCH", help="restore a missing ledger row for a registered existing worktree branch"),
         opt("--close", action="store_true", help="coordinator: close a processed study, manually landed job, or parked job with --reason"),
         opt("--reason", help="one-line reason to explicitly close parked work"),
         opt("--live", action="store_true", help="read-only JSON rows joining ledger, hand-back, attempts and recorded queues; host activity unknown"),
@@ -811,6 +812,11 @@ def _main():
         with _m_timings.queue_phase(_m_nodes.find_root(), phase):
             a.f(a)
         return
+    if a.f.__name__ == 'cmd_jobs' and not writes(a) and not getattr(a, 'live', False):
+        from . import jobs
+        # Candidate discovery never takes the writer lock or caches authority.
+        # A possible closure uses the normal command transaction and fresh reads.
+        a._reconcile_landings = jobs.jobs_need_reconciliation(a)
     if command_read(a):
         handler = a.f
         def read_handler(args):

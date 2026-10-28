@@ -62,6 +62,140 @@ def settlement_export(test, root, node, branch=None, key=None, all_closed=False)
         return str(path)
 
 
+class LedgerFollowsMain(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.root = self.init('ledger')
+        self.home = self.repo(self.tmp / 'app')
+        self.b(self.root, 'new', 'a', '--title', 'A', '--home', str(self.home))
+        self.b(self.root, 'wt', 'add', 'a', 'job')
+        self.wt = self.tmp / 'app-work/worktrees/job'
+        self.module = core_loader.SourceFileLoader('ledger_follows_main', str(CORE / 'bin/brain')).load_module()
+
+    def rows(self):
+        return self.module.read_jobs(self.module.Instance(self.root).node('a'))
+
+    def commit_work(self):
+        (self.wt / 'feature.py').write_text('value = 1\n')
+        self.git('add', 'feature.py', cwd=self.wt)
+        self.git('commit', '-qm', 'Deliver feature', cwd=self.wt)
+        return self.git('rev-parse', 'HEAD', cwd=self.wt).strip()
+
+    def test_jobs_closes_manual_landing_without_ready_packet_and_retains_evidence(self):
+        head = self.commit_work()
+        self.git('merge', '--ff-only', 'job', cwd=self.home)
+        self.git('commit', '--allow-empty', '-qm', 'Later main work', cwd=self.home)
+        main = self.git('rev-parse', 'main', cwd=self.home).strip()
+        out = self.b(self.root, 'jobs', 'a', '--branch', 'job')
+        self.assertIn('1 finished (1 merged', out)
+        row, = self.rows()
+        self.assertTrue(row['Ended'])
+        self.assertEqual((row['Head commit'], row['Main commit']), (head, main))
+        self.assertEqual(json.loads(row['Code paths']), ['feature.py'])
+        self.assertEqual(row['Outcome'], 'merged')
+        self.assertFalse(list((self.root / 'nodes/a/job-handbacks').glob('*.json')))
+        before = (self.root / 'nodes/a/job-ledger.md').read_bytes()
+        self.b(self.root, 'jobs', 'a')
+        self.assertEqual((self.root / 'nodes/a/job-ledger.md').read_bytes(), before)
+        inst = self.module.Instance(self.root)
+        summary = self.module.jobs_summary(inst, inst.node('a'))
+        self.assertEqual(summary['merged'], 1)
+        self.assertEqual(sum(day['merged'] for day in summary['throughput']), 1)
+
+    def test_unlanded_and_untouched_branches_stay_open(self):
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+        self.commit_work()
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_missing_baseline_stays_open_without_waiting_for_writer_lock(self):
+        local = self.root / '.brain/local.json'
+        data = json.loads(local.read_text())
+        data['nodes']['a']['worktrees']['job'].pop('start')
+        local.write_text(json.dumps(data))
+        before = (self.root / '.brain/events.jsonl').read_bytes()
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+        self.assertEqual((self.root / '.brain/events.jsonl').read_bytes(), before)
+        inst = self.module.Instance(self.root)
+        jobs = self.module._owners['manual_landing_candidates']
+        with mock.patch.object(jobs._m_instance, 'brain_lock', side_effect=AssertionError('unexpected lock')):
+            self.assertEqual(jobs.reconcile_manual_landings(inst, inst.node('a')), [])
+
+    def test_event_source_reconciliation_is_a_complete_writer_transaction(self):
+        inst = self.module.Instance(self.root)
+        events = self.module._owners['cmd_events']
+        first = inst.now_dt() - datetime.timedelta(days=1, minutes=1)
+        events.append_line(self.root / '.brain/events-compare.jsonl',
+            {'ts': first.strftime('%Y-%m-%d %H:%M +00:00'), 'node': 'a', 'kind': 'comparison', 'equal': True})
+        self.b(self.root, 'status', 'a', '--refresh')
+        self.b(self.root, 'set', 'a', 'status_source=events')
+        self.commit_work()
+        self.git('merge', '--ff-only', 'job', cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertEqual(self.rows()[0]['Outcome'], 'merged')
+        self.b(self.root, 'backlog', 'a', 'add', 'Follow reconciled landing')
+        self.b(self.root, 'status', 'a', '--refresh')
+
+    def test_changed_branch_during_completion_evidence_refuses_closure(self):
+        self.commit_work()
+        self.git('merge', '--ff-only', 'job', cwd=self.home)
+        inst = self.module.Instance(self.root)
+        git = self.module.git
+        def move(*args, **kwargs):
+            result = git(*args, **kwargs)
+            if args[:3] == ('diff', '--name-only', '-z'):
+                self.git('commit', '--allow-empty', '-qm', 'Concurrent follow-up', cwd=self.wt)
+            return result
+        with mock.patch.object(self.module, 'git', side_effect=move):
+            with self.assertRaisesRegex(SystemExit, 'changed while reading completion evidence'):
+                self.module.prepare_ledger_close(inst, inst.node('a'), self.rows()[0])
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_branch_advanced_after_landing_stays_open(self):
+        self.commit_work()
+        self.git('merge', '--ff-only', 'job', cwd=self.home)
+        self.git('commit', '--allow-empty', '-qm', 'Unlanded follow-up', cwd=self.wt)
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_diverged_and_missing_refs_stay_open(self):
+        self.commit_work()
+        self.git('commit', '--allow-empty', '-qm', 'Separate main change', cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+        self.git('checkout', '--detach', cwd=self.wt)
+        self.git('branch', '-D', 'job', cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_live_projection_stays_read_only_and_unresolved_train_blocks_reconciliation(self):
+        self.commit_work()
+        self.git('merge', '--ff-only', 'job', cwd=self.home)
+        self.b(self.root, 'jobs', 'a', '--live')
+        self.assertFalse(self.rows()[0]['Ended'])
+        folder = self.root / 'nodes/a/job-trains'
+        folder.mkdir()
+        (folder / 'uncertain.json').write_text(json.dumps({'state': 'publication_failed',
+            'accepted': [{'key': self.module.job_key(self.rows()[0])}]}))
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_landing_reconciler_uses_same_ancestry_rule_without_gate_readiness(self):
+        self.commit_work()
+        self.git('merge', '--ff-only', 'job', cwd=self.home)
+        inst = self.module.Instance(self.root)
+        train = self.module._owners['cmd_land']
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(output):
+            closed = train.reconcile_manual_landings(inst, inst.node('a'))
+        self.assertIn('train: reconciled manual landing job', output.getvalue())
+        self.assertEqual(closed, [self.module.job_key(self.rows()[0])])
+        self.assertEqual(self.rows()[0]['Outcome'], 'merged')
+        self.assertEqual(json.loads(self.rows()[0]['Code paths']), ['feature.py'])
+
+
 class LedgerReviewEvidence(Scenario):
     def test_next_write_repairs_only_rows_with_retained_review_evidence(self):
         r = self.init("alice")

@@ -1102,6 +1102,16 @@ def prepare_ledger_close(inst, n, row, reason=None):
     if landed and not reason:
         row.update({'Outcome': 'merged', 'Head commit': landed[0], 'Main commit': landed[1],
                     'Lesson check': 'required', 'Cause': 'manual landing confirmed in local main'})
+        base = n['local'].get('worktrees', {}).get(row['Job'], {}).get('start')
+        # Delivered paths are Git facts, independent of verification/readiness.
+        paths = (_m_common.git('diff', '--name-only', '-z', base, landed[0], cwd=n['home_path']) if base else
+                 _m_common.git('diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-z',
+                               landed[0], cwd=n['home_path']))
+        if paths.returncode:
+            _m_common.die('cannot read landed job code paths; ledger unchanged')
+        if manual_landing(n, row) != landed:
+            _m_common.die('branch or main changed while reading completion evidence; retry closure')
+        row['Code paths'] = json.dumps(paths.stdout.strip('\0').split('\0') if paths.stdout else [])
     else:
         if not one_line(reason):
             _m_common.die('--close needs a merged branch or a nonempty one-line --reason for parked/closed work')
@@ -1128,6 +1138,34 @@ def close_ledger_job(inst, n, branch, reason=None, preview=True):
         print_thread_checklist(n, row)
     if preview:
         job_preview_after_landing(inst, n, row)
+
+
+def manual_landing_candidates(n, branch=None):
+    for row in read_jobs(n) or []:
+        if (row.get('Ended') or _m_briefs.import_job(row['Job']) or branch and row['Job'] != branch
+                or not n['local'].get('worktrees', {}).get(row['Job'], {}).get('start')):
+            continue
+        if not publication_refusal(n, row) and manual_landing(n, row):
+            yield row
+
+
+def jobs_need_reconciliation(a):
+    inst = _m_nodes.load()
+    return any(next(manual_landing_candidates(n, a.branch), None) is not None
+               for n in inst.nodes() if not a.id or n['id'] == a.id)
+
+
+def reconcile_manual_landings(inst, n, branch=None):
+    """Local Git ancestry closes ledger work; it never invents gate evidence."""
+    if next(manual_landing_candidates(n, branch), None) is None:
+        return []
+    closed = []
+    with _m_instance.brain_lock(inst):
+        current = _m_instance.Instance(inst.root).node(n['id'])
+        for row in list(manual_landing_candidates(current, branch)):
+            close_ledger_job(inst, current, row['Job'], preview=False)
+            closed.append(job_key(row))
+    return closed
 
 
 def job_preview_after_landing(inst, n, row):
@@ -1661,6 +1699,14 @@ def job_budget_lines(inst, n, planned=None):
 
 
 def cmd_jobs(a):
+    if getattr(a, 'rebind', None) is not None:
+        if (not a.id or any((a.branch, a.job_key, a.start, a.close, a.settled, a.all_closed,
+                getattr(a, 'live', False), a.lessons is not None, a.switch is not None,
+                a.contract_file, a.usage_file, getattr(a, 'thread', None),
+                getattr(a, 'reason', None), getattr(a, 'attestation_file', None)))):
+            _m_common.die('--rebind needs a node and a branch, without other job updates')
+        from . import worktrees
+        return worktrees.rebind_job(_m_nodes.load(), a.id, a.rebind)
     if getattr(a, 'thread', None) is not None:
         if (not (a.id and a.branch and a.start) or any((a.close, a.settled, a.all_closed,
                 getattr(a, 'live', False), a.lessons is not None, a.switch is not None,
@@ -1856,6 +1902,8 @@ def cmd_jobs(a):
     for n in inst.nodes():
         if a.id and n["id"] != a.id:
             continue
+        if getattr(a, '_reconcile_landings', False):
+            reconcile_manual_landings(inst, n, a.branch)
         j = jobs_summary(inst, n)
         if not j["rows"] and not a.branch:
             continue

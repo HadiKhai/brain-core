@@ -668,7 +668,8 @@ class Command:
         ids = {n["id"] for n in self.inst.nodes()}
         candidates = [getattr(args, "id", None), getattr(args, "node", None), getattr(args, "source", None)] if args else [node]
         self.node = next((target for target in candidates if isinstance(target, str) and target in ids), "root")
-        self.close_job = bool(getattr(args, "close", False)) or (args is not None and args.f.__name__ in ("cmd_wt_prune", "cmd_wt_rm"))
+        self.close_job = (bool(getattr(args, "close", False)) or bool(getattr(args, '_reconcile_landings', False))
+                          or (args is not None and args.f.__name__ in ("cmd_wt_prune", "cmd_wt_rm")))
         self.command = command or args.f.__name__.removeprefix("cmd_")
         if getattr(args, "project", False) and self.command == "status":
             self.command = "project_status"

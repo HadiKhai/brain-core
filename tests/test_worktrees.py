@@ -28,6 +28,73 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class RebindLedgerJob(Scenario):
+    def setUp(self):
+        super().setUp()
+        self.root = self.init('rebind')
+        self.home = self.repo(self.tmp / 'app')
+        self.b(self.root, 'new', 'a', '--title', 'A', '--home', str(self.home))
+        self.b(self.root, 'set', 'a', 'runtime=codex', 'verify=python3 -c "pass"')
+
+    def start(self, task=False):
+        if task:
+            self.b(self.root, 'task', 'add', 'a', 'RECOVER', 'status=ready', '--title', 'Recover work')
+        self.b(self.root, 'wt', 'add', 'a', 'job', *(['--task-id', 'RECOVER'] if task else []))
+        self.wt = self.tmp / 'app-work/worktrees/job'
+        (self.wt / 'feature.py').write_text('value = 1\n')
+        self.git('add', 'feature.py', cwd=self.wt)
+        self.git('commit', '-qm', 'Deliver feature', cwd=self.wt)
+        self.module = core_loader.SourceFileLoader('rebind_ledger', str(CORE / 'bin/brain')).load_module()
+        inst = self.module.Instance(self.root)
+        n = inst.node('a')
+        self.old = self.module.read_jobs(n)[0]
+        self.module.write_jobs(inst, n, [])
+
+    def test_rebind_restores_missing_row_and_native_handback_is_accepted(self):
+        self.start()
+        (self.wt / 'draft').write_text('unfinished\n')
+        before = self.git('status', '--porcelain', cwd=self.wt)
+        self.assertIn('rebound:', self.b(self.root, 'jobs', 'a', '--rebind', 'job'))
+        self.assertEqual(self.git('status', '--porcelain', cwd=self.wt), before)
+        self.assertIn('already bound:', self.b(self.root, 'jobs', 'a', '--rebind', 'job'))
+        self.b(self.root, 'handback', 'a', '--branch', 'job', '--state', 'done',
+               '--summary', 'Recovered native handback', '--lessons', 'none: fixture')
+        live = json.loads(self.b(self.root, 'jobs', 'a', '--live'))
+        self.assertEqual(live['handback']['state'], 'done')
+        self.assertEqual(live['handback']['summary'], 'Recovered native handback')
+
+    def test_active_task_attempt_recovers_original_identity_and_checked_handback(self):
+        self.start(task=True)
+        self.b(self.root, 'jobs', 'a', '--rebind', 'job')
+        live = json.loads(self.b(self.root, 'jobs', 'a', '--live'))
+        self.assertEqual(live['job_key'], self.module.job_key(self.old))
+        self.assertEqual(live['ledger']['Task'], 'RECOVER')
+        self.b(self.root, 'handback', 'a', '--branch', 'job', '--state', 'done', '--reviews', '1',
+               '--summary', 'Recovered checked handback', '--lessons', 'none: fixture')
+        live = json.loads(self.b(self.root, 'jobs', 'a', '--live'))
+        self.assertEqual(live['handback']['ready']['verify_result'], 0)
+
+    def test_rebind_refuses_missing_or_mismatched_checkout_and_combined_updates(self):
+        self.start()
+        for args in (('job/absent',), ('main',), ('job', '--close'), ('job', '--live'),
+                     ('job', '--branch', 'job'), ('job', '--thread', 'fixture')):
+            self.b(self.root, 'jobs', 'a', '--rebind', *args, ok=False)
+        self.git('checkout', '--detach', cwd=self.wt)
+        self.b(self.root, 'jobs', 'a', '--rebind', 'job', ok=False)
+        self.assertEqual(self.module.read_jobs(self.module.Instance(self.root).node('a')), [])
+
+    def test_rebind_never_recounts_a_historically_landed_branch(self):
+        self.start()
+        self.b(self.root, 'jobs', 'a', '--rebind', 'job')
+        self.git('merge', '--ff-only', 'job', cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertIn('historical job binding exists', self.b(self.root, 'jobs', 'a', '--rebind', 'job', ok=False))
+        self.b(self.root, 'jobs', 'a')
+        rows = self.module.read_jobs(self.module.Instance(self.root).node('a'))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['Outcome'], 'merged')
+
+
 class Workbench(Scenario):
     fixture_init_in_process = True
 
