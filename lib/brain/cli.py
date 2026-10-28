@@ -684,16 +684,21 @@ def _main():
     cmd("spec-run", _Command("spec_run", "cmd_spec_run"), "run one focused command with native admission; never records full readiness", "id",
         opt("--branch"), opt("--head", help="exact clean worktree commit to test"),
         opt("--command", nargs=argparse.REMAINDER), opt("specs", nargs="*"))
-    cmd("ready", _Command("verify", "cmd_ready"), "check a worker's ready packet against the branch and cached origin default (local main without origin)", "id",
-        opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
-        opt('--enqueue', action='store_true', help='with --record: queue verification and return a request ID'),
-        opt('--request-id', help='retry --record --enqueue with the same payload-bound ID'),
-        opt("--summary", help="one-line hand-back result (required for --record with schema v3)"),
-        opt("--question", help="one-line coordinator choice for a question hand-back"),
-        opt("--reviews", type=int, help="completed review rounds, required with --record"),
-        opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
-        opt("--full-receipt", help="with --record: adopt a native full-run receipt"),
-        opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
+    for name, record, help_text in (
+        ("ready", False, "check a worker's ready packet against the branch and cached origin default (local main without origin)"),
+        ("verify", True, "run node verification and record a hand-back with its duration"),
+    ):
+        ready = cmd(name, _Command("verify", "cmd_ready"), help_text, "id",
+            opt("--branch", required=True), opt("--record", action="store_true", help="worker: run node verify and record"),
+            opt('--enqueue', action='store_true', help='with --record: queue verification and return a request ID'),
+            opt('--request-id', help='retry --record --enqueue with the same payload-bound ID'),
+            opt("--summary", help="one-line hand-back result (required for --record with schema v3)"),
+            opt("--question", help="one-line coordinator choice for a question hand-back"),
+            opt("--reviews", type=int, help="completed review rounds, required with --record"),
+            opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+            opt("--full-receipt", help="with --record: adopt a native full-run receipt"),
+            opt("--reverify", action="store_true", help="with --record: run verify even if a green run still proves it"))
+        ready.set_defaults(record=record)
     cmd("host", _Command("host_actions", "cmd_host"), "explicit coordinator provisioning and host wake/watch actions",
         opt("action", choices=['provision', 'wake-setup', 'watch', 'schedule']), "id", opt("--model"), opt("--url"),
         opt("--schedule-id"), opt("--provider", help="explicit host runtime for schedule binding"),

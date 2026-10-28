@@ -15,6 +15,14 @@ where to get it. This machine's bindings (host IDs, the home's local path) are i
 `.brain/local.json`: see `core/bin/brain show <id>`.
 For home jobs, set `verify: <command>` with `brain set`; `brain handback --state done --reviews N` runs it in
 the worker's worktree before hand-back.
+`brain verify <id> --branch <branch> --reviews N --summary "<result>"` uses the same
+verification and hand-back path. Both commands print the verify duration, including
+admission and preflight; reused proof reports zero new execution time. The job
+ledger consumes this measurement into `Verify s` and `Verify reused` on its next write.
+Runs over 600 seconds print a slow-verify warning. Set
+`brain set <id> verify_warn_seconds=900` to override the limit in this node's
+`node.md`, or set `verify_warn_seconds` in `instance.md` for the instance default.
+The warning is advisory and does not change readiness or stop verification.
 
 `parallel_jobs: N` sets the maximum number of open ledger jobs (a positive integer,
 default 1 when absent); set it with `brain set <id> parallel_jobs=N`. Record agreed

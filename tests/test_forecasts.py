@@ -116,8 +116,9 @@ class JobForecasts(Scenario):
         self.assertEqual((size["files"], size["lines"], size["binary_files"]), (2, 2, 1))
         self.git("restore", "README.md", cwd=wt)
         self.b(self.root, "jobs", "app", "--branch", "job/sample", "--usage-file", str(self.usage_file()))
-        self.b(self.root, "handback", "app", "--branch", "job/sample", "--state", "done", "--summary", "Fixture result", "--reviews", "1",
-               "--lessons", "none: fixture", "--report", "reports/fixture.md")
+        handback = self.b(self.root, "handback", "app", "--branch", "job/sample", "--state", "done", "--summary", "Fixture result", "--reviews", "1",
+                          "--lessons", "none: fixture", "--report", "reports/fixture.md")
+        self.assertIn("verify duration:", handback)
         hb = self.m.read_handback(n, row)
         self.assertGreaterEqual(hb["verify_duration"]["elapsed_seconds"], 0)
         self.assertFalse(hb["verify_duration"]["reused"])
@@ -299,11 +300,21 @@ class JobForecasts(Scenario):
         fresh = self.m.record_verify_duration(self.inst, self.n, row, {'verify_reused': False}, 601.25)
         self.assertEqual(fresh['elapsed_seconds'], 601.25)
         self.assertTrue(fresh['slow'])
+        self.assertIn('slow verify: exceeds 600s', self.m.verify_duration_line(self.inst, self.n, fresh))
+        boundary = self.m.record_verify_duration(self.inst, self.n, row, {}, 600)
+        self.assertFalse(boundary['slow'])
+        self.assertNotIn('slow verify', self.m.verify_duration_line(self.inst, self.n, boundary))
         reused = self.m.record_verify_duration(self.inst, self.n, row, {'verify_reused': True}, 900)
         self.assertEqual(reused['elapsed_seconds'], 0)
         self.assertFalse(reused['slow'])
         self.n['fm']['verify_warn_seconds'] = '900'
         self.assertFalse(self.m.record_verify_duration(self.inst, self.n, row, {}, 601.25)['slow'])
+        self.assertNotIn('slow verify', self.m.verify_duration_line(self.inst, self.n, fresh))
+        self.inst.cfg['verify_warn_seconds'] = '500'
+        self.assertFalse(self.m.record_verify_duration(self.inst, self.n, row, {}, 601.25)['slow'])
+        del self.n['fm']['verify_warn_seconds']
+        self.assertTrue(self.m.record_verify_duration(self.inst, self.n, row, {}, 501)['slow'])
+        del self.inst.cfg['verify_warn_seconds']
         for bad in (-1, float('nan'), True):
             self.assertIsNone(self.m.record_verify_duration(self.inst, self.n, row, {}, bad))
         hb = {'version': 2, 'job': row['Job'], 'started': row['Started'], 'state': 'done',
@@ -320,6 +331,71 @@ class JobForecasts(Scenario):
         path.write_text(json.dumps({**hb, 'verify_duration': {'elapsed_seconds': 'private', 'reused': False}}))
         self.m.write_jobs(self.inst, self.n, [row])
         self.assertNotIn('private', self.m.read_jobs(self.n)[0]['Verify s'])
+
+    def test_verify_command_prints_records_and_warns_using_node_override(self):
+        home = self.repo(self.tmp / 'app')
+        self.b(self.root, 'new', 'app', '--title', 'App', '--home', str(home))
+        self.b(self.root, 'set', 'app', 'verify=true', 'verify_warn_seconds=0.000000001')
+        self.b(self.root, 'wt', 'add', 'app', 'job/sample')
+        args = ('app', '--branch', 'job/sample', '--summary', 'Fixture result', '--reviews', '1')
+        output = self.b(self.root, 'verify', *args, '--lessons', 'none: fixture')
+        self.assertIn('verify duration:', output)
+        self.assertIn('slow verify: exceeds 1e-09s', output)
+        self.assertEqual(output.strip().splitlines()[-1], 'ready')
+        inst = self.m.Instance(self.root)
+        n = inst.node('app')
+        row = self.m.open_job(self.m.read_jobs(n), 'job/sample')
+        duration = self.m.read_handback(n, row)['verify_duration']
+        self.assertTrue(duration['slow'])
+        self.assertGreater(duration['elapsed_seconds'], 0)
+        self.assertEqual(duration['warning_seconds'], 1e-9)
+        # Ledger consumption uses the existing worker-owned measurement.
+        self.m.write_jobs(inst, n, self.m.read_jobs(n))
+        self.assertEqual(float(self.m.read_jobs(n)[0]['Verify s']), duration['elapsed_seconds'])
+        self.b(self.root, 'set', 'app', 'verify_warn_seconds=3600')
+        output = self.b(self.root, 'verify', *args, '--reverify')
+        self.assertIn('verify duration:', output)
+        self.assertNotIn('slow verify', output)
+        self.assertEqual(output.strip().splitlines()[-1], 'ready')
+        # The queued alias keeps the same durable result and caller-visible duration.
+        request = self.b(self.root, 'verify', *args, '--enqueue', '--reverify').strip()
+        receipt = json.loads(self.b(self.root, 'queue', 'wait', request))
+        self.assertTrue(receipt['ready'])
+        output = receipt['output']
+        self.assertIn('verify duration:', output)
+        self.assertNotIn('slow verify', output)
+        self.assertEqual(output.strip().splitlines()[-1], 'ready')
+        output = self.b(self.root, 'verify', *args)
+        self.assertIn('verify duration: 0.000s', output)
+        self.assertIn('reused proof, no new execution', output)
+        self.assertNotIn('slow verify', output)
+        # A failed verifier still reports the measured duration before its verdict.
+        self.b(self.root, 'set', 'app', 'verify=false', 'verify_warn_seconds=0.000000001')
+        output = self.b(self.root, 'handback', *args, '--state', 'done', ok=False)
+        self.assertIn('verify duration:', output)
+        self.assertIn('slow verify', output)
+        self.assertIn('not ready:', output)
+        # A later unverified hand-back keeps the recorded duration but never reprints it as its own.
+        output = self.b(self.root, 'handback', 'app', '--branch', 'job/sample', '--summary', 'Fixture blocked', '--state', 'blocked')
+        self.assertNotIn('verify duration', output)
+        self.assertIsNotNone(self.m.read_handback(n, row)['verify_duration'])
+
+    def test_recovered_handback_output_keeps_its_recorded_duration(self):
+        duration = self.m.record_verify_duration(self.inst, self.n, {}, {}, 601)
+        request = {'id': 'fixture', 'payload': {'node': 'root'}}
+        verdict = {'ready': False, 'reasons': ['fixture failure']}
+        with mock.patch.object(self.m, 'intent_read', return_value={'after': {'verify_duration': duration}}):
+            output = self.m.native_result_line(self.inst, request, verdict)
+        self.assertIn('verify duration: 601.000s', output)
+        self.assertIn('slow verify: exceeds 600s', output)
+        self.assertTrue(output.endswith('not ready: fixture failure\n'))
+        with mock.patch.object(self.m, 'intent_read', return_value={'after': {}}):
+            self.assertEqual(self.m.native_result_line(self.inst, request, verdict), 'not ready: fixture failure\n')
+        # An unchecked recovered message verified nothing now, whatever duration it carries.
+        prepared = {'after': {'verify_duration': duration, 'state': 'blocked', 'report': 'reports/fixture.md'},
+                    'job_key': 'fixture', 'branch': 'job/sample'}
+        with mock.patch.object(self.m, 'intent_read', return_value=prepared):
+            self.assertNotIn('verify duration', self.m.native_result_line(self.inst, request, None))
 
     def test_wave_fit_uses_fresh_weekly_headroom_and_retains_unknown_samples(self):
         rows = self.rows()

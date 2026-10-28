@@ -625,7 +625,10 @@ class HandbackLifecycle(Scenario):
             m.drain_intents(inst)
             receipt = m.intent_receipt(inst, checked['id'])
             self.assertEqual((receipt['state'], receipt['exit_code']), ('applied', 1))
-            self.assertEqual(receipt['output'], 'not ready: native verifier failed\n')
+            # Recovery reprints the checked hand-back's recorded duration before its verdict.
+            duration, verdict = receipt['output'].splitlines(keepends=True)
+            self.assertTrue(duration.startswith('verify duration: '))
+            self.assertEqual(verdict, 'not ready: native verifier failed\n')
             with self.assertRaises(SystemExit) as exit, contextlib.redirect_stdout(io.StringIO()) as out:
                 m.await_handback(inst, n, checked['id'], 0)
             self.assertEqual((exit.exception.code, out.getvalue()), (1, receipt['output']))

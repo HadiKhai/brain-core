@@ -553,6 +553,10 @@ def publish_handback(a):
                              _m_guard.never_terms(n)))
     except (OSError, ValueError, RuntimeError):
         pass  # accounting never blocks a hand-back
+    # Only this call's measurement: a carried-over duration belongs to an earlier verify.
+    duration_line = verify_duration_line(inst, n, duration)
+    if duration_line:
+        print(_m_guard.redact(duration_line, _m_guard.never_terms(n)))
     checked = not study and a.state == "done" and (a.reviews is not None or getattr(a, "record", False))
     if checked:
         if intent:

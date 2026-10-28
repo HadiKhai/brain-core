@@ -914,11 +914,14 @@ def native_result_line(inst, request, verdict):
     from . import guard, messages, verify
     n = inst.node(request['payload']['node'])
     terms = guard.never_terms(n)
-    if verdict:
-        text = 'ready' if verdict['ready'] else 'not ready: ' + '; '.join(dict.fromkeys(verdict['reasons']))
-        return verify.VerifyScrubber(terms).feed(text, final=True) + '\n'
     prepared = intent_read(inst, request['id'] + '.prepared')
     after = prepared['after']
+    # Only a checked hand-back verified now; an unchecked one may carry an earlier duration.
+    duration = verdict and _m_jobs.verify_duration_line(inst, n, after.get('verify_duration'))
+    prefix = guard.redact(duration, terms) + '\n' if duration else ''
+    if verdict:
+        text = 'ready' if verdict['ready'] else 'not ready: ' + '; '.join(dict.fromkeys(verdict['reasons']))
+        return prefix + verify.VerifyScrubber(terms).feed(text, final=True) + '\n'
     report = after.get('report') or _m_common.tilde(n['dir'] / 'job-handbacks' / (prepared['job_key'] + '.json'))
     kind = 'blocked' if after['state'] == 'failed' else after['state']
     return guard.redact(messages.format_worker_message(
