@@ -2225,7 +2225,8 @@ class AutonomyInbox(Scenario):
         journal = root / '.brain/events.jsonl'
         before = journal.read_bytes() if journal.exists() else None
         with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
-                mock.patch.object(sys, 'argv', ['brain', 'now']), mock.patch.object(tm, 'SLOW_SECONDS', 0):
+                mock.patch.object(sys, 'argv', ['brain', 'now']), \
+                mock.patch.object(tm, 'sample', side_effect=[(10, 111), (16, 125)]):
             with tm.command():
                 tm.select_command('now')
                 tm.record('lock_wait', 0.125)
@@ -2238,6 +2239,10 @@ class AutonomyInbox(Scenario):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['lock_wait_s'], 0.125)
         self.assertEqual(rows[0]['lock_hold_s'], 0.25)
+        self.assertGreaterEqual(rows[0]['cpu_s'], 0)
+        self.assertAlmostEqual(rows[0]['work_s'], rows[0]['cpu_s'] + 0.25)
+        self.assertIn('load1_start', rows[0])
+        self.assertIn('load1_end', rows[0])
         self.assertGreaterEqual(rows[0]['phases']['fixture'], 0)
         profile = rows[0]['profile']
         self.assertTrue(profile['top'])
@@ -2261,6 +2266,7 @@ class AutonomyInbox(Scenario):
         clock.perf_counter.side_effect = [0.0, 6.0]
         with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
                 mock.patch.object(tm, 'time', clock), \
+                mock.patch.object(tm, 'sample', side_effect=[(10, 100), (16, 120)]), \
                 mock.patch.object(tm.pstats, 'Stats') as stats:
             stats.return_value.stats = {('fixture.py', i, 'λ' * 5000 + str(i)): (1, 1, 0.01, 0.02, {})
                                         for i in range(40)}
@@ -2281,9 +2287,64 @@ class AutonomyInbox(Scenario):
         m.atomic_write(folder / filename, json.dumps(legacy), private=True)
         row = json.loads(appended)
         row['data'].update(command='legacy', profile=filename)
+        for key in ('cpu_s', 'work_s', 'load1_start', 'load1_end'):
+            row['data'].pop(key)
         m.append_line(folder / 'events.jsonl', row)
         rows = json.loads(self.b(root, 'timings', '--command', 'legacy', '--json'))
         self.assertEqual(rows[0]['profile'], legacy)
+        self.assertIsNone(rows[0]['slow'])
+        self.assertIsNone(rows[0]['work_s'])
+        self.assertEqual(json.loads(self.b(root, 'timings', '--slow', '--command', 'legacy', '--json')), [])
+        report = self.b(root, 'timings', '--command', 'legacy')
+        self.assertIn('CPU+hold unknown', report)
+        self.assertIn('wall 6.000s (load1 unknown -> unknown)', report)
+        summary = json.loads(self.b(root, 'timings', '--command', 'legacy', '--summary', '--json'))
+        self.assertEqual(summary['unknown_count'], 1)
+        self.assertIsNone(summary['p50_s'])
+
+    def test_timing_judges_cpu_and_hold_instead_of_wall_or_lock_wait(self):
+        root = self.init('demo')
+        m = core_loader.SourceFileLoader('cpu_timing_fixture', str(CORE / 'bin/brain')).load_module()
+        tm = m._owners['cmd_timings']
+        for cpu, hold, slow in ((1, 0, False), (1, 5, True), (6, 0, True)):
+            clock = mock.Mock()
+            clock.perf_counter.side_effect = [0, 346]
+            with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                    mock.patch.object(tm, 'time', clock), \
+                    mock.patch.object(tm, 'sample', side_effect=[(10, 111), (10 + cpu, 125)]):
+                with tm.command():
+                    tm.select_command('ui')
+                    tm.record('lock_wait', 300)
+                    tm.record('lock_hold', hold)
+            row = json.loads((root / '.brain/timings/events.jsonl').read_text().splitlines()[-1])['data']
+            self.assertEqual(row['cpu_s'], cpu)
+            self.assertEqual(row['load1_start'], 111)
+            self.assertEqual(row['load1_end'], 125)
+            self.assertEqual(row['slow'], slow)
+            self.assertEqual('profile' in row, slow)
+            self.assertEqual(row['work_s'], cpu + hold)
+        rows = json.loads(self.b(root, 'timings', '--slow', '--command', 'ui', '--json'))
+        self.assertEqual([r['work_s'] for r in rows], [6, 6])
+        report = self.b(root, 'timings', '--command', 'ui')
+        self.assertIn('1.000s CPU+hold', report)
+        self.assertIn('wall 346.000s (load1 111.00 -> 125.00)', report)
+        summary = json.loads(self.b(root, 'timings', '--command', 'ui', '--summary', '--json'))
+        self.assertEqual(summary, dict(metric='cpu_s+lock_hold_s', count=3, measured_count=3,
+                                       unknown_count=0, p50_s=6, p95_s=6))
+
+    def test_timing_samples_self_and_child_cpu_and_handles_unavailable_load(self):
+        m = core_loader.SourceFileLoader('cpu_sample_fixture', str(CORE / 'bin/brain')).load_module()
+        tm = m._owners['cmd_timings']
+        with mock.patch.object(tm.os, 'times', return_value=(1, 2, 3, 4, 9999)), \
+                mock.patch.object(tm.os, 'getloadavg', return_value=(111, 166, 125)):
+            self.assertEqual(tm.sample(), (10, 111))
+        with mock.patch.object(tm.os, 'getloadavg', side_effect=OSError('unsupported')):
+            self.assertIsNone(tm.sample()[1])
+        data = tm.measurements(346, {}, (None, None), (None, None))
+        self.assertIsNone(data['cpu_s'])
+        self.assertIsNone(data['slow'])
+        self.assertIsNone(tm.work_seconds({'cpu_s': float('nan')}))
+        self.assertIsNone(tm.work_seconds({'cpu_s': True}))
 
     def test_lock_hold_counts_physical_ownership_once_across_release(self):
         root = self.init('demo')

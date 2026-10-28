@@ -29,17 +29,23 @@ class OperationTimings(Scenario):
         path = root / '.brain/timings/events.jsonl'
         for i in range(1, 101):
             m.append_line(path, dict(ts=1000 + i, node=m.node_ref('app'), kind='timing',
-                                    data=dict(command='fixture', elapsed_s=i, slow=True)))
+                                    data=dict(command='fixture', elapsed_s=i, cpu_s=101-i, lock_hold_s=0, slow=True)))
+        m.append_line(path, dict(ts=1101, node=m.node_ref('app'), kind='timing',
+                                data=dict(command='fixture', elapsed_s=999, slow=True)))
         for row in ({'kind': 'timing', 'data': {'elapsed_s': float('nan')}}, [],
                     {'kind': 'timing', 'ts': None, 'data': {'elapsed_s': 1}}):
             m.append_line(path, row)
         args = ['timings', '--command', 'fixture', '--node', 'app']
         summary = json.loads(self.b(root, *args, '--summary', '--json'))
-        self.assertEqual(summary, dict(count=100, p50_s=50, p95_s=95))
+        self.assertEqual(summary, dict(metric='cpu_s+lock_hold_s', count=101, measured_count=100, unknown_count=1, p50_s=50, p95_s=95))
         rows = json.loads(self.b(root, *args, '--since', '1090', '--until', '1100', '--slowest', '2', '--json'))
-        self.assertEqual([r['elapsed_s'] for r in rows], [100, 99])
+        self.assertEqual([r['elapsed_s'] for r in rows], [90, 91])
+        self.assertEqual([r['work_s'] for r in rows], [11, 10])
+        all_rows = json.loads(self.b(root, *args, '--slowest', '102', '--json'))
+        self.assertIsNone(all_rows[-1]['work_s'])
+        self.assertEqual(all_rows[-1]['elapsed_s'], 999)
         self.assertEqual(json.loads(self.b(root, *args, '--since', '1970-01-01T00:18:10Z',
-                                         '--summary', '--json'))['count'], 11)
+                                         '--summary', '--json'))['count'], 12)
         self.assertIn('invalid timing filter', self.b(root, 'timings', '--slowest', '0', ok=False))
         self.assertIn('invalid timing filter', self.b(root, 'timings', '--since', 'nan', ok=False))
         self.assertEqual(inst.node('app')['id'], 'app')
@@ -73,7 +79,11 @@ class OperationTimings(Scenario):
         self.b(root, 'time', '--threshold', '0', '--', sys.executable, '-c', script)
         rows = json.loads(self.b(root, 'timings', '--command', Path(sys.executable).name, '--json'))
         row = rows[-1]
-        self.assertTrue(row['slow'])
+        # The explicit opt-in sampling threshold still captures processes;
+        # speed queries treat the wrapper's unavailable CPU as unknown.
+        self.assertIsNone(row['slow'])
+        native = [json.loads(line) for line in (root / '.brain/timings/events.jsonl').read_text().splitlines()]
+        self.assertTrue(next(r['data']['slow'] for r in reversed(native) if r.get('data', {}).get('source') == 'wrapper'))
         self.assertTrue(row['process_sampling']['approximate'])
         self.assertGreaterEqual(len(row['processes']), 2)
         pids = {r['pid'] for r in row['processes']}

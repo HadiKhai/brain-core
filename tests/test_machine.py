@@ -2419,6 +2419,12 @@ class WriteQueueService(Scenario):
         self.assertEqual([set(r['phases']) for r in records],
                          [{'queue_enqueue'}, {'queue_apply', 'queue_backlog'}, {'queue_wait'}])
         self.assertEqual(records[1]['phases']['queue_backlog'], 12)
+        for record in records:
+            self.assertGreaterEqual(record['cpu_s'], 0)
+            self.assertEqual(record['lock_wait_s'], 0)
+            self.assertEqual(record['lock_hold_s'], 0)
+            self.assertIn('load1_start', record)
+            self.assertIn('load1_end', record)
         before = (self.root / '.brain/timings/events.jsonl').read_bytes()
         with timings.queue_phase(self.root, 'enqueue') as capture:
             capture['publish'] = False  # synchronous forms did not enqueue
@@ -2427,6 +2433,25 @@ class WriteQueueService(Scenario):
                 mock.patch.object(self.queue._m_common, 'directory_target', side_effect=OSError('disk unavailable')):
             with timings.queue_phase(self.root, 'enqueue'):
                 pass  # telemetry errors cannot change the caller's result
+
+    def test_queue_timing_retains_nested_lock_totals_without_counting_wait_as_work(self):
+        timings = self.service._m_timings
+        parent = {}
+        token = timings._CURRENT.set(parent)
+        try:
+            with mock.patch.object(timings, 'sample', side_effect=[(10, 111), (10, 111), (11, 125), (11, 125)]):
+                with timings.queue_phase(self.root, 'apply'):
+                    with timings.command(persist=False):
+                        timings.record('lock_wait', 300)
+                        timings.record('lock_hold', 5)
+            data = json.loads((self.root / '.brain/timings/events.jsonl').read_text().splitlines()[-1])['data']
+            self.assertEqual(data['lock_wait_s'], 300)
+            self.assertEqual(data['lock_hold_s'], 5)
+            self.assertEqual(data['work_s'], 6)
+            self.assertTrue(data['slow'])
+            self.assertEqual(parent, {'lock_wait': 300, 'lock_hold': 5})
+        finally:
+            timings._CURRENT.reset(token)
 
     def test_health_read_never_suppresses_a_producers_fallback(self):
         import fcntl

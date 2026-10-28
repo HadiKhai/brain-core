@@ -727,7 +727,7 @@ def _main():
         opt("--slow", action="store_true"), opt("--command"), opt("--node"),
         opt("--since", help="inclusive ISO timestamp or Unix seconds"),
         opt("--until", help="inclusive ISO timestamp or Unix seconds"),
-        opt("--slowest", type=int, metavar="N"), opt("--summary", action="store_true"),
+        opt("--slowest", type=int, metavar="N"), opt("--summary", action="store_true", help="CPU plus lock hold p50/p95; legacy CPU is unknown"),
         opt("--json", action="store_true"))
     cmd("time", _Command("operation_timings", "cmd_time"), "time a command inside a Brain; never log arguments or output",
         opt("--node"), opt("--threshold", type=float, default=5.0),

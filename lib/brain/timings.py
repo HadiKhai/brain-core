@@ -6,6 +6,7 @@ import functools
 import json
 import math
 import datetime
+import os
 import pstats
 import re
 import time
@@ -40,6 +41,49 @@ def timing_node(inst, ref=None):
             if path and (path == cwd or path in cwd.parents):
                 matches.append((len(path.parts), n))
     return max(matches, key=lambda row: row[0])[1] if matches else inst.node('root')
+
+
+def sample():
+    """Process CPU includes user/system for self and reaped children, never uptime."""
+    try:
+        cpu = sum(os.times()[:4])
+    except (AttributeError, OSError, ValueError):
+        cpu = None
+    try:
+        load = os.getloadavg()[0]
+    except (AttributeError, OSError, ValueError):
+        load = None
+    return cpu, load
+
+
+def number(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def work_seconds(data):
+    """Unknown CPU is unknown work; legacy wall time cannot stand in for CPU."""
+    cpu, hold = data.get('cpu_s'), data.get('lock_hold_s', 0)
+    return cpu + hold if number(cpu) and number(hold) else None
+
+
+def measurements(elapsed, phases, started, ended):
+    cpu = max(0.0, ended[0] - started[0]) if all(number(s[0]) for s in (started, ended)) else None
+    data = dict(elapsed_s=round(elapsed, 6), cpu_s=round(cpu, 6) if cpu is not None else None,
+                load1_start=started[1], load1_end=ended[1],
+                lock_wait_s=round(phases.get('lock_wait', 0.0), 6),
+                lock_hold_s=round(phases.get('lock_hold', 0.0), 6))
+    work = work_seconds(data)
+    data['work_s'] = round(work, 6) if work is not None else None
+    data['slow'] = data['work_s'] > SLOW_SECONDS if data['work_s'] is not None else None
+    return data
+
+
+def restore_phases(token, phases):
+    _CURRENT.reset(token)
+    # Nested scopes retain their own samples and contribute phases to their
+    # enclosing scope, including physical lock intervals counted only once.
+    for name, seconds in phases.items():
+        record(name, seconds)
 
 
 def select_command(name, persist=True):
@@ -77,6 +121,7 @@ def timed(name):
 def command(persist=True):
     from . import spend, usage_cache
     start = time.perf_counter()
+    started = sample()
     phases = {}
     token = _CURRENT.set(phases)
     label_token = _LABEL.set('invalid')
@@ -97,11 +142,12 @@ def command(persist=True):
     finally:
         profiler.disable()
         elapsed = time.perf_counter() - start
-        _CURRENT.reset(token)
+        ended = sample()
+        restore_phases(token, phases)
         # Telemetry never changes the command's outcome, even on damaged storage.
         try:
             if _PERSIST.get():
-                publish(elapsed, phases, profiler, success)
+                publish(elapsed, phases, profiler, success, measurements(elapsed, phases, started, ended))
         except (Exception, SystemExit):
             pass
         finally:
@@ -110,7 +156,7 @@ def command(persist=True):
             _NODE.reset(node_token)
 
 
-def publish(elapsed, phases, profiler, success):
+def publish(elapsed, phases, profiler, success, measured=None):
     from . import events, guard, instance, nodes
     root = nodes.try_find_root()
     if root is None:
@@ -119,11 +165,9 @@ def publish(elapsed, phases, profiler, success):
     # Only a registered command word, never its arguments or raw invocation.
     name = _LABEL.get()
     identity = uuid.uuid4().hex
-    data = dict(command=name, elapsed_s=round(elapsed, 6), slow=elapsed > SLOW_SECONDS,
-                lock_wait_s=round(phases.get('lock_wait', 0.0), 6),
-                lock_hold_s=round(phases.get('lock_hold', 0.0), 6),
+    data = dict(command=name, **(measured or measurements(elapsed, phases, (None, None), (None, None))),
                 success=success, phases={k[:64]: round(v, 6) for k, v in sorted(phases.items())[:32]})
-    if elapsed > SLOW_SECONDS:
+    if data['slow']:
         # Filenames alone (no absolute source paths, arguments, locals or callers).
         rows = sorted(pstats.Stats(profiler).stats.items(), key=lambda row: row[1][3], reverse=True)[:30]
         top = [dict(function=Path(k[0]).name + ':' + str(k[1]) + ':' + k[2],
@@ -131,7 +175,8 @@ def publish(elapsed, phases, profiler, success):
         terms = [t for n in inst.nodes() for t in guard.never_terms(n)]
         for row in top:
             row['function'] = nodes.import_text(row['function'], terms, metadata=True)[:256]
-        profile = {'command': name, 'elapsed_s': data['elapsed_s'], 'top': top}
+        profile = {'command': name, **{key: data[key] for key in
+                   ('elapsed_s', 'cpu_s', 'work_s', 'load1_start', 'load1_end')}, 'top': top}
         data['profile'] = profile
     record = dict(ts=inst.now(), node=events.node_ref(timing_node(inst, _NODE.get())['id']),
                   kind='timing', actor='brain', ref=identity, data=data)
@@ -188,9 +233,12 @@ def cmd_timings(a):
                                 and (not node or events.same_node(row.get('node'), a.node))
                                 and (since is None or stamp(row.get('ts')) >= since)
                                 and (until is None or stamp(row.get('ts')) <= until)
-                                and (not a.slow or data.get('slow'))
                                 and (not a.command or data.get('command') == a.command)):
                             item = dict(data, ts=row.get('ts'), node=row.get('node'))
+                            item['work_s'] = work_seconds(item)
+                            item['slow'] = item['work_s'] > SLOW_SECONDS if item['work_s'] is not None else None
+                            if a.slow and not item['slow']:
+                                continue
                             legacy = item.get('profile')
                             if isinstance(legacy, str) and re.fullmatch(r'[0-9a-f]{32}\.json', legacy):
                                 try:
@@ -204,14 +252,17 @@ def cmd_timings(a):
                         continue
         except (OSError, ValueError, SystemExit):
             continue
-    if a.summary:
-        values = sorted(row['elapsed_s'] for row in records)
-        result = dict(count=len(values), p50_s=values[math.ceil(len(values) * .50) - 1] if values else None,
+    if getattr(a, 'summary', False):
+        values = sorted(row['work_s'] for row in records if row['work_s'] is not None)
+        result = dict(metric='cpu_s+lock_hold_s', count=len(records), measured_count=len(values),
+                      unknown_count=len(records) - len(values),
+                      p50_s=values[math.ceil(len(values) * .50) - 1] if values else None,
                       p95_s=values[math.ceil(len(values) * .95) - 1] if values else None)
         print(json.dumps(result, indent=2) if a.json else
-              f"count={result['count']} p50_s={result['p50_s']} p95_s={result['p95_s']}")
+              f"CPU+hold count={result['measured_count']} unknown={result['unknown_count']} "
+              f"p50_s={result['p50_s']} p95_s={result['p95_s']}")
         return
-    records = (sorted(records, key=lambda row: row['elapsed_s'], reverse=True)[:a.slowest]
+    records = (sorted(records, key=lambda row: (row['work_s'] is not None, row['work_s'] or 0), reverse=True)[:a.slowest]
                if a.slowest else records[-50:])
     if a.json:
         print(json.dumps(records, indent=2))
@@ -221,11 +272,25 @@ def cmd_timings(a):
         for row in records:
             phases = ', '.join(k + '=' + format(v, '.3f') + 's' for k, v in row.get('phases', {}).items()
                                if isinstance(v, (int, float)))
-            print(f"{row['ts']} {row.get('command', '?')}: {row['elapsed_s']:.3f}s" +
+            print(f"{row['ts']} " + report_line(row) +
                   (' slow' if row.get('slow') else '') + ('; ' + phases if phases else '') +
                   (('; profile: ' + str(len(row['profile'].get('top', []))) + ' functions'
                     if isinstance(row.get('profile'), dict) else '; profile .brain/timings/' + row['profile'])
                    if row.get('profile') else ''))
+
+
+def report_line(row):
+    def seconds(key):
+        value = row.get(key)
+        return f'{value:.3f}s' if number(value) else 'unknown'
+    def load(key):
+        value = row.get(key)
+        return f'{value:.2f}' if number(value) else 'unknown'
+    work = work_seconds(row)
+    verdict = f'{work:.3f}s CPU+hold' if work is not None else 'CPU+hold unknown (legacy/unavailable CPU)'
+    return (f"{row.get('command', '?')}: {verdict}; CPU {seconds('cpu_s')}; "
+            f"lock hold {seconds('lock_hold_s')}; lock wait {seconds('lock_wait_s')}; "
+            f"wall {seconds('elapsed_s')} (load1 {load('load1_start')} -> {load('load1_end')})")
 
 
 @contextlib.contextmanager
@@ -234,11 +299,16 @@ def queue_phase(root, name, backlog_s=None):
     if name not in ('enqueue', 'apply', 'wait'):
         raise ValueError('unknown queue timing phase')
     start, success = time.perf_counter(), False
+    started = sample()
+    observed = {}
+    token = _CURRENT.set(observed)
     capture = {'publish': True}
     try:
         yield capture
         success = True
     finally:
+        ended = sample()
+        restore_phases(token, observed)
         try:
             from . import events
             seconds = max(0.0, time.perf_counter() - start)
@@ -249,7 +319,7 @@ def queue_phase(root, name, backlog_s=None):
                 events.append_line(Path(root) / '.brain/timings/events.jsonl',
                                    dict(ts=time.time(), node=events.node_ref('root'), kind='timing',
                                         actor='brain', ref=uuid.uuid4().hex,
-                                        data=dict(command='queue', elapsed_s=round(seconds, 6),
-                                                  slow=seconds > SLOW_SECONDS, success=success, phases=phases)))
+                                        data=dict(command='queue', **measurements(seconds, observed, started, ended),
+                                                  success=success, phases=phases)))
         except (Exception, SystemExit):
             pass  # optional telemetry never changes durable acceptance/application
