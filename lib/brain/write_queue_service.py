@@ -15,6 +15,7 @@ from . import instance as _m_instance
 from . import machine as _m_machine
 from . import lifecycle_identity as _m_identity
 from . import timings as _m_timings
+from . import events as _m_events
 
 
 def service_spec(inst):
@@ -97,7 +98,13 @@ def wake_fallback(inst):
     try:
         _m_queue.intent_read(inst, 'blocked')
     except FileNotFoundError:
-        if _m_queue.pending_intents(inst):
+        from . import status
+        with _m_instance.brain_lock(inst):
+            current = _m_instance.Instance(inst.root)
+            invalid = _m_events.journal(current).state['invalid']
+            dirty = any(not n['archived'] and
+                        (_m_events.node_ref(n['id']) in invalid or status.generated_stale(n)) for n in current.nodes())
+        if _m_queue.pending_intents(inst) or dirty:
             _m_queue.start_intent_drainer(inst)
     # Retained application failures require explicit recovery, not an exit retry.
 
@@ -213,6 +220,7 @@ def run_service(inst, stop=None, interval=0.25):
                 handlers[sig] = signal.signal(sig, lambda *_: stop.set())
         try:
             first = True
+            cursor = {}
             while not stop.is_set():
                 with _m_common.directory_target(_m_queue.intent_path(inst, 'applier.lease'), private=True) as target:
                     target.check_file(fd)
@@ -220,7 +228,12 @@ def run_service(inst, stop=None, interval=0.25):
                 # drain_intents owns/closes its descriptor; the original open
                 # description retains the exclusive lease through its finalizer.
                 pending = _m_queue.pending_intents(current)
-                if pending or first:
+                with _m_instance.brain_lock(current):
+                    deferred = not first and _m_queue.deferred_writes_since(current, cursor)
+                    # Capture before draining: writers landing during a failed
+                    # projection must wake the next service iteration too.
+                    cursor = {key: pos['offset'] for key, pos in _m_events.journal(current).positions.items()}
+                if pending or first or deferred:
                     age = (max(0, time.time() - _m_queue.intent_path(current, pending[0][1]['id'] + '.request').stat().st_mtime)
                            if pending else 0.0)
                     with _m_timings.queue_phase(current.root, 'apply', backlog_s=age):

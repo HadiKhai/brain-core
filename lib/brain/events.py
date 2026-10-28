@@ -796,7 +796,7 @@ class Command:
         return {k for k in changed if k not in self.foreign}
 
     def finish(self, success, exit_code=0):
-        from . import status_refresh
+        from . import status, status_refresh
         self.inst = instance.Instance(self.inst.root)
         # Hooks own their durable writes even when this command failed. Attribute
         # them before deciding whether the command left partial writes behind.
@@ -820,6 +820,22 @@ class Command:
             fold_hooks(self.inst)
             after = resources(self.inst)
             changed = self.changes(after)
+            if not maintenance_ok and (getattr(self, 'views_deferred', False) or getattr(self, 'write_batch', False)):
+                # Label the final affected set, including hooks folded above or
+                # bytes a failed projection published before its later error.
+                stale = {n['id']: n for n in affected_nodes(self.inst, changed, self.node)}
+                if getattr(self, 'write_batch', False):
+                    invalid = journal(self.inst).state['invalid']
+                    stale.update({n['id']: n for n in self.inst.nodes() if not n['archived'] and
+                                  (n['id'] in getattr(self, 'project_nodes', ()) or node_ref(n['id']) in invalid)})
+                for node in stale.values():
+                    try:
+                        if status.mark_generated_stale(node):
+                            path = node['dir'] / 'status.md'
+                            after[path.relative_to(self.inst.root).as_posix()] = digest(path.read_bytes())
+                    except (Exception, SystemExit):
+                        pass  # The journal invalidation below remains authoritative.
+                changed = self.changes(after)
             try:
                 data = {'command': self.command, 'exit': exit_code, 'resources': resource_list(self.inst, changed),
                         'views': views, 'maintenance_ok': maintenance_ok}
@@ -834,6 +850,8 @@ class Command:
                         'resources': resource_list(self.inst, changed, display=False),
                         'maintenance_ok': False,
                         'invalidate': [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]}
+                if getattr(self, 'views_deferred', False):
+                    data['deferred'] = True
             self.maintenance_ok = data.get('maintenance_ok') is True
             self.invalidated = list(data.get('invalidate', []))
             if not maintenance_ok and getattr(self, 'unpublished_contention', False) and not self.owned(changed):
@@ -1470,7 +1488,7 @@ def affected_nodes(inst, changed, preferred):
 
 
 RELEASED_PROJECTION_ATTEMPTS = 3
-DEFERRED_VIEWS = object()  # maintain(): a queue drain batch projects these views once
+DEFERRED_VIEWS = object()  # maintain(): a coalesced drain projects these views once
 WT_COMMANDS = ('wt_add', 'wt_setup', 'wt_rm', 'wt_prune')
 # These writers fence their released projection on their own node's records
 # and recompute a view a concurrent writer made stale.
@@ -1570,8 +1588,6 @@ def maintain(op, changed):
         # Task files are outside this ledger/status projection. Preserve the
         # native command journal without re-reading every job's live usage.
         return {}
-    if getattr(op, 'defer_views', False):
-        return DEFERRED_VIEWS
     changed = {**{path: None for path in op.record_paths}, **changed}
     views = {}
     # Cleanup records current metadata for replay, but never rewrites the status
@@ -1591,6 +1607,8 @@ def maintain(op, changed):
                          getattr(op.args, '_validated_import_start', False)))
     materialize = (op.command not in ('wt_prune', 'wt_rm') and not op.study_handback
                    and not local_only and not private_connect and not explicit_refresh)
+    if getattr(op, 'defer_views', False) and materialize:
+        return DEFERRED_VIEWS
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
     for n in op.inst.nodes():

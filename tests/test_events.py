@@ -1,6 +1,7 @@
 """Metadata-only event stream scenarios; all data and instances are fabricated."""
 import argparse
 import contextlib
+import fcntl
 import importlib
 import io
 import json
@@ -21,6 +22,38 @@ from brain import events, instance, transitions
 
 
 class EventAppend(Scenario):
+    def test_provisional_stale_block_preserves_unowned_prose_and_marker_scope(self):
+        from brain import status
+        root = self.init('stale-prose')
+        inst = instance.Instance(root)
+        node = inst.node('root')
+        path = root / 'status.md'
+        original = 'Updated: 2026-01-01 00:00 +00:00\n\n# Status\n\n## Now\n\nHuman prose\n'
+        path.write_text(original)
+        with mock.patch.object(status, 'facts_block', return_value=status.FACTS_START + '\nFacts\n' + status.FACTS_END):
+            expected = status.refreshed_text(inst, node)
+            self.assertTrue(status.mark_generated_stale(node))
+            self.assertEqual(events.judgement(path.read_text()), original)
+            self.assertEqual(status.refreshed_text(inst, node), expected)
+        path.write_text(original + '\nA prose quotation: ' + status.FACTS_STALE + '\n')
+        self.assertNotIn('generated view stale', status.status_line(node))
+
+    def test_failed_batch_marks_preexisting_invalid_target_without_a_prior_file_marker(self):
+        from brain import status
+        root = self.init('prior-invalid')
+        self.b(root, 'new', 'peer', '--title', 'Peer')
+        inst = instance.Instance(root)
+        with instance.brain_lock(inst):
+            events.append(inst, 'peer', 'reconcile', 'a' * 32, {'invalidate': [events.node_ref('peer')]})
+            operation = events.Command(root, command='intent_queue')
+            operation.write_batch = True
+            operation.project_nodes = ['root', 'peer']
+            with mock.patch.object(events, 'released_view', side_effect=RuntimeError('failed view')), \
+                    contextlib.redirect_stderr(io.StringIO()), operation:
+                pass
+        self.assertIn(status.FACTS_STALE, (root / 'nodes/peer/status.md').read_text())
+        self.assertIn(events.node_ref('peer'), events.journal(instance.Instance(root)).state['invalid'])
+
     def test_wt_retries_the_whole_projection_batch_when_an_earlier_node_changes(self):
         root = self.init('batch-projection-race')
         for nid in ('app', 'peer'):
@@ -230,6 +263,12 @@ class EventAppend(Scenario):
         self.assertIn(events.node_ref('root'), commit['data']['invalidate'])
         self.assertTrue(commit['data']['resources'])
         self.assertIn(events.node_ref('root'), events.journal(instance.Instance(root)).state['invalid'])
+        from brain import status
+        self.assertIn(status.FACTS_STALE, (root / 'status.md').read_text())
+        self.assertIn('generated view stale', status.status_line(inst.node('root')))
+        self.assertEqual(status.status_lag(inst, inst.node('root')), 'generated view maintenance pending')
+        with self.assertRaisesRegex(SystemExit, 'no recorded view'):
+            events.events_view(inst, inst.node('root'))
         with instance.brain_lock(inst):
             batch = events.Command(root, command='intent_queue', node='root')
             batch.write_batch = True
@@ -242,6 +281,8 @@ class EventAppend(Scenario):
         self.assertTrue(terminal['data']['maintenance_ok'])
         self.assertIn(events.node_ref('root'), terminal['data']['views'])
         self.assertFalse(events.journal(instance.Instance(root)).state['invalid'])
+        self.assertNotIn(status.FACTS_STALE, (root / 'status.md').read_text())
+        self.assertNotIn('generated view stale', status.status_line(inst.node('root')))
 
     def test_resource_scopes_and_gap_scan_discover_nodes_once_per_batch(self):
         root = self.init('batch-scopes')
@@ -610,7 +651,10 @@ class EventAppend(Scenario):
         r = self.init('demo')
         home = self.repo(self.tmp / 'code')
         self.b(r, 'new', 'app', '--title', 'App', '--home', str(home))
-        count = len(self.commits(r))
+        def writes():
+            batches = {e['ref'] for e in self.records(r) if e['kind'] == 'begin' and e['data'].get('write_batch')}
+            return [c for c in self.commits(r) if c['ref'] not in batches]
+        count = len(writes())
         commands = [
             ('set', 'app', 'preview=none'),
             ('wt', 'add', 'app', 'job-one', '--no-setup'),
@@ -625,21 +669,24 @@ class EventAppend(Scenario):
                 count += 1
                 if args[0] == 'inbox' and '--add' in args:
                     self.b(r, 'queue', 'wait', result.strip())
-                    # The queued write commits deferred; its drain batch adds one maintenance commit.
-                    begins = {e['ref'] for e in self.records(r) if e['kind'] == 'begin' and e['data'].get('write_batch')}
-                    self.assertEqual([c['data']['maintenance_ok'] for c in self.commits(r)[-2:]
-                                      if c['ref'] in begins], [True])
-                    self.assertTrue(self.commits(r)[-2]['data']['deferred'])
-                    count += 1
-                self.assertEqual(len(self.commits(r)), count)
+                    # Identify this request's apply and publication independently
+                    # of coalesced maintenance for an earlier foreground writer.
+                    begin = next(e for e in self.records(r) if e['kind'] == 'begin'
+                                 and e['data'].get('write_request') == result.strip())
+                    apply = next(c for c in writes() if c['ref'] == begin['ref'])
+                    self.assertTrue(apply['data']['deferred'])
+                    marker = json.loads((r / '.brain/write-queue' / (result.strip() + '.view')).read_text())
+                    published = next(c for c in self.commits(r) if c['ref'] == marker['ref'])
+                    self.assertTrue(published['data']['maintenance_ok'])
+                self.assertEqual(len(writes()), count)
         local = json.loads((r / '.brain/local.json').read_text())
         wt = Path(local['nodes']['app']['worktrees']['job-one']['path'])
         self.git('commit', '--allow-empty', '-qm', 'worker change', cwd=wt)
         self.git('merge', '-q', 'job-one', cwd=home)
-        self.assertEqual(len(self.commits(r)), count)
+        self.assertEqual(len(writes()), count)
         self.b(r, 'jobs', 'app', '--branch', 'job-one', '--lessons', 'none: PRIVATE-LESSON')
         self.b(r, 'wt', 'prune', 'app', '--offline')
-        self.assertEqual(len(self.commits(r)), count + 2)
+        self.assertEqual(len(writes()), count + 2)
         journal = (r / '.brain/events.jsonl').read_text()
         for message in ('PRIVATE-SUMMARY', 'PRIVATE-LESSON', 'PRIVATE-INBOX', 'PRIVATE-SCHEDULE'):
             self.assertNotIn(message, journal)
@@ -1161,6 +1208,10 @@ class EventViews(Scenario):
         for i in range(30, 35):
             self.assertIn('- note %d\n' % i, archive)
         self.b(r, 'handback', 'app', '--branch', 'job-one', '--state', 'blocked', '--summary', 'PRIVATE-SUMMARY', '--lessons', 'none: PRIVATE-BODY')
+        # The command publishes the handback before its generated table. Join
+        # this fixture's independent lease before inspecting that projection.
+        with (r / '.brain/write-queue/applier.lease').open('r') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
         self.assertIn('| job-one | - | - | blocked |', st.read_text())
         self.assertNotIn('PRIVATE-BODY', (r / '.brain/events.jsonl').read_text())
 

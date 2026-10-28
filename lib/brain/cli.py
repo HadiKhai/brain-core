@@ -882,9 +882,21 @@ def _main():
                 + ", ".join(str(p.relative_to(Path(root).resolve())) if Path(root).resolve() in p.parents else str(p)
                             for p in out[:5]) + ("…" if len(out) > 5 else "") + "; remove them (brain check lists them)")
         def attempt():
-            with _m_instance.brain_lock(root):
-                with _m_events.Command(root, a):
-                    a.f(a)
+            operation = None
+            try:
+                with _m_instance.brain_lock(root):
+                    operation = _m_events.Command(root, a)
+                    # Durable source publication belongs to the caller; generated
+                    # views belong to the coalesced queue drain, after it returns.
+                    operation.defer_views = a.f.__name__ in ('cmd_task', 'cmd_handback', 'cmd_gate_queue')
+                    with operation:
+                        a.f(a)
+            finally:
+                if operation is not None and getattr(operation, 'views_deferred', False):
+                    try:
+                        handback_queue.start_intent_drainer(operation.inst)
+                    except OSError:
+                        print('brain: state saved; generated view stale; run brain queue drain', file=sys.stderr)
         if a.f.__name__ == 'cmd_status' and a.refresh:
             refresh_with_retry(attempt, root)
         else:

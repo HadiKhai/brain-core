@@ -282,9 +282,9 @@ def pending_intents(inst):
     return pending
 
 
-def intent_lease(inst):
+def intent_lease(inst, name='applier.lease'):
     """Return a held independent lease, or None. Never wait behind a producer."""
-    with _m_common.directory_target(intent_path(inst, 'applier.lease'), create=True, private=True) as target:
+    with _m_common.directory_target(intent_path(inst, name), create=True, private=True) as target:
         fd = target.open(os.O_RDWR | os.O_CREAT)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -441,6 +441,13 @@ def writer_busy(inst):
 def applier_busy(inst):
     fd = intent_lease(inst)
     if fd is None:
+        # Projection holds the applier lease too, but releases the writer lock.
+        # Earlier requests still force FIFO via queue_pending/refuse_overtaking;
+        # a plain handback need not wait for generated text alone.
+        projection = intent_lease(inst, 'projection.lease')
+        if projection is None:
+            return False
+        os.close(projection)
         return True
     os.close(fd)
     return False
@@ -740,6 +747,7 @@ def apply_handback_intent(inst, n, request):
 
 BATCH_REQUESTS = 16
 BATCH_SECONDS = 15
+VIEW_COALESCE_SECONDS = 0.25
 
 
 def open_view_batch(inst, node):
@@ -785,12 +793,23 @@ def reconcile_dead_batches(inst):
 
 
 def maintain_view_batch(inst):
+    """Expose projection-only ownership without granting any write authority."""
+    fd = intent_lease(inst, 'projection.lease')
+    if fd is None:
+        return False
+    try:
+        return _maintain_view_batch(inst)
+    finally:
+        os.close(fd)
+
+
+def _maintain_view_batch(inst):
     """Publish receipt-node groups before repairing unrelated invalid views.
 
     Each marker follows its own fenced projection commit. The detached drainer
     retains its lease and continues maintenance after that receipt can be read.
     """
-    from . import events
+    from . import events, status
     waiting = pending_views(inst)
     groups = {}
     for data in waiting:
@@ -821,17 +840,21 @@ def maintain_view_batch(inst):
         with intent_touched(), _m_instance.brain_lock(inst):
             current = _m_instance.Instance(inst.root)
             invalid = events.journal(current).state['invalid']
-            nodes = [n['id'] for n in current.nodes() if not n['archived'] and events.node_ref(n['id']) in invalid]
+            nodes = [n['id'] for n in current.nodes() if not n['archived'] and
+                     (events.node_ref(n['id']) in invalid or status.generated_stale(n))]
             if nodes:
                 operation = open_view_batch(inst, nodes[0])
+                operation.project_nodes = nodes
                 operation.__exit__(None, None, None)
-                return getattr(operation, 'maintenance_ok', False) is True
+                invalid = events.journal(_m_instance.Instance(inst.root)).state['invalid']
+                return (getattr(operation, 'maintenance_ok', False) is True
+                        and not any(events.node_ref(nid) in invalid for nid in nodes))
     except (Exception, SystemExit):
         return False  # unrelated view repair must not block the write queue
     return True
 
 
-def apply_view_batch(inst):
+def apply_view_batch(inst, maintenance=None):
     """Apply one bounded FIFO batch, then maintain its views once.
 
     Returns whether requests may remain after the batch bound.
@@ -906,8 +929,27 @@ def apply_view_batch(inst):
         with contextlib.suppress(Exception, SystemExit):
             maintain_view_batch(inst)
         raise
-    maintain_view_batch(inst)
+    # Copy offsets: the journal advances its own position dictionaries in place.
+    with _m_instance.brain_lock(inst):
+        cursor = {key: pos['offset'] for key, pos in events.journal(inst).positions.items()}
+    ok = maintain_view_batch(inst)
+    if maintenance is not None:
+        maintenance.append((ok, cursor))
     return more
+
+
+def deferred_writes_since(inst, cursor):
+    """Read only the journal tail, including files rotated during projection."""
+    from . import events
+    for path in events._paths(inst):
+        with events.private_open(path) as stream:
+            info = os.fstat(stream.fileno())
+            stream.seek(cursor.get('%s:%s' % (info.st_dev, info.st_ino), 0))
+            for line in stream:
+                event = events._event(line)
+                if event['kind'] == 'commit' and event['data'].get('deferred') and event['data'].get('invalidate'):
+                    return True
+    return False
 
 
 def drain_intents(inst, lease_fd=None):
@@ -915,12 +957,16 @@ def drain_intents(inst, lease_fd=None):
     if fd is None:
         return
     blocked = False
+    maintenance = []
     try:
         with _m_common.directory_target(intent_path(inst, 'applier.lease'), private=True) as target:
             target.check_file(fd)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         reconcile_dead_batches(inst)
-        while apply_view_batch(inst):
+        # One fixed window per lease, shared by foreground writes and accepted
+        # requests. Producers never sleep or wait for projection computation.
+        time.sleep(VIEW_COALESCE_SECONDS)
+        while apply_view_batch(inst, maintenance):
             pass
         path = intent_path(inst, 'blocked')
         with _m_common.directory_target(path, private=True) as target:
@@ -932,11 +978,27 @@ def drain_intents(inst, lease_fd=None):
         intent_store(inst, 'blocked', dict(state='blocked', reason=str(error)))
         raise
     finally:
+        primary = sys.exc_info()[0]
         os.close(fd)
         # Release then inspect: a producer that saw the old lease is covered;
         # a producer arriving after this inspection acquires the free lease itself.
-        if not blocked and pending_intents(inst):
-            start_intent_drainer(inst)
+        if not blocked:
+            try:
+                from . import events, status
+                with _m_instance.brain_lock(inst):
+                    current = _m_instance.Instance(inst.root)
+                    invalid = events.journal(current).state['invalid']
+                    # A failed batch gets another attempt only for a new source
+                    # commit, never for its own invalidation or unchanged damage.
+                    late_view = (maintenance and any(not n['archived'] and
+                                                    (events.node_ref(n['id']) in invalid or status.generated_stale(n))
+                                                    for n in current.nodes()) and
+                                 (maintenance[-1][0] or deferred_writes_since(current, maintenance[-1][1])))
+                if pending_intents(inst) or late_view:
+                    start_intent_drainer(inst)
+            except (Exception, SystemExit):
+                if primary is None:
+                    raise
 
 
 def native_result_line(inst, request, verdict):

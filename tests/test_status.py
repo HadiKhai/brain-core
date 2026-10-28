@@ -5,6 +5,7 @@ Every test builds instances in a throwaway folder that is also $HOME, so nothing
 import json
 import re
 import datetime
+import fcntl
 import importlib.util
 import core_loader
 import threading
@@ -283,6 +284,8 @@ class AutonomyDue(AutonomyProject):
         ledger = (r / 'nodes/app/job-ledger.md').read_bytes()
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done', '--report', 'reports/result.md')
         self.assertNotEqual((r / 'nodes/app/status.md').read_bytes(), before)
+        with (r / '.brain/write-queue/applier.lease').open('r') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
         self.assertIn('| job-a | - | - | done |', (r / 'nodes/app/status.md').read_text())
         self.assertEqual((r / 'nodes/app/job-ledger.md').read_bytes(), ledger)
         self.assertEqual([i['state'] for i in self.due(r) if i['kind'] == 'handback'], ['done'])
@@ -334,6 +337,8 @@ class AutonomyDue(AutonomyProject):
         self.git('add', 'nodes/app/status.md', cwd=r); self.git('commit', '-qm', 'app: refresh', cwd=r)
         self.assertEqual(self.due(r), [])
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--report', 'report.md')
+        with (r / '.brain/write-queue/applier.lease').open('r') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
         self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
         self.b(r, 'status', 'app', '--refresh')
         self.assertEqual([i['kind'] for i in self.due(r)], ['handback'])
@@ -2035,6 +2040,8 @@ with instance.brain_lock(Path(sys.argv[2])):
         after = st.read_text().split('<!-- brain:facts-state ', 1)[1].split(' -->', 1)[0]
         self.assertEqual(json.loads(before)['fingerprint'], json.loads(after)['fingerprint'])
         self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'done')
+        with (r / '.brain/write-queue/applier.lease').open('r') as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX)
         self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
         self.b(r, 'status', 'app', '--refresh')
         self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])

@@ -21,6 +21,284 @@ from scenario import CORE, Scenario
 PROCESS_BUDGET = 30
 
 class HandbackLifecycle(Scenario):
+    def test_service_shutdown_wakes_direct_writer_that_saw_its_last_idle_lease(self):
+        m, inst, n, row = self.fixture()
+        events, queue, service = m._owners['Command'], m._owners['drain_intents'], m._owners['run_service']
+        stop = threading.Event()
+        process = argparse.Namespace(Popen=mock.Mock(), DEVNULL=subprocess.DEVNULL)
+        def last_idle(interval):
+            with m.brain_lock(inst):
+                operation = events.Command(inst.root, command='task')
+                operation.defer_views = True
+                with operation:
+                    (n['dir'] / 'backlog.md').write_text('- Direct write at service shutdown\n')
+            queue.start_intent_drainer(inst)
+            process.Popen.assert_not_called()  # service's original descriptor still holds it
+            self.assertEqual(queue.pending_intents(inst), [])
+            stop.set()
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(stop, 'wait', side_effect=last_idle), mock.patch.object(queue, 'subprocess', process):
+            self.assertTrue(service.run_service(inst, stop))
+        process.Popen.assert_called_once()
+        self.assertIn('--lease-fd', process.Popen.call_args.args[0])
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            m.drain_intents(inst)
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+        self.assertNotIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+
+    def test_service_idle_lease_observes_direct_deferred_commits_once(self):
+        m, inst, n, row = self.fixture()
+        events, queue, service = m._owners['Command'], m._owners['drain_intents'], m._owners['run_service']
+        stop, waits, batch_counts = threading.Event(), [], []
+        def idle(interval):
+            waits.append(interval)
+            self.assertIsNone(queue.intent_lease(inst))  # service still owns it
+            if len(waits) == 1:
+                with m.brain_lock(inst):
+                    operation = events.Command(inst.root, command='task')
+                    operation.defer_views = True
+                    with operation:
+                        (n['dir'] / 'backlog.md').write_text('- Direct write beside idle service\n')
+                queue.start_intent_drainer(inst)  # cannot acquire the service lease
+                self.assertEqual(queue.pending_intents(inst), [])
+                self.assertIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+            else:
+                self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+                self.assertNotIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+                batch_counts.append(sum(e['kind'] == 'begin' and e['data'].get('write_batch', False)
+                                        for e in events.read(inst)))
+                if len(waits) == 3:
+                    stop.set()
+        process = argparse.Namespace(Popen=mock.Mock(), DEVNULL=subprocess.DEVNULL)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(stop, 'wait', side_effect=idle), mock.patch.object(queue, 'subprocess', process):
+            self.assertTrue(service.run_service(inst, stop))
+        self.assertEqual(batch_counts, [1, 1])
+        process.Popen.assert_not_called()
+
+    def test_display_fallback_preserves_deferred_wake_identity(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        screen = events.screen
+        def failed(current, data):
+            if isinstance(data, dict) and 'maintenance_ok' in data:
+                raise ValueError('display unavailable')
+            return screen(current, data)
+        with mock.patch.dict(os.environ, self.env, clear=True), m.brain_lock(inst), \
+                mock.patch.object(events, 'screen', side_effect=failed):
+            operation = events.Command(inst.root, command='task')
+            operation.defer_views = True
+            with operation:
+                (n['dir'] / 'backlog.md').write_text('- Durable write despite display failure\n')
+        commit = events.read(inst)[-1]
+        self.assertTrue(commit['data']['deferred'])
+        self.assertFalse(commit['data']['maintenance_ok'])
+        self.assertTrue(queue.deferred_writes_since(inst, {}))
+
+    def test_study_projection_cannot_strand_a_deferred_generated_file(self):
+        m, inst, n, row = self.fixture()
+        events = m._owners['Command']
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            with m.brain_lock(inst):
+                operation = events.Command(inst.root, command='task')
+                operation.defer_views = True
+                with operation:
+                    (n['dir'] / 'backlog.md').write_text('- Deferred source\n')
+                args = argparse.Namespace(id='root', branch='import:fixture', f=m.cmd_handback)
+                with events.Command(inst.root, args):
+                    (n['dir'] / 'inbox.md').write_text('- Retained study result\n')
+            # The study records current event metadata without owning status.md.
+            self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+            self.assertIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+            m.drain_intents(inst)
+        self.assertNotIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+
+    def test_deferred_cli_open_task_and_study_handback_preserve_projection_exemptions(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(inst.root)}, clear=True), \
+                mock.patch.object(m.Instance, 'commit'), contextlib.redirect_stdout(io.StringIO()):
+            with m.brain_lock(inst), events.Command(inst.root, command='intent_queue'):
+                pass  # establish the existing ledger's replay records first
+            before = (n['dir'] / 'status.md').read_bytes()
+            with mock.patch.object(sys, 'argv', [str(CORE / 'bin/brain'), 'task', 'add', 'root', 'NEW',
+                                                '--title', 'Independent work', '--owner', 'fixture']), \
+                    mock.patch.object(events, 'released_view', side_effect=AssertionError('open task projected')), \
+                    mock.patch.object(queue, 'start_intent_drainer') as kick:
+                m.main()
+            kick.assert_not_called()
+            self.assertEqual((n['dir'] / 'status.md').read_bytes(), before)
+            self.assertTrue(events.read(inst)[-1]['data']['maintenance_ok'])
+            args = argparse.Namespace(id='root', branch='import:fixture', f=m.cmd_handback)
+            operation = events.Command(inst.root, args)
+            operation.defer_views = True  # the actual CLI policy
+            with m.brain_lock(inst), mock.patch.object(m, 'refresh_status') as refresh, \
+                    mock.patch.object(events, 'cap_now') as cap, operation:
+                (n['dir'] / 'inbox.md').write_text('- Retained study result\n')
+            refresh.assert_not_called()
+            cap.assert_not_called()
+        self.assertTrue(operation.study_handback)
+        self.assertFalse(getattr(operation, 'views_deferred', False))
+        self.assertEqual((n['dir'] / 'status.md').read_bytes(), before)
+
+    def test_failed_final_batch_rekicks_only_for_a_new_deferred_source_commit(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(1)
+        def failed_after_writer(current):
+            with m.brain_lock(current):
+                operation = events.Command(current.root, command='task')
+                operation.defer_views = True
+                with operation:
+                    (n['dir'] / 'backlog.md').write_text('- Source arrived during failed projection\n')
+            return False
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'maintain_view_batch', side_effect=failed_after_writer), \
+                mock.patch.object(queue, 'start_intent_drainer') as kick:
+            m.drain_intents(inst)
+        kick.assert_called_once_with(inst)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            m.drain_intents(inst)
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+        self.assertEqual(queue.intent_receipt(inst, requests[0]['id'])['view'], 'current')
+
+    def test_plain_handback_publishes_while_drainer_is_rendering_without_earlier_requests(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        with mock.patch.dict(os.environ, self.env, clear=True), m.brain_lock(inst):
+            operation = events.Command(inst.root, command='task')
+            operation.defer_views = True
+            with operation:
+                (n['dir'] / 'backlog.md').write_text('- Trigger view maintenance\n')
+        snapshot, published = events.snapshot_view, []
+        def render(*args, **kwargs):
+            self.assertIsNone(m._owners['brain_lock']._LOCK['fh'])
+            result = self.default_cli(inst)('handback', 'root', '--branch', row['Job'], '--state', 'done',
+                                             '--summary', 'Published during projection')
+            self.assertNotIn('queued', result.stdout)
+            self.assertEqual(m.intent_index(inst), [])
+            self.assertEqual(m.read_handback(n, row)['summary'], 'Published during projection')
+            published.append(True)
+            return snapshot(*args, **kwargs)
+        def first_render(*args, **kwargs):
+            return render(*args, **kwargs) if not published else snapshot(*args, **kwargs)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(events, 'snapshot_view', side_effect=first_render):
+            m.drain_intents(inst)
+        self.assertEqual(published, [True])
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+
+    def test_drain_cleanup_journal_error_preserves_primary_interrupt(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        with mock.patch.object(queue, 'reconcile_dead_batches', side_effect=KeyboardInterrupt), \
+                mock.patch.object(events, 'journal', side_effect=events.JournalError('cleanup failed')), \
+                self.assertRaises(KeyboardInterrupt):
+            m.drain_intents(inst)
+
+    def test_writes_inside_the_drain_window_share_one_maintenance(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        sleeps = []
+
+        def window(seconds):
+            self.assertEqual(seconds, queue.VIEW_COALESCE_SECONDS)
+            self.assertIsNone(m._owners['brain_lock']._LOCK['fh'])
+            sleeps.append(seconds)
+            for i in range(10):
+                with m.brain_lock(inst):
+                    operation = events.Command(inst.root, command='task', node='root')
+                    operation.defer_views = True
+                    with operation:
+                        with (n['dir'] / 'backlog.md').open('a') as stream:
+                            stream.write(f'- Coalesced {i}\n')
+            self.assertIn(events.node_ref('root'), events.journal(m.Instance(inst.root)).state['invalid'])
+
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue.time, 'sleep', side_effect=window):
+            m.drain_intents(inst)
+        self.assertEqual(sleeps, [queue.VIEW_COALESCE_SECONDS])
+        records = events.read(inst)
+        self.assertEqual(sum(e['kind'] == 'commit' and e['data'].get('deferred', False) for e in records), 10)
+        self.assertEqual(sum(e['kind'] == 'begin' and e['data'].get('write_batch', False) for e in records), 1)
+        self.assertTrue(records[-1]['data']['maintenance_ok'])
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+
+    def test_foreground_task_queue_and_handback_return_before_one_coalesced_view(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        m.mutate(inst, n, 'T-1', {'title': 'Before', 'owner': 'fixture'}, create=True)
+        kicked = []
+
+        def kick(current):
+            self.assertIsNone(m._owners['brain_lock']._LOCK['fh'])
+            commit = events.read(current)[-1]
+            self.assertEqual(commit['kind'], 'commit')
+            self.assertTrue(commit['data']['deferred'])
+            self.assertFalse(commit['data']['maintenance_ok'])
+            self.assertIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+            with self.assertRaisesRegex(SystemExit, 'no recorded view'):
+                events.events_view(current, current.node('root'))
+            kicked.append(commit['data']['command'])
+
+        commands = [
+            ['task', 'set', 'root', 'T-1', '--status', 'blocked'],
+            ['queue', 'run', 'root', '--once'],
+            ['handback', 'root', '--branch', row['Job'], '--state', 'done',
+             '--summary', 'Durable result', '--direct']]
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(inst.root)}, clear=True), \
+                mock.patch.object(m.Instance, 'commit'), contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(queue, 'start_intent_drainer', side_effect=kick), \
+                mock.patch.object(events, 'released_view', side_effect=AssertionError('foreground rendered a view')):
+            for command in commands:
+                with mock.patch.object(sys, 'argv', [str(CORE / 'bin/brain'), *command]):
+                    m.main()
+        self.assertEqual(kicked, ['task', 'gate_queue', 'handback'])
+        self.assertEqual(m.read_records(n)['T-1']['status'], 'blocked')
+        self.assertEqual(m.read_handback(n, row)['summary'], 'Durable result')
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            m.drain_intents(inst)
+        batches = [e for e in events.read(inst) if e['kind'] == 'begin' and e['data'].get('write_batch')]
+        self.assertEqual(len(batches), 1)
+        self.assertNotIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+        self.assertTrue(events.events_view(inst, n))
+
+    def test_direct_write_during_final_drain_lease_release_gets_another_kick(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(1)
+        original = queue.maintain_view_batch
+
+        def late_write(current):
+            ok = original(current)
+            with m.brain_lock(current):
+                op = events.Command(current.root, command='task', node='root')
+                op.defer_views = True
+                with op:
+                    (n['dir'] / 'backlog.md').write_text('- Late source mutation\n')
+            return ok
+
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'maintain_view_batch', side_effect=late_write), \
+                mock.patch.object(queue, 'start_intent_drainer') as kick:
+            m.drain_intents(inst)
+        kick.assert_called_once_with(inst)
+        self.assertIn(events.node_ref('root'), events.journal(m.Instance(inst.root)).state['invalid'])
+
+    def test_failed_direct_view_batch_stays_stale_without_rescheduling_forever(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        with mock.patch.dict(os.environ, self.env, clear=True), m.brain_lock(inst):
+            operation = events.Command(inst.root, command='task', node='root')
+            operation.defer_views = True
+            with operation:
+                (n['dir'] / 'backlog.md').write_text('- Saved source\n')
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(events, 'released_view', side_effect=RuntimeError('projection unavailable')), \
+                mock.patch.object(queue, 'start_intent_drainer') as kick, contextlib.redirect_stderr(io.StringIO()):
+            m.drain_intents(inst)
+        kick.assert_not_called()
+        self.assertIn(m.FACTS_STALE, (n['dir'] / 'status.md').read_text())
+        self.assertIn(events.node_ref('root'), events.journal(m.Instance(inst.root)).state['invalid'])
+
     def test_real_queue_applier_projects_unlocked_and_retries_source_drift(self):
         root = self.init('queue-projection')
         m = core_loader.SourceFileLoader('queue_projection', str(CORE / 'bin/brain')).load_module()
