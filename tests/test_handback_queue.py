@@ -2131,18 +2131,22 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(inst.root)}, clear=True), \
                 mock.patch.object(m.Instance, 'commit'), contextlib.redirect_stdout(io.StringIO()), \
                 mock.patch.object(queue, 'start_intent_drainer') as kick:
+            # The file-only fixture writes its initial documents outside a
+            # command; establish their coverage before testing the handback.
+            with m.brain_lock(inst):
+                events.reconcile(inst)
             with mock.patch.object(sys, 'argv', [str(CORE / 'bin/brain'), 'handback', 'root',
                                                 '--branch', row['Job'], '--state', 'blocked',
                                                 '--summary', 'Synchronous result']):
                 m.main()
-        kick.assert_not_called()
-        commit = events.read(inst)[-1]
-        self.assertEqual(commit['kind'], 'commit')
-        self.assertTrue(commit['data']['maintenance_ok'])
-        self.assertFalse(commit['data'].get('deferred', False))
-        self.assertTrue(events.comparison(inst, n, record=False)['equal'])
-        self.assertTrue(events.events_view(inst, n))
-        self.assertFalse(m.generated_stale(n))
+            kick.assert_not_called()
+            commit = events.read(inst)[-1]
+            self.assertEqual(commit['kind'], 'commit')
+            self.assertTrue(commit['data']['maintenance_ok'])
+            self.assertFalse(commit['data'].get('deferred', False))
+            self.assertTrue(events.comparison(inst, n, record=False)['equal'])
+            self.assertTrue(events.events_view(inst, n))
+            self.assertFalse(m.generated_stale(n))
 
     def test_default_handback_runs_in_place_uncontended_and_queues_behind_a_writer(self):
         m, inst, n, row = self.fixture()
