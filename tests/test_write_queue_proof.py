@@ -94,6 +94,7 @@ class WriteQueueProof(unittest.TestCase):
         self.assertEqual(self.analyze([timing, call])['families']['task set']['lock_evidence'], 'UNKNOWN')
         call['data']['call_id'] = 'a'
         self.assertEqual(self.analyze([timing, call])['families']['task set']['lock_evidence'], 'PASS')
+        self.assertEqual(self.analyze([timing, call, call])['families']['task set']['lock_evidence'], 'UNKNOWN')
         for row in (timing, call):
             row['data'].update(success=False, lock_wait_failure=True)
         call['data'].update(call_id='b', exit_code=1)

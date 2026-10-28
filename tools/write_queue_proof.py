@@ -168,8 +168,9 @@ def each_call_timed(calls, timing):
             free.remove(found)
         return found is not None
     # Exact call IDs first, then callers that need an unlabelled timing, then unlabelled callers.
-    exact = [r for r in calls if r.get('call_id') and take(r, lambda t, c=r['call_id']: t.get('call_id') == c)]
-    labelled = [r for r in calls if r.get('call_id') and r not in exact]
+    # Keep the unmatched rows themselves: equal duplicate rows are distinct invocations.
+    labelled = [r for r in calls if r.get('call_id')
+                and not take(r, lambda t, c=r['call_id']: t.get('call_id') == c)]
     return (all(take(r, lambda t: not t.get('call_id')) for r in labelled)
             and all(take(r, lambda t: True) for r in calls if not r.get('call_id')))
 
