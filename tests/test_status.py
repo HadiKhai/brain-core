@@ -944,6 +944,11 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             self.assertEqual(refresh.compute(inst, inst.node('app'), prepare), 0)
         self.assertTrue(committed)
 
+    def stable_facts(self, root):
+        # The refresh clock and live machine sample may move between two refreshes.
+        return [line for line in (root / 'status.md').read_text().splitlines()
+                if not line.startswith('Facts refreshed: ') and 'load/CPU' not in line]
+
     def refresh_cli(self, root, name):
         loader = core_loader.SourceFileLoader(name, str(CORE / 'bin/brain'))
         m = loader.load_module()
@@ -974,9 +979,9 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertTrue(landed)
         self.assertNotIn('under the lock', err.getvalue())
         inst = m.Instance(root)
-        published = (root / 'status.md').read_text()
+        published = self.stable_facts(root)
         self.b(root, 'status', 'root', '--refresh')  # a quiet refresh finds nothing newer
-        self.assertEqual((root / 'status.md').read_text(), published)
+        self.assertEqual(self.stable_facts(root), published)
         terminal = events.read(inst)[-1]
         self.assertEqual(terminal['kind'], 'commit')
         self.assertTrue(terminal['data']['maintenance_ok'])
@@ -1010,9 +1015,9 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                          cli.REFRESH_TRIES + 1)
         self.assertEqual(records[-1]['kind'], 'commit')
         self.assertTrue(records[-1]['data']['maintenance_ok'])
-        published = (root / 'status.md').read_text()
+        published = self.stable_facts(root)
         self.b(root, 'status', 'root', '--refresh')  # a quiet refresh finds nothing newer
-        self.assertEqual((root / 'status.md').read_text(), published)
+        self.assertEqual(self.stable_facts(root), published)
 
     def test_contended_events_source_refresh_keeps_its_committed_view(self):
         root = self.init('alice')
