@@ -442,6 +442,8 @@ def reminder_reconcile(inst, n, items, data, omitted_kinds=()):
         record = previous[key] if key in previous else {'id': identity, 'at': inst.now()}
         if not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
             raise ValueError('invalid reminder episode receipt')
+        if record['id'] == retired.get(key):
+            record = {'id': identity, 'at': inst.now()}
         record = {**record, 'kind': item['kind']}
         current[key] = record
         handling = record.get('handling')
@@ -517,7 +519,8 @@ def reminder_items(inst, n, items, include_handled=False, omitted_kinds=()):
             key = reminder_key(item)
             identity = _m_jobs.digest([key, 'recurrence', retired[key]]) if key in retired else key
             record = previous.get(key)
-            if isinstance(record, dict) and re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
+            if (isinstance(record, dict) and re.fullmatch(r'[0-9a-f]{24}', str(record.get('id')))
+                    and record['id'] != retired.get(key)):
                 identity = record['id']
             out.append({**item, 'id': identity, 'lifecycle_error': 'receipt state unknown; no suppression'})
         return reminder_display(out, retired.values())

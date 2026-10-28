@@ -805,13 +805,17 @@ def _due_source_items_unbatched(inst, n, state, include_ready):
     for branch, w in state["worktrees"].items():
         if not _m_jobs.open_job(state["jobs"] or [], branch):
             add("unrecorded-worktree", f"{branch}: worktree has no open ledger job; reconcile the records")
+    try:
+        request_data = _m_reminders.lifecycle_read(inst)
+    except (OSError, ValueError):
+        request_data = _m_reminders.lifecycle_empty()
     for line in state["inbox"]:
         if machine_transition_line(n, line):
             continue  # legacy autonomous transitions are informational, never coordinator work
         else:
             from . import inbox_notices
             add("inbox", line[2:], informational=inbox_notices.informational_notice(line),
-                episode=_m_reminders.request_episode_id(inst, n, line))
+                episode=_m_reminders.request_episode_id(inst, n, line, lifecycle_data=request_data))
     before_advice, items = items, []
     if n['id'] == 'root':
         episode = status_machine_alert(inst)
@@ -819,7 +823,7 @@ def _due_source_items_unbatched(inst, n, state, include_ready):
             add(episode['kind'], episode['text'], **{k: v for k, v in episode.items() if k not in ('kind', 'text')})
     for line in overdue_questions(inst, n, state["inbox"]):
         add("overdue-question", "question unanswered past its threshold; root must follow up", escalate_to="root",
-            episode=_m_reminders.request_episode_id(inst, n, line))
+            episode=_m_reminders.request_episode_id(inst, n, line, lifecycle_data=request_data))
     before_stale, items = items, []
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
@@ -1605,7 +1609,24 @@ def answer_inbox(inst, item_id, text):
             items, _ = inbox_items(inst, readonly=True, requests_only=True, lifecycle_data=data)
             candidates = list(items)
             requests = {i['id']: i for i in items if i['kind'] == 'inbox'}
+            receipts = {}
+            for nid in ({i['node'] for i in requests.values()} | set(data['reminders']) |
+                        set(data.get('reminders_retired', {}))):
+                previous = data['reminders'].get(nid, {})
+                retired = data.get('reminders_retired', {}).get(nid, {})
+                if (not isinstance(previous, dict) or not isinstance(retired, dict) or
+                        any(not isinstance(r, dict) or not isinstance(r.get('id'), str) or
+                            not re.fullmatch(r'[0-9a-f]{24}', r['id']) for r in previous.values()) or
+                        any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{24}', v)
+                            for v in retired.values())):
+                    continue  # Unknown reminder receipts cannot disable direct request answers.
+                receipts[nid] = previous, retired
+                candidates.extend({'id': identity, 'node': nid, 'kind': 'retired'}
+                                  for identity in set(retired.values()))
             for nid in {i['node'] for i in requests.values()}:
+                if nid not in receipts:
+                    continue
+                previous, retired = receipts[nid]
                 n = inst.node(nid)
                 lines = inbox_lines(n, readonly=True, lifecycle_data=data)
                 overdue = set(overdue_questions(inst, n, lines))
@@ -1621,17 +1642,12 @@ def answer_inbox(inst, item_id, text):
                     for kind, body in reminders:
                         raw = {'node': nid, 'kind': kind, 'text': body, 'episode': request['id']}
                         key = _m_reminders.reminder_key(raw)
-                        record = data['reminders'].get(nid, {}).get(key)
-                        retired = data.get('reminders_retired', {}).get(nid, {})
+                        record = previous.get(key)
                         identity = (_m_jobs.digest([key, 'recurrence', retired[key]]) if key in retired else key)
-                        candidates.append({**request, 'id': record['id'] if record else identity,
+                        if record and record['id'] != retired.get(key):
+                            identity = record['id']
+                        candidates.append({**request, 'id': identity,
                                            'request_id': request['id']})
-            for nid, retired in data.get('reminders_retired', {}).items():
-                if not isinstance(retired, dict) or any(not re.fullmatch(r'[0-9a-f]{24}', str(v))
-                                                       for v in retired.values()):
-                    raise ValueError('invalid retired reminder state')
-                candidates.extend({'id': identity, 'node': nid, 'kind': 'retired'}
-                                  for identity in set(retired.values()))
             item = _m_reminders.resolve_lifecycle_id(candidates, item_id)
             if item['kind'] == 'retired':
                 _m_common.die('this reminder is retired; nothing left to answer for this reminder')

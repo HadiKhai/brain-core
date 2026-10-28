@@ -377,9 +377,54 @@ class DueLifecycle(Scenario):
         item = {'node': 'root', 'kind': 'inbox', 'text': 'Choose a color?'}
         old = self.m.reminder_items(self.inst, self.n, [item])[0]['id']
         data = self.m.lifecycle_read(self.inst)
-        data['reminders_retired']['root'] = {self.m.reminder_key(item): old}
+        key = self.m.reminder_key(item)
+        data['reminders_retired']['root'] = {key: old}
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        receipt.write_text(json.dumps(data))
+        successor = self.m.digest([key, 'recurrence', old])
+        self.assertEqual([i['id'] for i in self.m.reminder_items(self.inst, self.n, [item] * 7)], [successor])
+        self.assertEqual(self.m.lifecycle_read(self.inst)['reminders']['root'][key]['id'], successor)
+        data['reminders']['root']['f' * 24] = {'id': 'e' * 24, 'kind': 'inbox'}
+        data['reminders_retired']['root'].update({f'{i:024x}': f'{i + 100:024x}' for i in range(6)})
+        receipt.write_text(json.dumps(data))
+        before = receipt.read_bytes()
+        with mock.patch.object(self.m, 'LIFECYCLE_LIMIT', 7):
+            visible = self.m.reminder_items(self.inst, self.n, [item] * 7)
+        self.assertEqual([i['id'] for i in visible], [successor])
+        self.assertIn('lifecycle_error', visible[0])
+        self.assertEqual(receipt.read_bytes(), before)
+
+    def test_answer_current_successor_with_conflicting_retired_active_record(self):
+        self.request('Choose a color?')
+        item = next(i for i in self.m.due_items(self.inst, self.n, include_stale=False, include_advice=False)
+                    if i['kind'] == 'inbox')
+        key = self.m.reminder_key(item)
+        data = self.m.lifecycle_read(self.inst)
+        data['reminders_retired']['root'] = {key: item['id']}
         (self.root / '.brain/wake/lifecycle.json').write_text(json.dumps(data))
-        self.assertEqual(self.m.reminder_items(self.inst, self.n, [item] * 7), [])
+        successor = self.m.digest([key, 'recurrence', item['id']])
+        self.m.answer_inbox(self.inst, successor, 'Blue')
+        self.assertEqual(self.requests(), [])
+
+    def test_corrupt_reminder_metadata_does_not_block_direct_request_answers(self):
+        cases = [('reminders', []), ('reminders', {'a' * 24: []}),
+                 ('reminders', {'a' * 24: {}}), ('reminders', {'a' * 24: {'id': 2}}),
+                 ('reminders', {'a' * 24: {'id': 'bad'}}),
+                 ('reminders_retired', []), ('reminders_retired', {'a' * 24: None})]
+        for index, (section, corrupt) in enumerate(cases):
+            with self.subTest(section=section, corrupt=corrupt):
+                (self.root / 'inbox.md').write_text('')
+                self.request(f'Choose color {index}?')
+                request = self.requests()[0]['id']
+                data = self.m.lifecycle_read(self.inst)
+                data['reminders']['root'] = {}
+                data['reminders_retired']['root'] = {}
+                data[section]['root'] = corrupt
+                receipt = self.root / '.brain/wake/lifecycle.json'
+                receipt.write_text(json.dumps(data))
+                self.assertEqual(self.m.answer_inbox(self.inst, request, 'Blue'), request)
+                self.assertEqual(self.requests(), [])
+                self.assertEqual(self.m.lifecycle_read(self.inst)[section]['root'], corrupt)
 
     def test_answer_accepts_inbox_and_single_overdue_reminder_ids(self):
         for kind in ('inbox', 'overdue-question'):
