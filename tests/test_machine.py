@@ -405,6 +405,16 @@ class MachineCare(Scenario):
             self.assertIsNotNone(observer.identity(os.getpid()))
             self.assertIn(os.getpid(), observer.members(os.getsid(0), {}))
 
+    def test_heavy_run_preserves_validated_gate_descriptor_for_nested_commands(self):
+        root = self.init('oak')
+        brain = str(root / 'core/bin/brain')
+        result = subprocess.run([sys.executable, brain, 'gate-lock', '--node', 'root', '--',
+                    sys.executable, brain, 'heavy', 'run', '--node', 'root', '--',
+                    sys.executable, brain, 'heavy', '--node', 'root'], cwd=root, env=self.env,
+                    capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'heavy work allowed (admission only)', result.stdout)
+
     def samples(self, count, reading=None):
         now = time.time()
         return [{"at": now - (count - i - 1) * 60, "reading": dict(reading or self.good)} for i in range(count)]

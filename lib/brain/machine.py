@@ -1671,7 +1671,7 @@ def machine_heavy_monitor(observer, session, done, cancellation, pause, known=No
         pause()
 
 
-def machine_supervise(control, token, command):
+def machine_supervise(control, token, command, inherited=()):
     """A published session leader cleans up on wrapper EOF; the wrapper is backup."""
     import select
     stopped = [0]
@@ -1686,7 +1686,7 @@ def machine_supervise(control, token, command):
             machine_release(token)
             return 125
         try:
-            proc = subprocess.Popen(command)
+            proc = subprocess.Popen(command, pass_fds=inherited)
         except OSError:
             machine_release(token)
             return 127
@@ -1719,6 +1719,11 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
     if not command:
         _m_common.die('heavy run: provide a command after --')
     observer = MachineProcesses()  # refuse unsupported ownership before admission/spawn
+    child_env = os.environ if env is None else env
+    gate_fd = (_m_gate_lock.gate_inherited_fd(inst.root, child_env, node)
+               if inst is not None and node is not None else None)
+    from . import handback_queue as _m_queue
+    inherited = tuple(dict.fromkeys(fd for fd in (gate_fd, _m_queue.queue_descendant_fd()) if fd is not None))
     stopped = [0]
     def stop(number, frame):
         stopped[0] = stopped[0] or number
@@ -1735,11 +1740,13 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
                 control_read, control_write = os.pipe()
                 bootstrap = ("import sys; sys.dont_write_bytecode=True; sys.path.insert(0,sys.argv.pop(1)); "
                              "from brain.machine import machine_supervise; "
-                             "sys.exit(machine_supervise(int(sys.argv[1]),sys.argv[2],sys.argv[3:]))")
+                             "sys.exit(machine_supervise(int(sys.argv[1]),sys.argv[2],sys.argv[4:],"
+                             "tuple(map(int,sys.argv[3].split(','))) if sys.argv[3] else ()))")
                 proc = subprocess.Popen([sys.executable, '-I', '-S', '-c', bootstrap,
-                                         str(Path(__file__).resolve().parent.parent), str(control_read), str(token), *command],
+                                         str(Path(__file__).resolve().parent.parent), str(control_read), str(token),
+                                         ','.join(map(str, inherited)), *command],
                                         cwd=cwd, env=env, stdout=stdout, stderr=stderr,
-                                        pass_fds=(control_read,), start_new_session=True)
+                                        pass_fds=(control_read,) + inherited, start_new_session=True)
                 token.retain = True
                 os.close(control_read)
                 control_read = None
