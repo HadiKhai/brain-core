@@ -26,12 +26,14 @@ _RECORD_PARSER_CODE = marshal.dumps(_m_common.read_fm.__code__)
 @contextlib.contextmanager
 def record_scan(inst):
     """Optional per-source parsing cache for watchers; never cache due decisions."""
-    from . import usage_cache
-    with usage_cache.database(inst) as cache:
+    from . import spend, ui_readmodel, usage_cache
+    readonly = spend._SPEND_READ_ONLY.get() or ui_readmodel.projection(inst.root) is not None
+    with usage_cache.database(inst, readonly=readonly) as cache:
         saved = cache.get('watch-records-v2')
         root = inst.root.resolve()
         code = hashlib.sha256(marshal.dumps(read_record.__code__) + _RECORD_PARSER_CODE
-                              + str(VERSION).encode() + _m_common.FRONTMATTER_RE.pattern.encode()).hexdigest()
+                              + str(VERSION).encode() + _m_common.FRONTMATTER_RE.pattern.encode()
+                              + str(_m_common.FRONTMATTER_RE.flags).encode()).hexdigest()
         old = (saved['sources'] if isinstance(saved, dict) and saved.get('root') == str(root)
                and saved.get('code') == code and isinstance(saved.get('sources'), dict) else {})
         scope = {'root': root, 'old': old, 'sources': {}, 'folders': {}, 'dirty': False}
@@ -58,7 +60,7 @@ def record_stamp(path):
 
 def read_record(path, folder):
     scope = _RECORD_SCAN.get()
-    stamp = record_stamp(path)
+    stamp = record_stamp(path) if scope else None
     cacheable = False
     key = str(path)
     if scope and stamp:
@@ -67,7 +69,7 @@ def read_record(path, folder):
             scope['folders'][parent] = path.parent.resolve().is_relative_to(scope['root'])
         cacheable = scope['folders'][parent]
     if cacheable:
-        saved = scope['old'].get(key)
+        saved = scope['sources'].get(key, scope['old'].get(key))
         if (isinstance(saved, dict) and saved.get('stamp') == list(stamp) and saved.get('folder') == folder
                 and isinstance(saved.get('row'), dict)
                 and isinstance(saved['row'].get('description'), str)

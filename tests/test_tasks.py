@@ -362,6 +362,7 @@ class Tasks(Scenario):
         plan['core_task_operations'][0]['target']['node_identity_sha256'] = task_plan.digest('peer')
         with self.assertRaisesRegex(ValueError, 'outside'):
             task_plan.apply_plan(self.inst, 'root', plan)
+
     def test_watch_record_cache_reuses_only_unchanged_sources_and_detaches_rows(self):
         self.add('APP-1', title='Blue')
         self.add('APP-2', title='Peer')
@@ -382,6 +383,39 @@ class Tasks(Scenario):
         path.write_text('---\nversion: 1\nid: "WRONG"\n---\n')
         with tasks.record_scan(self.inst), self.assertRaisesRegex(ValueError, 'mismatched record'):
             tasks.read_records(self.n)
+
+    def test_watch_record_cache_does_not_publish_a_parse_overtaken_by_a_write(self):
+        self.add('APP-1', title='Blue')
+        path = self.n['dir'] / 'tasks/APP-1.md'
+        read = tasks._m_common.read_fm
+        def overtaken(source):
+            parsed = read(source)
+            path.write_text('---\nversion: 1\nid: "WRONG"\n---\n')
+            return parsed
+        with tasks.record_scan(self.inst), mock.patch.object(tasks._m_common, 'read_fm', side_effect=overtaken):
+            self.assertEqual(tasks.read_records(self.n)['APP-1']['title'], 'Blue')
+        with tasks.record_scan(self.inst), self.assertRaisesRegex(ValueError, 'mismatched record'):
+            tasks.read_records(self.n)
+
+    def test_watch_record_cache_rechecks_changed_sources_within_one_scan(self):
+        self.add('APP-1', title='Blue')
+        path = self.n['dir'] / 'tasks/APP-1.md'
+        read = tasks._m_common.read_fm
+        with tasks.record_scan(self.inst), mock.patch.object(tasks._m_common, 'read_fm', wraps=read) as parser:
+            tasks.read_records(self.n)['APP-1']['aliases'].append('detached')
+            self.assertEqual(tasks.read_records(self.n)['APP-1']['aliases'], [])
+            path.write_text(path.read_text().replace('Blue', 'Cyan'))
+            self.assertEqual(tasks.read_records(self.n)['APP-1']['title'], 'Cyan')
+        self.assertEqual([call.args[0] for call in parser.call_args_list], [path, path])
+
+    def test_watch_record_cache_keeps_accounting_reads_readonly(self):
+        from brain import spend
+        self.add('APP-1')
+        cache = self.root / '.brain/usage.sqlite'
+        before = cache.read_bytes() if cache.exists() else None
+        with spend.spend_read_only(), tasks.record_scan(self.inst):
+            self.assertIn('APP-1', tasks.read_records(self.n))
+        self.assertEqual(cache.read_bytes() if cache.exists() else None, before)
 
     def test_watch_record_cache_rechecks_inventory_links_and_time_thresholds(self):
         import datetime

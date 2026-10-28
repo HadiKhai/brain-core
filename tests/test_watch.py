@@ -337,6 +337,45 @@ class Watcher(Scenario):
         with self.assertRaises(ValueError):
             m.watch_source_signature(inst, layout)
 
+    def test_incremental_signature_reuses_unchanged_generations_and_rechecks_links(self):
+        m, inst = self.m, self.inst
+        target = inst.root / '.brain/fixture-inbox.txt'
+        target.write_text('- Choose blue\n')
+        inbox = inst.root / 'inbox.md'
+        inbox.unlink(missing_ok=True)
+        inbox.symlink_to(target)
+        layout = {}
+        before = m.watch_source_signature(inst, layout)
+        digest = m.watch_digest
+        with mock.patch.object(m, 'watch_digest', wraps=digest) as hashing:
+            self.assertEqual(m.watch_source_signature(inst, layout), before)
+        self.assertEqual(hashing.call_count, 1, 'warm fences only combine unchanged source generations')
+        stamp = target.stat()
+        target.write_text('- Choose cyan\n')
+        os.utime(target, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+
+    def test_incremental_signature_rediscovers_rewritten_git_common_directory(self):
+        m, inst = self.m, self.inst
+        first = self.repo(self.tmp / 'fixture-first')
+        second = self.repo(self.tmp / 'fixture-second')
+        linked = self.tmp / 'fixture-linked'
+        self.git('worktree', 'add', '--detach', str(linked), cwd=first)
+        private = (linked / '.git').read_text().split(':', 1)[1].strip()
+        from pathlib import Path
+        common = Path(private) / 'commondir'
+        external = {**inst.node('root'), 'id': 'fixture-external', 'parent': None,
+                    'external': True, 'home_path': linked}
+        nodes = list(inst.nodes()) + [external]
+        with mock.patch.object(type(inst), 'nodes', return_value=nodes):
+            layout = {}
+            before = m.watch_source_signature(inst, layout)
+            common.write_text(str(second / '.git') + '\n')
+            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+            before = m.watch_source_signature(inst, layout)
+            (second / '.git/refs/heads/main').write_text('0' * 40 + '\n')
+            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
         line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose a color <!-- host-question:color -->'
