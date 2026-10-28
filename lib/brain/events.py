@@ -674,6 +674,10 @@ class Command:
             os.fsync(self.lease)
             os.fsync(self.lease_target.fd)
             data = {"command": self.command}
+            request = getattr(self, 'write_request', None)
+            if request is not None:
+                from . import handback_queue
+                data.update(handback_queue.prepare_intent_operation(self, request))
             if not journal(self.inst).positions:
                 data["baseline"] = resource_list(self.inst, self.before)
             append(self.inst, self.node, "begin", self.ref, data)
@@ -687,6 +691,11 @@ class Command:
         # repairs below only change private journal/index files, not resources.
         before = (resources(self.inst) if not nested and
                   self.command in ('set', 'task', 'handback') else None)
+        request = getattr(self, 'write_request', None)
+        if request is not None and not nested:
+            from . import handback_queue
+            if handback_queue.resume_intent_operation(self, request):
+                return self
         # Refused writes must not first publish repairs or reconstructed sources.
         # Read the retained state without changing it before admitting a writer.
         if (not nested and self.command not in ("status", "set")

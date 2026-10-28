@@ -131,7 +131,7 @@ def write_attempt(n, row, data):
                                    reason_code='attempt_' + data['state'], **evidence)
 
 
-def begin_attempt(inst, n, row, request_id=None):
+def begin_attempt(inst, n, row, request_id=None, write_request=None):
     with _m_instance.brain_lock(inst):
         rows = _m_jobs.read_jobs(n) or []
         current = _m_jobs.open_job(rows, row['Job'])
@@ -148,6 +148,8 @@ def begin_attempt(inst, n, row, request_id=None):
         data = {'version': 1, 'id': os.urandom(16).hex(), 'job_key': _m_jobs.job_key(row),
                 'state': 'queued', 'at': inst.now_dt().isoformat(), 'binding': binding,
                 'owner': owner, 'request_id': request_id}
+        if write_request is not None:
+            data['write_request'] = write_request
         write_attempt(n, row, data)
         return data
 

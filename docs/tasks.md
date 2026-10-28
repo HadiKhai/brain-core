@@ -14,6 +14,8 @@ request ID immediately. `inbox NODE --add TEXT` and unchecked
 Task status, owner/claim, dependencies, holds, authority, contracts and other gate
 fields keep their synchronous path. Checked `handback --state done --reviews N`
 retains the existing verifier/foreground-queue behavior. Item writes stay synchronous.
+Metadata edits on already completed tasks also stay synchronous because their
+effective row requires fresh completion proof.
 
 Before any dependent read or action, carry the returned ID through a barrier:
 
@@ -37,6 +39,9 @@ after preparation block the queue for inspection; no records are skipped.
 Inspect `.brain/write-queue/blocked` for the retained reason. Request, prepared
 effect and applied/rejected receipt files are private instance state. Do not edit,
 rotate or remove the spool while requests or producers exist.
+Interrupted event operations are bound to their immutable request and resumed
+under the original operation lease. Only prepared primary effects may account
+for new source differences; unrelated gaps keep the queue blocked for inspection.
 
 ## Adopt after installation or upgrade
 

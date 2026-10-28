@@ -301,7 +301,9 @@ def cmd_handback(a):
             if not attempt or attempt['id'] != identity or not _m_attempts.attempt_matches(n, row, attempt):
                 _m_common.die('queued attempt changed; no handback published')
         else:
-            attempt = _m_attempts.begin_attempt(inst, n, row)
+            intent = getattr(a, '_intent_request', None)
+            attempt = (_m_attempts.begin_attempt(inst, n, row, write_request=intent['id']) if intent
+                       else _m_attempts.begin_attempt(inst, n, row))
             identity = attempt['id']
     except (OSError, ValueError) as error:
         _m_common.die(_m_guard.redact(str(error), _m_guard.never_terms(n)))
@@ -478,6 +480,9 @@ def publish_handback(a):
                             job_key=job_key(current), inbox_question=bool(inbox_question),
                             message=message if inbox_question else '', marker=marker if inbox_question else '',
                             need=need, branch=a.branch)
+            if inbox_question:
+                line = f"- {data['at']} from worker {a.branch}: {a.state}: {message} <!-- wake:{data['wake_id']} --> {marker}\n"
+                prepared['inbox_after_hash'] = _m_queue.inbox_after_hash(n, line, marker)
             _m_queue.intent_store(inst, intent['id'] + '.prepared', prepared, exclusive=True)
         f.parent.mkdir(exist_ok=True)
         from . import events
@@ -488,7 +493,8 @@ def publish_handback(a):
         if inbox_question:
             wake_id = data["wake_id"]
             inbox = n["dir"] / "inbox.md"
-            bullet = f"- {inst.now()} from worker {a.branch}: {a.state}: {message} <!-- wake:{wake_id} --> {marker}\n"
+            stamp = data['at'] if intent else inst.now()
+            bullet = f"- {stamp} from worker {a.branch}: {a.state}: {message} <!-- wake:{wake_id} --> {marker}\n"
             _m_guard.no_terms_in(n, bullet, "the inbox question")
             question_created = _m_transitions.inbox_append(n["dir"], bullet, marker)
             _m_common.touch(inbox)

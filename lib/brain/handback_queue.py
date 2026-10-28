@@ -68,6 +68,15 @@ def intent_store(inst, name, data, exclusive=False):
         if not exclusive:
             target.atomic_write(raw.decode())
             return
+        if name.endswith(('.receipt', '.prepared')):
+            # These are published only by the single applier lease owner.
+            # Stage + fsync + rename: no empty final receipt/preparation can be
+            # exposed by death between create and write. Refuse an existing
+            # final object rather than replacing its immutable evidence.
+            if target.stat() is not None:
+                raise FileExistsError(str(path))
+            target.atomic_write(raw.decode(), expected=None)
+            return
         fd = target.open(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         try:
             if os.write(fd, raw) != len(raw):
@@ -229,6 +238,9 @@ def fast_intent(a, root):
         changes = tasks.command_changes(a)
         if changes and set(changes) <= PATCH_FIELDS:
             n = inst.node(a.node)
+            current = tasks.read_records(n, ident=a.task_id).get(a.task_id)
+            if current and current.get('status') in ('merged', 'done'):
+                return False  # effective completion proof retains synchronous refusal
             guard.no_terms_in(n, json.dumps(changes), 'task patch')
             payload = dict(kind='task', node=n['id'], task=a.task_id, changes=changes)
     elif name == 'cmd_handback' and getattr(a, 'enqueue', False):
@@ -273,9 +285,9 @@ def apply_intent(inst, data):
         try:
             prepared = intent_read(inst, identity + '.prepared')
         except FileNotFoundError:
-            prepared = dict(hash=data['hash'], line=line)
+            prepared = dict(hash=data['hash'], line=line, inbox_after_hash=inbox_after_hash(n, line, marker))
             intent_store(inst, identity + '.prepared', prepared, exclusive=True)
-        if prepared != dict(hash=data['hash'], line=line):
+        if prepared.get('hash') != data['hash'] or prepared.get('line') != line:
             raise RuntimeError('inbox preparation identity changed')
         # Archives retain the marker. A death after append must not resurrect it.
         archived = archived_intent_marker(n, marker)
@@ -287,6 +299,9 @@ def apply_intent(inst, data):
     elif payload['kind'] == 'task':
         if not payload['changes'] or not set(payload['changes']) <= PATCH_FIELDS:
             raise ValueError('task gate fields cannot be queued')
+        existing = tasks.read_records(n, ident=payload['task']).get(payload['task'])
+        if existing and existing.get('status') in ('merged', 'done'):
+            raise ValueError('effective completion gate cannot be queued')
         name = identity + '.prepared'
         try:
             prepared = intent_read(inst, name)
@@ -301,6 +316,10 @@ def apply_intent(inst, data):
         if prepared.get('hash') != data['hash']:
             raise ValueError('prepared request identity changed')
         current = tasks.read_records(n, ident=payload['task']).get(payload['task'])
+        # Prepared recovery never exempts current mutable graph/proof inputs.
+        records = tasks.read_records(n)
+        records[payload['task']] = prepared['after']
+        tasks.validate(n, records, selected=payload['task'])
         if current == prepared['before']:
             tasks.save_record(n, prepared['after'])
         elif current != prepared['after']:
@@ -319,6 +338,102 @@ def archived_intent_marker(n, marker):
             return marker in target.read_bytes().decode()
     except FileNotFoundError:
         return False
+
+
+def inbox_after_hash(n, line, marker):
+    path = n['dir'] / 'inbox.md'
+    try:
+        with _m_common.directory_target(path) as target:
+            raw = target.read_bytes()
+    except FileNotFoundError:
+        raw = b''
+    return hashlib.sha256(raw if marker.encode() in raw else raw + line.encode()).hexdigest()
+
+
+def prepare_intent_operation(op, request):
+    """Bind the native journal begin to this exact immutable request, durably."""
+    binding = dict(write_request=request['id'], request_hash=request['hash'], before_hash=intent_hash(op.before))
+    intent_store(op.inst, request['id'] + '.operation', dict(binding, ref=op.ref, before=op.before, node=op.node))
+    return binding
+
+
+def resume_intent_operation(op, request):
+    """Resume only our dead native operation; never adopt unrelated source gaps."""
+    from . import events
+    try:
+        saved = intent_read(op.inst, request['id'] + '.operation')
+    except FileNotFoundError:
+        return False
+    except (ValueError, OSError) as error:
+        raise RuntimeError('damaged write operation evidence') from error
+    if (not isinstance(saved, dict) or not isinstance(saved.get('before'), dict)
+            or not isinstance(saved.get('ref'), str) or not re.fullmatch('[0-9a-f]{32}', saved['ref'])
+            or any(not isinstance(k, str) or not isinstance(v, str) or not re.fullmatch('[0-9a-f]{64}', v)
+                   for k, v in saved['before'].items())):
+        raise RuntimeError('invalid write operation evidence')
+    binding = dict(write_request=request['id'], request_hash=request['hash'], before_hash=intent_hash(saved['before']))
+    if any(saved.get(k) != v for k, v in binding.items()) or saved.get('node') != op.node:
+        raise RuntimeError('write operation binding changed')
+    store = events.journal(op.inst)
+    recorded, _, opened = events.replay(op.inst)
+    old = opened.get(saved['ref'])
+    if old is None:
+        return False  # no begin yet, or the prior operation completed before its receipt
+    if (old['data'].get('command') != op.command or not events.same_node(old['node'], op.node)
+            or any(old['data'].get(k) != v for k, v in binding.items())
+            or set(opened) != {saved['ref']} or store.state['faults']):
+        raise RuntimeError('unrelated or damaged event operation; retain blocked request')
+    actual = events.resources(op.inst)
+    allowed = intent_recovery_resources(op.inst, request, actual)
+    observed = {events.digest(path.encode()): (path, value) for path, value in actual.items()}
+    for key in recorded.keys() | observed.keys():
+        current = observed.get(key)
+        value = current[1] if current else None
+        if recorded.get(key, {}).get('hash') != value and (
+                current is None or (allowed.get(current[0]) != value
+                                    and saved['before'].get(current[0]) != value)):
+            raise RuntimeError('unrelated source gap; retain blocked write operation')
+    target = _m_common.directory_target(events.lease_path(op.inst, saved['ref']), create=True, private=True)
+    target.__enter__()
+    fd = None
+    try:
+        fd = target.open(os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        target.check_file(fd)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        target.__exit__(None, None, None)
+        raise
+    op.ref, op.before, op.lease_target, op.lease = saved['ref'], saved['before'], target, fd
+    events._CURRENT.append(op)
+    return True
+
+
+def intent_recovery_resources(inst, request, actual):
+    """Only prepared native effects may bridge the journal's coverage check."""
+    n, payload = inst.node(request['payload']['node']), request['payload']
+    try:
+        prepared = intent_read(inst, request['id'] + '.prepared')
+    except FileNotFoundError:
+        prepared = {}
+    if prepared and prepared.get('hash') != request['hash']:
+        raise RuntimeError('prepared operation payload changed')
+    allowed = {}
+    if prepared.get('inbox_after_hash'):
+        allowed[(n['dir'] / 'inbox.md').relative_to(inst.root).as_posix()] = prepared['inbox_after_hash']
+    if payload['kind'] == 'handback':
+        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], payload['args']['branch'])
+        if not row or _m_jobs.job_key(row) != payload['job_key']:
+            raise RuntimeError('interrupted handback job changed')
+        attempt = _m_attempts.current_attempt(n, row)
+        if attempt and attempt.get('write_request') == request['id'] and attempt['state'] in ('queued', 'terminal', 'interrupted'):
+            path = _m_attempts.attempt_path(n, row).relative_to(inst.root).as_posix()
+            allowed[path] = actual.get(path)
+        if prepared and _m_jobs.read_handback(n, row) == prepared['after']:
+            path = _m_jobs.handback_file(n, row).relative_to(inst.root).as_posix()
+            allowed[path] = actual.get(path)
+    return allowed
 
 
 def apply_handback_intent(inst, n, request):
@@ -390,12 +505,16 @@ def drain_intents(inst, lease_fd=None):
             sequence, data = pending[0]
             state, reason = 'applied', ''
             diagnostic = io.StringIO()
-            with _m_instance.brain_lock(inst):
+            with intent_touched(), _m_instance.brain_lock(inst):
                 current = _m_instance.Instance(inst.root)
                 args = argparse.Namespace(cmd='queue', action='apply', id=data['payload']['node'], f=cmd_intent_queue)
                 try:
                     with contextlib.redirect_stderr(diagnostic):
-                        with events.Command(inst.root, args):
+                        if _m_common.outward_links(inst.root):
+                            raise ValueError('unsafe instance links; write request rejected')
+                        operation = events.Command(inst.root, args)
+                        operation.write_request = data
+                        with operation:
                             apply_intent(current, data)
                 except (ValueError, SystemExit) as error:
                     # Rejection is terminal only when no prepared primary effect
@@ -411,7 +530,7 @@ def drain_intents(inst, lease_fd=None):
             info = target.stat()
             if info:
                 target.unlink_owned(path.name, (info.st_dev, info.st_ino))
-    except (OSError, ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, AttributeError) as error:
         blocked = True
         intent_store(inst, 'blocked', dict(state='blocked', reason=str(error)))
         raise
@@ -421,6 +540,18 @@ def drain_intents(inst, lease_fd=None):
         # a producer arriving after this inspection acquires the free lease itself.
         if not blocked and pending_intents(inst):
             start_intent_drainer(inst)
+
+
+@contextlib.contextmanager
+def intent_touched():
+    """Process-global native write tracking belongs to one request at a time."""
+    prior = set(_m_common.TOUCHED)
+    _m_common.TOUCHED.clear()
+    try:
+        yield
+    finally:
+        _m_common.TOUCHED.clear()
+        _m_common.TOUCHED.update(prior)
 
 
 def cmd_intent_queue(a):

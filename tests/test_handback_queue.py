@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import hashlib
 from unittest import mock
 
 import core_loader
@@ -36,6 +37,106 @@ class HandbackLifecycle(Scenario):
         before = m.state_signature(inst, extra=paths)
         self.git('commit', '--allow-empty', '-qm', 'Selected target changed', cwd=home)
         self.assertNotEqual(before, m.state_signature(inst, extra=paths))
+    def test_write_receipt_is_atomic_and_existing_receipt_is_immutable(self):
+        m, inst, n, row = self.fixture()
+        request = m.submit_intent(inst, dict(kind='inbox', node='root', text='Receipt retry', at=inst.now()), start=False)
+        replace = os.replace
+        def killed(src, dst, **kwargs):
+            if dst == request['id'] + '.receipt':
+                raise RuntimeError('owned kill before receipt rename')
+            return replace(src, dst, **kwargs)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            with mock.patch.object(os, 'replace', side_effect=killed), self.assertRaises(RuntimeError):
+                m.drain_intents(inst)
+            self.assertFalse(m.intent_path(inst, request['id'] + '.receipt').exists())
+            self.assertIsNone(m.intent_receipt(inst, request['id']))
+            m.drain_intents(inst)
+            receipt = m.intent_receipt(inst, request['id'])
+            with self.assertRaises(FileExistsError):
+                m.intent_store(inst, request['id'] + '.receipt', {**receipt, 'state': 'rejected'}, exclusive=True)
+        self.assertEqual(m.intent_receipt(inst, request['id']), receipt)
+        self.assertEqual((n['dir'] / 'inbox.md').read_text().count(request['id']), 1)
+
+    def test_write_events_source_resumes_exact_dead_operation_and_keeps_unrelated_gap(self):
+        m, inst, n, row = self.fixture()
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            with m.brain_lock(inst), m.Command(inst.root, command='set', node='root'):
+                path = n['dir'] / 'node.md'
+                path.write_text(path.read_text().replace('home: none', 'home: none\nstatus_source: events'))
+            events = m._owners['Command']
+            self.assertEqual(events.source(inst, inst.node('root')), 'events')
+            # This hand-built fixture predates its journal; initialize the
+            # source baseline exactly as an explicit refresh does at adoption.
+            with m.brain_lock(inst):
+                events.reconcile(inst)
+            self.assertFalse(events.detect_gaps(inst, 'root', record=False))
+            def crash(text):
+                request = m.submit_intent(inst, dict(kind='inbox', node='root', text=text, at=inst.now()), start=False)
+                args = argparse.Namespace(id='root', f=m.cmd_intent_queue)
+                operation = m.Command(inst.root, args)
+                operation.write_request = request
+                with m.brain_lock(inst):
+                    operation.__enter__()
+                    try:
+                        m.apply_intent(inst, request)
+                    finally:
+                        # A SIGKILL leaves begin + primary bytes without __exit__.
+                        operation.close_lease()
+                        events._CURRENT.pop()
+                return request
+            request = crash('Events recovery')
+            m.drain_intents(inst)
+            self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'applied')
+            self.assertEqual((n['dir'] / 'inbox.md').read_text().count(request['id']), 1)
+            other = crash('Retain unrelated gap')
+            unrelated = n['dir'] / 'decisions.md'
+            unrelated.write_text('Independent unrecorded decision\n')
+            with self.assertRaisesRegex(RuntimeError, 'unrelated source gap'):
+                m.drain_intents(inst)
+            self.assertIsNone(m.intent_receipt(inst, other['id']))
+            self.assertEqual(unrelated.read_text(), 'Independent unrecorded decision\n')
+
+    def test_write_touched_paths_do_not_commit_another_requests_later_edit(self):
+        m, inst, n, row = self.fixture()
+        for ident in ('TASKA', 'TASKB'):
+            m.mutate(inst, n, ident, {'title': ident, 'owner': 'fixture'}, create=True)
+            m.submit_intent(inst, dict(kind='task', node='root', task=ident, changes={'priority': 'P1'}), start=False)
+        (inst.root / '.git').mkdir()
+        touched = m._owners['TOUCHED'].TOUCHED
+        inherited = set(touched)
+        apply = m.apply_intent
+        def second(current, data):
+            if data['payload']['task'] == 'TASKB':
+                path = m.record_path(n, 'TASKA')
+                path.write_text(path.read_text() + '\nIndependent edit\n')
+            return apply(current, data)
+        commits = []
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'apply_intent', side_effect=second), \
+                mock.patch.object(m.Instance, '_commit', side_effect=lambda root, want, message: commits.append((want, message))):
+            m.drain_intents(inst)
+        second_paths = next(want for want, message in commits if message.endswith('task TASKB'))
+        self.assertNotIn('tasks/TASKA.md', second_paths)
+        self.assertEqual(touched, inherited)
+
+    def test_write_completed_task_gate_stays_sync_and_recovery_revalidates(self):
+        m, inst, n, row = self.fixture()
+        artifact = n['dir'] / 'measurement.txt'
+        artifact.write_text('Measured\n')
+        receipt = dict(ref='report:fixture', scope='fixture', result='passed', at=inst.now(),
+                       artifact=artifact.name, sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(), version=1)
+        m.mutate(inst, n, 'REPORT', dict(title='Report', owner='fixture', status='done', completion_kind='report',
+                                      evidence=['Measured'], completion_receipt=receipt), create=True)
+        artifact.write_text('Changed\n')
+        args = argparse.Namespace(f=m.cmd_task, action='set', node='root', task_id='REPORT', fields=['title=Edited'],
+                                  title=None, status=None, owner=None, json=False, request_id=None)
+        with mock.patch.object(m, 'start_intent_drainer') as start:
+            self.assertFalse(m.fast_intent(args, inst.root))
+            start.assert_not_called()
+        request = m.submit_intent(inst, dict(kind='task', node='root', task='REPORT', changes={'title': 'Edited'}), start=False)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            m.drain_intents(inst)
+        self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'rejected')
+        self.assertEqual(m.read_records(n)['REPORT']['title'], 'Report')
     def test_write_intent_identity_order_and_corruption_are_fail_closed(self):
         m, inst, n, row = self.fixture()
         payload = dict(kind='inbox', node='root', text='same text', at=inst.now())
