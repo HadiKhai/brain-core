@@ -208,8 +208,8 @@ def ui_json_stamps(inst):
         runs = None
     # Wake lifecycle receipts change by the second; reused views re-read job and round
     # usage from them (ui_json_view_usage) and lifecycle reconciliation always re-runs.
+    # Inbox-seen markers churn the same way and only the uncached inbox_items reads them.
     shared = (stamp(root / 'instance.md'), stamp(root / '.brain/communications.json'),
-              stamp(root / '.brain/inbox-seen.json'),
               tuple(stamp(path) for path in sorted((root / '.brain/teaching').glob('*.json'))),
               json.dumps({k: v for k, v in inst.local.items() if k != 'nodes'}, sort_keys=True, default=str),
               os.path.realpath(root / '.brain/core-current'), runs is None,
