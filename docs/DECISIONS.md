@@ -4251,3 +4251,9 @@ Source signatures and publication checks bypass this observation, including an
 enclosing UI display snapshot. The UI instance delegates scoped and fresh reads
 to the same discovery implementation. Mutable node records remain confined to
 the scan; the instance's ordinary node reads outside a scope remain uncached.
+
+The observation preserves the caller's existing retry policy. A scan whose
+inputs change remains explicitly stale, cannot publish and cannot update due
+receipts. A later scan starts a new inventory and observes the changed tree and
+bindings. This helper adds no automatic rescan or dependency on optional source
+scan optimizations.

@@ -119,8 +119,19 @@ class Watcher(Scenario):
         def scan(*args):
             seen.append([])
             return original(*args)
+        receipt = self.root / '.brain/wake/due-episodes.json'
+        before = receipt.read_bytes() if receipt.exists() else None
         with mock.patch.object(m, 'watch_scan', side_effect=scan), \
                 mock.patch.object(m, 'watch_items', side_effect=items):
+            # Main retains changed input as unknown. Its caller retries with a
+            # later scan; node observation must not add an automatic retry.
+            stale = m.watch_groups(inst)
+            self.assertTrue(stale.stale)
+            self.assertEqual(stale, {})
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(receipt.read_bytes() if receipt.exists() else None, before)
+            with m.watch_precomputed_publication(inst, stale) as current:
+                self.assertFalse(current)
             groups = m.watch_groups(inst)
         self.assertFalse(groups.stale)
         self.assertEqual([{nid for nid, _ in attempt} for attempt in seen],
