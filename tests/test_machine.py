@@ -2288,12 +2288,11 @@ class WriteQueueService(Scenario):
         first = self.submit('First service write')
         stop = threading.Event()
         waits, roots = [], []
-        construct = self.service._m_instance.Instance
-        def fresh(root):
-            current = construct(root)
+        construct = self.service._m_instance.Instance.__init__
+        def fresh(current, root):
+            construct(current, root)
             current.commit = mock.Mock()
             roots.append(current)
-            return current
         second = []
         def idle(interval):
             health = self.service.queue_health(self.inst)
@@ -2304,9 +2303,12 @@ class WriteQueueService(Scenario):
                 second.append(self.submit('Arrived while idle'))
             else:
                 stop.set()
+        start = mock.Mock()
+        # Keep native ps/sysctl identity probes while forbidding a fallback child.
+        queue_process = argparse.Namespace(Popen=start, DEVNULL=subprocess.DEVNULL)
         with mock.patch.object(stop, 'wait', side_effect=idle), \
-                mock.patch.object(self.service._m_instance, 'Instance', side_effect=fresh), \
-                mock.patch.object(subprocess, 'Popen') as start:
+                mock.patch.object(self.service._m_instance.Instance, '__init__', fresh), \
+                mock.patch.object(self.queue, 'subprocess', queue_process):
             self.assertTrue(self.service.run_service(self.inst, stop))
         start.assert_not_called()
         self.assertIsNot(roots[0], roots[1])
