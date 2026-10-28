@@ -298,8 +298,6 @@ class IsolatedDisposition(Scenario):
 
     def test_initial_snapshot_refuses_rebinding_and_configuration_drift_before_execution(self):
         import argparse
-        import contextlib
-        import io
         import os
         from unittest import mock
         import core_loader
@@ -327,14 +325,13 @@ class IsolatedDisposition(Scenario):
                         (self.wt / 'tests/test_sample.py').write_text(self.source.replace(
                             'any("::" in a for a in sys.argv)', 'True'))
                     return result
-                error = io.StringIO()
                 try:
                     with self.subTest(drift=drift, action=action), \
                             mock.patch.dict(os.environ, self.env, clear=True), \
                             mock.patch.object(inst, 'node', side_effect=stale_node), \
                             mock.patch.object(m, 'load', return_value=inst), \
                             mock.patch.object(m, 'run_verify') as execute, \
-                            contextlib.redirect_stderr(error), self.assertRaises(SystemExit):
+                            self.assertRaises(SystemExit) as refusal:
                         if action == 'isolate':
                             m.cmd_full_isolate(argparse.Namespace(id='a', branch='one',
                                 full_receipt=self.red.stem, test=self.tests[0]))
@@ -342,7 +339,7 @@ class IsolatedDisposition(Scenario):
                             m.cmd_full_quarantine(argparse.Namespace(id='a', branch='one',
                                 file=str(self.tmp / 'unread-request.json')))
                     execute.assert_not_called()
-                    self.assertIn('configuration or checkout binding changed', error.getvalue())
+                    self.assertIn('configuration or checkout binding changed', str(refusal.exception))
                     self.assertEqual(set(self.folder.glob('*')), before)
                 finally:
                     node_path.write_bytes(node_bytes)
