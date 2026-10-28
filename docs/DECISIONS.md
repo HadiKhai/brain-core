@@ -4108,3 +4108,14 @@ When due_items omits stale-status checks and receives no evidence, it reads
 file_state directly. The full evidence fingerprint remains required for stale
 checks, and supplied evidence is reused. Due items, reminder lifecycle and live
 readiness are still evaluated on each call; no result or verdict cache is added.
+
+## 2026-10-28: Share due source observations within one read snapshot
+
+The status fingerprint and final due inventory reuse a source-only inventory,
+keyed by node, observed file state and readiness mode. Direct due calls create
+a narrow observation scope; read commands use their existing snapshot. Neither
+scope survives a return or projection retry. Advice, staleness and reminder
+lifecycle handling remain separate per caller, preserving ordering, partial-scan
+omissions, current suppression and damaged-receipt refusals. No due result or
+readiness verdict is retained across snapshots; mutations between calls are read
+again.

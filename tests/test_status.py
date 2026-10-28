@@ -2750,6 +2750,49 @@ class RenderedFingerprint(Scenario):
             cheap = self.m.due_items(self.inst, self.n, evidence=evidence, include_stale=False)
         self.assertEqual(cheap, [i for i in items if i['kind'] != 'stale-status'])
 
+    def test_due_snapshot_observes_sources_once_and_matches_unshared_inventory(self):
+        status = self.m._owners['due_items']
+        reads = status._m_command_reads
+        observe = status._due_source_items
+        # Bypass only the new sharing boundary to reproduce the old repeated
+        # inventory path, keeping real readiness, source reads and lifecycle IDs.
+        with mock.patch.object(status, '_due_source_items', observe.__wrapped__):
+            expected = self.m.due_items(self.inst, self.n)
+        sources = [(status._m_proposals, 'pending_rule_snapshot'),
+                   (status._m_rotation, 'rotation_due'),
+                   (status._m_verify, 'due_ready_state'),
+                   (status._m_recurrence, 'synthesis_due'),
+                   (status._m_learning, 'enforcement_due'),
+                   (status._m_feedback, 'feedback_due')]
+        with contextlib.ExitStack() as stack:
+            counters = [stack.enter_context(mock.patch.object(owner, name, wraps=getattr(owner, name)))
+                        for owner, name in sources]
+            with reads.snapshot():
+                evidence = self.m.due_evidence(self.inst, self.n)
+                actual = self.m.due_items(self.inst, self.n)
+                self.assertEqual(actual, expected)
+                self.assertEqual(self.m.due_evidence(self.inst, self.n), evidence)
+            for (_, name), counter in zip(sources, counters):
+                self.assertEqual(counter.call_count, 1, name)
+
+    def test_direct_due_call_shares_fingerprint_reads_but_next_call_revalidates_policy(self):
+        status = self.m._owners['due_items']
+        with mock.patch.object(status._m_verify, 'due_ready_state',
+                               wraps=status._m_verify.due_ready_state) as ready:
+            first = self.m.due_items(self.inst, self.n)
+            self.assertTrue(next(i for i in first if i['kind'] == 'handback')['ready'])
+            self.assertEqual(ready.call_count, 1)
+            self.n['fm']['verify'] = 'false'
+            second = self.m.due_items(self.inst, self.n)
+            handback = next(i for i in second if i['kind'] == 'handback')
+            self.assertFalse(handback['ready'])
+            self.assertTrue(handback['reasons'])
+            self.assertEqual(ready.call_count, 2)
+        self.signal['summary'] = 'A changed worker publication'
+        self.save_signal()
+        third = self.m.due_items(self.inst, self.n)
+        self.assertIn(self.signal['summary'], next(i for i in third if i['kind'] == 'handback')['text'])
+
     def facts(self):
         state, _, _ = self.m.due_evidence(self.inst, self.n)
         return self.m.status_facts(self.inst, self.n, state,

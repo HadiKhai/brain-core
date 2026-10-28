@@ -577,6 +577,32 @@ class DueLifecycle(Scenario):
         changed = self.m.due_items(self.inst, self.n, (state, '', ''), include_stale=False, include_advice=False)
         self.assertTrue(any(i['kind'] == 'handback' for i in changed))
 
+    def test_shared_sources_apply_current_handling_and_receipt_refusals_each_time(self):
+        self.n['fm']['labels'] = 'kind:code'
+        row = self.identity_row(Ended='2026-01-15T10:00Z', Outcome='merged', Settled='yes')
+        self.m.write_jobs(self.inst, self.n, [row])
+        status = self.m._owners['due_items']
+        evidence = (self.m.file_state(self.inst, self.n), '', '')
+        def inventory(**options):
+            return self.m.due_items(self.inst, self.n, evidence, include_stale=False,
+                                    include_advice=False, **options)
+        with status._m_command_reads.snapshot(), \
+                mock.patch.object(status, '_due_source_items', wraps=status._due_source_items) as source:
+            due = inventory()
+            preview = next(i for i in due if i['kind'] == 'missing-preview')
+            self.m.record_reminder(self.inst, self.n, due, preview['id'], 'defer', 'Preview later',
+                                   until='2026-01-16T12:00:00Z')
+            self.assertFalse(any(i['kind'] == 'missing-preview' for i in inventory()))
+            handled = next(i for i in inventory(include_handled=True) if i['kind'] == 'missing-preview')
+            self.assertEqual(handled['id'], preview['id'])
+            self.assertEqual(handled['handling']['reason'], 'Preview later')
+            receipt = self.root / '.brain/wake/lifecycle.json'
+            receipt.write_text('{damaged receipt')
+            refused = next(i for i in inventory() if i['kind'] == 'missing-preview')
+            self.assertIn('lifecycle_error', refused)
+            self.assertEqual(receipt.read_text(), '{damaged receipt')
+            self.assertEqual(source.call_count, 4)  # each caller applies lifecycle independently
+
     def test_p14_deferral_expires_and_changed_need_reappears(self):
         raw = [{'node': 'root', 'kind': 'missing-preview', 'episode': 'merge-one', 'text': 'Preview required'}]
         item = self.m.reminder_items(self.inst, self.n, raw)[0]

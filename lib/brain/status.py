@@ -688,13 +688,9 @@ def runnable_work(n, rows):
     return tasks
 
 
-def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True,
-              include_handled=False):
-    if n["archived"]:
-        return []
-    # Descendant scans omit staleness; its display fingerprint is unused there.
-    evidence = evidence or (due_evidence(inst, n) if include_stale else (file_state(inst, n), None, None))
-    state, _, _ = evidence
+@_m_command_reads.memo
+def _due_source_items(inst, n, state, include_ready):
+    """Source observations only; lifecycle and display options belong to each caller."""
     items = []
     def add(kind, text, **extra):
         items.append({"node": n["id"], "kind": kind, "text": _m_guard.redact(text, _m_guard.never_terms(n)), **extra})
@@ -802,21 +798,14 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
         else:
             from . import inbox_notices
             add("inbox", line[2:], informational=inbox_notices.informational_notice(line))
-    if include_advice:
-        for advice in runaway_jobs(inst, n, structured=True):
-            if isinstance(advice, str):  # legacy callers supplying display-only advice
-                add("job", advice, informational=True)
-            else:
-                items.append(advice)
+    before_advice, items = items, []
     if n['id'] == 'root':
         episode = status_machine_alert(inst)
         if episode:
             add(episode['kind'], episode['text'], **{k: v for k, v in episode.items() if k not in ('kind', 'text')})
     for line in overdue_questions(inst, n, state["inbox"]):
         add("overdue-question", "question unanswered past its threshold; root must follow up", escalate_to="root")
-    lag = status_lag(inst, n, evidence) if include_stale else None
-    if lag:
-        add("stale-status", lag + "; update judgement sections, then brain status <node> --refresh")
+    before_stale, items = items, []
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
     from . import tasks as _m_tasks
@@ -827,6 +816,36 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     items.extend(_m_recurrence.synthesis_due(inst, n))
     items.extend(_m_learning.enforcement_due(inst, n))
     items.extend(_m_feedback.feedback_due(inst, n))
+    return before_advice, before_stale, items
+
+
+def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True,
+              include_handled=False):
+    if n["archived"]:
+        return []
+    # The fingerprint's status_facts and this inventory share observations even
+    # for direct callers. A surrounding read snapshot can share them further;
+    # otherwise this scope expires on return, including on errors and retries.
+    with _m_command_reads.scope(_due_source_items):
+        # Descendant scans omit staleness; its display fingerprint is unused there.
+        evidence = evidence or (due_evidence(inst, n) if include_stale else (file_state(inst, n), None, None))
+        state, _, _ = evidence
+        before_advice, before_stale, after_stale = _due_source_items(inst, n, state, include_ready)
+        items = list(before_advice)
+        if include_advice:
+            for advice in runaway_jobs(inst, n, structured=True):
+                if isinstance(advice, str):  # legacy callers supplying display-only advice
+                    items.append({'node': n['id'], 'kind': 'job', 'informational': True,
+                                  'text': _m_guard.redact(advice, _m_guard.never_terms(n))})
+                else:
+                    items.append(advice)
+        items.extend(before_stale)
+        lag = status_lag(inst, n, evidence) if include_stale else None
+        if lag:
+            items.append({'node': n['id'], 'kind': 'stale-status',
+                          'text': _m_guard.redact(lag + '; update judgement sections, then brain status <node> --refresh',
+                                                  _m_guard.never_terms(n))})
+        items.extend(after_stale)
     omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
     return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
 
