@@ -166,6 +166,26 @@ class Watcher(Scenario):
         self.root = self.cached_setup('watch', self.watch_fixture)
         self.inst = self.m.Instance(self.root)
 
+    def test_producer_inbox_wake_ref_is_the_scan_entry(self):
+        self.b(self.root, 'new', 'kid', '--title', 'Kid')
+        episode = 'a' * 32
+        line = ('- 2026-10-28 07:00 from worker job: question: Choose blue <!-- wake:' + episode
+                + ' --> <!-- handback:' + 'b' * 24 + ' -->')
+        (self.root / 'nodes/kid/inbox.md').write_text(line + '\n')
+        inst = self.m.Instance(self.root)
+        n = inst.node('kid')
+        scanned = [i for i in self.m.watch_items(inst, n) if i.get('reason') == 'wake:' + episode]
+        self.assertEqual(len(scanned), 1)
+        self.assertEqual(self.m.watch_handback_wake_items(inst, n, 'job', 'attempt', episode, line=line), scanned)
+        # Unknown forms keep the scan fallback rather than invent an identity.
+        self.assertIsNone(self.m.watch_handback_wake_items(inst, n, 'job', 'attempt', 'c' * 32, line=line))
+        self.assertIsNone(self.m.watch_handback_wake_items(inst, n, 'job', 'attempt', 'legacy', line=line))
+        # Appended onto an unterminated line, the bullet is not the durable line the scan sees.
+        (self.root / 'nodes/kid/inbox.md').write_text('- 2026-10-28 06:00 from someone: earlier note ' + line + '\n')
+        self.assertIsNone(self.m.watch_handback_wake_items(self.m.Instance(self.root), n, 'job', 'attempt', episode, line=line))
+        notice = '- 2026-10-28 07:00 from worker job: fyi: landed <!-- wake:' + episode + ' -->'
+        self.assertIsNone(self.m.watch_handback_wake_items(inst, n, 'job', 'attempt', episode, line=notice))
+
     def watch_fixture(self):
         self.root = self.init('oak')
         self.b(self.root, 'set', 'root', 'wake=fixture-send', 'coordinator=fixture-root')

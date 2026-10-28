@@ -326,24 +326,6 @@ def watch_items(inst, n):
     for item in items:
         if (item['kind'] == 'machine' or item['kind'] == 'stale-status' and not visible) or (item['kind'] == 'inbox' and item.get('informational')):
             continue
-        direct_reason = None
-        handback_episode = None
-        if item['kind'] == 'inbox':
-            marker = re.search(r'<!-- (?:host-question|handback):[^>]+ -->', item['text'])
-            direct_reason = marker.group() if marker else None
-            episode = re.search(r'<!-- wake:([0-9a-f]{32}) -->', item['text'])
-            if episode and marker:
-                direct_reason = 'wake:' + episode[1]
-        if item['kind'] == 'handback' and item.get('state') in ('question', 'blocked'):
-            row = next(r for r in rows if _m_jobs.job_key(r) == item['job'])
-            if any(f"from worker {row['Job']}: {item['state']}:" in line
-                   and '<!-- handback:' in line for line in state['inbox']):
-                continue  # the associated inbox item owns this same wake
-            episode = (signals.get(item['job']) or {}).get('wake_id')
-            if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode):
-                handback_episode = episode
-            direct_reason = ('wake:' + handback_episode if handback_episode else
-                             'handback:' + _m_jobs.digest([item['job'], item['state']]))
         if item['kind'] == 'overdue-question':
             continue  # routed separately to root, once per source question
         if item['kind'] == 'unsettled-threads':
@@ -356,35 +338,122 @@ def watch_items(inst, n):
                 out.append({'id': watch_digest([n['id'], item['kind'], entry['id']]),
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
-        # Keep identity separate from changing display (readiness, age, counts).
-        identity = (item.get('episode') if item.get('episode') else
-                    [item.get('job'), item.get('state'), watch_text_identity(item)] if item.get('job') else
-                    watch_text_identity(item))
-        if item['kind'] == 'rotate':
-            sessions = n['local'].get('coordinator_sessions', [])
-            category = ('repair' if item['text'].startswith('rotation sidecar') else
-                        'session' if item['text'].startswith('append the new coordinator') else 'limit')
-            identity = [n['local'].get('coordinator'), sessions[-1] if isinstance(sessions, list) and sessions else None,
-                        category]
-        if item['kind'] == 'handback':
-            identity = [item.get('job') or watch_text_identity(item), item.get('state')]
-            if item.get('state') == 'done':
-                signal = signals.get(item.get('job')) or {}
-                episode = signal.get('wake_id')
-                handback_episode = (episode if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode)
-                                    else 'legacy')
-            if handback_episode:
-                identity.append(handback_episode)
-        text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
-        semantic = _m_reminders.semantic_item_key(item)
-        entry = {'id': watch_digest(semantic if semantic is not None else [n['id'], item['kind'], identity]),
-                 'kind': item['kind'], 'text': text}
-        if item['kind'] == 'handback':
-            entry['state'] = item.get('state')
-        if direct_reason:
-            entry.update(reason=direct_reason, source=n['id'])
-        out.append(entry)
+        entry = watch_item_entry(n, item, rows, signals, state['inbox'])
+        if entry is not None:
+            out.append(entry)
     return out
+
+
+def watch_item_entry(n, item, rows, signals, inbox):
+    """The canonical wake entry for one ordinary due item; None when its inbox line owns the wake.
+
+    Shared by the scan and by a producer that has just published a direct
+    episode, so a supplied wake ref is exactly the identity, kind, question
+    flag and direct reason a later scan computes.
+    """
+    direct_reason = None
+    handback_episode = None
+    if item['kind'] == 'inbox':
+        marker = re.search(r'<!-- (?:host-question|handback):[^>]+ -->', item['text'])
+        direct_reason = marker.group() if marker else None
+        episode = re.search(r'<!-- wake:([0-9a-f]{32}) -->', item['text'])
+        if episode and marker:
+            direct_reason = 'wake:' + episode[1]
+    if item['kind'] == 'handback' and item.get('state') in ('question', 'blocked'):
+        row = next(r for r in rows if _m_jobs.job_key(r) == item['job'])
+        if any(f"from worker {row['Job']}: {item['state']}:" in line
+               and '<!-- handback:' in line for line in inbox):
+            return None  # the associated inbox item owns this same wake
+        episode = (signals.get(item['job']) or {}).get('wake_id')
+        if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode):
+            handback_episode = episode
+        direct_reason = ('wake:' + handback_episode if handback_episode else
+                         'handback:' + _m_jobs.digest([item['job'], item['state']]))
+    # Keep identity separate from changing display (readiness, age, counts).
+    identity = (item.get('episode') if item.get('episode') else
+                [item.get('job'), item.get('state'), watch_text_identity(item)] if item.get('job') else
+                watch_text_identity(item))
+    if item['kind'] == 'rotate':
+        sessions = n['local'].get('coordinator_sessions', [])
+        category = ('repair' if item['text'].startswith('rotation sidecar') else
+                    'session' if item['text'].startswith('append the new coordinator') else 'limit')
+        identity = [n['local'].get('coordinator'), sessions[-1] if isinstance(sessions, list) and sessions else None,
+                    category]
+    if item['kind'] == 'handback':
+        identity = [item.get('job') or watch_text_identity(item), item.get('state')]
+        if item.get('state') == 'done':
+            signal = signals.get(item.get('job')) or {}
+            episode = signal.get('wake_id')
+            handback_episode = (episode if isinstance(episode, str) and re.fullmatch(r'[0-9a-f]{32}', episode)
+                                else 'legacy')
+        if handback_episode:
+            identity.append(handback_episode)
+    text = _m_nodes.import_text(item['text'], _m_guard.never_terms(n))[:400]
+    semantic = _m_reminders.semantic_item_key(item)
+    entry = {'id': watch_digest(semantic if semantic is not None else [n['id'], item['kind'], identity]),
+             'kind': item['kind'], 'text': text}
+    if item['kind'] == 'handback':
+        entry['state'] = item.get('state')
+    if direct_reason:
+        entry.update(reason=direct_reason, source=n['id'])
+    return entry
+
+
+def watch_handback_wake_items(inst, n, branch, attempt_id, wake_id, line=None):
+    """Typed refs for a just-published direct question/blocked handback, or None.
+
+    The producer already knows its episode, so it never rediscovers it through
+    an all-node scan. Only the current signal of this job, attempt and episode,
+    in the form a scan of this node shows as direct, gets refs; a restart, a
+    replaced or legacy signal, a merged worktree, an older blocked inbox line
+    that owns the wake, a handled reminder or unknown state returns None,
+    keeping request_wake's scan fallback.
+    """
+    import copy
+    from . import inbox_notices
+    from . import job_attempts as _m_attempts
+    if n['archived'] or not isinstance(wake_id, str) or not re.fullmatch(r'[0-9a-f]{32}', wake_id):
+        return None
+    reason = 'wake:' + wake_id
+    if line is not None:
+        # The scan sees the durable line, never the bullet as written: an append
+        # onto an unterminated line or a filtered request is a different form.
+        if (inbox_notices.informational_notice(line)
+                or line not in _m_status.inbox_lines(n, readonly=True)):
+            return None
+        item = {'node': n['id'], 'kind': 'inbox', 'text': _m_guard.redact(line[2:], _m_guard.never_terms(n))}
+        entry = watch_item_entry(n, item, [], {}, [])
+    else:
+        row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+        projection = _m_attempts.job_projection(inst, n, row) if row else None
+        signal = projection and projection['signal']  # what due reports, not merely the file
+        if (not signal or signal.get('state') != 'blocked' or signal.get('restart')
+                or signal.get('attempt_id') != attempt_id or signal.get('wake_id') != wake_id):
+            return None
+        w = n['local'].get('worktrees', {}).get(branch)
+        if w and _m_status.local_job_state(n, branch, w).get('merged'):
+            return None  # a merged job is reported as such, never as this handback
+        inbox = n['dir'] / 'inbox.md'
+        # Raw lines are a superset of the scan's filtered inbox: never miss an owning line.
+        lines = [l for l in inbox.read_text().splitlines() if l.startswith('- ')] if inbox.exists() else []
+        key = _m_jobs.job_key(row)
+        need = _m_jobs.digest({k: signal.get(k) for k in ('state', 'summary', 'question', 'report', 'lessons', 'restart')})
+        item = {'node': n['id'], 'kind': 'handback', 'job': key, 'state': 'blocked', 'text': branch,
+                'reasons': signal.get('ready_reasons', []), 'episode': projection['episode_id'], 'need': need,
+                'protected': bool(signal.get('question'))}
+        # A coordinator may already have acknowledged this need; the scan then
+        # omits it. Read the same reminder receipts without changing them.
+        try:
+            with _m_reminders.lifecycle_store(inst, readonly=True) as data:
+                current = _m_reminders.reminder_reconcile(inst, n, [item], copy.deepcopy(data))
+        except (OSError, ValueError):
+            return None  # unknown suppression state: the scan decides
+        if _m_reminders.reminder_handled(inst, current[0]):
+            return None
+        entry = watch_item_entry(n, item, [row], {key: signal}, lines)
+    if entry is None or entry.get('reason') != reason or entry.get('source') != n['id']:
+        return None
+    return [entry]
 
 
 def watch_recorded_ready(inst, n, row, signal, strict=False):

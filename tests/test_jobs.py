@@ -298,6 +298,91 @@ class UnifiedHandbacks(Scenario):
         self.assertEqual(len(list(directory.glob("*.pending"))), 2)
         self.assertIn("Choose blue", (r / "nodes/a/inbox.md").read_text())
 
+    def test_direct_handback_wakes_carry_the_watcher_identity_without_a_scan(self):
+        r, home, wt = self.job()
+        module = core_loader.SourceFileLoader("brain_handback_identity", str(CORE / "bin/brain")).load_module()
+        inst = module.Instance(r)
+        inst.local_of("root")["wake"] = "exit 0"
+        inst.save_local()
+        args = argparse.Namespace(summary="Synthetic result", question="Choose blue", id="a", branch="job", state="question",
+                                  lessons="none: fixture", report=None, reviews=None, need_human=None)
+        directory = module.wake_directory(inst, inst.node("root"))
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(module, "load", return_value=inst), \
+                mock.patch.object(module, "wake_start"), contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(module, "watch_groups", wraps=module.watch_groups) as scan:
+                module.cmd_handback(args)
+                question = json.loads((r / "nodes/a/job-handbacks" / (module.job_key(module.open_job(
+                    module.read_jobs(inst.node("a")), "job")) + ".json")).read_text())["wake_id"]
+                args.state, args.question = "blocked", None
+                module.cmd_handback(args)
+            self.assertEqual(scan.call_count, 0, "the producer never rediscovers its own episode")
+            fresh = module.Instance(r)
+            n = fresh.node("a")
+            blocked = module.job_signal(fresh, n, module.open_job(module.read_jobs(n), "job"))["wake_id"]
+            pending = {p.name: json.loads(p.read_text()) for p in directory.glob("*.pending")}
+            self.assertEqual(len(pending), 2)
+            binding = module.wake_turn_binding(fresh, fresh.node("root"))
+            for episode, kind in ((question, "inbox"), (blocked, "handback")):
+                reason = "wake:" + episode
+                value = pending[module.wake_request_key(fresh, n, reason) + ".pending"]
+                # Exactly what the scan-based capture computes for the same reason and key.
+                self.assertEqual(value["items"], module.wake_reason_items(fresh, n, reason))
+                self.assertEqual([i["kind"] for i in value["items"]], [kind])
+                self.assertNotIn("question", value["items"][0])  # the watcher flags neither form
+                self.assertEqual(value["binding"], binding)
+            # A replaced attempt or episode, or a merged job, is not this producer's form.
+            for attempt, episode in (("0" * 32, blocked), (module.job_signal(fresh, n, module.open_job(
+                    module.read_jobs(n), "job"))["attempt_id"], "f" * 32)):
+                self.assertIsNone(module.watch_handback_wake_items(fresh, n, "job", attempt, episode))
+            attempt = module.job_signal(fresh, n, module.open_job(module.read_jobs(n), "job"))["attempt_id"]
+            self.assertTrue(module.watch_handback_wake_items(fresh, n, "job", attempt, blocked))
+            with mock.patch.object(module, "local_job_state", return_value={"merged": True}):
+                self.assertIsNone(module.watch_handback_wake_items(fresh, n, "job", attempt, blocked))
+            # The watcher's own pass finds both episodes recorded; none is published twice.
+            module.watch_once(module.Instance(r), quiet=True)
+            ids = [i["id"] for p in directory.glob("*.pending") for i in json.loads(p.read_text())["items"]]
+            for value in pending.values():
+                self.assertEqual(ids.count(value["items"][0]["id"]), 1)
+            # An acknowledged blocked need is omitted by the scan; the producer never revives it.
+            candidates = module.due_items(fresh, n, include_handled=True)
+            target = next(i for i in candidates if i["kind"] == "handback" and i.get("state") == "blocked")
+            module.record_reminder(fresh, n, candidates, target["id"], "ack", "Handled fixture",
+                                   resume_condition="Fixture changes")
+            self.assertEqual(module.wake_reason_items(module.Instance(r), n, "wake:" + blocked), [])
+            self.assertIsNone(module.watch_handback_wake_items(module.Instance(r), n, "job", attempt, blocked))
+
+    def test_legacy_and_restart_handback_wakes_keep_the_scan_fallback(self):
+        r, home, wt = self.job()
+        module = core_loader.SourceFileLoader("brain_handback_fallback", str(CORE / "bin/brain")).load_module()
+        inst = module.Instance(r)
+        inst.local_of("root")["wake"] = "exit 0"
+        inst.save_local()
+        args = argparse.Namespace(summary="Synthetic result", id="a", branch="job", state="blocked", lessons="none: fixture",
+                                  report=None, reviews=None, need_human="Grant fixture access")
+        directory = module.wake_directory(inst, inst.node("root"))
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(module, "load", return_value=inst), \
+                mock.patch.object(module, "wake_start"), contextlib.redirect_stdout(io.StringIO()):
+            def requested():
+                pending = list(directory.glob("*.pending"))
+                self.assertEqual(len(pending), 1, "every direct wake is still requested")
+                pending[0].unlink()  # delivered elsewhere: the next handback opens a fresh episode
+            with mock.patch.object(module, "watch_groups", wraps=module.watch_groups) as scan:
+                module.cmd_handback(args)  # its inbox line is the direct episode
+                self.assertEqual(scan.call_count, 0)
+                requested()
+                # A later blocked handback is owned by that older inbox line: unknown form.
+                args.need_human = None
+                module.cmd_handback(args)
+                self.assertEqual(scan.call_count, 1)
+                requested()
+                (r / "nodes/a/inbox.md").write_text("")
+                args.restart = "compactions"  # a restart is an ordinary due item, never this direct form
+                module.cmd_handback(args)
+                self.assertEqual(scan.call_count, 2)
+                requested()
+
     def test_answered_handback_same_report_gets_a_fresh_wake(self):
         r, home, wt = self.job()
         module = core_loader.SourceFileLoader("brain_handback_episode", str(CORE / "bin/brain")).load_module()

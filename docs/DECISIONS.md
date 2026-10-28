@@ -4087,3 +4087,18 @@ go to stderr so the command owns stdout. A failed or interrupted wrapper
 admission marks the gate released and never runs the command. Waits a command
 performs outside native admission (its own sleep loops) remain busy; they
 cannot be told apart from work.
+## 2026-10-28: Direct handback wakes carry the producer's own canonical identity
+
+A question or blocked handback already knows the episode it just published, so
+it no longer rediscovers it through an all-node watch scan before queueing its
+wake. `watch_item_entry` is the one per-item identity rule the scan uses; the
+producer builds its item (the exact line as the scan reads it from the inbox,
+or the blocked signal due reports, after the same reminder handling) and passes the resulting typed ref through `request_wake(items=)`. The
+request key, owner binding, root privacy policy, shown and terminal dedupe and
+atomic pending publication are unchanged, and the wake still follows durable
+publication outside the instance lock. Only the direct form a scan would treat
+as this episode gets producer refs: a restart, a replaced attempt or episode, a
+merged worktree, an older blocked inbox line owning the wake, an informational
+or non-durable line, an acknowledged need, unknown reminder state or any
+helper failure returns None and keeps the scan fallback. Producer
+refs never substitute an invented or empty identity.

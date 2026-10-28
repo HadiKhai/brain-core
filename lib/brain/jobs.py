@@ -29,6 +29,7 @@ _m_ui = _m_common.LazyModule(__package__, 'ui')
 _m_tasks = _m_common.LazyModule(__package__, 'tasks')
 _m_usage = _m_common.LazyModule(__package__, 'usage')
 _m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_watch = _m_common.LazyModule(__package__, 'watch')
 
 
 JOBS_FILE = "job-ledger.md"  # in a node folder: one row per job, written by `brain wt` and `brain review`
@@ -527,10 +528,15 @@ def publish_handback(a):
         _m_tasks.handback_event(inst, n, row, data)
         inst.commit([], f"{n['id']}: worker hand-back")
     _m_instance.unlock()  # wake identity scans follow durable publication, never its hold
-    if question_created:
-        _m_hosts.request_wake(inst, n, 'wake:' + wake_id)
-    elif a.state == "blocked" and not need:
-        _m_hosts.request_wake(inst, n, "wake:" + data["wake_id"])
+    if question_created or a.state == "blocked" and not need:
+        # The producer supplies its own episode's canonical refs; None (a legacy
+        # or unknown form) keeps request_wake's scan fallback.
+        try:
+            items = _m_watch.watch_handback_wake_items(inst, n, a.branch, a._attempt_id, data["wake_id"],
+                                                       line=bullet.rstrip("\n") if question_created else None)
+        except (Exception, SystemExit):
+            items = None  # identity capture is best effort; the scan fallback still wakes
+        _m_hosts.request_wake(inst, n, "wake:" + data["wake_id"], items=items)
     try:
         current = open_job(read_jobs(n) or [], a.branch)
         if current:
