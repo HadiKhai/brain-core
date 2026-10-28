@@ -1,4 +1,5 @@
 """The live view reuses snapshots; fabricated brains and transcripts only."""
+import datetime
 import json
 import subprocess
 import sys
@@ -19,6 +20,7 @@ class IdleView(Scenario):
         super().tearDown()
 
     def start_server(self, transcript=False, partial=False, projects=False, hold_spend=False):
+        fixture_epoch = int(time.time() // 300) * 300 + 60
         config = self.tmp / 'config'
         config.mkdir(exist_ok=True)
         self.env['BRAIN_CONFIG'] = str(config / 'brains.json')
@@ -42,7 +44,7 @@ class IdleView(Scenario):
             folder.mkdir(parents=True)
             (config / 'subscriptions.json').write_text(json.dumps({'subscriptions': [
                 {'id': 'demo', 'runtime': 'codex', 'config_dir': str(cfg), 'brains': ['*']}]}))
-            stamp = '2026-10-21T00:00:00Z'
+            stamp = datetime.datetime.fromtimestamp(fixture_epoch - 60, datetime.timezone.utc).isoformat()
             rows = [
                 {'timestamp': stamp, 'type': 'session_meta', 'payload': {
                     'id': '00000000-0000-4000-8000-000000000001', 'cwd': str(root)}},
@@ -58,7 +60,7 @@ class IdleView(Scenario):
         poll_file = self.tmp / ('ui-poll-' + str(len(self.servers)))
         clock_file = self.tmp / ('ui-clock-' + str(len(self.servers)))
         poll_file.write_text('0')
-        clock_file.write_text(str(int(time.time() // 300) * 300 + 60))
+        clock_file.write_text(str(fixture_epoch))
         script = '''
 import sys
 import time as fixture_time
@@ -278,7 +280,9 @@ cli.main()
         before = state()
         transcript = self.tmp / 'runtime/sessions/demo.jsonl'
         with transcript.open('a') as stream:
-            stream.write(json.dumps({'timestamp': '2026-10-21T00:01:00Z', 'type': 'event_msg', 'payload': {
+            stamp = json.loads(transcript.read_text().splitlines()[0])['timestamp']
+            appended = (datetime.datetime.fromisoformat(stamp) + datetime.timedelta(seconds=60)).isoformat()
+            stream.write(json.dumps({'timestamp': appended, 'type': 'event_msg', 'payload': {
                 'type': 'token_count', 'info': {
                     'total_token_usage': {'input_tokens': 40, 'cached_input_tokens': 0, 'output_tokens': 10},
                     'last_token_usage': {'input_tokens': 20, 'cached_input_tokens': 0, 'output_tokens': 5}}}}, separators=(',', ':')) + '\n')

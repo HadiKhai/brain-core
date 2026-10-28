@@ -1290,11 +1290,14 @@ def install_observer(events, root, trace, read=False):
         return row
     events.comparison = comparison
     original_detect = events.detect_gaps
-    def detect_gaps(inst, preferred, record=True):
+    def detect_gaps(inst, preferred, record=True, actual=None):
+        # Newer producers reuse a locked resource snapshot. Preserve that exact
+        # operand; older installed cores still use the original signature.
+        options = {'actual': actual} if actual is not None else {}
         if not record:
-            return original_detect(inst, preferred, record=False)
+            return original_detect(inst, preferred, record=False, **options)
         if not stack or inst.root.resolve() != Path(root).resolve():
-            return original_detect(inst, preferred)
+            return original_detect(inst, preferred, **options)
         # Capture operands at the native calls that consume them. No second
         # resource scan may be substituted after publication or begin.
         saved = {name: getattr(events, name) for name in ('replay', 'resource_list', 'lease_live', 'append_line')}
@@ -1342,7 +1345,7 @@ def install_observer(events, root, trace, read=False):
                 observe('invalid')
             events.replay, events.resource_list = replay_call, resource_call
             events.lease_live, events.append_line = lease_call, append_call
-            result = original_detect(inst, preferred)
+            result = original_detect(inst, preferred, **options)
             try:
                 require(counts == dict(replay=1, actual=1))
                 emit('coverage-exit', preferred=preferred, operands=operand, result=result, owner=owner())
