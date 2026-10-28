@@ -113,8 +113,8 @@ def normalize(changes):
     return out
 
 
-def validate(n, records, selected=None, requirements=None):
-    jobs = None
+def validate(n, records, selected=None, requirements=None, ledger=None):
+    jobs = ledger
     for ident, row in records.items():
         if selected is not None and ident != selected:
             continue
@@ -161,8 +161,8 @@ def validate(n, records, selected=None, requirements=None):
             if requirement not in requirements:
                 raise ValueError(ident + ': requirement not found')
         if row['status'] in ('in-progress', 'in-review', 'testing') and not external:
+            from . import jobs as _m_jobs
             if jobs is None:
-                from . import jobs as _m_jobs
                 jobs = _m_jobs.read_jobs(n) or []
             has_attempt = any(a.get('state') == 'open' and a.get('id') for a in row.get('attempts', []) if isinstance(a, dict))
             if not has_attempt and not any(r.get('Job') == row.get('branch') and not r.get('Ended') and

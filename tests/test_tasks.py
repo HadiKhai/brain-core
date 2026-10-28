@@ -166,6 +166,57 @@ class Tasks(Scenario):
         self.assertEqual((self.root / 'job-ledger.md').read_bytes(), before)
         self.assertEqual(tasks.read_records(self.n)['FIRST']['attempts'][0]['state'], 'open')
 
+    def test_housekeeping_closed_job_cannot_back_a_final_active_task(self):
+        from brain import task_plan
+        job = self.housekeeping_job()
+        plan = self.housekeeping_plan('FIRST')
+        plan['stale_job_operations'] = [job]
+        plan['core_task_operations'][0]['fields']['status'] = 'in-progress'
+        ledger = (self.root / 'job-ledger.md').read_bytes()
+        task = tasks.record_path(self.n, 'FIRST').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'active status requires a live ledger'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual((self.root / 'job-ledger.md').read_bytes(), ledger)
+        self.assertEqual(tasks.record_path(self.n, 'FIRST').read_bytes(), task)
+
+    def test_housekeeping_refuses_outputs_that_invalidate_report_artifacts(self):
+        from brain import task_plan
+        self.add('FIRST'); self.add('SECOND')
+        artifact = tasks.record_path(self.n, 'SECOND')
+        receipt = {'ref': 'fixture', 'scope': 'fixture', 'result': 'passed', 'at': self.inst.now(),
+                   'artifact': 'tasks/SECOND.md', 'version': 1,
+                   'sha256': task_plan.digest(artifact.read_bytes())}
+        for retained in (False, True):
+            with self.subTest(retained=retained):
+                if retained:
+                    tasks.mutate(self.inst, self.n, 'FIRST', {'status': 'done', 'completion_kind': 'report',
+                        'evidence': ['fixture report'], 'completion_receipt': receipt})
+                plan = self.housekeeping_plan('SECOND')
+                if not retained:
+                    completion = self.housekeeping_plan('FIRST')['core_task_operations'][0]
+                    completion['fields'].update(status='done', completion_kind='report',
+                        evidence=['fixture report'], completion_receipt=receipt)
+                    plan['core_task_operations'].append(completion)
+                before = {ident: tasks.record_path(self.n, ident).read_bytes() for ident in ('FIRST', 'SECOND')}
+                with self.assertRaisesRegex(ValueError, 'invalidate a report artifact'):
+                    task_plan.apply_plan(self.inst, 'root', plan)
+                self.assertEqual(before, {ident: tasks.record_path(self.n, ident).read_bytes() for ident in before})
+
+    def test_housekeeping_prepared_ledger_preserves_other_live_job_backing(self):
+        from brain import jobs, task_plan
+        job = self.housekeeping_job()
+        self.add('SECOND')
+        rows = jobs.read_jobs(self.n)
+        other = dict(rows[0], Job='job/other', Task='SECOND')
+        jobs.write_jobs(self.inst, self.n, rows + [other])
+        tasks.mutate(self.inst, self.n, 'SECOND', {'status': 'in-progress',
+            'branch': 'job/other', 'job': jobs.job_key(other)})
+        plan = self.housekeeping_plan('FIRST', 'SECOND')
+        plan['stale_job_operations'] = [job]
+        task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(tasks.read_records(self.n)['SECOND']['status'], 'in-progress')
+        self.assertEqual(jobs.read_jobs(self.n)[1]['Ended'], '')
+
     def test_housekeeping_no_source_retirement_requires_fresh_terminal_workers(self):
         from brain import host_instances, host_lifecycle, jobs, task_plan
         job = self.housekeeping_job()

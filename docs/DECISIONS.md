@@ -3768,6 +3768,11 @@ processes or when that inventory is unavailable.
 The plan parser registers without loading execution dependencies. Native helpers
 load lazily when the command runs, preserving lightweight help and startup paths.
 
+Final task validation consumes the prepared job ledger, so an operation cannot
+retain active work backed only by a job closed in the same batch. Publication
+refuses changed outputs that overlap report artifacts, including receipts on
+unchanged tasks; the batch cannot invalidate its own completion evidence.
+
 A process ID in even a partial process inventory is sufficient to retain the
 checkout as busy. A nonzero inventory exit cannot discard that positive evidence;
 an empty unsuccessful inventory still retains the checkout as unavailable.

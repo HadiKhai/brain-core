@@ -286,7 +286,8 @@ def prepare(inst, n, plan):
     proof_paths = artifact_paths(inst, n, records)
     proof_generation = instance.state_signature(inst, selected, extra=proof_paths)
     for ident in sorted(changed):
-        tasks.validate(n, records, selected=ident, requirements=requirements)
+        tasks.validate(n, records, selected=ident, requirements=requirements,
+                       ledger=ledger if closed else None)
     writes = {}
     for ident in sorted(changed):
         writes[tasks.record_path(n, ident)] = tasks.record_text(records[ident])
@@ -305,6 +306,7 @@ def prepare(inst, n, plan):
             with path.open(newline='') as stream:
                 writes[path] = events.active_table_text(stream.read(), {'active': active})
     result = Prepared()
+    artifacts = {path.resolve() for path in proof_paths}
     for path, text in writes.items():
         common.safe_target(path)
         if path.is_symlink() or path.parent.is_symlink():
@@ -312,6 +314,8 @@ def prepare(inst, n, plan):
         guard.no_terms_in(n, text, 'housekeeping output')
         before = path.read_text() if path.exists() else ''
         if before != text:
+            if path.resolve() in artifacts:
+                raise ValueError('housekeeping output would invalidate a report artifact')
             result[path] = (before, text)
     result.guards = [(selected, paths, generation), (selected, proof_paths, proof_generation)]
     return result
