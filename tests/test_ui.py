@@ -1409,6 +1409,65 @@ ui_json.ui_json_background(root, '[]')
         self.assertEqual(built, ['meadow', 'root'])  # another node's tasks may block
         self.assertEqual(problems, 0)  # only view stamps move inside the count's age bound
 
+    def test_ready_packets_invalidate_only_their_own_worktree_stamp(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        inst = self.m.UIInstance(root)
+        n = inst.node('meadow')
+        n['local']['worktrees'] = {'job/a': {'path': str(root)}, 'job/b': {'path': str(root)}}
+        before = module.ui_json_stamps(inst)[1]
+        for packet in (module._m_verify.ready_path(inst, n, 'job/a'),
+                       self.m._owners['ui_state']._m_rehearse.evidence_path(n, 'job/a')):
+            packet.parent.mkdir(parents=True, exist_ok=True)
+            for action in ('create', 'edit', 'delete'):
+                if action == 'delete':
+                    packet.unlink()
+                else:
+                    packet.write_text(action)
+                after = module.ui_json_stamps(inst)[1]
+                self.assertNotEqual(after[('meadow', 'job/a')], before[('meadow', 'job/a')])
+                self.assertEqual(after[('meadow', 'job/b')], before[('meadow', 'job/b')])
+                before = after
+
+    def test_background_revalidation_skips_fresh_pairs_but_refreshes_old_or_changed_rows(self):
+        root = self.first_paint_root()
+        ui = self.m._owners['ui_state']
+        module = __import__(ui.__package__ + '.ui_json', fromlist=['snapshot'])
+        verify = module._m_verify
+        inst, code = self.m.UIInstance(root), self.m.ui_code_version()
+        n = inst.node('meadow')
+        branches = ['job/' + name for name in ('fresh', 'old', 'changed', 'future', 'unpaired', 'closed')]
+        n['local']['worktrees'] = {b: {'path': str(root)} for b in branches}
+        keys = {('meadow', b): 'current' for b in branches}
+        privacy = module.ui_json_privacy_key(inst, code)
+        model = self.m.ReadModel(inst, code)
+        stored = {'binding': model.binding(privacy), 'nodes': {}, 'worktrees': {}, 'ready': {}}
+        for branch in branches:
+            at = 1001 if branch.endswith('future') else (970 if branch.endswith('old') else 999)
+            key = 'obsolete' if branch.endswith('changed') else 'current'
+            name = module.ui_json_job(('meadow', branch))
+            stored['worktrees'][name] = {'key': key, 'at': at, 'row': {'branch': branch, 'dirty': 0}}
+            if not branch.endswith('unpaired'):
+                stored['ready'][name] = {'key': key, 'at': at, 'data': {'ready': False, 'reasons': []}, 'policy': []}
+        model.write('node-views', stored)
+        after = {**keys, ('meadow', 'job/changed'): 'moved-during-read'}
+        def live(node):
+            return {b: w for b, w in node['local'].get('worktrees', {}).items() if not b.endswith('closed')}
+        with mock.patch.object(ui, 'UIInstance', return_value=inst), \
+                mock.patch.object(ui, 'ui_live_worktrees', side_effect=live), \
+                mock.patch.object(module, 'ui_json_stamps', side_effect=[({}, keys), ({}, after)]), \
+                mock.patch.object(module.time, 'time', return_value=1000), \
+                mock.patch.object(ui, 'ui_worktree', side_effect=lambda i, h, b, w, n: {'branch': b, 'dirty': 1}) as read, \
+                mock.patch.object(verify, 'ready_state', return_value=verify.ReadyStateResult({'ready': False, 'reasons': []})):
+            module.ui_json_revalidate(str(root))
+        self.assertEqual([c.args[2] for c in read.call_args_list], branches[1:5])
+        result = model.read('node-views')['worktrees']
+        for branch in branches:
+            name = module.ui_json_job(('meadow', branch))
+            # A future-dated stored row is refused for reuse, but publication still
+            # preserves its newer timestamp rather than rolling a reading back.
+            self.assertEqual(result[name]['row']['dirty'], 1 if branch in (branches[1], branches[4]) else 0)
+
     def test_stamp_changed_mid_build_delivers_but_never_caches_that_view(self):
         root = self.first_paint_root()
         self.view_builds(root)

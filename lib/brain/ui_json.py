@@ -328,7 +328,10 @@ def ui_json_stamps(inst, problem_keys=None):
         for directory, dirs, names in os.walk(n['dir'] / 'job-trains'):
             dirs.sort()
             policy.extend(stamp(Path(directory) / name) for name in sorted(names))
-        ready = [row for row in files if any(f'/{tree}/' in row[0] for tree in ('scratch/ready', 'scratch/rehearse'))]
+        packets = {}
+        for row in files:
+            if any(f'/{tree}/' in row[0] for tree in ('scratch/ready', 'scratch/rehearse')):
+                packets.setdefault(Path(row[0]).name, []).append(row)
         jobs = _m_jobs.read_jobs(n) or []
         namespace = hashlib.sha256(n['id'].encode()).hexdigest()
         # A post-build stamp must see moved thread bindings even inside command-read memoization.
@@ -339,6 +342,9 @@ def ui_json_stamps(inst, problem_keys=None):
                 continue
             refs = ['refs/heads/' + branch, 'refs/heads/main', 'refs/heads/master', 'refs/remotes/origin/HEAD',
                     'refs/remotes/origin/main', 'refs/remotes/origin/master']
+            # Ready/rehearsal packets are branch-specific. Another job publishing its
+            # packet must not discard every unchanged row in this node.
+            ready = packets.get(hashlib.sha256(branch.encode()).hexdigest() + '.json', [])
             handbacks = [(stamp(_m_jobs.handback_file(n, row)), stamp(_m_job_attempts.attempt_path(n, row)),
                           stamp(_m_jobs.contract_file(n, row)))
                          for row in jobs if row.get('Job') == branch]  # replacement attempts move readiness
@@ -564,6 +570,9 @@ def ui_json_revalidate(root):
                 return
             privacy = ui_json_privacy_key(inst, code)
             _, keys = ui_json_stamps(inst)
+            model = _m_ui_readmodel.ReadModel(inst, code)
+            views = ui.UIStateCache()
+            ui_json_views(inst, model, privacy, {}, keys, views)
             at, rows, ready = {}, {}, {}
             with _m_common.git_read_snapshot(), _m_status.local_job_snapshot():
                 for n in inst.nodes():
@@ -571,6 +580,11 @@ def ui_json_revalidate(root):
                     for branch, w in n['local'].get('worktrees', {}).items():
                         job = (n['id'], branch)
                         if branch in live and job in keys:
+                            # A foreground build may just have read this job while an
+                            # older row requested the refresh. Keep its paired reading.
+                            if (job in views.ready and job in views.checked
+                                    and 0 <= time.time() - views.checked[job] < UI_JSON_REVALIDATE_SECONDS):
+                                continue
                             at[job] = time.time()
                             rows[job] = {**ui.ui_worktree(inst, n['home_path'], branch, w, n), 'live': True}
                             ready[job] = verify.ready_state(inst, n, branch, display=True)
