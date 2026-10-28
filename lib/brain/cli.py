@@ -262,7 +262,7 @@ def queueable_command(cmd, name):
         opt("--enqueue", action="store_true", help="return a request ID; queue wait ID returns the native checked verdict"),
         opt("--direct", action="store_true", help="apply in this process instead of through the write queue"),
         opt("--wait", type=float, metavar="SECONDS",
-            help="queued default: wait this long for the receipt (default 10), then print the request ID"),
+            help="when a contended unchecked handback queues: wait this long for its receipt (default 4)"),
         opt('--request-id', help='retry a queued handback using the same payload-bound ID'),
         opt('--record', action='store_true', help='with done --reviews N: record native readiness'),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),

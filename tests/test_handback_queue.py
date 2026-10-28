@@ -1684,32 +1684,76 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
             return result
         return cli
 
-    def test_default_handback_queues_waits_and_replays_the_applied_output(self):
+    def test_default_handback_runs_in_place_uncontended_and_queues_behind_a_writer(self):
         m, inst, n, row = self.fixture()
         cli = self.default_cli(inst)
         base = ('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--lessons', 'none: fixture')
-        result = cli(*base, '--summary', 'Queued default', '--wait', str(PROCESS_BUDGET))
+        # Nothing to wait on: the plain form runs here exactly as --direct does.
+        plain = cli(*base, '--summary', 'Uncontended result')
+        self.assertEqual(m.intent_index(inst), [])
+        self.assertEqual(m.read_handback(n, row)['summary'], 'Uncontended result')
+        self.assertNotIn('write_request', m.read_handback(n, row))
+        # A held writer lock: admission queues instead of waiting behind it.
+        with m.brain_lock(inst):
+            process = subprocess.Popen([sys.executable, str(CORE / 'bin/brain'), *base, '--summary', 'Queued default',
+                                        '--wait', str(PROCESS_BUDGET)], cwd=inst.root, env=self.env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            deadline = time.monotonic() + PROCESS_BUDGET
+            while not m.intent_index(inst) and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(len(m.intent_index(inst)), 1)
+            self.assertEqual(m.read_handback(n, row)['summary'], 'Uncontended result')
+        stdout, stderr = process.communicate(timeout=PROCESS_BUDGET)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
         [(_, request)] = m.intent_index(inst)
         receipt = m.intent_receipt(inst, request['id'])
         self.assertEqual(receipt['state'], 'applied')
         self.assertEqual(m.read_handback(n, row)['summary'], 'Queued default')
         self.assertEqual(m.read_handback(n, row)['write_request'], request['id'])
         # Applied within the deadline: the native output, never a queued notice.
-        self.assertEqual(result.stdout, receipt['output'])
-        self.assertIn('blocked', result.stdout)
-        self.assertNotIn('queued', result.stdout)
-        # --direct keeps the old in-process path: no request, same native message.
+        self.assertEqual(stdout, receipt['output'])
+        self.assertEqual(stdout.splitlines()[-1], plain.stdout.splitlines()[-1])
+        self.assertNotIn('queued', stdout)
         direct = cli(*base, '--summary', 'Direct result', '--direct')
         self.assertEqual(len(m.intent_index(inst)), 1)
         self.assertEqual(m.read_handback(n, row)['summary'], 'Direct result')
-        self.assertNotIn('write_request', m.read_handback(n, row))
-        self.assertEqual(direct.stdout.splitlines()[-1], result.stdout.splitlines()[-1])
+        self.assertEqual(direct.stdout.splitlines()[-1], plain.stdout.splitlines()[-1])
         for extra in (('--enqueue',), ('--wait', '1'), ('--request-id', 'a' * 32)):
             refused = cli(*base, '--summary', 'Mixed', '--direct', *extra, ok=False)
             self.assertIn('--direct applies in this process', refused.stderr)
         refused = cli(*base, '--summary', 'Mixed', '--enqueue', '--wait', '1', ok=False)
         self.assertIn('--wait takes', refused.stderr)
         self.assertEqual(len(m.intent_index(inst)), 1)
+
+    def test_default_queue_routes_only_safe_contended_messages(self):
+        m, inst, n, row = self.fixture()
+        def route(**changes):
+            a = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Route', question=None,
+                                   lessons=None, report=None, reviews=None, need_human=None, restart=None,
+                                   reverify=False, full_receipt=None, record=False, request_id=None)
+            vars(a).update(changes)
+            return m.default_queue(inst, n, row, a, {key: getattr(a, key, None) for key in m.QUEUE_ARGS})
+        self.assertFalse(route())  # uncontended: in place
+        fd = m.intent_lease(inst)
+        try:
+            self.assertTrue(route())  # a running applier: queue behind it
+            self.assertTrue(route(request_id='b' * 32))
+            # Verification binds this caller's execution context: never queued by default.
+            self.assertFalse(route(state='done', reviews=1))
+            self.assertFalse(route(state='done', record=True))
+            with self.assertRaisesRegex(SystemExit, 'queues only with --enqueue'):
+                route(state='done', reviews=1, request_id='b' * 32)
+            with mock.patch.object(m, 'outward_links', return_value=['link']):
+                self.assertFalse(route())  # the exact synchronous link refusal
+            with mock.patch.object(m, 'never_terms', return_value=[('secretword', 'term 1')]):
+                self.assertFalse(route(report='secretword.md'))  # the direct path's own term rules
+        finally:
+            os.close(fd)
+        m.intent_store(inst, 'blocked', dict(state='blocked', reason='fixture'))
+        self.assertTrue(route())  # earlier blocked requests keep FIFO order
+        os.unlink(m.intent_path(inst, 'blocked'))
+        m.submit_intent(inst, dict(kind='inbox', node='root', text='Earlier request', at=inst.now()), start=False)
+        self.assertTrue(route())
 
     def test_default_handback_past_its_deadline_reports_the_queued_id_honestly(self):
         m, inst, n, row = self.fixture()

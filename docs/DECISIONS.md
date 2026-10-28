@@ -3983,3 +3983,24 @@ stream; the receipt validates both as strings. A recovered request whose native
 run printed nothing in this applier rebuilds its final line from durable
 evidence: the saved verdict for a checked handback, the prepared publication for
 an unchecked one.
+
+## 2026-10-28: Queue a plain handback only when it is safe and would wait
+
+The lander's isolated run showed that queueing every plain handback broke
+synchronous contracts. Verification binds the caller's execution context: lane
+environment, stdin and the full-receipt disposition context. The detached
+applier runs with its own environment, so checked handbacks failed binding and
+disposition checks. Lock-site, atomic-replace and SIGKILL recovery guarantees
+are proved on the process that runs the handback.
+
+A plain handback now queues only when all of these hold: it is unchecked
+(no `--reviews`/`--record` on done), it is not an import study, the instance has
+no outward links, its arguments contain no guarded term, it is not nested under
+its own lock holder, and it would otherwise wait (the writer lock is held, an
+applier is running, or earlier requests are pending or blocked). Pending
+requests keep FIFO order, so a direct publication never overtakes an earlier
+queued one for the same job. Every other plain handback runs in place, unchanged.
+The probes never wait or hold the writer lock. A race only picks between two
+reviewed paths. `--request-id` without `--enqueue` stays queued for an unchecked
+retry and is refused for a checked or study handback. The queued receipt wait
+defaults to 4 s, keeping a contended handback under 5 s.

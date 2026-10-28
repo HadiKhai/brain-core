@@ -38,8 +38,8 @@ QUEUE_LEASE = contextvars.ContextVar('brain_queue_lease', default=None)
 PATCH_FIELDS = frozenset(('title', 'description', 'kind', 'priority', 'order',
                           'estimate', 'spent', 'external_url', 'next_action'))
 MAX_INTENT = 65536
-# A plain handback waits this long for its receipt, then reports the queued ID.
-HANDBACK_WAIT = 10.0
+# A queued plain handback waits this long for its receipt, then reports the queued ID.
+HANDBACK_WAIT = 4.0
 # Native application output replayed from a receipt keeps only its tail.
 MAX_REPLAY = 16384
 
@@ -343,6 +343,8 @@ def fast_intent(a, root):
             raise ValueError('no open job for handback')
         _m_jobs.validate_handback_options(a, row=row)
         args = {key: getattr(a, key, None) for key in QUEUE_ARGS}
+        if name == 'cmd_handback' and not getattr(a, 'enqueue', False) and not default_queue(inst, n, row, a, args):
+            return False  # the plain form stays synchronous unless queueing is safe and needed
         guard.no_terms_in(n, json.dumps(args), 'handback request')
         # The applier may serve many callers; spend belongs to this one.
         payload = dict(kind='handback', node=n['id'], job_key=_m_jobs.job_key(row), args=args,
@@ -374,6 +376,65 @@ def fast_intent(a, root):
     else:
         print(data['id'])
     return True
+
+
+def default_queue(inst, n, row, a, args):
+    """Whether a plain handback admits through the queue instead of running here.
+
+    Only an unchecked, non-study message queues: verification binds this
+    caller's execution context (environment, stdin, lane binding), which no
+    applier reproduces. Links and guarded terms keep their exact synchronous
+    refusals. An uncontended handback runs here as before; one that would wait
+    on the writer lock, a running applier or earlier requests queues behind them.
+    """
+    from . import briefs, guard
+    checked = a.state == 'done' and (args.get('reviews') is not None or args.get('record'))
+    if checked or briefs.import_job(row['Job']):
+        if getattr(a, 'request_id', None):
+            _m_common.die('--request-id retries a queued handback; a checked or study handback queues only with --enqueue')
+        return False
+    if _m_common.outward_links(inst.root) or guard.find_terms(json.dumps(args), guard.never_terms(n)):
+        return False
+    if getattr(a, 'request_id', None):
+        return True  # a retry must reuse its queued identity
+    if _m_instance.brain_lock(inst).owner_is_running_us():
+        return False  # nested under our own holder: its lock is ours, an applier would wait on it
+    return writer_busy(inst) or applier_busy(inst) or queue_pending(inst)
+
+
+def writer_busy(inst):
+    """A nonblocking probe of the instance writer lock; never waits or holds it."""
+    try:
+        with _m_common.directory_target(inst.root / '.brain' / 'lock', private=True) as target:
+            fd = target.open()
+    except (OSError, ValueError):
+        return False  # absent or unsafe: the synchronous path owns its exact refusal
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def applier_busy(inst):
+    fd = intent_lease(inst)
+    if fd is None:
+        return True
+    os.close(fd)
+    return False
+
+
+def queue_pending(inst):
+    """Earlier requests keep FIFO order: a direct publication must not overtake them."""
+    if intent_path(inst, 'blocked').exists():
+        return True
+    try:
+        return bool(pending_intents(inst))
+    except ValueError:
+        return True  # invalid queue evidence: queue behind it and report the block honestly
 
 
 def await_handback(inst, n, identity, wait, started=True, since=0.0):

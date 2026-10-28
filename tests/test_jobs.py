@@ -258,30 +258,26 @@ class UnifiedHandbacks(Scenario):
         self.assertEqual((rejected['state'], rejected['ready'], rejected['exit_code']), ('applied', False, 1))
         self.assertIn('verify failed (exit 7)', rejected['reason'])
 
-    def test_default_checked_handback_queues_and_returns_the_native_verdict(self):
+    def test_default_checked_handback_runs_in_place_even_behind_a_busy_applier(self):
         r, home, wt = self.job()
-        args = ('handback', 'a', '--branch', 'job', '--state', 'done', '--reviews', '1',
-                '--lessons', 'none: fixture', '--wait', '120')
-        out = self.b(r, *args, '--summary', 'Default checked')
-        self.assertEqual(out.strip().splitlines()[-1], 'ready')
         m = core_loader.SourceFileLoader('default_checked_queue', str(CORE / 'bin/brain')).load_module()
         inst = m.Instance(r)
+        args = ('handback', 'a', '--branch', 'job', '--state', 'done', '--reviews', '1', '--lessons', 'none: fixture')
         with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(r)}, clear=True):
-            [(_, first)] = m.intent_index(inst)
-            receipt = m.intent_receipt(inst, first['id'])
-        self.assertEqual((receipt['state'], receipt['ready'], receipt['exit_code']), ('applied', True, 0))
-        self.assertEqual(receipt['binding']['head'], self.git('rev-parse', 'HEAD', cwd=wt).strip())
-        # A failing native verifier exits 1 with its reasons, as --direct does.
-        (wt / 'verify.py').write_text('raise SystemExit(7)\n')
-        self.git('commit', '-qam', 'Fail native fixture', cwd=wt)
-        out = self.b(r, *args, '--summary', 'Default failure', ok=False)
-        self.assertIn('not ready: ', out)
-        self.assertIn('verify failed (exit 7)', out)
-        self.assertNotIn('queued', out)
-        direct = self.b(r, *args[:-2], '--summary', 'Direct failure', '--direct', ok=False)
-        self.assertIn('verify failed (exit 7)', direct)
-        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(r)}, clear=True):
-            self.assertEqual(len(m.intent_index(inst)), 2)
+            fd = m.intent_lease(inst)
+            try:
+                # Verification binds this caller's environment: no queue, the native verdict here.
+                out = self.b(r, *args, '--summary', 'Default checked')
+                self.assertEqual(out.strip().splitlines()[-1], 'ready')
+                (wt / 'verify.py').write_text('raise SystemExit(7)\n')
+                self.git('commit', '-qam', 'Fail native fixture', cwd=wt)
+                out = self.b(r, *args, '--summary', 'Default failure', ok=False)
+                self.assertIn('verify failed (exit 7)', out)
+                self.assertNotIn('queued', out)
+                self.b(r, *args, '--summary', 'Retry', '--request-id', 'c' * 32, ok=False)
+            finally:
+                os.close(fd)
+            self.assertEqual(m.intent_index(inst), [])
 
     def test_question_and_blocked_handbacks_request_wake(self):
         r, home, wt = self.job()
