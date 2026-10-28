@@ -487,6 +487,20 @@ class Watcher(Scenario):
                                    else access(path, mode, **k)):
                 signature()
             self.assertEqual(asked(home), calls + 1)
+            # Per-worktree config and config includes are read by Git but not stamped.
+            for name, text in (('config.worktree', '[core\n'), ('config', None)):
+                signature()
+                calls = asked(home)
+                path = home / '.git' / name
+                saved = path.read_text() if path.exists() else None
+                path.write_text(text if text is not None else saved + '[include]\n\tpath = extra\n')
+                signature()
+                signature()
+                self.assertEqual(asked(home), calls + 2, name + ' changes keep asking Git')
+                if saved is None:
+                    path.unlink()
+                else:
+                    path.write_text(saved)
         # Inputs inside the settle window may postdate Git's read: never memoized.
         fresh = {}
         with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', 10 ** 30):

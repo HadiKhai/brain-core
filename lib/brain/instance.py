@@ -432,7 +432,11 @@ def git_location_inputs(home, values=None, settled=None):
                     return None
                 stamp += (info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
             inputs.append(stamp)
-        if os.path.lexists(marker / 'commondir'):
+        # Linked layouts, per-worktree config and config includes add inputs
+        # outside these stamps; their repositories always ask Git.
+        if os.path.lexists(marker / 'commondir') or os.path.lexists(marker / 'config.worktree'):
+            return None
+        if re.search(rb'^\s*\[\s*include', (marker / 'config').read_bytes(), re.I | re.M):
             return None
     except OSError:
         return None
