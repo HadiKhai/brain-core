@@ -29,6 +29,46 @@ from scenario import Scenario, AutonomyProject, shlex_quote
 
 
 class Basics(Scenario):
+    def test_creation_finishes_when_a_writer_changes_initial_projection_inputs(self):
+        for command in ('new', 'adopt', 'split'):
+            with self.subTest(command=command):
+                root = self.init('creation-' + command)
+                self.b(root, 'new', 'peer', '--title', 'Peer')
+                if command == 'new':
+                    args = ['new', 'foo', '--title', 'Foo']
+                elif command == 'adopt':
+                    home = self.repo(self.tmp / 'adopt-home')
+                    args = ['adopt', str(home), '--id', 'foo', '--title', 'Foo']
+                else:
+                    self.b(root, 'new', 'app', '--title', 'App')
+                    (root / 'nodes/app/note.md').write_text('move this source\n')
+                    self.git('add', '.', cwd=root)
+                    self.git('commit', '-qm', 'Source to split', cwd=root)
+                    args = ['split', 'app', 'foo', '--title', 'Foo', '--move', 'note.md']
+                m = core_loader.SourceFileLoader('creation_projection_' + command, str(CORE / 'bin/brain')).load_module()
+                facts, concurrent = m.status_facts, []
+                def changed(*a, **kw):
+                    self.assertIsNone(m._owners['brain_lock']._LOCK['fh'])
+                    if a[1]['id'] == 'foo' and not concurrent:
+                        concurrent.append(True)
+                        self.b(root, 'set', 'peer', 'title=Concurrent peer')
+                    return facts(*a, **kw)
+                with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}, clear=True), \
+                        mock.patch.object(sys, 'argv', ['brain', *args]), \
+                        mock.patch.object(m, 'status_facts', side_effect=changed), \
+                        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    m.main()
+                self.assertTrue(concurrent)
+                self.assertIn('foo', (root / 'registry.md').read_text())
+                self.assertIn('nodes/foo/node.md', self.git('ls-files', cwd=root))
+                self.assertIn('Concurrent peer', (root / 'nodes/peer/node.md').read_text())
+                if command == 'split':
+                    self.assertEqual((root / 'nodes/foo/note.md').read_text(), 'move this source\n')
+                    self.assertFalse((root / 'nodes/app/note.md').exists())
+                self.assertEqual(m.pending(m.read(m.Instance(root))), {})
+                self.b(root, 'status', 'foo', '--refresh')
+                self.assertIn('<!-- brain:facts-state ', (root / 'nodes/foo/status.md').read_text())
+
     def test_fresh_instance_is_generic_and_passes(self):
         r = self.init("alice")
         self.assertIn("✓", self.b(r, "check"))

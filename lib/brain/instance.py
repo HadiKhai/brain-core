@@ -326,7 +326,7 @@ def settings(inst):
 
 @contextlib.contextmanager
 def held(root):
-    """Keep the instance lock through every released step: a contended last attempt.
+    """Retain final-attempt admission policy; projections still release ownership.
 
     Settings are frozen before the attempt loads any: an editor outside the
     lock may change them, and a held refresh then refuses as before.
@@ -471,13 +471,15 @@ class StateChanged(Exception):
 
 
 @contextlib.contextmanager
-def released(inst, node=None, extra=(), local_keys=(), retry=False):
+def released(inst, node=None, extra=(), local_keys=(), retry=False, projection=False):
     """Release an existing writer lock, then validate and reload before publication.
 
     Readers, hook descendants and nested unlocked scopes retain main's lock-free
     behavior. Only the enclosing writer owns validation and the binding reload.
     """
-    if _LOCK["fh"] is None or _LOCK.get("hold"):
+    # Even a contended refresh must prepare read-only projections without
+    # physical writer ownership. Its caller still fences and bounds retries.
+    if _LOCK["fh"] is None or (_LOCK.get("hold") and not projection):
         yield
         return
     with brain_lock(inst):

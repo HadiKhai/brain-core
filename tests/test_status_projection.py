@@ -1,5 +1,6 @@
 """Projection is an explicit owned phase, never a cleanup side effect."""
 import sys
+from unittest import mock
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from brain import events, instance, status, status_projection
@@ -7,6 +8,28 @@ from scenario import Scenario
 
 
 class OwnedStatusProjection(Scenario):
+    def test_projection_prepares_facts_and_machine_unlocked_and_refuses_concurrent_prose(self):
+        inst, node = self.fixture()
+        path = node['dir'] / 'status.md'
+        facts, machine = status.status_facts, status._m_machine.machine_state
+        calls = []
+        def observed_facts(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            calls.append('facts')
+            return facts(*args, **kwargs)
+        def edited_machine(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            path.write_text(path.read_text() + '\nConcurrent prose\n')
+            return machine(*args, **kwargs)
+        path.write_text('# App\n## Now\n- owned prose\n')
+        with instance.brain_lock(inst), events.Command(inst.root, command='project_status', node='app'), \
+                mock.patch.object(status, 'status_facts', side_effect=observed_facts), \
+                mock.patch.object(status._m_machine, 'machine_state', side_effect=edited_machine):
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                status_projection.project_owned(inst, node)
+        self.assertTrue(calls)
+        self.assertEqual(path.read_text(), '# App\n## Now\n- owned prose\n\nConcurrent prose\n')
+
     def fixture(self):
         root = self.init('demo')
         self.b(root, 'new', 'app', '--title', 'App')

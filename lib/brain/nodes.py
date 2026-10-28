@@ -264,7 +264,9 @@ def create_node(inst, nid, title, owners="", labels="", runtime=None, home=None,
         fm["home_url"] = home_url
     _m_common.write_fm(d / "node.md", fm, body)
     inst.save_local()
-    _m_status.refresh_status(inst, inst.node(nid))
+    # Creation has already published its directory and bindings. A projection
+    # refusal must not interrupt the registry/commit (or split/adopt) that follows.
+    _m_status.refresh_status(inst, inst.node(nid), defer_on_contention=True)
     return d, parent_id, eff, sealed
 
 

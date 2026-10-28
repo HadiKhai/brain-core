@@ -857,7 +857,7 @@ REFRESH_WRITER_WAIT = 120  # one deadline across all live-owner waits and admiss
 
 
 def refresh_with_retry(attempt, root):
-    """Retry a contended refresh with fresh state, then once under the held lock."""
+    """Retry fresh state, then use bounded final admission and unlocked builds."""
     import contextlib
     import random
     import time
@@ -872,7 +872,7 @@ def refresh_with_retry(attempt, root):
                     _m_instance.settings(_m_instance.Instance(root)) != before):
                 raise
         time.sleep(random.uniform(0.05, 0.25) * tries)
-    print(f'brain: status refresh contended {REFRESH_TRIES} times; refreshing under the lock', file=sys.stderr)
+    print(f'brain: status refresh contended {REFRESH_TRIES} times; retrying with bounded admission', file=sys.stderr)
     deadline = None
     while True:
         before = _m_instance.settings(_m_instance.Instance(root))

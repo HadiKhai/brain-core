@@ -826,7 +826,8 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         inst = m.Instance(root)
         builds = []
         def changed(current, target):
-            self.assertTrue(refresh.instance.holding() and refresh.instance._LOCK['fh'] is not None)
+            self.assertTrue(refresh.instance.holding())
+            self.assertIsNone(refresh.instance._LOCK['fh'])
             head = refresh.common.git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
             if not builds:  # a worker commit lands in its worktree during the held build
                 (wt / 'concurrent.txt').write_text('relevant branch change\n')
@@ -853,7 +854,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             builds.append(head)
             return head
         with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
-            with self.assertRaisesRegex(SystemExit, 'kept changing through 3 locked builds'):
+            with self.assertRaisesRegex(SystemExit, 'kept changing through 3 unlocked builds'):
                 refresh.compute(inst, inst.node('app'), churn)
         self.assertEqual(len(builds), refresh.HELD_BUILDS)
 
@@ -1021,12 +1022,13 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertEqual(terminal['kind'], 'commit')
         self.assertTrue(terminal['data']['maintenance_ok'])
 
-    def test_contended_refresh_finishes_under_the_lock(self):
+    def test_contended_refresh_refuses_churn_without_rendering_under_the_lock(self):
         root = self.init('alice')
         self.b(root, 'status', 'root', '--refresh')
         m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_locked')
         backlog = root / 'backlog.md'
         facts, locked = status.status_facts, []
+        published = self.stable_facts(root)
         def contended(*args, **kwargs):
             result = facts(*args, **kwargs)
             if instance._LOCK['fh'] is None:
@@ -1041,18 +1043,16 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                 mock.patch.object(status, 'status_facts', side_effect=contended), \
                 mock.patch('random.uniform', return_value=0), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            cli.main()  # exit 0: no SystemExit
-        self.assertIn(f'contended {cli.REFRESH_TRIES} times; refreshing under the lock', err.getvalue())
-        self.assertTrue(locked and any(locked))
+            with self.assertRaisesRegex(SystemExit, 'kept changing through 3 unlocked builds'):
+                cli.main()
+        self.assertIn(f'contended {cli.REFRESH_TRIES} times; retrying with bounded admission', err.getvalue())
+        self.assertEqual(locked, [])
         self.assertFalse(instance.holding())
         records = events.read(m.Instance(root))[start:]
         self.assertEqual(len([r for r in records if r['kind'] == 'begin' and r['data'].get('command') == 'status']),
                          cli.REFRESH_TRIES + 1)
-        self.assertEqual(records[-1]['kind'], 'commit')
-        self.assertTrue(records[-1]['data']['maintenance_ok'])
-        published = self.stable_facts(root)
-        self.b(root, 'status', 'root', '--refresh')  # a quiet refresh finds nothing newer
         self.assertEqual(self.stable_facts(root), published)
+        self.assertEqual(records[-1]['kind'], 'abort')
 
     def test_contended_events_source_refresh_keeps_its_committed_view(self):
         root = self.init('alice')
@@ -1078,7 +1078,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             records = events.read(m.Instance(root))
         finally:
             os.close(writer)
-        self.assertIn('refreshing under the lock', err.getvalue())
+        self.assertIn('retrying with bounded admission', err.getvalue())
         self.assertFalse(any(r['kind'] == 'commit' and r['data'].get('invalidate') for r in records))
         self.assertEqual(records[-1]['kind'], 'commit')
         self.assertTrue(records[-1]['data']['maintenance_ok'])

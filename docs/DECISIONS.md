@@ -1,5 +1,19 @@
 # Code decisions
 
+## Writer maintenance prepares every generated view without physical lock ownership
+
+All mutating commands use fenced, unlocked preparation for generated facts and
+machine display text. A command allowlist cannot cover new writers reliably.
+The writer reacquires ownership and validates its inputs before publication;
+source drift causes a bounded rebuild or refusal, preserving concurrent prose.
+The final contended status attempt follows the same rule. Persistent churn
+refuses without publishing a stale view or leaving a begin owned only by foreign
+changes. Direct refresh, reconciliation and owned-facts projection share the
+same preparation boundary. Actual durable writes retain the writer lock.
+Initial node creation may defer a contended facts block and reload current
+bindings; it still finishes the registry, commit and any split/adopt work. A
+generated-view refusal must never strand an otherwise valid creation midway.
+
 - Rehearsal stores timestamp-preserving copies in a private directory beside the workbench, outside captured source roots; every owned allocation requires an explicit parent and refuses physical paths under system temp, macOS aging roots or HOME dot-directories before starting, while native cleanup still retires its bulk data.
 
 ## D31005: Reconcile only absent, durably recorded local queue processes

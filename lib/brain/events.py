@@ -717,7 +717,7 @@ class Command:
             def replay_inputs():
                 return [*_paths(self.inst), self.inst.root / '.brain/events-compare.jsonl',
                         self.inst.root / '.brain/events-repair-needed.json']
-            with instance.released(self.inst, extra=replay_inputs), timings.phase('refresh_compute'):
+            with instance.released(self.inst, extra=replay_inputs, projection=True), timings.phase('refresh_compute'):
                 try:
                     # Decode source and prepare derived bytes only. Every
                     # publication/repair stays in the locked path below.
@@ -891,7 +891,7 @@ def cmd_backlog(a):
 def snapshot_view(inst, n, known_merges=None):
     from . import jobs, status
     from . import status_refresh
-    if not status_refresh.active() and status_refresh.requested(inst):
+    if not status_refresh.active() and (status_refresh.requested(inst) or instance._LOCK['fh'] is not None):
         return status_refresh.compute(inst, n, lambda current, node: snapshot_view(current, node, known_merges))
     state = status.file_state(inst, n)
     known = status.facts_meta(n).get('merged_before', []) if known_merges is None else known_merges
@@ -1057,7 +1057,7 @@ def reconcile(inst, node=None, snapshot=False):
         marker = stack.enter_context(common.directory_target(inst.root / '.brain/events-repair-needed.json', private=True))
         marker_st = marker.stat()
         from . import status_refresh
-        if status_refresh.requested(inst):
+        if status_refresh.requested(inst) or instance._LOCK['fh'] is not None:
             def reconciliation_inputs():
                 paths = [inst.root / name for name in resources(inst) if not name.startswith('@ready/')]
                 paths.extend(inst.root / '.brain' / name for name in
@@ -1246,8 +1246,8 @@ def events_view_without_current(inst, n):
         common.die('events view unavailable: another interrupted or active write needs reconciliation')
     if others and not instance.holding():
         common.die('events view unavailable: another write is active; cannot reconcile its snapshot')
-    # Held final refresh: a live writer cannot commit beside it, and its
-    # pending bytes are not in the committed views rendered here.
+    # Final refresh uses committed views, excluding another writer's pending
+    # bytes. Its unlocked preparation fences journal changes before publishing.
     if n['id'] not in views:
         common.die('events view unavailable: no recorded view; refresh while files are authoritative')
     return views[n['id']]
@@ -1475,7 +1475,7 @@ def released_view(op, n, known_of, inputs, prepare=None, retry=False, targets=No
         return current, node, views if targets is not None else views[node['id']]
     for _ in range(RELEASED_PROJECTION_ATTEMPTS if retry else 1):
         try:
-            with instance.released(op.inst, list(op.inst.nodes()), extra=inputs, retry=retry):
+            with instance.released(op.inst, list(op.inst.nodes()), extra=inputs, retry=retry, projection=True):
                 current, node, view = render()
             break
         except instance.StateChanged:
@@ -1524,8 +1524,12 @@ def maintain(op, changed):
         # The reviewed batch owns its exact final graph and one commit. Retain a
         # replay view, leaving automatic reconciliation/index/status writes to
         # their explicit commands rather than expanding the reviewed write set.
-        return {n['id']: snapshot_view(op.inst, n)
-                for n in affected_nodes(op.inst, changed, op.node)}
+        selected = affected_nodes(op.inst, changed, op.node)
+        if not selected:
+            return {}
+        views, _ = released_view(op, selected[0], lambda node: None,
+                                 lambda: projection_inputs(op, selected), targets=[n['id'] for n in selected])
+        return views
     from . import status, freshness
     dispatch_landings(op.inst)
     indexed = freshness.maintain_indexes(op.inst, op.inst.nodes())
@@ -1563,8 +1567,9 @@ def maintain(op, changed):
                                   or n['id'] in getattr(op, 'project_nodes', ())):
             selected[n['id']] = n
     prepared = {}
-    released_projection = op.command in ('set', 'handback', 'task', 'review', 'preview_receipt',
-                                         'report', 'workbench', 'upgrade', 'intent_queue', 'inbox_seen', *WT_COMMANDS)
+    # Every writer uses the same fenced preparation, including new commands.
+    # An allowlist left question-answer, notify, jobs and check under the lock.
+    released_projection = op.command != 'status'
     refresh_node = getattr(op, 'refresh_node', None)
     if op.command == 'status' and selected:
         from . import status_refresh
@@ -1608,7 +1613,8 @@ def maintain(op, changed):
         def prepare(current, node, view, machine):
             prepared[node['id']] = (view, status.refreshed_text(current, node, view, machine_snapshot=machine))
         batch, _ = released_view(op, next(iter(selected.values())),
-                                 lambda node: status.facts_meta(node).get('merged', []),
+                                 lambda node: status.facts_meta(node).get(
+                                     'merged_before' if op.command == 'check' and status.facts_meta(node) else 'merged', []),
                                  lambda: projection_inputs(op, [op.inst.node(nid) for nid in selected]),
                                  prepare=prepare if materialize else None,
                                  retry=op.command in SCOPED_PROJECTIONS, targets=list(selected))

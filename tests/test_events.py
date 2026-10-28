@@ -73,7 +73,8 @@ class EventAppend(Scenario):
 
     def test_short_writers_prepare_facts_and_machine_text_without_the_writer_lock(self):
         from brain import status
-        for command in ('set', 'task', 'handback', 'wt_add', 'wt_setup', 'upgrade', 'intent_queue', 'inbox_seen'):
+        for command in ('set', 'task', 'handback', 'wt_add', 'wt_setup', 'upgrade', 'intent_queue', 'inbox_seen',
+                        'question_answer', 'notify', 'jobs', 'backlog', 'changes', 'check', 'fixture_future_writer'):
             with self.subTest(command=command):
                 root = self.init('unlocked-' + command)
                 home = self.repo(self.tmp / ('code-' + command))
@@ -113,7 +114,49 @@ class EventAppend(Scenario):
                 self.assertIn('concurrent writer', (root / 'nodes/peer/backlog.md').read_text())
                 records = self.records(root)
                 self.assertEqual(events.pending(records), {})
-                self.assertTrue(records[-1]['data']['maintenance_ok'])
+                self.assertEqual(records[-1]['data']['maintenance_ok'], command in events.SCOPED_PROJECTIONS)
+
+    def test_writer_timing_phases_never_overlap_facts_and_physical_lock_hold(self):
+        from brain import status, timings
+        for command in ('question_answer', 'jobs', 'wt_add', 'task_apply_plan'):
+            with self.subTest(command=command):
+                root = self.init('timing-' + command)
+                inst, intervals = instance.Instance(root), []
+                record = timings.record
+                def observed(name, seconds):
+                    end = time.perf_counter()
+                    if name in ('status_facts', 'lock_hold'):
+                        intervals.append((name, end - seconds, end))
+                    record(name, seconds)
+                with mock.patch.object(timings, 'record', side_effect=observed):
+                    with instance.brain_lock(inst), events.Command(root, command=command):
+                        (root / 'backlog.md').write_text('- durable mutation\n')
+                facts = [r for r in intervals if r[0] == 'status_facts']
+                holds = [r for r in intervals if r[0] == 'lock_hold']
+                self.assertTrue(facts and holds, intervals)
+                for _, start, end in facts:
+                    for _, locked, unlocked in holds:
+                        self.assertTrue(end <= locked or start >= unlocked, intervals)
+                self.assertTrue(self.records(root)[-1]['data']['maintenance_ok'])
+
+    def test_direct_refresh_and_reconciliation_prepare_facts_unlocked(self):
+        from brain import status
+        root = self.init('direct-projection')
+        inst = instance.Instance(root)
+        facts, observed = status.status_facts, []
+        def unlocked(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            observed.append(True)
+            return facts(*args, **kwargs)
+        with mock.patch.object(status, 'status_facts', side_effect=unlocked):
+            with instance.brain_lock(inst), events.Command(root, command='check'):
+                status.refresh_status(inst, inst.node('root'))
+                status.due_evidence(inst, inst.node('root'))
+            (root / 'backlog.md').write_text('- external edit\n')
+            with instance.brain_lock(inst):
+                events.reconcile(inst)
+        self.assertTrue(observed)
+        self.assertEqual(events.pending(self.records(root)), {})
 
     def test_short_writer_retries_from_fresh_status_and_preserves_concurrent_prose(self):
         from brain import status

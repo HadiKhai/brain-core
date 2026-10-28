@@ -339,7 +339,7 @@ GIT_DRIFT = ('status refresh inputs changed during computation',
 # refresh. Any other refusal stays final: a repair's own cause, and a settings
 # or binding edit (see cli.refresh_with_retry), which refuses as before.
 CONTENTION = ('another write is active; cannot reconcile its snapshot',
-              'state changed during the unlocked step', *GIT_DRIFT)
+              'state changed during the unlocked step', 'status refresh inputs kept changing through', *GIT_DRIFT)
 HELD_BUILDS = 3
 
 
@@ -366,9 +366,8 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     if active():
         return build(inst, n)
     if instance.holding():
-        # The contended last attempt keeps the lock, so no Brain writer can
-        # publish beside it. Worktree files and Git still can: every build stays
-        # fenced, drift rebuilds under the lock, and only a bounded number.
+        # The final attempt retains its admission policy, but preparation still
+        # releases physical ownership. Drift gets only a bounded fresh rebuild.
         for _ in range(HELD_BUILDS):
             try:
                 result = fenced(inst, n, build, all_nodes, targets, extra)
@@ -380,8 +379,8 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
             if settings_changed():
                 common.die('state changed during the unlocked step; retry from fresh state')
             return result
-        common.die(f'status refresh inputs kept changing through {HELD_BUILDS} locked builds; '
-                   'worktree files and Git are outside the Brain lock')
+        common.die(f'status refresh inputs kept changing through {HELD_BUILDS} unlocked builds; '
+                   'retry from fresh state')
     return fenced(inst, n, build, all_nodes, targets, extra)
 
 
@@ -402,8 +401,8 @@ def fenced(inst, n, build, all_nodes, targets, extra):
                     list(extra() if callable(extra) else extra))
         from . import events
         owner = next((op for op in reversed(events._CURRENT) if isinstance(op, events.Command)
-                      and op.command == 'status' and op.inst.root == inst.root), None)
-        window = events.resources(inst) if owner is not None and not instance.holding() else None
+                      and op.inst.root == inst.root), None)
+        window = events.resources(inst) if owner is not None else None
         def attribute_window():
             # Runs after released() retook the lock: whatever moved is foreign.
             after = events.resources(inst)
@@ -411,8 +410,7 @@ def fenced(inst, n, build, all_nodes, targets, extra):
         with contextlib.ExitStack() as stack:
             if window is not None:
                 stack.callback(attribute_window)
-            stack.enter_context(contextlib.nullcontext() if instance.holding() else
-                                instance.released(inst, list(current.nodes())))
+            stack.enter_context(instance.released(inst, list(current.nodes()), projection=True))
             token = _ACTIVE.set(True)
             observer = common._GIT_OBSERVER.set(git_inputs.observe)
             reads = common._GIT_READS.set(None)

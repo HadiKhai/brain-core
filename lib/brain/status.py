@@ -577,6 +577,9 @@ def file_state(inst, n):
 @_m_command_reads.memo
 @_m_timings.timed("due_evidence")
 def due_evidence(inst, n):
+    from . import status_refresh
+    if _m_instance._LOCK['fh'] is not None and not status_refresh.active():
+        return status_refresh.compute(inst, n, due_evidence)
     state = file_state(inst, n)
     # Node's own commits only, excluding status (including its generated refresh commit) and children.
     names = ["brief.md", "decisions.md", "backlog.md", "node.md", "inbox.md", "sources", "AGENTS.md", _m_jobs.JOBS_FILE,
@@ -1262,15 +1265,26 @@ def refreshed_text(inst, n, view=None, machine_snapshot=None):
     return text
 
 
-def refresh_status(inst, n, view=None, prepared_text=None, machine_snapshot=None):
+def refresh_status(inst, n, view=None, prepared_text=None, machine_snapshot=None, defer_on_contention=False):
     from . import status_refresh
-    text = prepared_text if prepared_text is not None else (
-        status_refresh.compute(inst, n, lambda current, node: refreshed_text(current, node, view, machine_snapshot))
-        if status_refresh.requested(inst) else refreshed_text(inst, n, view, machine_snapshot))
+    try:
+        text = prepared_text if prepared_text is not None else (
+            status_refresh.compute(inst, n, lambda current, node: refreshed_text(current, node, view, machine_snapshot))
+            if status_refresh.requested(inst) or _m_instance._LOCK['fh'] is not None
+            else refreshed_text(inst, n, view, machine_snapshot))
+    except SystemExit as error:
+        if not defer_on_contention or not status_refresh.contended(error):
+            raise
+        # The caller must finish its durable creation, using the bindings and
+        # policy that landed while preparation was unlocked. Publish no old text.
+        inst.__dict__.update(vars(_m_instance.Instance(inst.root)))
+        print(f'brain: {n["id"]}: initial generated status deferred; run status --refresh', file=sys.stderr)
+        return False
     f = n['dir'] / 'status.md'
     with _m_timings.phase('refresh_write'):
         _m_common.atomic_write(f, text)
         _m_common.touch(f)
+    return True
 
 
 class InboxReporters(dict):
