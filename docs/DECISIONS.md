@@ -3889,6 +3889,8 @@ existing generated-transformation ownership bookkeeping.
 A held refresh blocked by live foreign leases and invalid views closes its own
 attempt before waiting outside the writer lock. One 120-second deadline covers
 all owner waits and repeated admission races. Each retry reloads and reconciles
-under the lock, checking the current lease set. Expiry refuses without claiming
+under the lock, checking the current lease set. Lock admission uses the remaining
+deadline budget, restoring the normal process-local wait limit before any nested
+work. Expiry refuses without claiming
 a current view. Live leases are never adopted or closed; dead operations and
 stream damage keep their existing strict refusal and recovery behavior.

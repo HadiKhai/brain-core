@@ -1270,6 +1270,53 @@ with instance.brain_lock(root), mock.patch.object(events, 'maintain', return_val
         out, err = writer.communicate('\n', timeout=10)
         self.assertEqual(writer.returncode, 0, err)
 
+    def test_refresh_deadline_also_bounds_a_new_lock_owner_at_readmission(self):
+        root = self.init('refresh-admission')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_admission_deadline')
+        script = '''
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from brain import instance
+with instance.brain_lock(Path(sys.argv[2])):
+    print('held', flush=True)
+    sys.stdin.readline()
+'''
+        holder = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(root)],
+                                  env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: holder.communicate('\n', timeout=10) if holder.poll() is None else None)
+        self.assertEqual(holder.stdout.readline().strip(), 'held')
+        calls, admitted = [], []
+        lock = instance.brain_lock
+        def attempt():
+            calls.append(True)
+            raise events.RefreshBlocked(['c' * 32])
+        def admission(target):
+            if calls:
+                admitted.append(instance.LOCK_WAIT)
+                return lock(target)  # a new owner now prevents readmission
+            return contextlib.nullcontext()  # isolate the already-completed held attempt
+        start = time.monotonic()
+        with mock.patch.object(cli, 'REFRESH_TRIES', 0), \
+                mock.patch.object(cli, 'REFRESH_WRITER_WAIT', 0.1), \
+                mock.patch.object(instance, 'LOCK_WAIT', 5), \
+                mock.patch.object(instance, 'brain_lock', side_effect=admission), \
+                mock.patch.object(events, 'lease_live', return_value=False), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, 'deadline expired during lock admission'):
+                cli.refresh_with_retry(attempt, root)
+            self.assertEqual(instance.LOCK_WAIT, 5)
+        self.assertLess(time.monotonic() - start, 2)
+        self.assertEqual(calls, [True])
+        self.assertEqual(len(admitted), 1)
+        self.assertGreater(admitted[0], 0)
+        self.assertLessEqual(admitted[0], 0.1)
+        self.assertIsNone(instance._LOCK['fh'])
+        self.assertFalse(instance.holding())
+        out, err = holder.communicate('\n', timeout=10)
+        self.assertEqual(holder.returncode, 0, err)
+
     def test_explicit_inbox_seen_projects_unlocked_and_retries_source_drift(self):
         root = self.init('inbox-seen-projection')
         line = '- 2026-10-28 05:00 +00:00 from worker: Apply the export'

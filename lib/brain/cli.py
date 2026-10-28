@@ -850,6 +850,7 @@ REFRESH_WRITER_WAIT = 120  # one deadline across all live-owner waits and admiss
 
 def refresh_with_retry(attempt, root):
     """Retry a contended refresh with fresh state, then once under the held lock."""
+    import contextlib
     import random
     import time
     for tries in range(1, REFRESH_TRIES + 1):
@@ -871,7 +872,21 @@ def refresh_with_retry(attempt, root):
             with _m_instance.held(root):
                 # Admission can race another released writer. Reconciliation
                 # re-reads the leases under the lock on every fresh attempt.
-                with _m_instance.brain_lock(root):
+                with contextlib.ExitStack() as stack:
+                    lock_wait = _m_instance.LOCK_WAIT
+                    try:
+                        if deadline is not None:
+                            _m_instance.LOCK_WAIT = min(lock_wait, max(0, deadline - time.monotonic()))
+                        stack.enter_context(_m_instance.brain_lock(root))
+                    except SystemExit:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            _m_common.die('status refresh refused: refresh deadline expired during lock admission; '
+                                          'retry from fresh state')
+                        raise
+                    finally:
+                        # The CLI owns this process-local admission policy only
+                        # while acquiring; nested work keeps its normal bound.
+                        _m_instance.LOCK_WAIT = lock_wait
                     if deadline is not None and time.monotonic() >= deadline:
                         _m_common.die('status refresh refused: refresh deadline expired; retry from fresh state')
                     return attempt()
