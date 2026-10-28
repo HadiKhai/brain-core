@@ -27,8 +27,13 @@ class ReadyPolicies(Scenario):
         m, inst, n = self.module(root)
         review, preview = mock.Mock(return_value=['review blocked']), mock.Mock(return_value=['preview missing'])
         owner = m.ready_policy_reasons.__globals__
-        def module(name, package):
-            return SimpleNamespace(**{'validate_ready_reviews' if name == '.review' else 'validate_ready_preview': review if name == '.review' else preview})
+        real_import = owner['importlib'].import_module
+        validators = {'.review': ('validate_ready_reviews', review), '.preview_evidence': ('validate_ready_preview', preview)}
+        def module(name, package=None):
+            # Fake only the two validator owners; deferred sibling imports stay real.
+            if name not in validators:
+                return real_import(name, package)
+            return SimpleNamespace(**dict([validators[name]]))
         with mock.patch.object(owner['importlib'], 'import_module', side_effect=module):
             reasons = m.ready_policy_reasons(inst, n, 'one', '1' * 40, {'head': '1' * 40})
         self.assertEqual(reasons, ['review blocked', 'preview missing'])
