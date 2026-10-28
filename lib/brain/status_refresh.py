@@ -397,8 +397,8 @@ def fenced(inst, n, build, all_nodes, targets, extra):
             return ([path for target in selected for path in input_paths(current, target)] + policy +
                     list(extra() if callable(extra) else extra))
         from . import events
-        owner = next((op for op in reversed(events._CURRENT)
-                      if op.command == 'status' and op.inst.root == inst.root), None)
+        owner = next((op for op in reversed(events._CURRENT) if isinstance(op, events.Command)
+                      and op.command == 'status' and op.inst.root == inst.root), None)
         window = events.resources(inst) if owner is not None and not instance.holding() else None
         def attribute_window():
             # Runs after released() retook the lock: whatever moved is foreign.
