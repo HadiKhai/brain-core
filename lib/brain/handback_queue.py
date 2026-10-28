@@ -785,29 +785,50 @@ def reconcile_dead_batches(inst):
 
 
 def maintain_view_batch(inst):
-    """Maintain every invalid view and every waiting receipt's affected node
-    once; mark receipts current only after that publication succeeds."""
+    """Publish receipt-node groups before repairing unrelated invalid views.
+
+    Each marker follows its own fenced projection commit. The detached drainer
+    retains its lease and continues maintenance after that receipt can be read.
+    """
     from . import events
     waiting = pending_views(inst)
-    if not waiting:
-        return True
-    nodes = sorted({nid for data in waiting for nid in intent_receipt(inst, data['id']).get('nodes', [])})
+    groups = {}
+    for data in waiting:
+        nodes = tuple(sorted(intent_receipt(inst, data['id'])['nodes']))
+        groups.setdefault(nodes, []).append(data)
+    succeeded = True
+    for nodes, receipts in groups.items():
+        try:
+            with intent_touched(), _m_instance.brain_lock(inst):
+                operation = open_view_batch(inst, nodes[0])
+                # Reconciliation can clear invalidation without rewriting the
+                # status files. Always project every node named by a receipt.
+                operation.project_nodes = nodes
+                operation.__exit__(None, None, None)
+                invalid = events.journal(_m_instance.Instance(inst.root)).state['invalid']
+                ok = (getattr(operation, 'maintenance_ok', False) is True
+                      and not any(events.node_ref(nid) in invalid for nid in nodes))
+                mark_views(inst, receipts, 'current' if ok else 'invalid', operation.ref)
+        except (Exception, SystemExit):
+            mark_views(inst, receipts, 'invalid', '')
+            ok = False
+        succeeded = succeeded and ok
+    if not succeeded:
+        return False
+    # Markers are already durable. This remaining work must not hold their
+    # queue wait barriers, and a failure must not revoke their successful pass.
     try:
         with intent_touched(), _m_instance.brain_lock(inst):
-            operation = open_view_batch(inst, nodes[0] if nodes else 'root')
-            # Reconciliation can clear the journal invalidation without
-            # rewriting status files, so the receipts name what to project.
-            operation.project_nodes = nodes
-            operation.__exit__(None, None, None)
-            invalid = events.journal(_m_instance.Instance(inst.root)).state['invalid']
-            ok = (getattr(operation, 'maintenance_ok', False) is True
-                  and not any(events.node_ref(nid) in invalid for nid in nodes))
-            mark_views(inst, waiting, 'current' if ok else 'invalid', operation.ref)
+            current = _m_instance.Instance(inst.root)
+            invalid = events.journal(current).state['invalid']
+            nodes = [n['id'] for n in current.nodes() if not n['archived'] and events.node_ref(n['id']) in invalid]
+            if nodes:
+                operation = open_view_batch(inst, nodes[0])
+                operation.__exit__(None, None, None)
+                return getattr(operation, 'maintenance_ok', False) is True
     except (Exception, SystemExit):
-        # Admission refused (or maintenance raised): the views stay invalid.
-        mark_views(inst, waiting, 'invalid', '')
-        return False
-    return ok
+        return False  # unrelated view repair must not block the write queue
+    return True
 
 
 def apply_view_batch(inst):

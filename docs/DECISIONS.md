@@ -3966,6 +3966,25 @@ while the view is pending. Its output stays exactly the native receipt JSON; an
 invalid view is reported by that receipt's `view: invalid`, not by an extra line.
 Old receipts without a view field were maintained synchronously.
 
+## 2026-10-28: Release queue waits at their receipt-node projection boundary
+
+The detached drainer groups pending receipts by their affected node sets, in
+first-receipt FIFO order. Each group gets its own fenced projection operation;
+identical node sets still share one pass. That operation explicitly projects
+the receipt nodes, including after reconciliation, and does not add unrelated
+invalid views. Only its successful commit and a locked check that none of those
+nodes remains invalid permit the group's `current` markers to publish.
+
+`queue wait ID` can therefore return when its own receipt's nodes are projected,
+while the same lease-holding drainer continues later groups and repairs remaining
+invalid views. It is a receipt-local publication barrier, not a barrier for the
+whole instance or the detached drain. It retains native JSON and exit semantics.
+Projection refusal reports `invalid`; a crash before publication leaves the
+receipt pending. A later repair failure or crash cannot revoke an earlier
+successful projection. Existing released-compute fences, retries and dead-batch
+reconciliation still apply. This does not shorten readiness computation when
+the receipt itself affects an expensive node, nor bypass a preceding FIFO apply.
+
 ## 2026-10-28: Synchronize concurrent test fixtures at publication boundaries
 
 The runner fixture publishes its daemon PID by atomic rename after writing the

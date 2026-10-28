@@ -1595,6 +1595,7 @@ def maintain(op, changed):
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
     for n in op.inst.nodes():
         if not n['archived'] and (node_ref(n['id']) in journal(op.inst).state['invalid']
+                                  and not hasattr(op, 'project_nodes')
                                   or n['id'] in getattr(op, 'project_nodes', ())):
             selected[n['id']] = n
     prepared = {}

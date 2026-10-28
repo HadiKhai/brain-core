@@ -247,10 +247,123 @@ class HandbackLifecycle(Scenario):
             self.assertEqual([queue.intent_receipt(inst, r['id'])['nodes'] for r in requests], [['app'], ['root']])
             with mock.patch.object(events, 'maintain', side_effect=observed):
                 m.drain_intents(inst)  # reconciliation clears invalidation; receipts still name their nodes
-        # The repair op's own node is app; root is projected only because its receipt names it.
-        self.assertEqual(projected, [['app', 'root']])
+        # Each receipt group projects its explicit nodes even after reconciliation.
+        self.assertEqual(projected, [['app'], ['root']])
         self.assertEqual(self.views(queue, inst, requests), ['current'] * 2)
         self.assertFalse(events.journal(m.Instance(root)).state['opened'])
+
+    def test_receipt_wait_releases_before_unrelated_repair_and_survives_its_crash(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(1)
+        app = inst.root / 'nodes/app'
+        app.mkdir(parents=True)
+        (app / 'node.md').write_text('---\ntitle: App\nhome: none\n---\n')
+        inst = m.Instance(inst.root)
+        maintain, projected = events.maintain, []
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            # An unrelated writer left its generated view invalid.
+            with mock.patch.object(events, 'maintain', return_value=events.DEFERRED_VIEWS):
+                with m.brain_lock(inst), m.Command(inst.root, command='set', node='app'):
+                    pass
+
+            def observed(op, changed):
+                if not getattr(op, 'write_batch', False):
+                    return maintain(op, changed)
+                if hasattr(op, 'project_nodes'):
+                    self.assertEqual(self.views(queue, inst, requests), ['pending'])
+                    views = maintain(op, changed)
+                    projected.append(sorted(views))
+                    return views
+                # The detached drain still owns its lease, but this writer's
+                # own projection has committed and its wait already returns.
+                self.assertTrue(queue.applier_busy(inst))
+                receipt, err = self.wait(m, inst, requests[0])
+                self.assertEqual((receipt['view'], err), ('current', ''))
+                state = events.journal(m.Instance(inst.root)).state
+                self.assertNotIn(events.node_ref('root'), state['invalid'])
+                self.assertIn(events.node_ref('app'), state['invalid'])
+                raise KeyboardInterrupt  # unrelated repair dies after release
+
+            with mock.patch.object(events, 'maintain', side_effect=observed), self.assertRaises(KeyboardInterrupt):
+                m.drain_intents(inst)
+            self.assertEqual(projected, [['root']])
+            self.assertEqual(self.views(queue, inst, requests), ['current'])
+            # A later drain reconciles the interrupted background operation.
+            m.drain_intents(inst)
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['opened'])
+        self.assertEqual(self.views(queue, inst, requests), ['current'])
+
+    def test_unrelated_repair_open_failure_does_not_block_new_writes(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(1)
+        app = inst.root / 'nodes/app'
+        app.mkdir(parents=True)
+        (app / 'node.md').write_text('---\ntitle: App\nhome: none\n---\n')
+        inst = m.Instance(inst.root)
+        open_batch = queue.open_view_batch
+
+        def refused(current, node):
+            if node == 'app':
+                raise RuntimeError('unrelated repair could not open')
+            return open_batch(current, node)
+
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            with mock.patch.object(events, 'maintain', return_value=events.DEFERRED_VIEWS):
+                with m.brain_lock(inst), m.Command(inst.root, command='set', node='app'):
+                    pass
+            with mock.patch.object(queue, 'open_view_batch', side_effect=refused):
+                m.drain_intents(inst)
+                self.assertFalse(queue.intent_path(inst, 'blocked').exists())
+                self.assertEqual(self.wait(m, inst, requests[0])[0]['view'], 'current')
+                later = m.submit_intent(inst, dict(kind='inbox', node='root', text='After repair refusal', at=inst.now()),
+                                        start=False)
+                m.drain_intents(inst)
+            self.assertFalse(queue.intent_path(inst, 'blocked').exists())
+            self.assertEqual(self.views(queue, inst, requests + [later]), ['current'] * 2)
+            self.assertIn(events.node_ref('app'), events.journal(m.Instance(inst.root)).state['invalid'])
+
+    def test_receipt_groups_publish_before_a_later_groups_projection(self):
+        root = self.init('receipt-groups')
+        self.b(root, 'new', 'app', '--title', 'App')
+        m = core_loader.SourceFileLoader('receipt_groups', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        requests = [m.submit_intent(inst, dict(kind='inbox', node=nid, text='Request ' + nid, at=inst.now()), start=False)
+                    for nid in ('root', 'app')]
+        maintain = events.maintain
+
+        def observed(op, changed):
+            if getattr(op, 'project_nodes', None) == ('app',):
+                receipt, err = self.wait(m, inst, requests[0])
+                self.assertEqual((receipt['view'], err), ('current', ''))
+                self.assertEqual(self.views(queue, inst, requests), ['current', 'pending'])
+            return maintain(op, changed)
+
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(events, 'maintain', side_effect=observed):
+            m.drain_intents(inst)
+        self.assertEqual(self.views(queue, inst, requests), ['current'] * 2)
+
+    def test_refused_receipt_group_does_not_strand_later_receipts_pending(self):
+        root = self.init('refused-receipt-group')
+        self.b(root, 'new', 'app', '--title', 'App')
+        m = core_loader.SourceFileLoader('refused_receipt_group', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        requests = [m.submit_intent(inst, dict(kind='inbox', node=nid, text='Request ' + nid, at=inst.now()), start=False)
+                    for nid in ('root', 'app')]
+        maintain = events.maintain
+
+        def refused(op, changed):
+            if getattr(op, 'project_nodes', None) == ('root',):
+                raise RuntimeError('first group refused')
+            return maintain(op, changed)
+
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(events, 'maintain', side_effect=refused), \
+                contextlib.redirect_stderr(io.StringIO()):
+            m.drain_intents(inst)
+        self.assertEqual(self.views(queue, inst, requests), ['invalid', 'current'])
+        invalid = events.journal(m.Instance(root)).state['invalid']
+        self.assertIn(events.node_ref('root'), invalid)
+        self.assertNotIn(events.node_ref('app'), invalid)
 
     def test_dead_batch_beside_live_writer_blocks_instead_of_rejecting(self):
         m, inst, n, events, queue, requests = self.batch_fixture(1)
