@@ -1228,9 +1228,9 @@ def job_queue_projection(inst, node, owner):
 
 
 def machine_wait(kind="heavy", inst=None, node=None, job=None, clock=None, read=None, pause=None,
-                 reduction_ready=False, token=None):
+                 reduction_ready=False, token=None, gate_phase='running'):
     clock = clock or (token.clock if token is not None else time)
-    with (_m_gate_lock.gate_admission(inst, node) if inst is not None and node is not None
+    with (_m_gate_lock.gate_admission(inst, node, gate_phase) if inst is not None and node is not None
           else contextlib.nullcontext()):
         if token is not None:
             return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)

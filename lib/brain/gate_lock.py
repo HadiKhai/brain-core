@@ -81,8 +81,11 @@ def gate_state_lock(inst):
 
 
 @contextlib.contextmanager
-def gate_admission(inst, node):
-    """Only the first admission can be idle; later lane waits retain running ownership."""
+def gate_admission(inst, node, admitted='running'):
+    """Only the first admission can be idle; later lane waits retain running ownership.
+
+    The gate-lock wrapper admits before its command exists, so it passes
+    `admitted='starting'` and leaves the command its own first admission."""
     active = ACTIVE_GATE.get()
     env = active[2] if active is not None and active[:2] == (inst.root, node) else os.environ
     fd = gate_inherited_fd(inst.root, env, node)
@@ -107,7 +110,7 @@ def gate_admission(inst, node):
         with gate_state_lock(inst):
             row = gate_metadata(fd)
             if row.get('phase') == 'waiting-for-admission':
-                row.update(phase='running')
+                row.update(phase=admitted)
                 row.pop('phase_owner', None)
                 gate_write_metadata(fd, row)
 
@@ -231,21 +234,39 @@ def node_gate(inst, n, env, label):
     finally:
         ACTIVE_GATE.reset(active)
         if owned:
-            # Close, never unlock: a surviving child retains the same ownership.
-            # Released is never idle while the flock is held, so this best-effort
-            # mark needs no instance lock; it only spares the next holder a
-            # stale-holder report after an ordinary close.
-            row = gate_metadata(fd)
-            if row.get('pid') == os.getpid():
-                row.update(phase='released')
-                row.pop('phase_owner', None)
-                data = (json.dumps(row) + '\n').encode()
-                try:
-                    if len(data) <= 4096 and os.pwrite(fd, data, 0) == len(data):
-                        os.ftruncate(fd, len(data))
-                except OSError:
-                    pass
-            os.close(fd)
+            gate_close(fd)
+
+
+def gate_close(fd):
+    # Close, never unlock: a surviving child retains the same ownership.
+    # Released is never idle while the flock is held, so this best-effort
+    # mark needs no instance lock; it only spares the next holder a
+    # stale-holder report after an ordinary close.
+    row = gate_metadata(fd)
+    if row.get('pid') == os.getpid():
+        row.update(phase='released')
+        row.pop('phase_owner', None)
+        data = (json.dumps(row) + '\n').encode()
+        try:
+            if len(data) <= 4096 and os.pwrite(fd, data, 0) == len(data):
+                os.ftruncate(fd, len(data))
+        except OSError:
+            pass
+    os.close(fd)
+
+
+def gate_wrapper_admission(inst, node, env):
+    """Wait for heavy admission holding the gate, in the phase upgrade treats as idle.
+
+    The lock comes first so same-node waiters keep their flock order; admitting
+    first would let a later arrival overtake an earlier one once load clears."""
+    active = ACTIVE_GATE.set((inst.root, node, env))
+    try:
+        with contextlib.redirect_stdout(sys.stderr):  # the command owns stdout
+            with _m_machine.machine_run('heavy', inst, node) as token:
+                _m_machine.machine_wait(inst=inst, node=node, token=token, gate_phase='starting')
+    finally:
+        ACTIVE_GATE.reset(active)
 
 
 def cmd_gate_lock(a):
@@ -254,10 +275,16 @@ def cmd_gate_lock(a):
         _m_common.die('gate-lock requires -- CMD [ARGS...]')
     inst = _m_nodes.load()
     n = gate_node(inst, getattr(a, 'node', None))
-    fd, _ = gate_acquire(inst, n['id'], os.environ, a.label or command[0])
+    fd, owned = gate_acquire(inst, n['id'], os.environ, a.label or command[0])
     os.set_inheritable(fd, True)
     _m_core_releases.hold_pin(_m_common.CORE)  # the exec'd command keeps this release from prune
     env = gate_environment(inst, n['id'], os.environ, fd)
+    if owned:  # an inherited gate's outer wrapper already admitted
+        try:
+            gate_wrapper_admission(inst, n['id'], env)
+        except BaseException:
+            gate_close(fd)
+            raise
     sys.stdout.flush()
     sys.stderr.flush()
     for name in ('SIGPIPE', 'SIGXFZ', 'SIGXFSZ'):

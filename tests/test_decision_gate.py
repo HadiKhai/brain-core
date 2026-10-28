@@ -159,6 +159,105 @@ sys.stdin.readline()
         self.assertEqual(out.strip(), '43')
         self.assertEqual(path.stat().st_ino, inode)
 
+    def wrapper_driver(self, admission, command):
+        """Run `gate-lock` itself with a patched admission, then exec `command CORE`."""
+        return r"""import argparse,os,sys
+sys.path.insert(0,sys.argv[1]+'/lib')
+from unittest import mock
+import brain.machine as m, brain.gate_lock as g
+reading={'load_per_cpu':[9,9,9], 'mem_free_gb':32, 'disk_free_gb':200, 'thermal':'normal'}
+wait=m.machine_wait
+""" + admission + r"""
+with mock.patch.object(m,'machine_wait',side_effect=admission):
+ g.cmd_gate_lock(argparse.Namespace(node='maple', label='queued', command=['--',sys.executable,'-u','-c',%r,sys.argv[1]]))
+""" % command
+
+    def start_wrapper(self, code):
+        # Unbuffered bytes: a text reader could buffer a second line past select().
+        p = subprocess.Popen([sys.executable, '-u', '-c', code, str(CORE)], cwd=self.root, env=self.env,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        def cleanup():
+            if p.poll() is None:
+                p.kill()
+            p.communicate()
+        self.addCleanup(cleanup)
+        return p
+
+    def test_wrapper_waits_for_admission_as_idle_holder_then_runs_busy_in_fifo_order(self):
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        code = self.wrapper_driver(r"""def pause(seconds):
+ print('admission-barrier',file=sys.stderr,flush=True)
+ sys.stdin.readline()
+ reading['load_per_cpu']=[0,0,0]
+def admission(*args,**kwargs):
+ return wait(*args,**kwargs,read=lambda:dict(reading),pause=pause)""",
+            "import sys; print('command-ran',flush=True); sys.stdin.readline()")
+        first = self.start_wrapper(code)
+        # Admission reports go to stderr; the command's stdout stays its own.
+        self.assertIn(b'machine care: heavy held', self.line(first.stderr))
+        self.assertEqual(self.line(first.stderr), b'admission-barrier')
+        inst = self.m.Instance(self.root)
+        path = self.gate_path('maple')
+        inode = path.stat().st_ino
+        before = path.read_bytes()
+        row = json.loads(before)
+        self.assertEqual((row['phase'], row['label'], row['pid']), ('waiting-for-admission', 'queued', first.pid))
+        self.assertEqual(self.m.open_jobs_anywhere(inst), [])  # a queued wrapper does not block upgrade
+        self.assertEqual(path.read_bytes(), before)
+        # The waiting wrapper still owns the node gate: a later run queues behind it.
+        second = self.start_gate('second', "import sys; print('second-barrier'); sys.stdin.readline()", node='maple')
+        self.assertIn('waiting for gate held by queued', self.line(second.stderr))
+        self.assertEqual(select.select([second.stdout], [], [], 0)[0], [])
+        first.stdin.write(b'\n')
+        self.assertEqual(self.line(first.stdout), b'command-ran')
+        self.assertEqual(json.loads(path.read_text())['phase'], 'starting')
+        self.assertIn(('maple', 'in-flight node gate'), self.m.open_jobs_anywhere(inst))
+        self.assertEqual(select.select([second.stdout], [], [], 0)[0], [])
+        out, err = first.communicate(b'\n', timeout=5)
+        self.assertEqual(first.returncode, 0, err)
+        self.assertEqual(out, b'')
+        self.assertIn(b'machine care: heavy resumed', err)
+        self.assertEqual(self.line(second.stdout), 'second-barrier')
+        self.assertIn(('maple', 'in-flight node gate'), self.m.open_jobs_anywhere(inst))
+        second.communicate('\n', timeout=5)
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(path.stat().st_ino, inode)
+
+    def test_wrapper_admission_leaves_command_its_own_first_idle_admission(self):
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        command = r"""import sys
+sys.path.insert(0,sys.argv[1]+'/lib')
+from unittest import mock
+import os, time, brain.machine as m, brain.nodes as nodes, brain.upgrade as u
+inst=nodes.load()
+def held(*args):
+ print(m._m_gate_lock.gate_metadata(int(os.environ['BRAIN_GATE_FD']))['phase'], u.open_jobs_anywhere(inst), flush=True)
+ return 'token'
+with mock.patch.object(m,'machine_admit',side_effect=held):
+ m.machine_wait(inst=inst, node='maple', token='token', clock=time)
+"""
+        first = self.start_wrapper(self.wrapper_driver('admission=wait', command))
+        out, err = first.communicate(timeout=10)
+        self.assertEqual(first.returncode, 0, err)
+        self.assertEqual(out.strip(), b'waiting-for-admission []')
+        # The command's own admission made the gate running; it is sticky.
+        self.assertEqual(json.loads(self.gate_path('maple').read_text())['phase'], 'running')
+
+    def test_failed_wrapper_admission_releases_gate_without_running_command(self):
+        self.b(self.root, 'new', 'maple', '--title', 'Maple')
+        code = self.wrapper_driver("def admission(*args,**kwargs):\n raise SystemExit('machine care: held')",
+                                   "print('command-ran')")
+        first = self.start_wrapper(code)
+        out, err = first.communicate(timeout=10)
+        self.assertNotEqual(first.returncode, 0)
+        self.assertNotIn(b'command-ran', out)
+        self.assertIn(b'machine care: held', err)
+        self.assertEqual(json.loads(self.gate_path('maple').read_text())['phase'], 'released')
+        after = self.start_gate('after', 'print(43)', node='maple')
+        out, err = after.communicate(timeout=5)
+        self.assertEqual((after.returncode, out.strip()), (0, '43'), err)
+        self.assertNotIn('stale holder', err)
+
     def test_native_first_admission_is_idle_but_later_lane_admission_is_busy(self):
         m, inst, n = self.m, self.inst, self.n
         with m.node_gate(inst, n, self.env, 'native'):

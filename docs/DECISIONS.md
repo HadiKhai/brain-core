@@ -4071,3 +4071,19 @@ pinned. Migration: that first upgrade installs the plain core's commit as
 the new release's previous and activates the new release. Rollback before migration is
 refused. Old cores interpreting post-upgrade `task migrate --all` records are
 not version-gated here.
+## 2026-10-28: The gate-lock wrapper admits under its lock as an idle holder
+
+A queued `brain gate-lock` run held its node gate while its command slept on
+load, so upgrade's idle guard refused installs behind it. The wrapper now waits
+for heavy machine admission itself, after taking the gate and before exec, in
+the recorded `waiting-for-admission` phase the idle guard already ignores. The
+lock still comes first: admitting first would let a later same-node arrival
+overtake an earlier one once load clears, and native verification's admission
+reserves a verify slot that must not be held while blocked on its own node.
+After admission the wrapper restores `starting`, not `running`: its command has
+not started, so the command's own first `brain heavy` or verify admission stays
+an idle wait. A nested (inherited) wrapper adds no admission. Admission reports
+go to stderr so the command owns stdout. A failed or interrupted wrapper
+admission marks the gate released and never runs the command. Waits a command
+performs outside native admission (its own sleep loops) remain busy; they
+cannot be told apart from work.

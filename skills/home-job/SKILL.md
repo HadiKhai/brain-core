@@ -230,7 +230,8 @@ do not define identity. Nested wrappers must target the same node and preserve
 forward the validated descriptor using `pass_fds`, alongside existing FDs.
 Closed, stale, unlocked or mismatched inherited proof refuses. Stable lock files
 in `.brain/gates/` are never unlinked or replaced. The wrapper does not consume
-an extra machine slot.
+an extra machine slot. It waits for heavy admission after taking the lock, as a
+holder upgrade treats as idle.
 
 Before starting heavy work outside `brain wt add` or a fresh job verify, run `brain heavy --node <node>`.
 Those two commands already wait for machine admission. Never start a replacement to bypass
