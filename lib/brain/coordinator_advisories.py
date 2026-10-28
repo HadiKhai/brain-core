@@ -117,7 +117,10 @@ def coordinator_queue_view(inst, n, now, host_record=None):
         unknown = {'count': None, 'oldest_at': None, 'episode': None, 'source': 'coalesced_queue_unknown',
                    'transport': None}
         try:
-            value = reader(inst, n)
+            for _ in range(3):  # a concurrent enqueue or delivery makes one read unknown; re-read before giving up
+                value = reader(inst, n)
+                if value.get('known') is True:
+                    break
             count, at = value.get('item_count'), value.get('oldest_at')
             if value.get('known') is not True or type(count) is not int or count < 0:
                 return unknown
@@ -142,7 +145,7 @@ def coordinator_queue_severity(count, age):
 
 def coordinator_condition_valid(record):
     severity = record.get('severity') if isinstance(record, dict) else None
-    return (isinstance(record, dict) and isinstance(record.get('thread'), str)
+    return (isinstance(record, dict) and 'severity' in record and isinstance(record.get('thread'), str)
             and type(record.get('start')) in (int, float) and math.isfinite(record['start'])
             and (severity is None or isinstance(severity, list) and len(severity) == 2
                  and type(severity[0]) is int and severity[0] >= 0 and type(severity[1]) is bool))

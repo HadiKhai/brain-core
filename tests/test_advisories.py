@@ -225,6 +225,19 @@ class CoordinatorAdvisories(unittest.TestCase):
         snapshot(0)
         self.assertNotIn(worse, snapshot(8, at='11:58'))
 
+    def test_transient_unknown_projection_keeps_the_raised_backlog_and_partial_records_are_ignored(self):
+        import json
+        hosts = self.m.coordinator_advisories.__globals__['_m_hosts']
+        known = {'known':True,'item_count':4,'oldest_at':self.now.timestamp()-300,'unconsumed_wake':True}
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=known,create=True):
+            first = self.m.coordinator_advisories(self.inst)
+        with mock.patch.object(hosts,'wake_turn_queue',side_effect=[{'known':False}, {'known':False}, known],create=True):
+            self.assertEqual(self.m.coordinator_advisories(self.inst), first)
+        (self.root / '.brain/coordinator-queue.json').write_text(json.dumps({'version':1,'conditions':{
+            'app':{'thread':'fixture-thread','start':self.now.timestamp()-300}}}))
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=known,create=True):
+            self.assertEqual(self.m.coordinator_advisories(self.inst), first)
+
     def test_transport_only_doorbells_raise_no_busy_advisory(self):
         import importlib
         observations = importlib.import_module(self.m.coordinator_advisories.__globals__['__package__'] + '.host_observations')
