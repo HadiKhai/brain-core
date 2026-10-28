@@ -185,8 +185,13 @@ def intent_receipt(inst, identity):
             or result.get('state') not in ('applied', 'rejected') or type(result.get('sequence')) is not int
             or result.get('view') not in ((None, 'pending', 'current', 'invalid') if result['state'] == 'applied'
                                           else (None,))
-            or not isinstance(result.get('nodes', []), list)
-            or not all(isinstance(nid, str) for nid in result.get('nodes', []))):
+            or ('nodes' in result) != (result.get('view') is not None)):
+        raise ValueError('blocked write queue: invalid receipt')
+    nodes = result.get('nodes', [])
+    # Legacy receipts (no view) were maintained synchronously. A view-bearing
+    # receipt must name what its repair projects; nothing pending names nothing.
+    if (not isinstance(nodes, list) or not all(isinstance(nid, str) and nid for nid in nodes)
+            or len(set(nodes)) != len(nodes) or (result.get('view') in ('pending', 'invalid') and not nodes)):
         raise ValueError('blocked write queue: invalid receipt')
     if checked_handback(request['payload']):
         validate_handback_verdict(result)
@@ -706,10 +711,11 @@ def apply_view_batch(inst):
                 receipt = dict(id=data['id'], hash=data['hash'], sequence=sequence, state=state,
                                reason=reason or '; '.join(result.get('reasons', [])), **result)
                 if state == 'applied':
-                    receipt['view'] = ('pending' if getattr(operation, 'views_deferred', False) else
-                                       'current' if getattr(operation, 'maintenance_ok', False) else 'invalid')
                     refs = set(getattr(operation, 'invalidated', ()))
                     receipt['nodes'] = sorted(n['id'] for n in current.nodes() if events.node_ref(n['id']) in refs)
+                    # A write that invalidated no live view has nothing pending.
+                    receipt['view'] = ('current' if not receipt['nodes'] or getattr(operation, 'maintenance_ok', False)
+                                       else 'pending' if getattr(operation, 'views_deferred', False) else 'invalid')
                 with _m_instance.brain_lock(inst):
                     intent_store(inst, data['id'] + '.receipt', receipt, exclusive=True)
             applied += 1

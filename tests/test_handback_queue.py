@@ -280,6 +280,14 @@ class HandbackLifecycle(Scenario):
                 mock.patch.object(queue, 'maintain_view_batch'):
             m.drain_intents(inst)
         self.assertEqual(self.views(queue, inst, requests), ['pending'])
+        name = requests[0]['id'] + '.receipt'
+        receipt = queue.intent_read(inst, name)
+        for damaged in ({k: v for k, v in receipt.items() if k != 'nodes'}, {**receipt, 'nodes': []},
+                        {**receipt, 'nodes': ['']}, {**receipt, 'nodes': ['root', 'root']}):
+            queue.intent_path(inst, name).write_text(json.dumps(damaged))  # damaged affected-node evidence
+            with self.assertRaisesRegex(ValueError, 'invalid receipt'):
+                queue.intent_receipt(inst, requests[0]['id'])
+        queue.intent_path(inst, name).write_text(json.dumps(receipt))
         marker = dict(id=requests[0]['id'], hash=requests[0]['hash'], view='current')
         for damaged in (marker, {**marker, 'ref': ''}, {**marker, 'ref': 'x' * 32}, {**marker, 'ref': 'a' * 32, 'extra': 1}):
             queue.intent_store(inst, requests[0]['id'] + '.view', damaged)

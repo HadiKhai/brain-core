@@ -3934,7 +3934,9 @@ admitting a request. Beside a live foreign writer it retries outside the lock fo
 30 seconds. It then blocks the queue rather than rejecting a request. Each
 deferred receipt records its affected nodes. Batch maintenance projects exactly
 those nodes and every invalid view, because reconciliation can clear the journal
-invalidation without rewriting status files.
+invalidation without rewriting status files. A pending or invalid receipt
+without that node evidence blocks the queue. A write that invalidated no live
+view is receipted current.
 `queue wait` returns only for a current or invalid view. It refuses at its deadline
 while the view is pending. An invalid view is reported as saved state needing repair.
 Old receipts without a view field were maintained synchronously.
