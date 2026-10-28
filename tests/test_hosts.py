@@ -53,6 +53,11 @@ class LockHotfix(Scenario):
             root, _, wt = self.job()
             args = ['handback', 'a', '--branch', 'job', '--state', 'done',
                     '--reviews', '1', '--summary', 'Synthetic result', '--lessons', 'none: fixture']
+            if site == 'handback_projection':
+                # Deferred views now belong only to explicit unchecked direct
+                # handbacks; the checked form has a separate synchronous probe.
+                args = ['handback', 'a', '--branch', 'job', '--state', 'done', '--direct',
+                        '--summary', 'Synthetic result', '--lessons', 'none: fixture']
             if site in ('handback_question', 'handback_blocked'):
                 self.b(root, 'set', 'a', 'coordinator=fixture-owner', 'wake=exit 0')
                 args = ['handback', 'a', '--branch', 'job', '--state', site.removeprefix('handback_'),
@@ -93,6 +98,7 @@ owner, name = {'sample': (ui, 'machine_load'), 'sample_watcher': (watch, 'watch_
                'handback_binding': (job_attempts, 'attempt_binding'),
                'handback_preflight': (verify, 'record_ready'), 'handback_accounting': (spend, 'live_usage'),
                'handback_projection': (events, 'snapshot_view'),
+               'handback_checked_projection': (events, 'snapshot_view'),
                'handback_publication': (job_attempts, 'attempt_matches'),
                'handback_question': (watch, 'watch_handback_wake_items'),
                'handback_blocked': (watch, 'watch_handback_wake_items'),
@@ -212,6 +218,9 @@ if projection:
 
     def test_handback_terminal_projection_allows_writer(self):
         self.assert_compute_allows_writer('handback_projection')
+
+    def test_checked_handback_terminal_projection_allows_writer(self):
+        self.assert_compute_allows_writer('handback_checked_projection')
 
     def test_handback_binding_drift_refuses_publication(self):
         self.assert_compute_allows_writer('handback_binding', drift=True)

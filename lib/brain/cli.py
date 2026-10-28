@@ -886,9 +886,15 @@ def _main():
             try:
                 with _m_instance.brain_lock(root):
                     operation = _m_events.Command(root, a)
-                    # Durable source publication belongs to the caller; generated
-                    # views belong to the coalesced queue drain, after it returns.
-                    operation.defer_views = a.f.__name__ in ('cmd_task', 'cmd_handback', 'cmd_gate_queue')
+                    # Plain handbacks retain their immediate replay view. Checked
+                    # handbacks also finish generated status commits in the caller.
+                    # Only an explicit, unchecked direct handback defers its view;
+                    # its primary publication still runs here and reports errors.
+                    checked_handback = (a.f.__name__ == 'cmd_handback' and a.state == 'done'
+                                        and (a.reviews is not None or a.record))
+                    operation.defer_views = (a.f.__name__ in ('cmd_task', 'cmd_gate_queue') or
+                                             (a.f.__name__ == 'cmd_handback' and a.direct
+                                              and not checked_handback))
                     with operation:
                         a.f(a)
             finally:
