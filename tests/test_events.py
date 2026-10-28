@@ -928,7 +928,7 @@ class EventViews(Scenario):
                     with self.assertRaisesRegex(SystemExit, 'another write is active'):
                         events.reconcile(inst, node=inst.node('app'))
                     err = io.StringIO()
-                    with instance.held(), contextlib.redirect_stderr(err):
+                    with instance.held(r), contextlib.redirect_stderr(err):
                         events.reconcile(inst, node=inst.node('app'))
                         with self.assertRaisesRegex(SystemExit, 'another write is active'):
                             events.reconcile(inst)  # whole-instance reconciliation stays strict
@@ -949,7 +949,7 @@ class EventViews(Scenario):
                 with mock.patch.object(events, '_CURRENT', []):
                     with self.assertRaisesRegex(SystemExit, 'another write is active; cannot reconcile'):
                         events.events_view_without_current(inst, inst.node('app'))
-                    with instance.held():
+                    with instance.held(r):
                         self.assertEqual(events.events_view_without_current(inst, inst.node('app')), view)
                         events.append(inst, 'other', 'begin', 'c' * 32, {'command': 'interrupted'})
                         with self.assertRaisesRegex(SystemExit, 'interrupted or active write needs reconciliation'):
@@ -978,7 +978,7 @@ class EventViews(Scenario):
                         with mock.patch.object(events, '_CURRENT', []):
                             with self.assertRaisesRegex(SystemExit, 'another write is active'):
                                 events.reconcile(inst, node=inst.node('other'), snapshot=True)
-                            with instance.held(), self.assertRaisesRegex(SystemExit, 'needs reconciliation'):
+                            with instance.held(r), self.assertRaisesRegex(SystemExit, 'needs reconciliation'):
                                 events.reconcile(inst, node=inst.node('other'), snapshot=True)
                             self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
                             self.assertEqual(events.pending(events.read(inst)), pending)

@@ -318,14 +318,23 @@ def holding():
     return bool(_LOCK.get("hold"))
 
 
+def settings(inst):
+    """Parsed instance, local and node settings; Instance.nodes() rereads node.md."""
+    return inst.cfg, inst.local, [(node['id'], node['fm']) for node in inst.nodes()]
+
+
 @contextlib.contextmanager
-def held():
-    """Keep the instance lock through every released step: a contended last attempt."""
-    _LOCK["hold"] = True
+def held(root):
+    """Keep the instance lock through every released step: a contended last attempt.
+
+    Settings are frozen before the attempt loads any: an editor outside the
+    lock may change them, and a held refresh must then refuse, not mix them.
+    """
+    _LOCK["hold"], _LOCK["held_settings"] = True, settings(Instance(root))
     try:
         yield
     finally:
-        _LOCK["hold"] = False
+        _LOCK["hold"], _LOCK["held_settings"] = False, None
 
 
 def unlock():

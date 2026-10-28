@@ -350,10 +350,6 @@ def contended(error):
     return any(text in message for text in CONTENTION)
 
 
-def settings(inst):
-    return inst.cfg, inst.local, [(node['id'], node['fm']) for node in inst.nodes()]
-
-
 def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     """Release physical ownership, prepare once, then refuse relevant drift.
 
@@ -375,9 +371,9 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
                 if not contended(error):
                     raise
                 continue
-            # The caller publishes with its own loaded instance: a rebuild may
-            # not carry settings that instance does not have.
-            if settings(instance.Instance(inst.root)) != settings(inst):
+            # The caller publishes with settings loaded during this attempt: a
+            # rebuild may not carry settings that changed since it began.
+            if instance.settings(instance.Instance(inst.root)) != instance._LOCK['held_settings']:
                 common.die('instance or node settings changed during the locked refresh; refresh again')
             return result
         common.die(f'status refresh inputs kept changing through {HELD_BUILDS} locked builds; '

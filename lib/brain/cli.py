@@ -755,7 +755,7 @@ def _main():
                 with _m_events.Command(root, a):
                     a.f(a)
         if a.f.__name__ == 'cmd_status' and a.refresh:
-            refresh_with_retry(attempt)
+            refresh_with_retry(attempt, root)
         else:
             attempt()
     else:
@@ -765,7 +765,7 @@ def _main():
 REFRESH_TRIES = 5
 
 
-def refresh_with_retry(attempt):
+def refresh_with_retry(attempt, root):
     """Retry a contended refresh with fresh state, then once under the held lock."""
     import random
     import time
@@ -777,5 +777,5 @@ def refresh_with_retry(attempt):
                 raise
         time.sleep(random.uniform(0.05, 0.25) * tries)
     print(f'brain: status refresh contended {REFRESH_TRIES} times; refreshing under the lock', file=sys.stderr)
-    with _m_instance.held():
+    with _m_instance.held(root):
         return attempt()

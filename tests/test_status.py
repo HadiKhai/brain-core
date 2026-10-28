@@ -493,7 +493,7 @@ class AutonomyFacts(AutonomyProject):
                 mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
                 mock.patch.object(status, 'status_facts', side_effect=changed), \
                 mock.patch.object(events, 'comparison', wraps=events.comparison) as compare, \
-                mock.patch.object(cli, 'refresh_with_retry', lambda attempt: attempt()), \
+                mock.patch.object(cli, 'refresh_with_retry', lambda attempt, root: attempt()), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             # One optimistic attempt keeps its fence; retries have their own specs.
             with self.assertRaisesRegex(SystemExit, 'status refresh maintenance refused'):
@@ -834,7 +834,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                 self.git('commit', '-qm', 'relevant branch change', cwd=wt)
             builds.append(head)
             return head
-        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
             result = refresh.compute(inst, inst.node('app'), changed)
         self.assertEqual(len(builds), 2)
         self.assertEqual(result, self.git('rev-parse', 'HEAD', cwd=wt).strip())
@@ -852,7 +852,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             self.git('commit', '--allow-empty', '-qm', 'branch change %d' % len(builds), cwd=wt)
             builds.append(head)
             return head
-        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
             with self.assertRaisesRegex(SystemExit, 'kept changing through 3 locked builds'):
                 refresh.compute(inst, inst.node('app'), churn)
         self.assertEqual(len(builds), refresh.HELD_BUILDS)
@@ -870,7 +870,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                 backlog.write_text(backlog.read_text() + '\n- concurrent item\n')
             builds.append(text)
             return text
-        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
             refresh.compute(inst, inst.node('root'), changed)
         self.assertEqual(len(builds), 2)
 
@@ -886,7 +886,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                 policy.write_text(policy.read_text() + '\n')
             builds.append(True)
             return len(builds)
-        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
             self.assertEqual(refresh.compute(inst, inst.node('root'), changed), 2)
 
     def test_held_refresh_refuses_settings_its_publisher_has_not_loaded(self):
@@ -901,9 +901,27 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                 policy.write_text(policy.read_text().replace('---\n', '---\nnote: edited\n', 1))
             builds.append(True)
             return len(builds)
-        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
             with self.assertRaisesRegex(SystemExit, 'settings changed during the locked refresh'):
                 refresh.compute(inst, inst.node('root'), changed)
+        self.assertEqual(len(builds), 2)
+
+    def test_held_refresh_refuses_a_node_policy_change(self):
+        root = self.init('alice')
+        self.b(root, 'new', 'app', '--title', 'App')
+        loader = core_loader.SourceFileLoader('refresh_held_node_policy', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        node_md, builds = root / 'nodes/app/node.md', []
+        def changed(current, target):
+            if not builds:  # an editor switches the node's status source during the held build
+                node_md.write_text(node_md.read_text().replace('---\n', '---\nstatus_source: files\n', 1))
+            builds.append(True)
+            return len(builds)
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
+            inst = m.Instance(root)
+            with self.assertRaisesRegex(SystemExit, 'settings changed during the locked refresh'):
+                refresh.compute(inst, inst.node('app'), changed)
         self.assertEqual(len(builds), 2)
 
     def test_refresh_fences_complete_ref_names(self):
