@@ -28,7 +28,7 @@ class ReviewDiscipline(Scenario):
                                     {"severity": "minor", "text": "Unrelated formatting suggestion"}]))
         return str(path)
 
-    def test_round_cap_and_all_exception_reasons(self):
+    def test_round_cap_and_free_text_reason(self):
         r, home, wt = self.job()
         self.assertIn("Review round 1 (full)", self.review(r))
         self.assertEqual(self.job_row(r)["Review reason"], "")
@@ -39,12 +39,47 @@ class ReviewDiscipline(Scenario):
         self.assertIn("Review round 2 (check-fix)", self.review(r, "--check-fix", "--findings", self.findings()))
         self.assertIn("review round 3 refused", self.review(r, ok=False))
         self.assertIn("review round 3 refused", self.review(r, "--check-fix", "--findings", self.findings(), ok=False))
-        for i, reason in enumerate(("security", "schema", "privacy"), 3):
-            self.assertIn(f"Review round {i} (full)", self.review(r, "--reason", reason))
+        reason = 'Recheck the corrected parser boundary'
+        self.assertIn('Review round 3 (full)', self.review(r, '--reason', reason))
         row = self.job_row(r)
-        self.assertEqual(row["Reviews"], "5")
-        self.assertEqual(row["Full reviews"], "4")
-        self.assertEqual(row["Review reason"], "privacy")
+        self.assertEqual(row["Reviews"], "3")
+        self.assertEqual(row["Full reviews"], "2")
+        self.assertEqual(row["Review reason"], reason)
+        before = (r / 'nodes/a/job-ledger.md').read_bytes()
+        self.assertIn('cap of 3', self.review(r, '--reason', 'security', ok=False))
+        self.assertEqual(before, (r / 'nodes/a/job-ledger.md').read_bytes())
+
+    def test_risk_marks_allow_five_rounds_but_never_six(self):
+        r, home, wt = self.job()
+        m = core_loader.SourceFileLoader('brain_risk_review', str(r / 'core/bin/brain')).load_module()
+        inst, n = m.Instance(r), m.Instance(r).node('a')
+        for risk in ('security', 'permissions', 'data-loss', 'concurrency'):
+            with self.subTest(risk=risk):
+                rows = m.read_jobs(n)
+                rows[0].update(Reviews='3', **{'Full reviews': '1', 'Review risk': ''})
+                m.write_jobs(inst, n, rows)
+                reason = 'Check the remaining boundary cases'
+                self.assertIn('Review round 4', self.review(r, '--reason', reason, '--risk', risk))
+                self.assertEqual(self.job_row(r)['Review risk'], risk)
+                before = (r / 'nodes/a/job-ledger.md').read_bytes()
+                self.assertIn('requires --reason', self.review(r, ok=False))
+                self.assertEqual(before, (r / 'nodes/a/job-ledger.md').read_bytes())
+                self.assertIn('Review round 5', self.review(r, '--reason', reason))
+                before = (r / 'nodes/a/job-ledger.md').read_bytes()
+                self.assertIn('cap of 5', self.review(r, '--reason', reason, '--risk', risk, ok=False))
+                self.assertIn('cap of 5', self.review(r, '--reason', reason, '--check-fix',
+                                                   '--findings', self.findings(), ok=False))
+                self.assertEqual(before, (r / 'nodes/a/job-ledger.md').read_bytes())
+
+    def test_invalid_reasons_do_not_change_the_ledger_or_emit_private_text(self):
+        r, home, wt = self.job()
+        word = 'invented-vocabulary-omega'
+        (r / 'nodes/a/never-name.txt').write_text(word + '\n')
+        before = (r / 'nodes/a/job-ledger.md').read_bytes()
+        for reason in ('', '  ', 'one\ntwo', word):
+            text = self.review(r, '--reason', reason, ok=False)
+            self.assertNotIn(word, text)
+            self.assertEqual(before, (r / 'nodes/a/job-ledger.md').read_bytes())
 
     def test_fix_check_contains_only_prior_major_and_fix_range(self):
         r, home, wt = self.job()

@@ -671,7 +671,7 @@ def job_started(inst, n, branch, runtime, task_id=None):
             inst.commit([], f"{n['id']}: job started")
 
 
-def job_reviewed(inst, n, branch, *, full=True, head="", reason="", identity_required=False, exception=None):
+def job_reviewed(inst, n, branch, *, full=True, head="", reason="", risk=None, identity_required=False, exception=None):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
@@ -686,6 +686,8 @@ def job_reviewed(inst, n, branch, *, full=True, head="", reason="", identity_req
         r["Review head"] = head
         r["Review kind"] = "full" if full else "check-fix"
         r["Review reason"] = " ".join(reason.splitlines())
+        if risk:
+            r['Review risk'] = risk
         if identity_required:
             r['Review identity required'] = 'true'
         if exception:
@@ -2061,9 +2063,6 @@ def cmd_jobs(a):
                     print_thread_checklist(n, r)
 
 
-REVIEW_CAP = 2  # one full review and one blocker-only fix check; exceptions require a reason
-
-
 def record_verify_duration(inst, n, row, packet, elapsed_seconds):
     """Measure readiness wall time, including preflight/admission; reused proof costs no new execution."""
     seconds = forecast_number(elapsed_seconds)
@@ -2098,9 +2097,10 @@ def job_advice(inst, n, row):
     if duration_line:
         out.append(duration_line)
     reviews = int(row.get("Reviews") or 0) if str(row.get("Reviews") or "0").isdigit() else 0
-    if reviews > REVIEW_CAP:
-        out.append(f"advice: {reviews} review rounds, over the cap of {REVIEW_CAP}: audit each finding's whole class "
-                   "before another round")
+    limit = _m_review.review_limit(row)
+    if reviews >= limit:
+        out.append(f"advice: {reviews} review rounds, at or over the cap of {limit}: "
+                   "narrow the change or hand back for a coordinator decision")
     runs, reused = (hb.get(k) if type(hb.get(k)) is int else 0 for k in ("verify_runs", "verify_reused"))
     if runs or reused:
         out.append(f"verify: {runs} run(s), {reused} reused" + (

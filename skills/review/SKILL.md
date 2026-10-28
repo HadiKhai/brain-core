@@ -63,7 +63,10 @@ stated; never run a polling loop in an agent.
    Only blockers/majors enter the fix brief. Its fix range starts at the previous review head;
    `--fix-base <commit>` overrides it. Ask only whether those findings are fixed and whether
    the fix broke anything. A second full round or any third brief requires
-   `--reason security|schema|privacy`; never let the cap suppress a review of those changes.
+   `--reason <text>`, a nonempty one-line explanation recorded in the ledger. Jobs are capped at
+   3 rounds; `--risk security|permissions|data-loss|concurrency` marks the change in the ledger
+   for up to 5 rounds. Later rounds retain that mark and still require their own reason.
+   At the cap, narrow the change or hand back for a coordinator decision.
    The builder then records readiness, state and proposed lessons with one `brain handback`
    command. Reviewers never write or refresh the builder's job record.
 5. **Report.** In the Active work row and in what you tell the operator: reviewed by `<runtime>`,

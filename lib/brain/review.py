@@ -13,6 +13,12 @@ _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_ui = _m_common.LazyModule(__package__, 'ui')
 
+REVIEW_RISKS = ('security', 'permissions', 'data-loss', 'concurrency')
+
+
+def review_limit(row, risk=None):
+    return 5 if (risk or (row or {}).get('Review risk')) in REVIEW_RISKS else 3
+
 
 def review_count(value):
     if value in (None, ""):
@@ -27,9 +33,18 @@ def review_policy(a, row):
     full = review_count(row.get("Full reviews") or row.get("Reviews")) if row else 0
     check = getattr(a, "check_fix", False)
     reason = getattr(a, "reason", None)
+    if reason is not None and (not reason.strip() or len(reason.splitlines()) != 1):
+        _m_common.die('--reason needs nonempty one-line text')
+    risk = getattr(a, 'risk', None)
+    if risk is not None and risk not in REVIEW_RISKS:
+        _m_common.die('invalid review risk')
+    limit = review_limit(row, risk)
+    if row and rounds >= limit:
+        _m_common.die(f'review round {rounds + 1} refused: cap of {limit} rounds reached; '
+                      'narrow the change or hand back for a coordinator decision')
     if row and (rounds >= 2 or (full >= 1 and not check)) and not reason:
         _m_common.die(f"review round {rounds + 1} refused: a second full round or round 3+ requires "
-                      "--reason security|schema|privacy; use --check-fix for the blocker-only fix check")
+                      "--reason <text>; use --check-fix for the blocker-only fix check")
     if check and not rounds and not getattr(a, "fix_base", None):
         _m_common.die("--check-fix needs a prior review round or an explicit --fix-base")
     if not check and (getattr(a, "findings", None) or getattr(a, "fix_base", None)):

@@ -1007,12 +1007,16 @@ class Measures(Scenario):
         st = r / "nodes" / "app" / "status.md"
         st.write_text(st.read_text() + "\n- the coordinator's edit, not committed yet\n")
         ps = [subprocess.Popen([sys.executable, str(r / "core" / "bin" / "brain"), "review", "app", "--branch", "job-a",
-                                "--built-by", "claude", "--reason", "security"], cwd=r, env=self.env, stdout=subprocess.DEVNULL,
+                                "--built-by", "claude", "--reason", "Check concurrent writes", "--risk", "concurrency"],
+                               cwd=r, env=self.env, stdout=subprocess.DEVNULL,
                                stderr=subprocess.PIPE, text=True) for _ in range(16)]
         errs = [p.communicate()[1] for p in ps]
-        self.assertEqual([p.returncode for p in ps], [0] * 16, errs)
+        self.assertEqual(sorted(p.returncode for p in ps), [0] * 5 + [1] * 11, errs)
+        for p, error in zip(ps, errs):
+            if p.returncode:
+                self.assertIn('cap of 5 rounds reached', error)
         row = next(l for l in (r / "nodes" / "app" / "job-ledger.md").read_text().splitlines() if l.startswith("| job-a"))
-        self.assertEqual(row.split("|")[7].strip(), "16")         # no round lost
+        self.assertEqual(row.split("|")[7].strip(), "5")  # every admitted round recorded; no cap bypass
         self.assertEqual(self.git("status", "--porcelain", "--", "nodes", cwd=r).strip(), "M nodes/app/status.md")
 
     def test_stale_compares_moments_not_digits(self):
@@ -1580,7 +1584,7 @@ class Workflow(Scenario):
         self.assertIn("Why a separate agent: Dedicated test expertise", self.b(r, *hire,
                       "--why-separate", "Dedicated test expertise"))
         self.assertIn("needs a reason", self.b(r, *hire, "--why-separate", "", ok=False))
-        review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex")
+        review = ("review", "a", "--branch", "job", "--base", "main", "--built-by", "codex", "--risk", "security")
         self.assertIn("Why a separate agent: Independent second-runtime review.", self.b(r, *review))
         self.assertIn('"Review reason": ""', self.b(r, "jobs", "a", "--branch", "job"))
         self.assertIn("Why a separate agent: Check independently", self.b(r, *review, "--reason", "security",
@@ -1774,8 +1778,9 @@ class Workflow(Scenario):
         self.assertIn("same kind of problem everywhere", second)
         self.assertNotIn("caps reviews", second)
         self.assertIn("This is review round 3", self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security"))
-        self.b(r, "review", "a", "--branch", "job", "--built-by", "claude", "--reason", "security")
-        self.assertIn("4 review rounds, over the cap", self.b(r, "jobs", "a"))
+        self.assertIn('cap of 3', self.b(r, "review", "a", "--branch", "job", "--built-by", "claude",
+                                       "--reason", "security", ok=False))
+        self.assertIn("3 review rounds, at or over the cap of 3", self.b(r, "jobs", "a"))
         status = r / "nodes/a/status.md"
         text = status.read_text()
         status.write_text(text + "\n## Blocked / needs the operator\n\n- The staging key\n")
