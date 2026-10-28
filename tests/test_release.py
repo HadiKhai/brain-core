@@ -101,12 +101,18 @@ class GreenRelease(Scenario):
         owner = m.cmd_machine.__globals__
         watch = importlib.import_module(owner['__package__'] + '.watch')
         order = []
+        admission = []
+        def watch_sample(i, *, episode_blocking):
+            order.append('watch')
+            admission.append(episode_blocking)
         with mock.patch.object(m, 'load', return_value=inst), \
                 mock.patch.object(m, 'machine_sample_once', side_effect=lambda i: order.append('sample')), \
-                mock.patch.object(watch, 'watch_once', side_effect=lambda i: order.append('watch')), \
+                mock.patch.object(watch, 'watch_once', side_effect=watch_sample), \
                 mock.patch.object(m, 'tick_releases', side_effect=lambda i: order.append('release')):
             m.cmd_machine(SimpleNamespace(action='sample'))
         self.assertEqual(order, ['sample', 'watch', 'release'])
+        self.assertEqual(len(admission), 1)
+        self.assertIs(admission[0], False)
 
     def test_release_tick_is_disabled_without_explicit_node_setting(self):
         m, inst, n, _ = self.setup_release()
