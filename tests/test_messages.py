@@ -449,3 +449,35 @@ class NativeDispatcher(Scenario):
             self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 1)
             self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
             self.assertEqual(enqueue.call_count, 2)
+
+    def test_sampler_dispatch_defers_on_busy_episode_lock_and_retries_without_receipt_loss(self):
+        import fcntl
+        import time
+        from unittest import mock
+        m = self.m
+        self.question()
+        self.b(self.root, 'set', 'root', 'dispatcher=on')
+        inst = m.Instance(self.root)
+        with mock.patch.object(m, 'wake_start'):
+            self.assertEqual(m.dispatch_if_enabled(inst)['accepted'], 1)
+        pending = list(m.wake_directory(inst, inst.node('root')).glob('*.pending'))
+        self.assertEqual(len(pending), 1)
+        paths = [*pending, self.root / '.brain/dispatch-receipts.json',
+                 self.root / '.brain/wake/due-episodes.json']
+        before = {path: path.read_bytes() for path in paths}
+        (self.root / 'inbox.md').write_text('- Host question: Choose a second path <!-- host-question:second -->\n')
+        with (self.root / '.brain/wake/due-episodes.lock').open('a+') as held, \
+                mock.patch.object(m, 'request_wake') as wake:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            start = time.monotonic()
+            result = m.dispatch_if_enabled(inst)
+            self.assertLess(time.monotonic() - start, 1.5)
+            self.assertTrue(result['busy'])
+            self.assertEqual(result['accepted'], 0)
+            wake.assert_not_called()
+            self.assertEqual({path: path.read_bytes() for path in paths}, before)
+            self.assertEqual(list(m.wake_directory(inst, inst.node('root')).glob('*.pending')), pending)
+        with mock.patch.object(m, 'wake_start'):
+            self.assertEqual(m.dispatch_if_enabled(inst)['accepted'], 1)
+        self.assertEqual(pending[0].read_bytes(), before[pending[0]])
+        self.assertEqual(len(list(m.wake_directory(inst, inst.node('root')).glob('*.pending'))), 2)

@@ -45,7 +45,7 @@ def cmd_dispatch(a):
         print(json.dumps(plan, ensure_ascii=False, sort_keys=True))
 
 
-def dispatch_run(inst, limit=50, node_limit=200):
+def dispatch_run(inst, limit=50, node_limit=200, episode_blocking=True):
     from . import communication as _m_communication
     from . import host_observations as _m_host_observations
     from . import hosts as _m_hosts
@@ -67,9 +67,9 @@ def dispatch_run(inst, limit=50, node_limit=200):
     result = {'accepted': 0, 'partial': len(nodes) > node_limit or len(asks) > limit}
     if not asks:
         return result
-    groups = _m_watch.watch_groups(inst)
+    groups = _m_watch.watch_groups(inst, episode_blocking=episode_blocking)
     if getattr(groups, 'stale', False):
-        return {**result, 'busy': True}  # stale identities would be fallback keys: duplicate wakes later
+        return {**result, 'busy': True}  # unknown identities cannot authorize dispatch or receipts
     def text_key(text):
         return ' '.join(text.removeprefix('inbox: ').split())[:400]
     actual = {(i['node'], text_key(i['text'])): i for g in groups.values() for i in g['items']}
@@ -120,6 +120,6 @@ def dispatch_if_enabled(inst):
     if inst.local_of('root').get('dispatcher') != 'on':
         return
     try:
-        dispatch_run(inst)
+        return dispatch_run(inst, episode_blocking=False)
     except (OSError, ValueError, TypeError):
         print('dispatcher state unavailable; questions retained in source files')

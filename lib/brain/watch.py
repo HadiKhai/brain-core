@@ -301,7 +301,7 @@ def watch_receipt_observed(inst):
         return False
 
 
-def watch_due_episodes(inst, scan, serialized=False, layout=None):
+def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None):
     """Persist opaque receipts while ordinary due needs remain open.
 
     The source scan runs before the receipt lock; only reconciliation holds it.
@@ -312,8 +312,11 @@ def watch_due_episodes(inst, scan, serialized=False, layout=None):
     optimistic scan was already overtaken. Machine and direct producer
     episodes already have their own receipts. A caller's `layout` carries
     stamp-validated source generations into its rescan and publication fence.
+    Background callers take nonblocking admission before scanning; busy
+    admission leaves receipts untouched.
     """
     import fcntl
+    serialized = serialized or not blocking
     path = inst.root / '.brain/wake/due-episodes.json'
     lock = path.with_suffix('.lock')
     if _m_common.outward_links(inst.root):
@@ -325,10 +328,14 @@ def watch_due_episodes(inst, scan, serialized=False, layout=None):
         if os.fstat(stream.fileno()).st_nlink != 1:
             raise ValueError('linked due episode lock')
         with _m_timings.phase('episode_lock_wait'):
-            fcntl.flock(stream, fcntl.LOCK_EX)
+            fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        stack.enter_context(_m_timings.phase('episode_lock_hold'))
     with contextlib.ExitStack() as stack:
         if serialized:
-            acquire()  # fallback: the whole-scan transaction, which no reconciliation can overtake
+            try:
+                acquire()  # fallback/background: admit before scanning sources
+            except BlockingIOError:
+                return WatchGroups({}, None, stale=True)
         observed = watch_receipt_observed(inst)
         layout = {} if layout is None else layout
         generation = watch_source_signature(inst, layout)
@@ -773,9 +780,10 @@ def watch_state_invalid(inst):
         return True
 
 
-def watch_groups(inst, nodes=None):
-    """The file-only wake queue, grouped by the coordinator who can act on it."""
+def watch_groups(inst, nodes=None, episode_blocking=True):
+    """File-only wake queue; foreground waits, background defers unknown scans."""
     from . import command_reads, communication
+    started = time.perf_counter()
     communication.communication_reconcile(inst)  # defaults precede observation, including fallback scans
     # Direct wake drains and snapshots enter here without watch_once's read
     # scope. Batch their transcript/Git observations too. Each standalone scan
@@ -787,14 +795,13 @@ def watch_groups(inst, nodes=None):
             return watch_scan(inst, nodes)
     layout = {}  # stamp-validated generations only; each scan still reads afresh
     try:
-        groups = watch_due_episodes(inst, scan, layout=layout)
-        if groups.stale and not command_reads.active():
+        groups = watch_due_episodes(inst, scan, blocking=episode_blocking, layout=layout)
+        if groups.stale and episode_blocking and not command_reads.active():
             # Overtaken (or sources moved): rescan fresh inside the receipt lock,
             # which no reconciliation can overtake. Only this rare second scan
             # holds the lock long. Inside an enclosing read scope a rescan would
             # reuse old reads, so those callers keep stale as unknown.
             groups = watch_due_episodes(inst, scan, serialized=True, layout=layout)
-        return groups
     except (OSError, ValueError):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
@@ -802,8 +809,12 @@ def watch_groups(inst, nodes=None):
         generation = watch_source_signature(inst, layout)
         groups = scan()
         if watch_source_signature(inst, layout) != generation:
-            return WatchGroups({}, None, generation, stale=True, layout=layout)
-        return watch_untracked(groups, generation)
+            groups = WatchGroups({}, None, generation, stale=True, layout=layout)
+        else:
+            groups = watch_untracked(groups, generation)
+    if groups.stale:
+        _m_timings.record('episode_deferred', time.perf_counter() - started)
+    return groups
 
 
 def watch_inbox_rollup(inst, group):
@@ -921,7 +932,9 @@ def watch_precomputed_publication(inst, groups):
     try:
         target = stack.enter_context(_m_common.directory_target(inst.root / '.brain/wake/due-episodes.lock'))
         stream = stack.enter_context(os.fdopen(target.open(os.O_RDWR), 'r+'))
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with _m_timings.phase('episode_lock_wait'):
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        stack.enter_context(_m_timings.phase('episode_lock_hold'))
         target.check_file(stream.fileno())
         current = watch_receipt_revision(inst) == revision
     except (OSError, ValueError, SystemExit):
@@ -937,7 +950,7 @@ def watch_run(inst, kinds=None, quiet=False, sources=None, groups=None):
         with watch_precomputed_publication(inst, groups) as current:
             if current:
                 return watch_publish(inst, kinds, quiet, sources, groups)
-        return  # a newer/busy scan owns reconciliation; never publish obsolete episodes
+        return 'deferred'  # a newer/busy scan owns reconciliation
     return watch_publish(inst, kinds, quiet, sources)
 
 
@@ -1042,10 +1055,11 @@ def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
             print('watch: due acknowledgement state invalid; retained for repair')
         else:
             print(f'watch: {count} new item(s) queued')
+    return 'published'
 
 
-def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
-    """Share the sampler's short, nonblocking instance-lock discipline."""
+def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None, episode_blocking=True):
+    """Return published/deferred; only foreground callers wait for episode admission."""
     import fcntl
     from . import command_reads
     folder = inst.root / '.brain'
@@ -1056,16 +1070,20 @@ def watch_once(inst, kinds=None, quiet=False, sources=None, groups=None):
         if _m_instance._LOCK['fh'] is not None:
             if not quiet:
                 print('watch: skipped; instance busy')
-            return
+            return 'deferred'
         generation = _m_instance.state_signature(inst, list(inst.nodes()))
         if groups is None:
             # Each scan opens its own read scope, so an overtaken scan can rescan fresh.
             with _m_timings.phase('watch_compute'):
-                groups = watch_groups(inst)
+                groups = watch_groups(inst, episode_blocking=episode_blocking)
+        if getattr(groups, 'stale', False):
+            if not quiet:
+                print('watch: deferred; episode scan busy or overtaken')
+            return 'deferred'
     with command_reads.scope(_m_common.outward_links):
         if _m_common.outward_links(inst.root):
             _m_common.die('watch: unsafe instance links; no wake sent')
-        watch_locked_publish(inst, folder, generation, kinds, quiet, sources, groups)
+        return watch_locked_publish(inst, folder, generation, kinds, quiet, sources, groups)
 
 
 def watch_locked_publish(inst, folder, generation, kinds, quiet, sources, groups):
@@ -1082,7 +1100,7 @@ def watch_locked_publish(inst, folder, generation, kinds, quiet, sources, groups
         except BlockingIOError:
             if not quiet:
                 print('watch: skipped; instance busy')
-            return
+            return 'deferred'
         held = os.fstat(stream.fileno())
         current = os.stat(folder / 'lock', follow_symlinks=False)
         if (not stat.S_ISREG(held.st_mode) or held.st_nlink != 1
@@ -1098,9 +1116,9 @@ def watch_locked_publish(inst, folder, generation, kinds, quiet, sources, groups
         os.environ['BRAIN_LOCK_HELD'] = f'{inst.root.resolve()}|{os.getpid()}'
         try:
             if _m_instance.state_signature(inst, list(inst.nodes())) != generation:
-                return  # changed routing/configuration cannot authorize the old scan
+                return 'deferred'  # changed routing/configuration cannot authorize the old scan
             with _m_timings.phase('watch_write'):
-                watch_run(inst, kinds=kinds, quiet=quiet, sources=sources, groups=groups)
+                return watch_run(inst, kinds=kinds, quiet=quiet, sources=sources, groups=groups)
         finally:
             _m_instance._LOCK['depth'] = 0
             _m_instance.unlock()

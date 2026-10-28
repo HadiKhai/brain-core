@@ -108,7 +108,7 @@ def slow(*args, **kwargs):
     return original(*args, **kwargs)
 setattr(owner, name, slow)
 hosts.wake_start = lambda *args, **kwargs: None
-if site != 'sample_watcher': watch.watch_once = lambda inst: None
+if site != 'sample_watcher': watch.watch_once = lambda inst, **kwargs: None
 sys.argv = ['brain', *sys.argv[5:]]
 cli.main()
 '''

@@ -1460,7 +1460,7 @@ def cmd_machine(a):
             print('daily retro unavailable; retained job records are unchanged')
         from . import watch as _m_watch
         try:
-            _m_watch.watch_once(inst)  # same minute timer; sampler has released its instance lock
+            _m_watch.watch_once(inst, episode_blocking=False)  # busy episodes retry on the next minute tick
         except (OSError, ValueError):
             print('watch: watcher state invalid; retained for repair (brain due root)')
         # The release extension owns opt-in policy and attempt fencing. Older

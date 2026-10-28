@@ -550,6 +550,125 @@ class Watcher(Scenario):
         with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18):
             owner.git_state_paths(home, locations=fresh)
         self.assertIn(str(home), fresh, 'the same settled repository is memoizable once unchanged')
+    def test_sampler_busy_episode_admission_preserves_pending_and_retries_next_tick(self):
+        import fcntl
+        m, inst = self.m, self.inst
+        root = inst.node('root')
+        def scan(names):
+            return {'root': {'node': root, 'command': 'fixture-send', 'items': [
+                {'id': m.watch_digest([name]), 'node': 'root', 'kind': 'blocked-overdue',
+                 'text': name} for name in names]}}
+        directory = inst.root / '.brain/wake'
+        with mock.patch.object(m, 'wake_start'), \
+                mock.patch.object(m, 'watch_scan', side_effect=lambda *args: scan(['first'])):
+            self.assertEqual(m.watch_once(inst, quiet=True, episode_blocking=False), 'published')
+        pending = list(m.wake_directory(inst, root).glob('*.pending'))
+        self.assertEqual(len(pending), 1)
+        paths = [*pending, directory / 'due-episodes.json', directory / 'due-seen.json',
+                 inst.root / '.brain/watch.json']
+        before = {path: path.read_bytes() for path in paths}
+        timings = m._owners['watch_once']._m_timings
+        phases = {}
+        token = timings._CURRENT.set(phases)
+        try:
+            with (directory / 'due-episodes.lock').open('a+') as held, \
+                    mock.patch.object(m, 'watch_scan', side_effect=lambda *args: scan(['first', 'second'])) as scanned, \
+                    mock.patch.object(m, 'request_wake') as wake:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                start = time.monotonic()
+                result = m.watch_once(inst, quiet=True, episode_blocking=False)
+                self.assertLess(time.monotonic() - start, 1.5)
+                self.assertEqual(result, 'deferred')
+                scanned.assert_not_called()
+                wake.assert_not_called()
+                self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                self.assertEqual(list(m.wake_directory(inst, root).glob('*.pending')), pending)
+        finally:
+            timings._CURRENT.reset(token)
+        self.assertIn('episode_lock_wait', phases)
+        self.assertGreater(phases['episode_deferred'], 0)
+        self.assertNotIn('episode_lock_hold', phases)
+        self.assertNotIn('lock_wait', phases, 'a skipped scan never enters writer admission')
+        with mock.patch.object(m, 'wake_start'), \
+                mock.patch.object(m, 'watch_scan', side_effect=lambda *args: scan(['first', 'second'])):
+            self.assertEqual(m.watch_once(inst, quiet=True, episode_blocking=False), 'published')
+        self.assertEqual(pending[0].read_bytes(), before[pending[0]])
+        queued = list(m.wake_directory(inst, root).glob('*.pending'))
+        self.assertEqual(len(queued), 2, 'the next native tick queues the previously unobserved need')
+
+    def test_background_episode_entry_defers_before_scanning(self):
+        import fcntl
+        m, inst = self.m, self.inst
+        directory = inst.root / '.brain/wake'
+        directory.mkdir(exist_ok=True)
+        with (directory / 'due-episodes.lock').open('a+') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            scan = mock.Mock(side_effect=AssertionError('busy serialized entry scanned'))
+            start = time.monotonic()
+            groups = m.watch_due_episodes(inst, scan, blocking=False)
+            self.assertLess(time.monotonic() - start, 1.5)
+            self.assertTrue(groups.stale)
+            self.assertIsNone(groups.receipt_revision)
+            scan.assert_not_called()
+        self.assertFalse((directory / 'due-episodes.json').exists())
+
+    def test_background_source_drift_defers_without_receipt_or_ack_publication(self):
+        m, inst = self.m, self.inst
+        m.watch_due_episodes(inst, lambda: {})
+        receipt = inst.root / '.brain/wake/due-episodes.json'
+        before = receipt.read_bytes()
+        def scan(*args):
+            (inst.root / 'inbox.md').write_text('- A question arrived during the scan\n')
+            return {}
+        with mock.patch.object(m, 'watch_scan', side_effect=scan) as scanned, \
+                mock.patch.object(m, 'watch_publish') as publish:
+            result = m.watch_once(inst, quiet=True, episode_blocking=False)
+        self.assertEqual(result, 'deferred')
+        self.assertEqual(scanned.call_count, 1)
+        publish.assert_not_called()
+        self.assertEqual(receipt.read_bytes(), before)
+
+    def test_foreground_episode_policy_waits_and_records_separate_lock_timing(self):
+        import fcntl
+        m, inst = self.m, self.inst
+        directory = inst.root / '.brain/wake'
+        directory.mkdir(exist_ok=True)
+        timings = m._owners['watch_once']._m_timings
+        original = fcntl.flock
+        entered, done = threading.Event(), threading.Event()
+        phases, results, errors = {}, [], []
+        def flock(stream, flags):
+            if threading.current_thread().name == 'foreground-episode':
+                self.assertEqual(flags, fcntl.LOCK_EX)
+                entered.set()
+            return original(stream, flags)
+        def foreground():
+            token = timings._CURRENT.set(phases)
+            try:
+                results.append(m.watch_due_episodes(inst, lambda: {}))
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                timings._CURRENT.reset(token)
+                done.set()
+        with (directory / 'due-episodes.lock').open('a+') as held, \
+                mock.patch.object(fcntl, 'flock', side_effect=flock):
+            original(held, fcntl.LOCK_EX)
+            thread = threading.Thread(target=foreground, name='foreground-episode')
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                self.assertFalse(done.wait(.05), 'foreground must wait while the lock is held')
+            finally:
+                original(held, fcntl.LOCK_UN)
+                thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(results[0].stale)
+        self.assertGreaterEqual(phases['episode_lock_wait'], .05)
+        self.assertGreater(phases['episode_lock_hold'], 0)
+        self.assertNotIn('lock_wait', phases)
+        self.assertNotIn('lock_hold', phases)
 
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
@@ -1677,7 +1796,7 @@ class Watcher(Scenario):
                 mock.patch.object(self.m, 'watch_once') as watch:
             self.m.cmd_machine(argparse.Namespace(action='sample'))
             sample.assert_called_once_with(self.inst)
-            watch.assert_called_once_with(self.inst)
+            watch.assert_called_once_with(self.inst, episode_blocking=False)
 
     def test_corrupt_state_wakes_current_work_and_external_links_refused(self):
         state = self.root / '.brain/watch.json'

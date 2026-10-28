@@ -4185,3 +4185,14 @@ same explicit ledger-closure path: record the landed tip's changed paths without
 attempting to diff a nonexistent baseline. They do not authorize automatic
 closure. A non-null baseline whose object is unavailable still refuses closure;
 this preserves the distinction between missing metadata and damaged history.
+## 2026-10-28: Bound background admission to the serialized episode transaction
+
+The native sampler and its optional question dispatcher request nonblocking
+admission to the existing episode transaction. A busy transaction returns an
+explicit deferred/unknown scan before reading sources or reconciling receipts.
+Source drift likewise defers publication. Neither outcome retires pending work
+or writes acknowledgements; a later native tick retries from the durable source.
+Foreground scans retain their blocking reconciliation and fresh retry policy.
+Background source scanning and receipt reconciliation remain serialized by the same lock, using the existing source
+generation and receipt revision APIs. Episode-lock wait and hold timings are
+separate from writer-lock timings, and discarded scan duration is observable.
