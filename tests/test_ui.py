@@ -1328,17 +1328,19 @@ ui_json.ui_json_background(root, '[]')
         with mock.patch.object(ui, 'ui_worktree', side_effect=slow):  # a hit keeps its earlier read time
             ui.cached_worktree(None, self.tmp, 'job/a', {'path': str(self.tmp)}, {'id': 'meadow'}, cache, live=True)
         self.assertEqual(len(read), 1)
-        # Persisted rows keep their own read time, and rows past the bound are re-read, not served.
+        # Persisted rows keep their own read time; old rows are served with it, never re-read in the
+        # build, and a changed stamp or a read time from the future is never served.
         root = self.first_paint_root()
         inst, code = self.m.UIInstance(root), self.m.ui_code_version()
         model, privacy = self.m.ReadModel(inst, code), module.ui_json_privacy_key(inst, code)
         name = module.ui_json_job(job)
-        for age, served in ((20, True), (module.UI_JSON_WORKTREE_SECONDS + 5, False)):
+        for age, key, served in ((20, 'k1', True), (module.UI_JSON_WORKTREE_SECONDS + 5, 'k1', True),
+                                 (20, 'k2', False), (-60, 'k1', False)):
             at = time.time() - age
             model.write('node-views', {'binding': model.binding(privacy), 'nodes': {},
                                        'worktrees': {name: {'key': 'k1', 'at': at, 'row': {'branch': 'job/a'}}}})
             views = ui.UIStateCache()
-            module.ui_json_views(inst, model, privacy, {}, {job: 'k1'}, views)
+            module.ui_json_views(inst, model, privacy, {}, {job: key}, views)
             self.assertEqual(views.checked.get(job), at if served else None)
             self.assertEqual(job in views.worktrees, served)
 

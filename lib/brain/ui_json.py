@@ -323,10 +323,10 @@ def ui_json_views(inst, model, privacy, keys, worktree_keys, cache):
             cache.nodes[nid] = (keys[nid], entry['row'], entry['commits'])
             hits.add(nid)
     jobs = {ui_json_job(job): job for job in worktree_keys}
-    # Dashboard worktree rows and readiness may be served up to UI_JSON_WORKTREE_SECONDS old
-    # (D-20261028-ui-bounded-staleness): unstaged edits are outside their stamp. Older rows re-read.
-    fresh = lambda entry: (type(entry.get('at')) in (int, float)  # noqa: E731
-                           and 0 <= time.time() - entry['at'] < UI_JSON_WORKTREE_SECONDS)
+    # Dashboard worktree rows and readiness are served under their stamp with their own read time
+    # shown; unstaged edits are outside the stamp, so rows are revalidated in the background, never
+    # inside the build (D-20261028-ui-bounded-staleness). Acting commands never read this cache.
+    fresh = lambda entry: type(entry.get('at')) in (int, float) and entry['at'] <= time.time()  # noqa: E731
     for name, entry in (record.get('worktrees') or {}).items():
         job = jobs.get(name)
         if (job and isinstance(entry, dict) and entry.get('key') == worktree_keys[job]
@@ -352,8 +352,8 @@ def ui_json_plain(value):
         return False
 
 
-UI_JSON_WORKTREE_SECONDS = 60
-UI_JSON_REVALIDATE_SECONDS = 30  # background re-reads begin well before rows expire
+UI_JSON_WORKTREE_SECONDS = 60  # the dashboard's staleness bound for worktree rows
+UI_JSON_REVALIDATE_SECONDS = 30  # background re-reads begin well before rows reach it
 
 
 # Due items and problems also compare against the clock (overdue thresholds, stale
@@ -475,7 +475,7 @@ def ui_json_revalidate(root):
                                                             'head': result.policy_head}
             model.write('node-views', record)
     except (Exception, SystemExit):
-        return  # an optional re-read; the next build re-reads expired rows itself
+        return  # an optional re-read; the next build requests another
 
 
 def ui_json_build(inst, scan, code, cache=True):
