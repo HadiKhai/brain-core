@@ -16,6 +16,7 @@ from . import common as _m_common
 
 _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_machine = _m_common.LazyModule(__package__, 'machine')
 _m_job_attempts = _m_common.LazyModule(__package__, 'job_attempts')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_reports = _m_common.LazyModule(__package__, 'reports')
@@ -211,7 +212,9 @@ def ui_json_stamps(inst):
               stamp(root / '.brain/inbox-seen.json'),
               tuple(stamp(path) for path in sorted((root / '.brain/teaching').glob('*.json'))),
               json.dumps({k: v for k, v in inst.local.items() if k != 'nodes'}, sort_keys=True, default=str),
-              os.path.realpath(root / '.brain/core-current'), runs is None)
+              os.path.realpath(root / '.brain/core-current'), runs is None,
+              # Task readiness shows the native machine hold: its state, never the sampler's churn.
+              bool((_m_machine.machine_samples(inst) or {}).get('episode')))
     nodes, repos, homes = inst.nodes(), {}, {}
     for n in nodes:
         paths = [n['home_path']] if n['external'] and n['home_path'] else []
@@ -435,6 +438,37 @@ def ui_json_revalidate_lock(inst):
     return held()
 
 
+@contextlib.contextmanager
+def ui_json_publish_lock(inst):
+    """A short lock around each writer's read-merge-write of the persisted views."""
+    folder = inst.root / '.brain/ui-cache'
+    folder.mkdir(parents=True, exist_ok=True)
+    fd = os.open(folder / 'publish.lock', os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def ui_json_keep_newer(record, stored):
+    """Keep a worktree reading another writer published later; a row and its readiness move together."""
+    if not isinstance(stored, dict) or stored.get('binding') != record.get('binding'):
+        return record
+    rows, ready = record.setdefault('worktrees', {}), record.setdefault('ready', {})
+    for name, entry in (stored.get('worktrees') or {}).items():
+        mine = rows.get(name)
+        if (isinstance(entry, dict) and type(entry.get('at')) in (int, float)
+                and (mine is None or entry['at'] > mine['at'])):
+            rows[name] = entry
+            pair = (stored.get('ready') or {}).get(name)
+            if isinstance(pair, dict) and pair.get('at') == entry['at']:
+                ready[name] = pair
+            else:
+                ready.pop(name, None)
+    return record
+
+
 def ui_json_request_revalidate(inst):
     try:
         script = ('import sys; sys.dont_write_bytecode=True; sys.path.insert(0,sys.argv[1]); '
@@ -475,19 +509,24 @@ def ui_json_revalidate(root):
             if privacy != ui_json_privacy_key(current, code):
                 return
             model = _m_ui_readmodel.ReadModel(current, code)
-            record = model.read('node-views')
-            if not isinstance(record, dict) or record.get('binding') != model.binding(privacy):
-                return
+            mine = {'binding': model.binding(privacy), 'worktrees': {}, 'ready': {}}
             for job, row in rows.items():
                 result = ready[job]
                 if (after.get(job) == keys[job] and ui_json_plain(row) and isinstance(result, verify.ReadyStateResult)
                         and not (result.get('packet') or {}).get('full_disposition') and ui_json_plain(dict(result))):
                     name = ui_json_job(job)
-                    record.setdefault('worktrees', {})[name] = {'key': keys[job], 'at': at[job], 'row': row}
-                    record.setdefault('ready', {})[name] = {'key': keys[job], 'at': at[job], 'data': dict(result),
-                                                            'policy': list(result.policy_reasons),
-                                                            'head': result.policy_head}
-            model.write('node-views', record)
+                    mine['worktrees'][name] = {'key': keys[job], 'at': at[job], 'row': row}
+                    mine['ready'][name] = {'key': keys[job], 'at': at[job], 'data': dict(result),
+                                           'policy': list(result.policy_reasons), 'head': result.policy_head}
+            with ui_json_publish_lock(current):
+                record = model.read('node-views')
+                if not isinstance(record, dict) or record.get('binding') != mine['binding']:
+                    return
+                rows_now, ready_now = record.setdefault('worktrees', {}), record.setdefault('ready', {})
+                for name, entry in mine['worktrees'].items():  # only readings newer than what is stored
+                    if not isinstance(rows_now.get(name), dict) or entry['at'] > rows_now[name].get('at', 0):
+                        rows_now[name], ready_now[name] = entry, mine['ready'][name]
+                model.write('node-views', record)
     except (Exception, SystemExit):
         return  # an optional re-read; the next build requests another
 
@@ -530,7 +569,7 @@ def ui_json_build(inst, scan, code, cache=True):
         held = {nid for nid, key in keys.items() if after.get(nid) == key}
         jobs_held = {job for job, key in worktree_keys.items()
                      if worktrees_after.get(job) == key and job in views.checked}
-        model.write('node-views', {
+        views_record = {
             'binding': model.binding(before),
             'nodes': {nid: {'key': key, 'row': row, 'commits': commits}
                       for nid, (key, row, commits) in views.nodes.items() if nid in held and key == keys[nid]},
@@ -547,7 +586,9 @@ def ui_json_build(inst, scan, code, cache=True):
             'due': {nid: {'key': due_keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else started,
                           'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
                     for nid in set(due_memo) | set(due_seen) if nid in held},
-            'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)})
+            'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)}
+        with ui_json_publish_lock(current):  # a background revalidation may have published newer rows
+            model.write('node-views', ui_json_keep_newer(views_record, model.read('node-views')))
         if any(time.time() - at >= UI_JSON_REVALIDATE_SECONDS for at in views.checked.values()):
             ui_json_request_revalidate(current)
     for row in state['nodes']:  # each live worktree row carries its own read time and age

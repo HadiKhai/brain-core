@@ -1317,6 +1317,19 @@ ui_json.ui_json_background(root, '[]')
         old, new = module.ui_json_stamps(stale)[0], module.ui_json_stamps(self.m.UIInstance(root))[0]
         self.assertNotEqual(old['meadow'], new['meadow'])  # the old parse never caches under the new file
 
+    def test_a_build_never_overwrites_a_newer_background_reading(self):
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        row = lambda at: {'key': 'k', 'at': at, 'row': {'dirty': at}}  # noqa: E731
+        ready = lambda at: {'key': 'k', 'at': at, 'data': {}, 'policy': [], 'head': ''}  # noqa: E731
+        build = {'binding': 'b', 'worktrees': {'a': row(10), 'b': row(30)}, 'ready': {'a': ready(10), 'b': ready(30)}}
+        stored = {'binding': 'b', 'worktrees': {'a': row(20), 'b': row(5), 'c': row(7)},
+                  'ready': {'a': ready(20), 'b': ready(5)}}
+        merged = module.ui_json_keep_newer(build, stored)
+        self.assertEqual({k: v['at'] for k, v in merged['worktrees'].items()}, {'a': 20, 'b': 30, 'c': 7})
+        self.assertEqual({k: v['at'] for k, v in merged['ready'].items()}, {'a': 20, 'b': 30})  # pairs move together
+        other = {'binding': 'other', 'worktrees': {'a': row(99)}}
+        self.assertEqual(module.ui_json_keep_newer(merged, other)['worktrees']['a']['at'], 20)
+
     def test_worktree_row_read_time_is_its_own(self):
         ui = self.m._owners['ui_state']
         package = ui.__package__
