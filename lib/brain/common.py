@@ -739,13 +739,15 @@ def worktree_git_dir(cwd, env=None):
     shape return None so the caller asks Git.
     """
     env = os.environ if env is None else env
-    if any(name in env for name in _GIT_LAYOUT_ENV):
-        return None
+    if any(name in env for name in _GIT_LAYOUT_ENV) or _GIT_OBSERVER.get() is not None:
+        return None  # an observer validates publication against the Git reads it saw
     try:
         root = Path(cwd).absolute()
         marker = root / '.git'
         st = marker.lstat()
         if stat.S_ISDIR(st.st_mode):
+            if (marker / 'commondir').exists():
+                return None  # a redirected common directory: let Git resolve it
             admin = common = marker
         elif stat.S_ISREG(st.st_mode):
             text = marker.read_text()

@@ -59,6 +59,15 @@ class ReadinessDirectGitReads(Scenario):
             self.assertIsNone(m.worktree_head(repo / 'missing'))
             with mock.patch.dict(os.environ, {'GIT_DIR': str(repo / '.git')}):
                 self.assertIsNone(m.worktree_head(linked))
+            common = sys.modules[m.worktree_head.__module__]
+            token = common._GIT_OBSERVER.set(lambda *args: None)
+            try:
+                self.assertIsNone(m.worktree_head(linked))  # observed reads stay native
+            finally:
+                common._GIT_OBSERVER.reset(token)
+            (repo / '.git/commondir').write_text('.\n')
+            self.assertIsNone(m.worktree_head(repo))  # a directory .git with commondir
+            (repo / '.git/commondir').unlink()
             # A loose symbolic target recurses in Git; ask Git rather than guess.
             (repo / '.git/refs/heads/alias').write_text('ref: refs/heads/third\n')
             self.git('symbolic-ref', 'HEAD', 'refs/heads/alias', cwd=packed)
