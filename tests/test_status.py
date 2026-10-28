@@ -2761,6 +2761,8 @@ class RenderedFingerprint(Scenario):
         sources = [(status._m_proposals, 'pending_rule_snapshot'),
                    (status._m_rotation, 'rotation_due'),
                    (status._m_verify, 'due_ready_state'),
+                   (self.m._owners['watch_job_stalls'], 'watch_job_stalls'),
+                   (self.m._owners['due_tasks'], 'due_tasks'),
                    (status._m_recurrence, 'synthesis_due'),
                    (status._m_learning, 'enforcement_due'),
                    (status._m_feedback, 'feedback_due')]
@@ -2792,6 +2794,23 @@ class RenderedFingerprint(Scenario):
         self.save_signal()
         third = self.m.due_items(self.inst, self.n)
         self.assertIn(self.signal['summary'], next(i for i in third if i['kind'] == 'handback')['text'])
+
+    def test_due_source_readiness_mode_and_failed_observation_remain_separate(self):
+        status = self.m._owners['due_items']
+        with status._m_command_reads.snapshot():
+            first = self.m.due_items(self.inst, self.n)
+            without_ready = self.m.due_items(self.inst, self.n, include_ready=False)
+            self.assertTrue(next(i for i in first if i['kind'] == 'handback')['ready'])
+            self.assertFalse(next(i for i in without_ready if i['kind'] == 'handback')['ready'])
+        with mock.patch.object(status._m_verify, 'due_ready_state',
+                               wraps=status._m_verify.due_ready_state) as ready, \
+                mock.patch.object(status._m_feedback, 'feedback_due', side_effect=ValueError('source unavailable')):
+            with self.assertRaisesRegex(ValueError, 'source unavailable'):
+                self.m.due_items(self.inst, self.n)
+        self.n['fm']['verify'] = 'false'
+        retried = self.m.due_items(self.inst, self.n)
+        self.assertEqual(ready.call_count, 1)
+        self.assertFalse(next(i for i in retried if i['kind'] == 'handback')['ready'])
 
     def facts(self):
         state, _, _ = self.m.due_evidence(self.inst, self.n)

@@ -8,7 +8,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -826,7 +826,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
     # The fingerprint's status_facts and this inventory share observations even
     # for direct callers. A surrounding read snapshot can share them further;
     # otherwise this scope expires on return, including on errors and retries.
-    with _m_command_reads.scope(_due_source_items):
+    with (_m_command_reads.scope(_due_source_items) if _m_command_reads._VALUES.get() is None
+          else nullcontext()):
         # Descendant scans omit staleness; its display fingerprint is unused there.
         evidence = evidence or (due_evidence(inst, n) if include_stale else (file_state(inst, n), None, None))
         state, _, _ = evidence
