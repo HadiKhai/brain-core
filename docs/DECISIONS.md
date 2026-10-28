@@ -4043,7 +4043,8 @@ checked-hash bytecode with the launcher's interpreter. Compiling happens at the
 final path because Apple's Python 3.9 keys its default pycache prefix by source
 path. The pin file is written last and marks completion. A failed compile or
 launcher smoke test (runpy of the release's bin/brain) removes the unpinned copy
-and never swaps. `brain upgrade` fetches origin and validates the target first.
+and never swaps. `brain upgrade` fetches origin and validates the target first, resolving the branch as
+submodule update --remote does (.git/config, then .gitmodules, "." = own branch).
 Only after the swap does it check the staged core out at that sha, so a broken
 release's launcher never reaches `core/bin/brain`. The rollback target is stored
 in `cores/<sha>.previous` and written before `<sha>` is activated. The single

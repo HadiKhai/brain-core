@@ -149,8 +149,12 @@ def _fetch_core_target(root):
                            capture_output=True, text=True)
     if fetch.returncode:
         _m_common.die(f"couldn't update core: {fetch.stderr.strip()}")
-    branch = _m_common.git("config", "-f", str(root / ".gitmodules"), "--get", "submodule.core.branch",
-                           cwd=root).stdout.strip()
+    # Git's precedence: the superproject's local config overrides .gitmodules; "." is its own branch.
+    branch = (_m_common.git("config", "--get", "submodule.core.branch", cwd=root).stdout.strip() or
+              _m_common.git("config", "-f", str(root / ".gitmodules"), "--get", "submodule.core.branch",
+                            cwd=root).stdout.strip())
+    if branch == ".":
+        branch = _m_common.git("symbolic-ref", "-q", "--short", "HEAD", cwd=root).stdout.strip()
     ref = f"refs/remotes/origin/{branch}" if branch else cached_origin_ref(core)
     target = _version_git("rev-parse", "--verify", ref + "^{commit}", cwd=core)
     if target.returncode or not _m_core_releases.SHA.fullmatch(target.stdout.strip()):

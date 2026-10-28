@@ -382,6 +382,27 @@ class R2VersionAndUpgrade(Scenario):
         held("other")
         self.assertIn("other: in-flight node gate", self.upgrade_attempt(m, inst, refused=True))
 
+    def test_upgrade_target_honors_local_branch_override_before_gitmodules(self):
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        root, core = inst.root, inst.root / "core"
+        main = self.git("rev-parse", "HEAD", cwd=core).strip()
+        self.git("checkout", "-qb", "stable", cwd=core)
+        (core / "CHANGES.md").write_text("## 2026-01-02: Stable\n")
+        self.git("commit", "-qam", "stable", cwd=core)
+        stable = self.git("rev-parse", "HEAD", cwd=core).strip()
+        self.git("checkout", "-q", "--detach", main, cwd=core)
+        (root / ".gitmodules").write_text('[submodule "core"]\npath = core\nbranch = main\n')
+        target = m._owners["cmd_upgrade"]._fetch_core_target
+        self.assertEqual(target(root), main)
+        self.git("config", "submodule.core.branch", "stable", cwd=root)
+        self.assertEqual(target(root), stable)  # .git/config wins, as with submodule update --remote
+        self.git("config", "submodule.core.branch", ".", cwd=root)
+        self.git("branch", "-f", "stable", cwd=root)
+        self.git("checkout", "-q", "stable", cwd=root)
+        self.assertEqual(target(root), stable)  # "." follows the superproject's branch
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=core).strip(), main)  # resolving never checks out
+
     def test_unknown_node_gate_inventory_refuses_before_upgrade(self):
         m = self.module()
         inst, n = self.upgrade_fixture(m)
