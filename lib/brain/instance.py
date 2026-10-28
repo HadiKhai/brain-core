@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -393,34 +394,42 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
 GIT_LOCATION_SETTLE_NS = 2_000_000_000
 
 
-def git_location_inputs(home, values, settled=None):
-    """What Git consults to locate a home's metadata, or None when unknowable.
+GIT_LOCATION_ENV = ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_CEILING_DIRECTORIES',
+                    'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES')
 
-    Directories are fenced by identity (their mtimes churn with every lock
-    file); the marker file, HEAD and commondir by full stamp. `settled`
-    rejects inputs changed so recently they may postdate Git's own read.
+
+def git_location_inputs(home, values, settled=None):
+    """Reusable inputs for an ordinary repository's own metadata, else None.
+
+    Only a real `.git` directory without commondir, which Git reports as both
+    its own and common directory, is memoizable: that answer names a path, so
+    it holds while the repository stays valid there (HEAD, objects, refs).
+    Gitfiles, symlinks, linked worktrees, environment overrides and ancestor
+    discovery always ask Git. `settled` rejects a HEAD changed so recently it
+    may postdate Git's own read.
     """
-    def stamp(path, full):
-        try:
-            info = os.lstat(path)
-        except (FileNotFoundError, NotADirectoryError):
-            return None
-        if full and settled is not None and info.st_ctime_ns >= settled:
-            raise ValueError('unsettled Git location input')
-        return ((info.st_dev, info.st_ino, info.st_mode, info.st_uid)
-                + ((info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns) if full else ()))
     marker = Path(home) / '.git'
+    if any(name in os.environ for name in GIT_LOCATION_ENV):
+        return None
     try:
-        found = stamp(marker, not marker.is_dir() or marker.is_symlink())
-        if found is None:
-            return None  # ancestor discovery depends on every parent directory
-        inputs = [os.path.realpath(home), os.path.realpath(marker), stamp(home, False), found,
-                  sorted((k, v) for k, v in os.environ.items() if k.startswith('GIT_'))]
-        for value in values[:2] if len(values) == 2 else []:
-            base = Path(home) / value.strip()
-            inputs.append([str(base.resolve()), stamp(base, False), stamp(base / 'HEAD', True),
-                           stamp(base / 'commondir', True)])
-    except (OSError, ValueError):
+        own = os.path.realpath(marker)
+        if [os.path.realpath(Path(home) / value.strip()) for value in values] != [own, own]:
+            return None
+        inputs = [os.path.realpath(home), own, sorted((k, v) for k, v in os.environ.items() if k.startswith('GIT_'))]
+        for path, kind in ((home, stat.S_ISDIR), (marker, stat.S_ISDIR), (marker / 'objects', stat.S_ISDIR),
+                           (marker / 'refs', stat.S_ISDIR), (marker / 'HEAD', stat.S_ISREG)):
+            info = os.lstat(path)
+            if not kind(info.st_mode):
+                return None
+            stamp = (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
+            if kind is stat.S_ISREG:
+                if settled is not None and info.st_ctime_ns >= settled:
+                    return None
+                stamp += (info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            inputs.append(stamp)
+        if os.path.lexists(marker / 'commondir'):
+            return None
+    except OSError:
         return None
     return inputs
 
@@ -452,7 +461,7 @@ def git_state_paths(home, *, task_proof=False, refs=None, include_head=True, loc
         values = result.stdout.splitlines() if result.returncode == 0 else []
         if locations is not None:
             inputs = git_location_inputs(home, values, settled=started - GIT_LOCATION_SETTLE_NS)
-            if inputs is None or len(values) != 2:
+            if inputs is None:
                 locations.pop(str(home), None)
             else:
                 locations[str(home)] = (inputs, values)

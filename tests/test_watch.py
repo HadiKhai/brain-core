@@ -397,8 +397,9 @@ class Watcher(Scenario):
                     inbox.write_text(inbox.read_text())  # same bytes, new stamp: a stale first scan
                 return scans[-1]
             published = []
-            settle = -10 ** 18 if memo else owner.GIT_LOCATION_SETTLE_NS
-            with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', settle), \
+            inputs = owner.git_location_inputs if memo else (lambda *a, **k: None)
+            with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18), \
+                    mock.patch.object(owner, 'git_location_inputs', side_effect=inputs), \
                     mock.patch.object(m, 'watch_scan', side_effect=scan), \
                     mock.patch.object(m, 'wake_start'), \
                     mock.patch.object(m, 'request_wake', side_effect=lambda *a, **k: published.append(k['items']) or False), \
@@ -419,41 +420,64 @@ class Watcher(Scenario):
         self.assertEqual(unmemoized, four, 'memoized locations leave episodes unchanged')
         self.assertEqual(len([c for c in fresh if '--absolute-git-dir' in c]), 5)
 
-    def test_memoized_git_location_still_sees_rewritten_markers_and_common_refs(self):
+    def test_memoized_git_location_reasks_git_whenever_its_inputs_change(self):
+        import shutil
         m, inst = self.m, self.inst
-        first = self.repo(self.tmp / 'fixture-first')
-        second = self.repo(self.tmp / 'fixture-second')
+        home = self.repo(self.tmp / 'fixture-home')
+        other = self.repo(self.tmp / 'fixture-other')
         linked = self.tmp / 'fixture-linked'
-        self.git('worktree', 'add', '--detach', str(linked), cwd=first)
-        private = Path((linked / '.git').read_text().split(':', 1)[1].strip())
-        external = {**inst.node('root'), 'id': 'fixture-external', 'parent': None,
-                    'external': True, 'home_path': linked}
-        nodes = list(inst.nodes()) + [external]
+        self.git('worktree', 'add', '--detach', str(linked), cwd=other)
         owner = m._owners['git_state_paths']
-        locate = mock.patch.object(owner._m_common, 'git', wraps=owner._m_common.git)
+        def node(path):
+            return {**inst.node('root'), 'id': 'fixture-' + path.name, 'parent': None,
+                    'external': True, 'home_path': path}
+        nodes = list(inst.nodes()) + [node(home), node(linked)]
+        layout = {}
         with mock.patch.object(type(inst), 'nodes', return_value=nodes), \
-                mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18), locate as git:
-            layout = {}
-            asked = lambda: len([c for c in git.call_args_list if '--absolute-git-dir' in c.args])
-            before = m.watch_source_signature(inst, layout)
-            self.assertEqual(m.watch_source_signature(inst, layout), before)
-            self.assertEqual(asked(), 1, 'an unchanged location is reused')
-            # A rewritten commondir relocates the common refs: Git is asked again.
-            (private / 'commondir').write_text(str(second / '.git') + '\n')
-            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
-            self.assertEqual(asked(), 2)
-            before = m.watch_source_signature(inst, layout)
-            (second / '.git/refs/heads/main').write_text('0' * 40 + '\n')
-            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
-            # A retargeted marker file is also a changed location input.
-            before = m.watch_source_signature(inst, layout)
-            asked_before = asked()
-            (linked / '.git').write_text('gitdir: ' + str(second / '.git') + '\n')
-            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
-            self.assertEqual(asked(), asked_before + 1)
-        # Recently changed inputs may postdate Git's read and are never memoized.
+                mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18), \
+                mock.patch.object(owner._m_common, 'git', wraps=owner._m_common.git) as git:
+            def asked(path):
+                return len([c for c in git.call_args_list if '--absolute-git-dir' in c.args
+                            and c.kwargs.get('cwd') == path])
+            def signature():
+                return m.watch_source_signature(inst, layout)
+            before = signature()
+            self.assertEqual(signature(), before)
+            self.assertEqual(asked(home), 1, 'an ordinary repository location is reused')
+            self.assertEqual(asked(linked), 2, 'linked worktrees (gitfiles, commondir) always ask Git')
+            # A rewritten HEAD is a changed location input; Git is asked again.
+            head = home / '.git/HEAD'
+            head.write_text('ref: refs/heads/other\n')
+            self.assertNotEqual(signature(), before)
+            self.assertEqual(asked(home), 2)
+            # Moving objects away invalidates the repository there (Git may discover an ancestor).
+            before = signature()
+            calls = asked(home)
+            shutil.move(str(home / '.git/objects'), str(self.tmp / 'fixture-objects'))
+            signature()
+            self.assertEqual(asked(home), calls + 1)
+            shutil.move(str(self.tmp / 'fixture-objects'), str(home / '.git/objects'))
+            signature()
+            # A replaced marker (here a gitfile into another repository) is never reused.
+            calls = asked(home)
+            shutil.move(str(home / '.git'), str(self.tmp / 'fixture-home-git'))
+            (home / '.git').write_text('gitdir: ' + str(other / '.git') + '\n')
+            changed = signature()
+            self.assertEqual(asked(home), calls + 1)
+            (other / '.git/refs/heads/main').write_text('0' * 40 + '\n')
+            self.assertNotEqual(signature(), changed, 'the relocated metadata is fenced')
+            # Discovery overrides in the environment always ask Git.
+            (home / '.git').unlink()
+            shutil.move(str(self.tmp / 'fixture-home-git'), str(home / '.git'))
+            signature()
+            calls = asked(home)
+            with mock.patch.dict(os.environ, {'GIT_DIR': str(home / '.git')}):
+                signature()
+                signature()
+            self.assertEqual(asked(home), calls + 2)
+        # With the production window, inputs changed just now may postdate Git's read.
         fresh = {}
-        owner.git_state_paths(linked, locations=fresh)
+        owner.git_state_paths(home, locations=fresh)
         self.assertEqual(fresh, {})
 
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
