@@ -169,8 +169,9 @@ def queue_phase(root, name, backlog_s=None):
     if name not in ('enqueue', 'apply', 'wait'):
         raise ValueError('unknown queue timing phase')
     start, success = time.perf_counter(), False
+    capture = {'publish': True}
     try:
-        yield
+        yield capture
         success = True
     finally:
         try:
@@ -179,10 +180,11 @@ def queue_phase(root, name, backlog_s=None):
             phases = {'queue_' + name: round(seconds, 6)}
             if backlog_s is not None:
                 phases['queue_backlog'] = round(max(0.0, backlog_s), 6)
-            events.append_line(Path(root) / '.brain/timings/events.jsonl',
-                               dict(ts=time.time(), node=events.node_ref('root'), kind='timing',
-                                    actor='brain', ref=uuid.uuid4().hex,
-                                    data=dict(command='queue', elapsed_s=round(seconds, 6),
-                                              slow=seconds > SLOW_SECONDS, success=success, phases=phases)))
+            if capture['publish']:
+                events.append_line(Path(root) / '.brain/timings/events.jsonl',
+                                   dict(ts=time.time(), node=events.node_ref('root'), kind='timing',
+                                        actor='brain', ref=uuid.uuid4().hex,
+                                        data=dict(command='queue', elapsed_s=round(seconds, 6),
+                                                  slow=seconds > SLOW_SECONDS, success=success, phases=phases)))
         except (Exception, SystemExit):
             pass  # optional telemetry never changes durable acceptance/application

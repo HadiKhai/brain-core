@@ -2298,7 +2298,6 @@ class WriteQueueService(Scenario):
         def idle(interval):
             health = self.service.queue_health(self.inst)
             self.assertEqual(health['state'], 'running')
-            self.assertTrue(health['applier_running'])
             self.assertIsNone(self.queue.intent_lease(self.inst))
             waits.append(interval)
             if len(waits) == 1:
@@ -2368,7 +2367,72 @@ class WriteQueueService(Scenario):
         self.assertEqual([set(r['phases']) for r in records],
                          [{'queue_enqueue'}, {'queue_apply', 'queue_backlog'}, {'queue_wait'}])
         self.assertEqual(records[1]['phases']['queue_backlog'], 12)
+        before = (self.root / '.brain/timings/events.jsonl').read_bytes()
+        with timings.queue_phase(self.root, 'enqueue') as capture:
+            capture['publish'] = False  # synchronous forms did not enqueue
+        self.assertEqual((self.root / '.brain/timings/events.jsonl').read_bytes(), before)
         with mock.patch.object(timings, 'queue_phase', wraps=timings.queue_phase), \
                 mock.patch.object(self.queue._m_common, 'directory_target', side_effect=OSError('disk unavailable')):
             with timings.queue_phase(self.root, 'enqueue'):
                 pass  # telemetry errors cannot change the caller's result
+
+    def test_health_read_never_suppresses_a_producers_fallback(self):
+        import fcntl
+        request = self.submit('Health race regression')
+        with mock.patch.object(fcntl, 'flock', side_effect=AssertionError('health must not lock')):
+            self.assertEqual(self.service.queue_health(self.inst)['pending'], 1)
+        with mock.patch.object(subprocess, 'Popen') as start:
+            self.queue.start_intent_drainer(self.inst)
+        start.assert_called_once()
+        self.assertIsNone(self.queue.intent_receipt(self.inst, request['id']))
+
+    def test_health_treats_malformed_existing_owner_as_unknown(self):
+        for owner in ({}, {'state': 'garbage'}, {'version': 1, 'state': 'running', 'owner': [True, 'birth']}):
+            self.queue.intent_store(self.inst, 'service.json', owner)
+            health = self.service.queue_health(self.inst)
+            self.assertEqual(health['state'], 'unknown')
+            self.assertIsNone(health['failed'])
+
+    def test_native_entrypoint_restarts_and_drains_without_any_producer_wake(self):
+        children = []
+        def cleanup():
+            for child in children:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=3)
+        self.addCleanup(cleanup)
+        def start():
+            child = subprocess.Popen([sys.executable, '-B', str(CORE / 'bin/brain'),
+                                      'machine', 'queue-service', 'run'], cwd=self.root,
+                                     env={**self.env, 'BRAIN_ROOT': str(self.root)},
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            children.append(child)
+            return child
+        def until(predicate):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if predicate():
+                    return
+                time.sleep(0.01)
+            self.fail('owned service did not reach its expected durable state')
+        def owner_matches(child):
+            try:
+                return self.queue.intent_read(self.inst, 'service.json')['owner'][0] == child.pid
+            except FileNotFoundError:
+                return False
+        first = start()
+        until(lambda: owner_matches(first))
+        self.assertTrue(self.service.queue_health(self.inst)['running'])
+        first.kill()
+        first.wait(timeout=3)
+        self.assertTrue(self.service.queue_health(self.inst)['failed'])
+        request = self.submit('Service restart without a producer wake')
+        second = start()
+        until(lambda: self.queue.intent_receipt(self.inst, request['id']) is not None)
+        self.assertTrue(owner_matches(second))
+        self.assertEqual(self.queue.intent_receipt(self.inst, request['id'])['state'], 'applied')
+        self.assertEqual((self.root / 'inbox.md').read_text().count(request['id']), 1)

@@ -1,5 +1,4 @@
 """Supervised per-instance write applier; transport and recovery remain queue-owned."""
-import fcntl
 import hashlib
 import os
 import plistlib
@@ -14,6 +13,7 @@ from . import common as _m_common
 from . import handback_queue as _m_queue
 from . import instance as _m_instance
 from . import machine as _m_machine
+from . import lifecycle_identity as _m_identity
 from . import timings as _m_timings
 
 
@@ -89,27 +89,31 @@ def service_control(inst, action, yes=False):
                 run(['systemctl', '--user', 'restart', path.name])
 
 
-def lease_state(inst):
-    """Read-only probe; never creates a lease or alters another applier's lock."""
+def lease_identity(inst):
+    """Observe only: taking even a short flock could suppress a producer's wake."""
     try:
         with _m_common.directory_target(_m_queue.intent_path(inst, 'applier.lease'), private=True) as target:
-            fd = target.open(os.O_RDWR)
-            try:
-                target.check_file(fd)
-                info = os.fstat(fd)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    return True, [info.st_dev, info.st_ino]
-                return False, [info.st_dev, info.st_ino]
-            finally:
-                os.close(fd)
+            info = target.stat()
+            return [info.st_dev, info.st_ino] if info else None
     except FileNotFoundError:
-        return False, None
+        return None
+
+
+def valid_service_owner(owner):
+    return (isinstance(owner, dict) and type(owner.get('version')) is int and owner['version'] == 1
+            and owner.get('state') in ('running', 'stopped', 'failed')
+            and isinstance(owner.get('owner'), list) and len(owner['owner']) == 2
+            and type(owner['owner'][0]) is int and owner['owner'][0] > 0
+            and isinstance(owner['owner'][1], str) and bool(owner['owner'][1])
+            and owner['owner'][1] != 'unknown'
+            and isinstance(owner.get('host'), str) and bool(owner['host'])
+            and isinstance(owner.get('lease'), list) and len(owner['lease']) == 2
+            and all(type(value) is int and value >= 0 for value in owner['lease'])
+            and owner['lease'][1] > 0)
 
 
 def queue_health(inst):
-    """Recorded backlog plus verified process/lease identity; no instance lock."""
+    """Recorded backlog and service process identity; never takes an applier lock."""
     result = dict(installed=None, running=None, failed=None, state='unknown',
                   pending=None, oldest_age_s=None, last_applied=None)
     try:
@@ -117,15 +121,19 @@ def queue_health(inst):
         result['installed'] = path.exists()
         if result['installed'] and (path.is_symlink() or path.read_text() != payload):
             raise ValueError('service definition changed')
-        held, lease = lease_state(inst)
+        lease = lease_identity(inst)
         try:
             owner = _m_queue.intent_read(inst, 'service.json')
         except FileNotFoundError:
-            owner = {}
-        if not isinstance(owner, dict):
+            owner = None
+        if owner is not None and not valid_service_owner(owner):
             raise ValueError('invalid service owner')
+        owner = owner or {}
         running = False
-        if owner.get('state') == 'running' and held and owner.get('lease') == lease:
+        if owner.get('state') == 'running' and lease is not None and owner.get('lease') == lease:
+            host = _m_identity.lifecycle_host_identity()
+            if host is None or owner.get('host') != host:
+                raise ValueError('unknown or foreign service host')
             pid, stamp = owner['owner']
             if type(pid) is not int or pid <= 0 or not isinstance(stamp, str) or stamp == 'unknown':
                 raise ValueError('invalid service process')
@@ -133,9 +141,9 @@ def queue_health(inst):
             if actual == 'unknown':
                 raise ValueError('unknown service process')
             running = actual is not None and actual == stamp
-        result.update(running=running, applier_running=held,
+        result.update(running=running,
                       failed=owner.get('state') == 'failed' or
-                      (owner.get('state') == 'running' and not running and not held))
+                      (owner.get('state') == 'running' and not running))
         rows = _m_queue.intent_index(inst)
         pending = _m_queue.pending_intents(inst)
         result['pending'] = len(pending)
@@ -180,14 +188,16 @@ def run_service(inst, stop=None, interval=0.25):
     try:
         info = os.fstat(fd)
         stamp = _m_machine.process_stamp(os.getpid())
-        if stamp in (None, 'unknown'):
+        host = _m_identity.lifecycle_host_identity()
+        if stamp in (None, 'unknown') or host is None:
             raise ValueError('service process identity unavailable')
-        owner = dict(state='running', owner=[os.getpid(), stamp], lease=[info.st_dev, info.st_ino])
+        owner = dict(version=1, state='running', owner=[os.getpid(), stamp], host=host, lease=[info.st_dev, info.st_ino])
         _m_queue.intent_store(inst, 'service.json', owner)
         if threading.current_thread() is threading.main_thread():
             for sig in (signal.SIGTERM, signal.SIGINT):
                 handlers[sig] = signal.signal(sig, lambda *_: stop.set())
         try:
+            first = True
             while not stop.is_set():
                 with _m_common.directory_target(_m_queue.intent_path(inst, 'applier.lease'), private=True) as target:
                     target.check_file(fd)
@@ -195,10 +205,12 @@ def run_service(inst, stop=None, interval=0.25):
                 # drain_intents owns/closes its descriptor; the original open
                 # description retains the exclusive lease through its finalizer.
                 pending = _m_queue.pending_intents(current)
-                if pending:
-                    age = max(0, time.time() - _m_queue.intent_path(current, pending[0][1]['id'] + '.request').stat().st_mtime)
+                if pending or first:
+                    age = (max(0, time.time() - _m_queue.intent_path(current, pending[0][1]['id'] + '.request').stat().st_mtime)
+                           if pending else 0.0)
                     with _m_timings.queue_phase(current.root, 'apply', backlog_s=age):
                         _m_queue.drain_intents(current, os.dup(fd))
+                first = False
                 stop.wait(interval)
         except BaseException:
             _m_queue.intent_store(inst, 'service.json', {**owner, 'state': 'failed'})

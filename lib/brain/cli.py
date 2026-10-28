@@ -221,8 +221,9 @@ def main():
         if root:
             from . import handback_queue
             try:
-                with _m_timings.queue_phase(root, 'enqueue'):
-                    if handback_queue.fast_intent(candidate, root):
+                with _m_timings.queue_phase(root, 'enqueue') as timing:
+                    timing['publish'] = handback_queue.fast_intent(candidate, root)
+                    if timing['publish']:
                         return
             except (OSError, ValueError) as error:
                 _m_common.die(str(error))

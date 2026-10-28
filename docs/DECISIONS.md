@@ -3790,7 +3790,8 @@ self-starting fallback; no service installation is required for queue admission.
 
 `brain machine queue-service status` returns JSON; ordinary machine/status views
 show service health, pending count, oldest request age and the latest applied
-receipt. Process birth identity and the held lease distinguish a running service
-from retained metadata. Corrupt or unreadable evidence stays unknown. Queue
+receipt. Process birth/host identity and the recorded lease inode distinguish a running
+service from retained metadata. Health readers never flock the applier lease: even
+a brief observer lock could suppress a producer wake. Corrupt or unreadable evidence stays unknown. Queue
 timings separate enqueue, apply, backlog age and receipt wait without recording
 request payloads or acquiring the instance writer lock for telemetry.
