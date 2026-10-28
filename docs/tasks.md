@@ -210,3 +210,60 @@ Backlog imports also exclude standalone policy announcements, review-independenc
 rules, spent repair allowances and resume-approval conditions, even when mixed into
 a features section. These are constraints on work rather than separate tasks.
 Explicit unchecked task boxes and actionable backlog entries remain commitments.
+
+## Apply a reviewed housekeeping plan
+
+`brain task apply-plan NODE plan.json --dry-run` validates version-1 batch plans
+and prints a unified diff without opening a write journal, persisting telemetry or changing records.
+Omit `--dry-run` to publish the prepared changes under the instance lock in one
+commit. Every operation is checked before publication, with source/ref/artifact generations checked immediately
+before the first write; a stale record, reused
+job incarnation, missing proof or invalid final graph refuses the whole plan.
+Interrupted filesystem publication remains a native journal recovery problem,
+never a successful partial batch.
+
+The schema uses `version: 1`, a nonempty `batch_id`, and these operation arrays:
+
+- `requirement_operations`: `action: requirement-add`, `node_identity_sha256`,
+  `id`, `quote`, absolute `at`, and `ref`. Existing exact identities are retained.
+- `core_task_operations`: `action: add|set`, `apply_here: true`, `target`,
+  `before`, and `fields` containing native task fields. A target binds the SHA-256
+  of the node ID and task ID. Additions also supply `create_id` matching that hash.
+  Existing records require `before.record_sha256` over exact file bytes;
+  additions require `before.must_be_absent: true`.
+- `dependency_operations`: the same hashed `target`, `before`,
+  `depends_on_refs` containing hashed same-node task references, and optional
+  `unresolved_prose`. New targets use `before.must_be_created_in_this_batch: true`.
+  References resolve against the final graph, so operation order does not create
+  artificial missing-dependency failures.
+- `stale_job_operations`: `action: close`, exact `job_key`,
+  `branch_identity_sha256`, `expected_started`, `expected_open: true`, full
+  `expected_head` and `main_delivery`, `code_path`, one-line `reason`, and
+  `host_settlement: false`. Closure shares the normal ledger preparation and
+  task-attempt close paths, then applies the final reviewed task fields and edges.
+  The branch tip, retained baseline, actual changed path and intended-main ancestry
+  must agree. A baseline equal to the head additionally requires fresh native
+  host inventory and terminal workers with no pending requests, including known
+  descendants; unavailable host evidence refuses retirement.
+
+Task completion uses the normal merge, ops and report checks. Optional `delivery`
+objects supply `baseline_sha`, `merge_sha`, and hashed `code_paths`/`scope` lists;
+paths resolve from the actual delivery diff and retained scope, never display text.
+Unbound `late_bound_delivery`, `application_hold` and `extra_preconditions` refuse
+publication. Refresh and review the plan after satisfying these conditions.
+A plan retaining `execution.explicit_7_3d_live_signal_received: false` cannot apply.
+
+Peer task proposals remain reference material with `apply_here: false`. Inbox,
+archive, reconciliation and pruning sections are reference material for their
+separate native commands; apply-plan executes only the four arrays above. It
+performs no host settlement, launch, provider update, fetch or Git-ref change.
+Generated status refresh and automatic dependency readiness remain explicit
+follow-up commands, so they cannot expand the reviewed batch's write set.
+
+`brain wt prune NODE --exclude 'job/protected-*' --exclude '/path/to/retained/*'`
+retains matching branch names or registered absolute paths. Patterns use
+case-sensitive shell-style glob matching; quote them to prevent shell expansion.
+Exclusions apply equally to dry runs. Non-excluded candidates still require the
+normal clean, merged, ownership and thread checks. A process with a file or working
+directory open inside the checkout retains it; unavailable process inventory also
+retains it. Exclusions never weaken those checks or terminate a process.

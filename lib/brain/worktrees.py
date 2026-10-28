@@ -508,6 +508,25 @@ def cmd_wt_rm(a):
     print(f"removed the worktree for {a.branch} (the branch itself stays)")
 
 
+def prune_process_refusal(path):
+    """Retain a checkout while any process has a file or cwd open inside it."""
+    if not Path(path).exists():
+        return ''
+    binary = shutil.which('lsof')
+    if not binary:
+        return 'process inventory unavailable'
+    try:
+        result = subprocess.run([binary, '-nP', '-Fpn', '+D', str(path)],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return 'process inventory unavailable'
+    if result.returncode == 0 and any(line.startswith('p') for line in result.stdout.splitlines()):
+        return 'running processes use this worktree'
+    if result.returncode != 1 or result.stdout.strip() or result.stderr.strip():
+        return 'process inventory unavailable'
+    return ''
+
+
 def cmd_wt_prune(a):
     """Remove clean worktrees merged into the integration branch. Never touches uncommitted work."""
     inst = _m_nodes.load()
@@ -517,6 +536,11 @@ def cmd_wt_prune(a):
             _m_common.git("fetch", "--all", "--prune", "--quiet", cwd=home)
     removed, kept = [], []
     for br, w in sorted(n["local"].get("worktrees", {}).items()):
+        if any(_m_common.fnmatch.fnmatchcase(br, pattern) or
+               _m_common.fnmatch.fnmatchcase(str(w.get('path', '')), pattern)
+               for pattern in getattr(a, 'exclude', [])):
+            kept.append(f"{br} (excluded)")
+            continue
         reason = removal_refusal(n, br, w)
         if reason:
             kept.append(f"{br} ({reason})")
@@ -533,6 +557,11 @@ def cmd_wt_prune(a):
             dirty, merged, ahead = worktree_state(home, w, br, n)
             cleanup_recheck(home, w, br, n, generation, (dirty, merged, ahead))
         if dirty is None or (merged and dirty == 0):
+            with _m_instance.released(inst, n):
+                reason = prune_process_refusal(w['path'])
+            if reason:
+                kept.append(f"{br} ({reason})")
+                continue
             if dirty is not None:
                 entries = _m_common.git("ls-files", "--stage", "-z", cwd=w["path"])
                 if entries.returncode:
@@ -549,6 +578,11 @@ def cmd_wt_prune(a):
             _m_jobs.print_worktree_threads(n, br, dry_run=a.dry_run)
             if not a.dry_run:
                 prepared = _m_jobs.prepare_job_usage(inst, inst.node(n["id"]), br, w.get("path"))
+                with _m_instance.released(inst, n):
+                    reason = prune_process_refusal(w['path'])
+                if reason:
+                    kept.append(f"{br} ({reason})")
+                    continue
                 dirty, merged, ahead = cleanup_recheck(home, w, br, n, generation, (dirty, merged, ahead))
                 remove_worktree(inst, inst.node(n["id"]), br, thread_hook=cleanup_thread_callback(inst, n, a))
                 _m_jobs.job_ended(inst, n, br, "merged" if merged else "abandoned", job_commits(home, w, br),

@@ -80,7 +80,7 @@ def parsed_job_rows(text, defaults):
     return tuple(rows)
 
 
-def write_jobs(inst, n, rows):
+def jobs_text(inst, n, rows):
     # Retained worker evidence repairs old rows too; absent/invalid evidence never
     # changes history. Readiness freshness is unrelated to completed review rounds.
     for row in rows:
@@ -124,9 +124,13 @@ def write_jobs(inst, n, rows):
     cols = JOB_COLS + list(dict.fromkeys(k for r in rows for k in r if k not in JOB_COLS))
     out = [head + "| " + " | ".join(cell(c) for c in cols) + " |", "| " + " | ".join("---" for _ in cols) + " |"]
     out += ["| " + " | ".join(cell(r.get(c, "")) for c in cols) + " |" for r in rows]
+    return "\n".join(out) + "\n"
+
+
+def write_jobs(inst, n, rows):
     from . import events
-    events.write_record(inst, n, "jobs", "ledger", "\n".join(out) + "\n")
-    _m_common.touch(f)
+    events.write_record(inst, n, "jobs", "ledger", jobs_text(inst, n, rows))
+    _m_common.touch(n["dir"] / JOBS_FILE)
 
 
 def ledger_rows(n):
@@ -1025,27 +1029,34 @@ def manual_landing(n, row):
     return None
 
 
+def prepare_ledger_close(inst, n, row, reason=None):
+    """Validate and prepare the same closure used by single and batch commands."""
+    row = dict(row)
+    refusal = publication_refusal(n, row)
+    if refusal:
+        _m_common.die(refusal)
+    landed = manual_landing(n, row)
+    if landed and not reason:
+        row.update({'Outcome': 'merged', 'Head commit': landed[0], 'Main commit': landed[1],
+                    'Lesson check': 'required', 'Cause': 'manual landing confirmed in local main'})
+    else:
+        if not one_line(reason):
+            _m_common.die('--close needs a merged branch or a nonempty one-line --reason for parked/closed work')
+        _m_guard.no_terms_in(n, reason, 'job closure reason')
+        row.update(Outcome='closed', Cause=reason.strip())
+    row['Ended'] = stamp(inst)
+    start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
+    row['Hours'] = f'{_m_status.elapsed(start, end) / 3600:.1f}' if start and end else ''
+    return row
+
+
 def close_ledger_job(inst, n, branch, reason=None, preview=True):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         row = open_job(rows or [], branch)
         if not row:
             _m_common.die('no open ledger job to close')
-        refusal = publication_refusal(n, row)
-        if refusal:
-            _m_common.die(refusal)
-        landed = manual_landing(n, row)
-        if landed and not reason:
-            row.update({'Outcome': 'merged', 'Head commit': landed[0], 'Main commit': landed[1],
-                        'Lesson check': 'required', 'Cause': 'manual landing confirmed in local main'})
-        else:
-            if not one_line(reason):
-                _m_common.die('--close needs a merged branch or a nonempty one-line --reason for parked/closed work')
-            _m_guard.no_terms_in(n, reason, 'job closure reason')
-            row.update(Outcome='closed', Cause=reason.strip())
-        row['Ended'] = stamp(inst)
-        start, end = inst.parse_time(row['Started']), inst.parse_time(row['Ended'])
-        row['Hours'] = f'{_m_status.elapsed(start, end) / 3600:.1f}' if start and end else ''
+        row.update(prepare_ledger_close(inst, n, row, reason))
         _m_tasks.job_closed(inst, n, row)
         write_jobs(inst, n, rows)
         from . import events

@@ -1261,10 +1261,7 @@ def cap_now(inst, n):
     own_transformation(inst, n, owned)
 
 
-def active_table(inst, n, view):
-    path = n['dir'] / 'status.md'
-    with path.open(newline='') as stream:
-        text = stream.read()
+def active_table_text(text, view):
     table = render({'facts': [], 'active': view['active']}).lstrip('\n')
     match = re.search(r'(?ms)^## Active work[^\r\n]*\r?\n.*?(?=^## |\Z)', text)
     if match:
@@ -1272,7 +1269,7 @@ def active_table(inst, n, view):
         rows = list(re.finditer(r'(?m)^[ \t]*\|[^\r\n]*(?:\r?\n|$)', old))
         new_rows = table.splitlines()[2:]
         if [r.group().rstrip('\r\n') for r in rows] == new_rows:
-            return
+            return text
         newline = '\r\n' if '\r\n' in old else '\n'
         rendered = newline.join(new_rows) + newline
         if rows:
@@ -1283,9 +1280,18 @@ def active_table(inst, n, view):
     elif view['active']:
         text = text + '\n' + table + '\n'
     else:
-        return
-    common.atomic_write(path, text)
-    common.touch(path)
+        return text
+    return text
+
+
+def active_table(inst, n, view):
+    path = n['dir'] / 'status.md'
+    with path.open(newline='') as stream:
+        before = stream.read()
+    text = active_table_text(before, view)
+    if text != before:
+        common.atomic_write(path, text)
+        common.touch(path)
 
 
 def close_active_work(inst, n, row):
@@ -1480,6 +1486,12 @@ def defer_status_refresh(inst, n):
 def maintain(op, changed):
     if op.command == "project_status":
         return getattr(op, "projected_views", {})
+    if op.command == 'task_apply_plan':
+        # The reviewed batch owns its exact final graph and one commit. Retain a
+        # replay view, leaving automatic reconciliation/index/status writes to
+        # their explicit commands rather than expanding the reviewed write set.
+        return {n['id']: snapshot_view(op.inst, n)
+                for n in affected_nodes(op.inst, changed, op.node)}
     from . import status, freshness
     dispatch_landings(op.inst)
     indexed = freshness.maintain_indexes(op.inst, op.inst.nodes())

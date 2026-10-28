@@ -19,6 +19,297 @@ class Tasks(Scenario):
         expected = {ident: [row['id'] for row in rows.values() if ident in row.get('depends_on', [])]
                     for ident in rows}
         self.assertEqual({row['id']: row['blocks'] for row in tasks.projection(self.n)}, expected)
+    def housekeeping_plan(self, *idents):
+        from brain import task_plan
+        return {'version': 1, 'batch_id': 'fixture-reviewed', 'core_task_operations': [
+            {'action': 'set', 'apply_here': True,
+             'target': {'node_identity_sha256': task_plan.digest('root'),
+                        'task_identity_sha256': task_plan.digest(ident), 'display': 'untrusted-display'},
+             'before': {'record_sha256': task_plan.digest(tasks.record_path(self.n, ident).read_bytes())},
+             'fields': {'priority': 'P1'}} for ident in idents]}
+
+    def test_housekeeping_invalid_final_operation_writes_nothing(self):
+        from brain import task_plan
+        self.add('FIRST'); self.add('SECOND')
+        plan = self.housekeeping_plan('FIRST', 'SECOND')
+        plan['core_task_operations'][-1]['fields'] = {'status': 'done', 'evidence': ['unproven']}
+        before = {p: p.read_bytes() for p in (self.root / 'tasks').glob('*.md')}
+        with self.assertRaisesRegex(ValueError, 'completion'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(before, {p: p.read_bytes() for p in before})
+
+    def test_housekeeping_stale_record_refuses_the_whole_batch(self):
+        from brain import task_plan
+        self.add('FIRST'); self.add('SECOND')
+        plan = self.housekeeping_plan('FIRST', 'SECOND')
+        tasks.mutate(self.inst, self.n, 'SECOND', {'priority': 'P0'})
+        with self.assertRaisesRegex(ValueError, 'stale'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(tasks.read_records(self.n)['FIRST']['priority'], 'P2')
+        self.assertEqual(tasks.read_records(self.n)['SECOND']['priority'], 'P0')
+
+    def test_housekeeping_dry_run_prints_diff_without_writes(self):
+        from brain import task_plan
+        self.add('FIRST')
+        plan = self.housekeeping_plan('FIRST')
+        before = tasks.record_path(self.n, 'FIRST').read_bytes()
+        with mock.patch.object(Instance, 'commit') as commit:
+            diff = task_plan.apply_plan(self.inst, 'root', plan, dry_run=True)
+        self.assertIn('a/tasks/FIRST.md', diff)
+        self.assertIn('+priority: "P1"', diff)
+        self.assertEqual(tasks.record_path(self.n, 'FIRST').read_bytes(), before)
+        commit.assert_not_called()
+
+    def test_housekeeping_final_graph_allows_reverse_order_ops_completions_in_one_commit(self):
+        from brain import task_plan
+        self.add('FIRST'); self.add('SECOND')
+        plan = self.housekeeping_plan('FIRST', 'SECOND')
+        for op in plan['core_task_operations']:
+            op['fields'].update(status='done', completion_kind='ops', evidence=['fixture receipt'],
+                completion_receipt={'ref': 'fixture', 'scope': 'fixture', 'result': 'passed', 'at': self.inst.now()})
+        plan['core_task_operations'][0]['fields']['depends_on'] = ['SECOND']
+        self.repo(self.root, {'engine.py': 'fixture'})
+        before = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(self.git('rev-list', '--count', before + '..HEAD', cwd=self.root).strip(), '1')
+        self.assertEqual([r['status'] for r in tasks.read_records(self.n).values()], ['done', 'done'])
+        self.assertIn('FIRST.md', self.git('show', '--stat', '--oneline', 'HEAD', cwd=self.root))
+
+    def test_housekeeping_dependency_cycle_refuses_before_new_requirement_or_task(self):
+        from brain import task_plan
+        self.add('FIRST'); self.add('SECOND')
+        plan = self.housekeeping_plan('FIRST', 'SECOND')
+        plan['requirement_operations'] = [{'action': 'requirement-add', 'id': 'REQ-NEW',
+            'node_identity_sha256': task_plan.digest('root'), 'quote': 'fixture', 'at': self.inst.now(), 'ref': 'fixture'}]
+        plan['core_task_operations'][0]['fields']['depends_on'] = ['SECOND']
+        plan['core_task_operations'][1]['fields']['depends_on'] = ['FIRST']
+        with self.assertRaisesRegex(ValueError, 'cycle'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertFalse((self.root / 'requirements' / 'REQ-NEW.md').exists())
+        self.assertEqual(tasks.read_records(self.n)['FIRST']['depends_on'], [])
+
+    def test_housekeeping_creates_requirement_task_and_hashed_dependency(self):
+        from brain import task_plan
+        self.add('FIRST')
+        plan = self.housekeeping_plan('FIRST')
+        plan['requirement_operations'] = [{'action': 'requirement-add', 'id': 'REQ-NEW',
+            'node_identity_sha256': task_plan.digest('root'), 'quote': 'fixture', 'at': self.inst.now(), 'ref': 'fixture'}]
+        target = {'node_identity_sha256': task_plan.digest('root'),
+                  'task_identity_sha256': task_plan.digest('NEW'), 'create_id': 'NEW', 'display': 'ignored'}
+        plan['core_task_operations'].append({'action': 'add', 'apply_here': True, 'target': target,
+            'before': {'must_be_absent': True}, 'fields': {'title': 'New fixture', 'requirement': 'REQ-NEW'}})
+        plan['dependency_operations'] = [{'target': target, 'before': {'must_be_created_in_this_batch': True},
+            'depends_on_refs': [plan['core_task_operations'][0]['target']], 'unresolved_prose': []}]
+        task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(tasks.read_records(self.n)['NEW']['depends_on'], ['FIRST'])
+        self.assertEqual(tasks.read_records(self.n, 'requirements')['REQ-NEW']['quote'], 'fixture')
+
+    def housekeeping_job(self):
+        from brain import jobs, task_plan
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture source', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('branch', 'job/fixture', cwd=self.root)
+        self.add('FIRST')
+        row = {key: '' for key in jobs.JOB_COLS}
+        row.update(Job='job/fixture', Started=self.inst.now(), Task='FIRST', **{'Base commit': base})
+        jobs.write_jobs(self.inst, self.n, [row])
+        key = jobs.job_key(row)
+        task = tasks.read_records(self.n)['FIRST']
+        task['attempts'] = [{'id': 'fixture-attempt', 'job': key, 'state': 'open'}]
+        tasks.save_record(self.n, task)
+        tasks.mutate(self.inst, self.n, 'FIRST', {'status': 'in-progress', 'branch': 'job/fixture', 'job': key})
+        (self.root / 'status.md').write_text('## Active work\n| Branch | Thread | PR | State |\n'
+            '| --- | --- | --- | --- |\n| job/fixture | fixture-worker | - | working |\n')
+        op = {'action': 'close', 'job_key': key, 'branch_identity_sha256': task_plan.digest('job/fixture'),
+              'expected_started': row['Started'], 'expected_open': True, 'expected_head': head,
+              'main_delivery': head, 'code_path': 'engine.py', 'reason': 'Retire delivered fixture attempt',
+              'host_settlement': False}
+        return op
+
+    def test_housekeeping_closes_job_attempt_and_active_work_before_final_task_state(self):
+        from brain import jobs, task_plan
+        job = self.housekeeping_job()
+        plan = self.housekeeping_plan('FIRST')
+        plan['stale_job_operations'] = [job]
+        plan['core_task_operations'][0]['fields'].update(status='done', completion_kind='ops',
+            evidence=['fixture receipt'], completion_receipt={'ref': 'fixture', 'scope': 'fixture',
+                'result': 'passed', 'at': self.inst.now()})
+        before = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        dry = task_plan.apply_plan(self.inst, 'root', plan, dry_run=True)
+        self.assertIn('job-ledger.md', dry)
+        self.assertEqual(jobs.read_jobs(self.n)[0]['Ended'], '')
+        task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(self.git('rev-list', '--count', before + '..HEAD', cwd=self.root).strip(), '1')
+        row = tasks.read_records(self.n)['FIRST']
+        self.assertEqual(row['status'], 'done')
+        self.assertEqual(row['attempts'][0]['state'], 'closed')
+        self.assertTrue(jobs.read_jobs(self.n)[0]['Ended'])
+        self.assertIn('| closed |', (self.root / 'status.md').read_text())
+
+    def test_housekeeping_reused_job_incarnation_and_missing_path_refuse_every_write(self):
+        from brain import jobs, task_plan
+        job = self.housekeeping_job()
+        plan = self.housekeeping_plan('FIRST')
+        plan['stale_job_operations'] = [job]
+        before = (self.root / 'job-ledger.md').read_bytes()
+        job['expected_started'] = 'different incarnation'
+        with self.assertRaisesRegex(ValueError, 'stale'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        job['expected_started'] = jobs.read_jobs(self.n)[0]['Started']
+        job['code_path'] = 'not-delivered.py'
+        with self.assertRaisesRegex(ValueError, 'path'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual((self.root / 'job-ledger.md').read_bytes(), before)
+        self.assertEqual(tasks.read_records(self.n)['FIRST']['attempts'][0]['state'], 'open')
+
+    def test_housekeeping_no_source_retirement_requires_fresh_terminal_workers(self):
+        from brain import host_instances, host_lifecycle, jobs, task_plan
+        job = self.housekeeping_job()
+        rows = jobs.read_jobs(self.n)
+        rows[0]['Base commit'] = job['expected_head']
+        jobs.write_jobs(self.inst, self.n, rows)
+        plan = self.housekeeping_plan('FIRST')
+        plan['stale_job_operations'] = [job]
+        worker = {'threadId': 'fixture-worker', 'status': 'completed', 'activeRunId': None,
+                  'pendingRequestCount': 0, 'parentThreadId': None}
+        def rpc(name, args):
+            if name == 't3_thread_read':
+                return {'thread': worker}
+            if name == 't3_pending_request_list':
+                return {'requestIds': []}
+            self.fail('unexpected host mutation: ' + name)
+        with mock.patch.object(host_instances, 'routed_host_rpc', return_value=rpc), \
+                mock.patch.object(host_lifecycle, 'lifecycle_inventory', return_value=(['fixture'], {'fixture-worker': worker}, set())):
+            for state, pending in (('running', 0), ('completed', 1)):
+                worker.update(status=state, pendingRequestCount=pending)
+                with self.subTest(state=state, pending=pending), self.assertRaisesRegex(ValueError, 'live, pending'):
+                    task_plan.apply_plan(self.inst, 'root', plan)
+                self.assertEqual(jobs.read_jobs(self.n)[0]['Ended'], '')
+            worker.update(status='completed', pendingRequestCount=0)
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertTrue(jobs.read_jobs(self.n)[0]['Ended'])
+        self.assertEqual(jobs.read_jobs(self.n)[0]['Settled'], '')
+
+    def housekeeping_merge_plan(self):
+        self.repo(self.root, {'engine.py': 'value = 1\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Deliver fixture source', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add('FIRST'); self.add('SECOND')
+        plan = self.housekeeping_plan('FIRST', 'SECOND')
+        plan['core_task_operations'][0]['fields'].update(status='done', baseline_sha=base, merge_sha=head,
+            code_path='engine.py', scope=['engine.py'], evidence=['fixture source'])
+        return plan, base
+
+    def test_housekeeping_refuses_main_reset_during_completion_validation(self):
+        from brain import task_plan
+        plan, base = self.housekeeping_merge_plan()
+        validate, changed = tasks.validate, []
+        def drift(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            if not changed:
+                self.git('update-ref', 'refs/heads/main', base, cwd=self.root)
+                changed.append(True)
+            return result
+        with mock.patch.object(tasks, 'validate', side_effect=drift), self.assertRaisesRegex(ValueError, 'intended local main'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(tasks.read_records(self.n)['FIRST']['status'], 'backlog')
+        self.assertEqual(tasks.read_records(self.n)['SECOND']['priority'], 'P2')
+
+    def test_housekeeping_revalidates_forward_main_movement(self):
+        from brain import task_plan
+        plan, _ = self.housekeeping_merge_plan()
+        validate, changed = tasks.validate, []
+        def drift(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            if not changed:
+                self.git('commit', '--allow-empty', '-qm', 'Unrelated forward main movement', cwd=self.root)
+                changed.append(True)
+            return result
+        with mock.patch.object(tasks, 'validate', side_effect=drift):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(tasks.read_records(self.n)['FIRST']['status'], 'done')
+
+    def test_housekeeping_refuses_report_artifact_drift_during_validation(self):
+        from brain import task_plan
+        self.add('FIRST'); self.add('SECOND')
+        artifact = self.root / 'report.txt'
+        artifact.write_text('measured fixture')
+        plan = self.housekeeping_plan('FIRST', 'SECOND')
+        plan['core_task_operations'][0]['fields'].update(status='done', completion_kind='report',
+            evidence=['fixture report'], completion_receipt={'ref': 'fixture', 'scope': 'fixture',
+                'result': 'passed', 'at': self.inst.now(), 'artifact': 'report.txt', 'version': 1,
+                'sha256': task_plan.digest(artifact.read_bytes())})
+        validate, changed = tasks.validate, []
+        def drift(*args, **kwargs):
+            result = validate(*args, **kwargs)
+            if not changed:
+                artifact.write_text('concurrent report replacement')
+                changed.append(True)
+            return result
+        with mock.patch.object(tasks, 'validate', side_effect=drift), self.assertRaisesRegex(ValueError, 'digest'):
+            task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(tasks.read_records(self.n)['FIRST']['status'], 'backlog')
+        self.assertEqual(artifact.read_text(), 'concurrent report replacement')
+
+    def test_housekeeping_cli_dry_run_and_apply_have_zero_and_one_commits(self):
+        from brain import task_plan
+        root = self.init('alice')
+        self.b(root, 'task', 'add', 'root', 'FIRST', '--title', 'First fixture')
+        n = Instance(root).node('root')
+        plan = {'version': 1, 'batch_id': 'fixture-cli', 'core_task_operations': [
+            {'action': 'set', 'apply_here': True,
+             'target': {'node_identity_sha256': task_plan.digest('root'),
+                        'task_identity_sha256': task_plan.digest('FIRST')},
+             'before': {'record_sha256': task_plan.digest(tasks.record_path(n, 'FIRST').read_bytes())},
+             'fields': {'status': 'done', 'completion_kind': 'ops', 'evidence': ['fixture'],
+                        'completion_receipt': {'ref': 'fixture', 'scope': 'fixture', 'result': 'passed', 'at': self.inst.now()}}}]}
+        plan_path = self.tmp / 'fixture-plan.json'
+        plan_path.write_text(json.dumps(plan))
+        before = self.git('rev-parse', 'HEAD', cwd=root).strip()
+        status_before = (root / 'status.md').read_bytes()
+        private_before = {str(p.relative_to(root)): p.read_bytes() for p in (root / '.brain').rglob('*') if p.is_file()}
+        dry = self.b(root, 'task', 'apply-plan', 'root', str(plan_path), '--dry-run')
+        private_after = {str(p.relative_to(root)): p.read_bytes() for p in (root / '.brain').rglob('*') if p.is_file()}
+        self.assertEqual(private_before, private_after)
+        self.assertIn('+status: "done"', dry)
+        self.assertEqual(before, self.git('rev-parse', 'HEAD', cwd=root).strip())
+        self.assertEqual(status_before, (root / 'status.md').read_bytes())
+        self.b(root, 'task', 'apply-plan', 'root', str(plan_path))
+        self.assertEqual(self.git('rev-list', '--count', before + '..HEAD', cwd=root).strip(), '1')
+        self.assertEqual(self.git('status', '--porcelain', cwd=root).strip(), '')
+
+    def test_housekeeping_does_not_bypass_ops_or_report_completion(self):
+        from brain import task_plan
+        self.add('FIRST')
+        for kind in ('ops', 'report'):
+            plan = self.housekeeping_plan('FIRST')
+            plan['core_task_operations'][0]['fields'].update(status='done', completion_kind=kind,
+                evidence=['fixture'], completion_receipt={'ref': 'fixture', 'scope': 'fixture',
+                    'result': 'passed', 'at': 'not a timestamp'})
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                task_plan.apply_plan(self.inst, 'root', plan)
+        self.assertEqual(tasks.read_records(self.n)['FIRST']['status'], 'backlog')
+
+    def test_housekeeping_refuses_unbound_authority_and_peer_writes(self):
+        from brain import task_plan
+        self.add('FIRST')
+        for extra in ({'application_hold': 'bind source'}, {'extra_preconditions': ['terminal host proof']},
+                      {'late_bound_delivery': 'install'}):
+            plan = self.housekeeping_plan('FIRST')
+            plan['core_task_operations'][0].update(extra)
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'unresolved'):
+                task_plan.apply_plan(self.inst, 'root', plan)
+        plan = self.housekeeping_plan('FIRST')
+        plan['core_task_operations'][0]['target']['node_identity_sha256'] = task_plan.digest('peer')
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            task_plan.apply_plan(self.inst, 'root', plan)
 
     def test_set_survives_unrelated_instance_commit_with_other_completed_tasks(self):
         self.repo(self.root, {'engine.py': 'value = 1\n'})

@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +118,38 @@ class PruneAnnotatedStates(AutonomyProject):
         self.assertIn('fixture-worker', out)
         self.assertFalse(wt.exists())
         self.assertEqual((root / 'nodes/app/status.md').read_bytes(), before)
+
+    def test_repeatable_branch_and_path_exclusions_retain_merged_worktrees(self):
+        root, home, wt = self.merged()
+        self.active(root, 'merged — fixture shipped')
+        before = (root / 'nodes/app/job-ledger.md').read_bytes()
+        for pattern in ('job-*', str(wt.parent / '*')):
+            for dry in ([], ['--dry-run']):
+                with self.subTest(pattern=pattern, dry=dry):
+                    out = self.b(root, 'wt', 'prune', 'app', '--offline', '--exclude', 'no-match',
+                                 '--exclude', pattern, *dry)
+                    self.assertIn('job-a (excluded)', out)
+                    self.assertIn('remove' if dry else 'removed', out)
+                    self.assertTrue(wt.exists())
+                    self.assertEqual((root / 'nodes/app/job-ledger.md').read_bytes(), before)
+        out = self.b(root, 'wt', 'prune', 'app', '--offline', '--exclude', 'no-match')
+        self.assertIn('removed: job-a', out)
+        self.assertFalse(wt.exists())
+
+    def test_prune_retains_checkout_with_running_process(self):
+        root, home, wt = self.merged()
+        self.active(root, 'merged — fixture shipped')
+        process = subprocess.Popen([sys.executable, '-c',
+            'import time; print("ready", flush=True); time.sleep(30)'], cwd=wt,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), 'ready')
+            out = self.b(root, 'wt', 'prune', 'app', '--offline')
+            self.assertIn('running processes use this worktree', out)
+            self.assertTrue(wt.exists())
+        finally:
+            process.terminate()
+            process.communicate(timeout=5)
 
     def test_terminal_note_cannot_override_dirty_or_unmerged_work(self):
         root, home, wt = self.merged()

@@ -121,7 +121,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton"}
+             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton", "cmd_task_apply_plan"}
 
 
 def writes(a):
@@ -133,6 +133,8 @@ def writes(a):
         return a.action in ("remember", "route")
     if name == "cmd_events":
         return bool(a.explain or a.record or a.rebuild_records)
+    if name == "cmd_task_apply_plan":
+        return not a.dry_run
     if name == "cmd_wt_prune":
         return not a.dry_run
     if name == 'cmd_preview':
@@ -609,6 +611,8 @@ def _main():
     t.add_argument('--settle-threads', action='store_true', help='tell and freshly settle exact closed-job threads before removal; retain while pending')
     t.add_argument("id"); t.add_argument("--dry-run", action="store_true", dest="dry_run")
     t.add_argument("--offline", action="store_true")
+    t.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                   help="retain branches or registered paths matching this glob (repeatable)")
     t.set_defaults(f=_Command("worktrees", "cmd_wt_prune"))
     cmd("report", _Command("reports", "cmd_report"), "start a report: brain report <node> \"topic\" (prints its folder)", "id", "topic")
     cmd("reports", _Command("reports", "cmd_reports"), "every report, newest first: brain reports [node]", opt("id", nargs="?"))
@@ -760,6 +764,10 @@ def _main():
             dashboard_all()
         elif not _m_status.cmd_dashboard(a):
             ap.print_help()
+        return
+    if a.f.__name__ == 'cmd_task_apply_plan':
+        # This endpoint preflights the entire plan before opening its journal.
+        a.f(a)
         return
     if a.f == _m_nodes.cmd_scan:
         try:

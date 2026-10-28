@@ -3701,6 +3701,7 @@ refs. A concurrent change retries the complete batch for scoped writers; other
 writers refuse it. All prepared views then publish under the retained writer
 lock, so rendering a later node cannot cause an earlier stale view to overwrite
 a concurrent writer's journal evidence.
+
 ## 2026-10-27: Publish an explicit refresh from one maintenance preparation
 
 A normal explicit refresh defers its projection to the enclosing status
@@ -3745,3 +3746,21 @@ recomputes the complete selected batch before publication. Refresh retry setting
 identity excludes only local changes_seen acknowledgement metadata; instance and
 node policy, worktree bindings, coordinator and authority settings still refuse
 on edits. Generation fences and retry limits are unchanged.
+
+## 2026-10-28: Preflight reviewed housekeeping before one publication
+
+Task batch plans bind executable identities with SHA-256 and existing records
+with exact byte digests. Displays and prose are reference material. The executor
+prepares native ledger/task-attempt closures before final task fields and dependency
+edges, then validates the final graph with the existing completion verifier.
+Requirements remain additive; peer proposals, unbound authority and unknown host
+liveness cannot authorize writes. Consumed source, Git-ref and report-artifact generations fence validation through
+publication. A forward main movement gets one fresh semantic recheck. One
+instance-locked commit publishes the batch.
+The native journal retains interrupted publication without claiming success;
+generated status and readiness reconciliation do not expand the reviewed write set.
+
+Worktree pruning accepts repeatable exclusions for branch names and registered
+paths before inspecting removal candidates. Existing cleanup checks remain in
+force, with a bounded process inventory retaining checkouts used by running
+processes or when that inventory is unavailable.

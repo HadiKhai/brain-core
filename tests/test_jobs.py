@@ -88,6 +88,21 @@ class LedgerReviewEvidence(Scenario):
         module.write_jobs(inst, n, module.read_jobs(n))
         self.assertEqual([row["Reviews"] for row in module.read_jobs(n)], [c[2] for c in cases])
 
+    def test_ended_rows_with_actual_handback_keep_the_instance_for_accounting(self):
+        r = self.init('alice')
+        module = core_loader.SourceFileLoader('ledger_actual_instance', str(CORE / 'bin/brain')).load_module()
+        inst, n = module.Instance(r), module.Instance(r).node('root')
+        row = {'Job': 'job/closed', 'Started': '2020-01-01T00:00Z',
+               'Ended': '2020-01-01T01:00Z', 'Reviews': '1'}
+        path = module.handback_file(n, row)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'job': row['Job'], 'started': row['Started'],
+            'state': 'done', 'actual': {'version': 1, 'tokens': 10}}))
+        with mock.patch.object(module, 'actual_cost', return_value={'version': 1, 'tokens': 20}) as actual:
+            module.write_jobs(inst, n, [row])
+        self.assertIs(actual.call_args.args[0], inst)
+        self.assertEqual(json.loads(module.read_jobs(n)[0]['Actual'])['tokens'], 20)
+
     def test_retained_handback_never_lowers_open_review_counts(self):
         r = self.init("alice")
         module = core_loader.SourceFileLoader("ledger_open_reviews", str(CORE / "bin/brain")).load_module()

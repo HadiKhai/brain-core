@@ -694,6 +694,32 @@ class ReleasedCleanupGeneration(AutonomyProject):
             self.assertFalse(wt.exists(), output.getvalue())
             self.assertIn('merged', self.b(r, 'jobs', 'app', '--branch', 'job-a'))
 
+    def test_prune_retains_commit_created_during_the_final_process_inventory(self):
+        r, home, wt = PruneSafety.merged(self)
+        ledger = r / 'nodes/app/job-ledger.md'
+        before = ledger.read_bytes()
+        m = core_loader.SourceFileLoader('cleanup_process_drift', str(CORE / 'bin/brain')).load_module()
+        checks = []
+        def inventory(path):
+            self.assertIsNone(m._LOCK['fh'])
+            checks.append(path)
+            if len(checks) == 2:
+                (wt / 'new-work.txt').write_text('unmerged fixture work\n')
+                self.git('add', 'new-work.txt', cwd=wt)
+                self.git('commit', '-qm', 'new unmerged fixture work', cwd=wt)
+            return ''
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(r)
+            with mock.patch.object(m, 'load', return_value=inst), \
+                    mock.patch.object(m, 'prune_process_refusal', side_effect=inventory), \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                with m.brain_lock(inst):
+                    m.cmd_wt_prune(argparse.Namespace(id='app', dry_run=False, offline=True))
+        self.assertEqual(len(checks), 2)
+        self.assertTrue(wt.exists())
+        self.assertEqual(ledger.read_bytes(), before)
+        self.assertIn('job-a', json.loads((r / '.brain/local.json').read_text())['nodes']['app']['worktrees'])
+
     def test_prune_retains_new_branch_commit(self):
         self.cleanup_during_accounting('prune', 'branch')
 

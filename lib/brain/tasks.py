@@ -64,13 +64,17 @@ def read_records(n, folder='tasks', ident=None):
     return records
 
 
+def record_text(row):
+    values = {k: v for k, v in row.items() if k != 'description'}
+    text = '---\n' + '\n'.join(k + ': ' + json.dumps(v, ensure_ascii=False) for k, v in values.items())
+    return text + '\n---\n' + row.get('description', '').strip() + '\n'
+
+
 def save_record(n, row, folder='tasks'):
     path = record_path(n, row['id'], folder)
     _m_common.safe_target(path)
     path.parent.mkdir(exist_ok=True)
-    values = {k: v for k, v in row.items() if k != 'description'}
-    text = '---\n' + '\n'.join(k + ': ' + json.dumps(v, ensure_ascii=False) for k, v in values.items())
-    _m_common.atomic_write(path, text + '\n---\n' + row.get('description', '').strip() + '\n')
+    _m_common.atomic_write(path, record_text(row))
     _m_common.touch(path)
 
 
@@ -109,8 +113,8 @@ def normalize(changes):
     return out
 
 
-def validate(n, records, selected=None):
-    jobs = requirements = None
+def validate(n, records, selected=None, requirements=None):
+    jobs = None
     for ident, row in records.items():
         if selected is not None and ident != selected:
             continue
@@ -261,9 +265,7 @@ def mutation_paths(inst, target=None, changes=None, ident=None, create=False):
     return paths
 
 
-def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
-    rows = (read_records(n, ident=ident) if create or independent_set(n, ident, changes)
-            else read_records(n))
+def prepare_record(inst, n, ident, changes, rows, create=False, provider=False):
     if create == (ident in rows):
         raise ValueError('task already exists' if create else 'task not found')
     changes = normalize(changes)
@@ -284,16 +286,21 @@ def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
     row.update(changes, updated=inst.now())
     if set(changes) & {'status', 'job', 'evidence', 'merge_sha', 'completion_receipt'}:
         row['last_progress_at'] = changes.get('last_progress_at') or inst.now()
-    if create:
-        from . import task_flow
-        # Every linked creation retains the complete graph, including qualified returns.
-        if task_flow.links(row):
-            rows = read_records(n)
-    rows[ident] = row
-    validate(n, rows, selected=ident)
-    closed_transition = row['status'] in ('merged', 'done') and (create or read_records(n, ident=ident).get(ident, {}).get('status') != row['status'])
+    closed_transition = row['status'] in ('merged', 'done') and (create or rows[ident]['status'] != row['status'])
     if closed_transition:
         row['event_pending'] = 'task_landed'
+    return row, closed_transition
+
+
+def prepare_mutation(inst, n, ident, changes, create=False, provider=False):
+    rows = (read_records(n, ident=ident) if create or independent_set(n, ident, changes)
+            else read_records(n))
+    row, closed_transition = prepare_record(inst, n, ident, changes, rows, create, provider)
+    from . import task_flow
+    if create and task_flow.links(row):
+        rows = read_records(n)
+    rows[ident] = row
+    validate(n, rows, selected=ident)
     return row, closed_transition
 
 
@@ -459,6 +466,8 @@ def register(sub):
     _m_requirements.register(actions)
     from . import task_reconcile
     task_reconcile.register(actions)
+    from . import task_plan
+    task_plan.register(actions)
     migration = actions.add_parser('migrate', help='additively migrate local task sources after install/upgrade')
     migration.add_argument('node', nargs='?')
     migration.add_argument('--all', action='store_true')
@@ -589,17 +598,17 @@ def handback_event(inst, n, row, data):
                 'Verification exit 0 at ' + data['at']]}, provider=True)
 
 
-def job_closed(inst, n, row):
+def prepare_job_closed(inst, n, row, records=None):
     ident = row.get('Task')
     if not ident:
         return
     from . import sync as _m_sync
     from . import jobs as _m_jobs
-    current = read_records(n)[ident]
+    import copy
+    current = copy.deepcopy((read_records(n) if records is None else records)[ident])
     for attempt in current.get('attempts', []):
         if attempt.get('job') == _m_jobs.job_key(row):
             attempt.update(state='closed', ended=row.get('Ended') or inst.now())
-    save_record(n, current)
     packet = _m_sync.integration_packet(inst, n, row) or {}
     changes = {'status': 'parked', 'park_reason': row.get('Cause') or 'Job closed without proven task completion',
                'resume': 'Start a new task job or supply verified main landing evidence'}
@@ -618,7 +627,18 @@ def job_closed(inst, n, row):
     from . import task_flow as _m_flow
     if changes['status'] == 'parked':
         changes.update(_m_flow.park_fields(inst))
+    return current, changes
+
+
+def job_closed(inst, n, row):
+    prepared = prepare_job_closed(inst, n, row)
+    if prepared is None:
+        return
+    current, changes = prepared
+    ident = current['id']
+    save_record(n, current)
     # Existing task proof remains unchanged if the job endpoint is not on main.
+    from . import task_flow as _m_flow
     try:
         mutate(inst, n, ident, changes, provider=True)
         if changes['status'] == 'done':
