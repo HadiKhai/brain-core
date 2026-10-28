@@ -1747,6 +1747,8 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                 self.assertFalse(route())  # the exact synchronous link refusal
             with mock.patch.object(m, 'never_terms', return_value=[('secretword', 'term 1')]):
                 self.assertFalse(route(report='secretword.md'))  # the direct path's own term rules
+                # A retry never falls back to a second, synchronous publication.
+                self.assertTrue(route(report='secretword.md', request_id='b' * 32))
         finally:
             os.close(fd)
         m.intent_store(inst, 'blocked', dict(state='blocked', reason='fixture'))
@@ -1754,6 +1756,39 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         os.unlink(m.intent_path(inst, 'blocked'))
         m.submit_intent(inst, dict(kind='inbox', node='root', text='Earlier request', at=inst.now()), start=False)
         self.assertTrue(route())
+
+    def test_synchronous_handback_never_overtakes_an_earlier_queued_one_for_its_job(self):
+        m, inst, n, row = self.fixture()
+        cli = self.default_cli(inst)
+        fd = m.intent_lease(inst)
+        try:
+            queued = cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--summary', 'Earlier',
+                         '--lessons', 'none: fixture', '--wait', '0')
+            [(_, request)] = m.intent_index(inst)
+            self.assertIn(request['id'], queued.stdout)
+            # Checked (always in place) and --direct both refuse before any attempt.
+            for extra in (('--state', 'done', '--reviews', '1'), ('--state', 'done', '--direct')):
+                refused = cli('handback', 'root', '--branch', row['Job'], '--summary', 'Later',
+                              '--lessons', 'none: fixture', *extra, ok=False)
+                self.assertIn('queued handback ' + request['id'] + ' for this job is still pending', refused.stderr)
+                self.assertIsNone(m.current_attempt(n, row))
+                self.assertIsNone(m.read_handback(n, row))
+            # The publication-time fence covers a request admitted during verification.
+            with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
+                    mock.patch.object(m, 'refuse_overtaking', side_effect=[None, SystemExit('fenced')]) as fence, \
+                    mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}), \
+                    contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, 'fenced'):
+                m.cmd_handback(argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Later',
+                                                  question=None, lessons='none: fixture', report=None, reviews=None,
+                                                  need_human=None, restart=None, direct=True))
+            self.assertEqual(fence.call_count, 2)
+            self.assertIsNone(m.read_handback(n, row))
+        finally:
+            os.close(fd)
+        cli('queue', 'drain')
+        cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--summary', 'Later',
+            '--lessons', 'none: fixture', '--direct')
+        self.assertEqual(m.read_handback(n, row)['summary'], 'Later')
 
     def test_default_handback_past_its_deadline_reports_the_queued_id_honestly(self):
         m, inst, n, row = self.fixture()

@@ -393,13 +393,32 @@ def default_queue(inst, n, row, a, args):
         if getattr(a, 'request_id', None):
             _m_common.die('--request-id retries a queued handback; a checked or study handback queues only with --enqueue')
         return False
+    if getattr(a, 'request_id', None):
+        return True  # a retry reuses its queued identity; never publish a second, different handback
     if _m_common.outward_links(inst.root) or guard.find_terms(json.dumps(args), guard.never_terms(n)):
         return False
-    if getattr(a, 'request_id', None):
-        return True  # a retry must reuse its queued identity
     if _m_instance.brain_lock(inst).owner_is_running_us():
         return False  # nested under our own holder: its lock is ours, an applier would wait on it
     return writer_busy(inst) or applier_busy(inst) or queue_pending(inst)
+
+
+def pending_job_request(inst, n, row):
+    """An earlier queued handback for this job: a synchronous publication must not
+    overtake it, or its later application would replace the newer result."""
+    try:
+        pending = pending_intents(inst)
+    except ValueError:
+        return None  # a broken queue applies nothing until repaired; its own block reports it
+    key = _m_jobs.job_key(row)
+    return next((data['id'] for _, data in pending if data['payload'].get('kind') == 'handback'
+                 and data['payload'].get('node') == n['id'] and data['payload'].get('job_key') == key), None)
+
+
+def refuse_overtaking(inst, n, row):
+    earlier = pending_job_request(inst, n, row)
+    if earlier:
+        _m_common.die('queued handback ' + earlier + ' for this job is still pending; '
+                      'brain queue wait ' + earlier + ', then hand back again')
 
 
 def writer_busy(inst):

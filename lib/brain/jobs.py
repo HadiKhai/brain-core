@@ -304,6 +304,8 @@ def cmd_handback(a):
             _m_common.die(_m_guard.redact(str(error), _m_guard.never_terms(n)))
         print(request['id'])
         return
+    if not getattr(a, '_intent_request', None) and not getattr(a, '_queue_request', None):
+        _m_queue.refuse_overtaking(inst, n, row)  # before any attempt or verification
     identity = getattr(a, '_attempt_id', None) if getattr(a, '_queue_request', None) else None
     try:
         if identity:
@@ -506,6 +508,8 @@ def publish_handback(a):
                 line = f"- {data['at']} from worker {a.branch}: {a.state}: {message} <!-- wake:{data['wake_id']} --> {marker}\n"
                 prepared['inbox_after_hash'] = _m_queue.inbox_after_hash(n, line, marker)
             _m_queue.intent_store(inst, intent['id'] + '.prepared', prepared, exclusive=True)
+        if not intent and not request:
+            _m_queue.refuse_overtaking(inst, n, current)  # a request admitted during verification
         f.parent.mkdir(exist_ok=True)
         from . import events
         events.write_record(inst, n, "handback", job_key(row), json.dumps(data, indent=2) + "\n")

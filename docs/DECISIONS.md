@@ -4004,3 +4004,9 @@ The probes never wait or hold the writer lock. A race only picks between two
 reviewed paths. `--request-id` without `--enqueue` stays queued for an unchecked
 retry and is refused for a checked or study handback. The queued receipt wait
 defaults to 4 s, keeping a contended handback under 5 s.
+A synchronous publication (checked, study, uncontended or `--direct`) refuses
+while an earlier queued handback for the same job is still pending. It checks
+once before any attempt or verification, and again under the writer lock just
+before writing. Otherwise the older request would later replace the newer
+result. An invalid queue applies nothing until repaired, so it does not fence.
+A `--request-id` retry never falls back to a synchronous publication.
