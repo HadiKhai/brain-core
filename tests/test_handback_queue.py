@@ -20,6 +20,44 @@ from scenario import CORE, Scenario
 PROCESS_BUDGET = 30
 
 class HandbackLifecycle(Scenario):
+    def test_real_queue_applier_projects_unlocked_and_retries_source_drift(self):
+        root = self.init('queue-projection')
+        m = core_loader.SourceFileLoader('queue_projection', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        events = m._owners['Command']
+        status = m._owners['status_facts']
+        instance = m._owners['brain_lock']
+        request = m.submit_intent(inst, dict(kind='inbox', node='root', text='Queued request', at=inst.now()), start=False)
+        snapshot, facts = events.snapshot_view, status.status_facts
+        rendered, fact_reads = [], []
+
+        def unlocked_facts(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            fact_reads.append(True)
+            return facts(*args, **kwargs)
+
+        def drift(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            view = snapshot(*args, **kwargs)
+            rendered.append(True)
+            if len(rendered) == 1:
+                with (root / 'status.md').open('a') as stream:
+                    stream.write('\nConcurrent human prose\n')
+            return view
+
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(events, 'snapshot_view', side_effect=drift), \
+                mock.patch.object(status, 'status_facts', side_effect=unlocked_facts):
+            m.drain_intents(inst)
+        self.assertEqual(len(rendered), 2)
+        self.assertTrue(fact_reads)
+        self.assertEqual(m.intent_receipt(inst, request['id'])['state'], 'applied')
+        self.assertIn('Concurrent human prose', (root / 'status.md').read_text())
+        self.assertIn('Queued request', (root / 'inbox.md').read_text())
+        terminal = events.read(inst)[-1]
+        self.assertEqual(terminal['data']['command'], 'intent_queue')
+        self.assertTrue(terminal['data']['maintenance_ok'])
+
     def test_many_scoped_refs_only_query_git_for_loose_symbolic_targets(self):
         m, inst, n, row = self.fixture()
         home = self.repo(self.tmp / 'home')

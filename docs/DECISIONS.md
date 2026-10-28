@@ -3736,3 +3736,12 @@ Merging into an unlanded base does not authorize cleanup, and deleting a landed
 base does not authorize removal of its unmerged child. Regression scenarios use
 real stacked commits and remove the base before inspecting and pruning the child.
 The existing integration ancestry and cleanup generation checks remain unchanged.
+
+## 2026-10-28: Release queue and inbox-seen projections; ignore change acknowledgements on retry
+
+The queue applier and explicit inbox-seen command use the existing unlocked,
+fenced status projection with bounded scoped retries. Source drift still
+recomputes the complete selected batch before publication. Refresh retry settings
+identity excludes only local changes_seen acknowledgement metadata; instance and
+node policy, worktree bindings, coordinator and authority settings still refuse
+on edits. Generation fences and retry limits are unchanged.

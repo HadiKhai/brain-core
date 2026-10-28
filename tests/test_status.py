@@ -1178,6 +1178,86 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertIn('abort', [r['kind'] for r in ours])
         self.assertTrue(ours[-1]['data']['maintenance_ok'])
 
+    def test_explicit_inbox_seen_projects_unlocked_and_retries_source_drift(self):
+        root = self.init('inbox-seen-projection')
+        line = '- 2026-10-28 05:00 +00:00 from worker: Apply the export'
+        (root / 'inbox.md').write_text(line + '\n')
+        items = json.loads(self.b(root, 'inbox', 'root', '--json'))
+        key = next(item['id'] for item in items if item['kind'] == 'inbox')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'inbox_seen_projection')
+        snapshot, facts = events.snapshot_view, status.status_facts
+        rendered, fact_reads = [], []
+        def unlocked_facts(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            fact_reads.append(True)
+            return facts(*args, **kwargs)
+        def drift(*args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            view = snapshot(*args, **kwargs)
+            rendered.append(True)
+            if len(rendered) == 1:
+                with (root / 'status.md').open('a') as stream:
+                    stream.write('\nConcurrent human prose\n')
+            return view
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'inbox-seen', 'root', key, 'Export applied']), \
+                mock.patch.object(events, 'snapshot_view', side_effect=drift), \
+                mock.patch.object(status, 'status_facts', side_effect=unlocked_facts), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli.main()
+        self.assertEqual(len(rendered), 2)
+        self.assertTrue(fact_reads)
+        self.assertIn('Concurrent human prose', (root / 'status.md').read_text())
+        self.assertEqual((root / 'inbox.md').read_text(), '')
+        self.assertIn(line, (root / 'inbox-archive.md').read_text())
+        terminal = events.read(m.Instance(root))[-1]
+        self.assertEqual(terminal['data']['command'], 'inbox_seen')
+        self.assertTrue(terminal['data']['maintenance_ok'])
+
+    def test_refresh_retries_after_changes_seen_bookkeeping(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_ack')
+        facts, edited = status.status_facts, []
+        def acknowledge(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            if not edited and instance._LOCK['fh'] is None:
+                edited.append(True)
+                current = instance.Instance(root)
+                current.local['changes_seen'] = {'root': ['acknowledged-change']}
+                current.save_local()
+            return result
+        start = len(events.read(m.Instance(root)))
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(status, 'status_facts', side_effect=acknowledge), \
+                mock.patch('random.uniform', return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.main()
+        self.assertTrue(edited)
+        records = events.read(m.Instance(root))[start:]
+        self.assertEqual(len([r for r in records if r['kind'] == 'begin' and r['data'].get('command') == 'status']), 2)
+        self.assertTrue(records[-1]['data']['maintenance_ok'])
+        self.assertEqual(m.Instance(root).local['changes_seen'], {'root': ['acknowledged-change']})
+
+    def test_refresh_does_not_retry_a_local_binding_edit(self):
+        for key, value in (('worktrees', {'job/edited': '/edited'}),
+                           ('coordinator', 'edited-thread'), ('authority', 'edited-owner')):
+            with self.subTest(key=key):
+                root = self.init('binding-' + key)
+                m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_binding_' + key)
+                attempts = []
+                def attempt():
+                    attempts.append(True)
+                    current = instance.Instance(root)
+                    current.local_of('root')[key] = value
+                    current.save_local()
+                    raise SystemExit('state changed during the unlocked step; retry from fresh state')
+                with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                    cli.refresh_with_retry(attempt, root)
+                self.assertEqual(len(attempts), 1)
+
     def test_refresh_does_not_retry_a_settings_edit(self):
         root = self.init('alice')
         self.b(root, 'status', 'root', '--refresh')

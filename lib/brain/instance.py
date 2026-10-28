@@ -319,8 +319,9 @@ def holding():
 
 
 def settings(inst):
-    """Parsed instance, local and node settings; Instance.nodes() rereads node.md."""
-    return inst.cfg, inst.local, [(node['id'], node['fm']) for node in inst.nodes()]
+    """Policy/binding identity; change acknowledgements do not alter settings."""
+    local = {key: value for key, value in inst.local.items() if key != 'changes_seen'}
+    return inst.cfg, local, [(node['id'], node['fm']) for node in inst.nodes()]
 
 
 @contextlib.contextmanager

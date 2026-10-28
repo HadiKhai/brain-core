@@ -1403,7 +1403,7 @@ RELEASED_PROJECTION_ATTEMPTS = 3
 WT_COMMANDS = ('wt_add', 'wt_setup', 'wt_rm', 'wt_prune')
 # These writers fence their released projection on their own node's records
 # and recompute a view a concurrent writer made stale.
-SCOPED_PROJECTIONS = ('set', 'handback', 'task', 'upgrade', *WT_COMMANDS)
+SCOPED_PROJECTIONS = ('set', 'handback', 'task', 'upgrade', 'intent_queue', 'inbox_seen', *WT_COMMANDS)
 
 
 def released_view(op, n, known_of, inputs, prepare=None, retry=False, targets=None):
@@ -1515,7 +1515,7 @@ def maintain(op, changed):
             selected[n['id']] = n
     prepared = {}
     released_projection = op.command in ('set', 'handback', 'task', 'review', 'preview_receipt',
-                                         'report', 'workbench', 'upgrade', *WT_COMMANDS)
+                                         'report', 'workbench', 'upgrade', 'intent_queue', 'inbox_seen', *WT_COMMANDS)
     refresh_node = getattr(op, 'refresh_node', None)
     if op.command == 'status' and selected:
         from . import status_refresh
