@@ -176,7 +176,9 @@ def communication_items(inst, nodes=None):
         communication_question(inst, q)
         if q.get('node') in allowed and 'answer' not in q:
             options = '; '.join(o['id'] + ': ' + o['label'] for o in q['options'])
-            out.append({**q, 'text': q['text'] + ' Options: ' + options +
+            # The direct producer owns this stable receipt identity and reason.
+            # Watch scans must not replace it with a second due-episode identity.
+            out.append({**q, 'reason': 'question:' + q['id'], 'text': q['text'] + ' Options: ' + options +
                         '. Recommendation/default: ' + q['recommendation'] + '. Deadline: ' + q['deadline']})
     return out
 

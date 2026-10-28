@@ -204,54 +204,88 @@ def wake_shown_path(inst, n):
     return wake_directory(inst, n) / ('shown-' + wake_owner_binding(inst, n) + '.json')
 
 
-def wake_shown_read(path):
+def wake_shown_receipt(path):
+    """Untyped legacy ids and positively recorded (id, kind) acknowledgements."""
     _m_common.safe_target(path)
     if not path.exists():
-        return set()
+        return set(), set()
     value = json.loads(path.read_text())
-    if (not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('ids'), list)
-            or any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{64}', key) for key in value['ids'])):
+    if not isinstance(value, dict):
         raise ValueError('invalid shown wake acknowledgements')
-    return set(value['ids'])
+    if value.get('version') == 1:
+        ids, items = value.get('ids'), []
+    elif value.get('version') == 2:
+        ids, items = value.get('legacy_ids', []), value.get('items')
+    else:
+        raise ValueError('invalid shown wake acknowledgements')
+    if (not isinstance(ids, list) or
+            any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{64}', key) for key in ids)
+            or not isinstance(items, list)):
+        raise ValueError('invalid shown wake acknowledgements')
+    pairs = set()
+    for item in items:
+        if wake_log_refs(wake_item_refs([item])) != [item]:
+            raise ValueError('invalid typed shown acknowledgement')
+        pairs.add((item['id'], item['kind']))
+    return set(ids) | {key for key, _ in pairs}, pairs
 
 
-def wake_shown(inst, n):
-    """Only successful snapshots for this live binding acknowledge shown work.
+def wake_shown_read(path):
+    return wake_shown_receipt(path)[0]
 
-    This does not reserve a coordinator turn or acknowledge future arrivals.
-    Legacy history has no acknowledgement authority; retain its display baseline.
+
+def wake_shown_evidence(inst, n):
+    """Successful acknowledgements for this binding, retaining their recorded kinds.
+
+    Legacy id-only storage remains observable but cannot certify a different
+    typed need. Matching typed history can recover its acknowledgement authority.
     """
-    shown = set()
+    shown, pairs = set(), set()
     try:
-        shown.update(wake_shown_read(wake_shown_path(inst, n)))
+        ids, typed = wake_shown_receipt(wake_shown_path(inst, n))
+        shown.update(ids)
+        pairs.update(typed)
     except (OSError, ValueError):
         pass  # preserve unknown evidence; valid delivery history can still certify work
     try:
         binding = wake_owner_binding(inst, n)
         _, history, acknowledged = wake_history_entry(wake_directory(inst, n))
         if binding not in acknowledged:
-            acknowledged[binding] = frozenset(i['id'] for row in history if row.get('ack_binding') == binding
-                                              for i in row.get('snapshot', []))
-        shown.update(acknowledged[binding])
+            typed = frozenset((i['id'], i['kind']) for row in history if row.get('ack_binding') == binding
+                              for i in row.get('snapshot', []))
+            acknowledged[binding] = (frozenset(key for key, _ in typed), typed)
+        ids, typed = acknowledged[binding]
+        shown.update(ids)
+        pairs.update(typed)
     except (OSError, ValueError):
         pass  # unknown evidence never certifies delivery
-    return shown
+    return shown, pairs
+
+
+def wake_shown(inst, n):
+    return wake_shown_evidence(inst, n)[0]
 
 
 def wake_ack_shown(inst, n, snapshot):
-    """Keep delivery acknowledgements independently of bounded display history."""
+    """Keep typed delivery acknowledgements independently of bounded display history."""
     if not snapshot:
         return
     path = wake_shown_path(inst, n)
-    shown = wake_shown(inst, n) | {i['id'] for i in snapshot}
+    shown, pairs = wake_shown_evidence(inst, n)
+    pairs.update((i['id'], i['kind']) for i in snapshot)
+    shown.update(i['id'] for i in snapshot)
     try:
-        previous = wake_shown_read(path)
+        previous, previous_pairs = wake_shown_receipt(path)
     except (OSError, ValueError):
         if path.exists():
             path.replace(path.with_name('shown-invalid-' + os.urandom(8).hex() + '.json'))
-        previous = set()
-    if shown != previous or not path.exists():
-        wake_accept_write(path, json.dumps({'version': 1, 'ids': sorted(shown)}) + '\n')
+        previous, previous_pairs = set(), set()
+    if shown != previous or pairs != previous_pairs or not path.exists():
+        value = {'version': 2, 'items': [{'id': key, 'kind': kind} for key, kind in sorted(pairs)]}
+        legacy = shown - {key for key, _ in pairs}
+        if legacy:
+            value['legacy_ids'] = sorted(legacy)
+        wake_accept_write(path, json.dumps(value) + '\n')
 
 
 def wake_is_question(item):
@@ -488,9 +522,9 @@ def wake_actionable_pending(inst, path, terminal_quarantine=False):
         except (Exception, SystemExit):
             pass  # unknown state must not retire an undelivered hold or mixed question
     owner = inst.node(urllib.parse.unquote(path.parent.name))
-    shown = wake_shown(inst, owner)
+    _, shown = wake_shown_evidence(inst, owner)
     policy_refs = wake_root_policy(inst, owner, refs)
-    allowed = [i for i in policy_refs if i['id'] not in shown
+    allowed = [i for i in policy_refs if (i['id'], i['kind']) not in shown
                and not (i['kind'] in WAKE_TERMINAL_KINDS and
                         wake_terminal_delivered(inst, i['id'], quarantine=terminal_quarantine))
                and (value.get('explicit_kinds') is True or i['kind'] == 'inbox'
@@ -573,9 +607,9 @@ def request_wake(inst, n, reason, items=None, explicit=False):
                     refs = wake_item_refs(original)
                 except ValueError:
                     refs = original  # retain contradictory evidence for fail-open delivery
-            shown = wake_shown(inst, target)
+            _, shown = wake_shown_evidence(inst, target)
             policy_refs = wake_root_policy(inst, target, refs)
-            allowed = [i for i in policy_refs if i['id'] not in shown and
+            allowed = [i for i in policy_refs if (i['id'], i['kind']) not in shown and
                        (i['kind'] not in WAKE_TERMINAL_KINDS or not wake_terminal_delivered(inst, i['id']))]
             if refs and not allowed:
                 return True

@@ -2065,6 +2065,39 @@ class AckAllShown(Scenario):
             history.unlink()
             self.assertEqual(m.wake_history(history.parent), [])
 
+    def test_shown_receipt_keeps_kind_authority_when_history_is_unavailable(self):
+        m, n = self.m, self.inst.node('root')
+        refs = [{'id': 'a' * 64, 'kind': kind} for kind in ('rotate', 'inbox')]
+        directory = m.wake_directory(self.inst, n)
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            for index, ref in enumerate(refs):
+                self.assertTrue(m.request_wake(self.inst, n, 'kind:' + str(index), items=[ref]))
+                m.wake_drain(self.inst, n, once=True)
+                self.assertEqual(send.call_count, index + 1)
+                (directory / 'history.json').unlink()
+            for index, ref in enumerate(refs):
+                self.assertTrue(m.request_wake(self.inst, n, 'retry:' + str(index), items=[ref]))
+                m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 2, 'both actually delivered kinds stay acknowledged')
+
+    def test_legacy_id_only_shown_receipt_does_not_certify_a_typed_need(self):
+        m, n = self.m, self.inst.node('root')
+        ref = {'id': 'b' * 64, 'kind': 'inbox'}
+        path = m.wake_shown_path(self.inst, n)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'version': 1, 'ids': [ref['id']]}))
+        self.assertEqual(m.wake_shown(self.inst, n), {ref['id']})
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            self.assertTrue(m.request_wake(self.inst, n, 'legacy kind unknown', items=[ref]))
+            m.wake_drain(self.inst, n, once=True)
+            send.assert_called_once()
+            (path.parent / 'history.json').unlink()
+            self.assertTrue(m.request_wake(self.inst, n, 'typed receipt now known', items=[ref]))
+            m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+
     def test_shown_receipt_preserves_corrupt_bytes_and_retries_publication(self):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2)]

@@ -365,6 +365,25 @@ class TypedCommunication(Scenario):
                     self.m.communication_record(self.inst, self.inst.node('root'), 'question', 'Choose?', 'bad', spec)
             send.assert_not_called()
 
+    def test_typed_question_watch_ticks_retain_the_direct_receipt_identity(self):
+        from unittest import mock
+        m, n = self.m, self.inst.node('root')
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            question = m.communication_record(self.inst, n, 'question', 'Stable fixture question',
+                                              'stable', self.spec('outward'))
+            for _ in range(2):
+                groups = m.watch_groups(self.inst)
+                group = groups['root']
+                item = next(i for i in group['items'] if i['kind'] == 'question')
+                self.assertEqual(item['id'], question['id'])
+                self.assertEqual(item['reason'], 'question:' + question['id'])
+                m.watch_run(self.inst, groups=groups, quiet=True)
+                m.wake_drain(self.inst, n, once=True)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(m.wake_history(m.wake_directory(self.inst, n))[-1]['snapshot'],
+                             [{'id': question['id'], 'kind': 'question'}])
+
     def test_typed_question_inflight_baseline_excludes_previously_shown_question(self):
         from unittest import mock
         m, n = self.m, self.inst.node('root')
