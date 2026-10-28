@@ -1997,6 +1997,27 @@ class AckAllShown(Scenario):
             m.wake_drain(self.inst, n, once=True)
             self.assertEqual(send.call_count, 2)  # undelivered work causes the next wake
 
+    def test_many_resolved_deliveries_retain_one_complete_comparison_baseline(self):
+        m, n = self.m, self.inst.node('root')
+        delivered = []
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            for index in range(1, 126):
+                # Replacing the source resolves the previous need before the next delivery.
+                (self.root / 'inbox.md').write_text('- fixture need ' + str(index) + '\n')
+                ref = {'id': format(index, '064x'), 'kind': 'inbox'}
+                self.assertTrue(m.request_wake(self.inst, n, 'fixture:' + str(index), items=[ref], explicit=True))
+                m.wake_drain(self.inst, n, once=True)
+                delivered.append(ref)
+        directory = m.wake_directory(self.inst, n)
+        history = m.wake_history(directory)
+        self.assertEqual(send.call_count, len(delivered))
+        self.assertEqual(len(history), 100)
+        self.assertEqual(m.wake_previous_items(directory), delivered[:-1])
+        self.assertEqual(sum(len(row.get('before', [])) for row in history), len(delivered) - 1)
+        self.assertEqual([row['snapshot'] for row in history], [[ref] for ref in delivered[-100:]])
+        self.assertEqual(history[-1]['items'], delivered[-1:])
+
     def test_history_is_parsed_once_per_file_generation(self):
         m, n = self.m, self.inst.node('root')
         binding = m.wake_owner_binding(self.inst, n)

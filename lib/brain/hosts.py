@@ -927,9 +927,13 @@ def wake_drain(inst, n, once=False):
                             path.unlink(missing_ok=True)
                         # Logging cannot undo delivery and cause another model wake on retry.
                         try:
+                            # Only the latest comparison is read. Retain its complete
+                            # baseline once, not a lifetime-sized copy in every row.
+                            retained = [{key: value for key, value in row.items() if key != 'before'}
+                                        for row in history[-99:]]
                             wake_accept_write(directory / 'history.json', json.dumps({'version': 1,
-                                'deliveries': (history + [{'at': WAKE_CLOCK.time(), 'items': wake_log_refs(refs), 'reason': reason,
-                                    'before': wake_log_refs(before), 'snapshot': wake_log_refs(snapshot), 'ack_binding': wake_owner_binding(current, target)}])[-100:]}) + '\n')
+                                'deliveries': retained + [{'at': WAKE_CLOCK.time(), 'items': wake_log_refs(refs), 'reason': reason,
+                                    'before': wake_log_refs(before), 'snapshot': wake_log_refs(snapshot), 'ack_binding': wake_owner_binding(current, target)}]}) + '\n')
                         except OSError:
                             status = 'delivered; history write failed'
                     try:
