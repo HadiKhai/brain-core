@@ -1095,6 +1095,47 @@ class Watcher(Scenario):
         self.assertIn('Next `job/plan`', self.idle_work()[0]['text'])
         self.assertNotIn('Active', self.idle_work()[0]['text'])
 
+    def test_idle_work_nested_tasks_and_parent_blocks_reach_due(self):
+        backlog = self.root / 'backlog.md'
+        for indent in (' ', '  ', '   ', '    ', '\t'):
+            with self.subTest(indent=repr(indent)):
+                backlog.write_text('## Build order\n- Search milestone\n' +
+                                   indent + '- [ ] Implement search\n')
+                items = self.idle_work()
+                self.assertEqual(len(items), 1)
+                self.assertIn('Implement search', items[0]['text'])
+        for parent in ('[x] Finished', 'Deferred (parked: dependency)',
+                       'Decision (waits: operator)'):
+            with self.subTest(parent=parent):
+                backlog.write_text('## Build order\n- ' + parent + '\n'
+                                   '  - Subgroup\n    - [ ] Blocked child\n')
+                self.assertEqual(self.idle_work(), [])
+                with backlog.open('a') as stream:
+                    stream.write('- [ ] Runnable sibling\n')
+                items = self.idle_work()
+                self.assertEqual(len(items), 1)
+                self.assertIn('Runnable sibling', items[0]['text'])
+                self.assertNotIn('Blocked child', items[0]['text'])
+
+    def test_idle_work_punctuated_branches_preserve_the_single_free_slot(self):
+        self.b(self.root, 'set', 'root', 'parallel_jobs=2')
+        self.inst = self.m.Instance(self.root)
+        backlog = self.root / 'backlog.md'
+        row = dict.fromkeys(self.m.JOB_COLS, '')
+        row.update(Started=self.inst.now())
+        for branch in ('job/plan,extra', 'job/plan;extra', 'job/plan(extra)'):
+            with self.subTest(branch=branch):
+                backlog.write_text('## Build order\n- [ ] Active `' + branch + '`\n'
+                                   '- [ ] Next task\n')
+                for opened, expected in ((branch, 'Next task'),
+                                         ('job/plan', 'Active `' + branch + '`')):
+                    with self.subTest(opened=opened):
+                        row['Job'] = opened
+                        self.m.write_jobs(self.inst, self.inst.node('root'), [row])
+                        items = self.idle_work()
+                        self.assertEqual(len(items), 1)
+                        self.assertTrue(items[0]['text'].endswith(expected), items)
+
     def test_idle_work_wakes_once_changes_and_rearms_without_sleeps(self):
         backlog = self.root / 'backlog.md'
         backlog.write_text('## Build order\n- [ ] First runnable\n')
