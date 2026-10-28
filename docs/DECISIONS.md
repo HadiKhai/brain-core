@@ -3824,3 +3824,11 @@ the current attempt cannot erase an interrupted request's no-replay fence.
 Native verdict reads run inside an unlocked generation fence over the exact
 published handback, attempt, refs and inputs, and persist under the retaken lock.
 Receipts rehash their immutable request before choosing validation rules.
+
+## 2026-10-28: Isolate repeated checked-handback fixture modules
+
+Each queue fixture loads a uniquely named flat module. Reusing the loader name
+replaced the first fixture's ownership map while its host-identity mock cleanup
+was still registered, so the ready/not-ready subcases restored the wrong module.
+The fixture correction preserves every verdict assertion and changes no runtime
+queue behavior.

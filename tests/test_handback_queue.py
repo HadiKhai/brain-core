@@ -522,7 +522,9 @@ class HandbackLifecycle(Scenario):
         root.mkdir()
         (root / 'instance.md').write_text('---\ntimezone: UTC\n---\n')
         (root / 'node.md').write_text('---\ntitle: Root\nhome: none\n---\n')
-        m = core_loader.SourceFileLoader('queue_fixture', str(CORE / 'bin/brain')).load_module()
+        # Each fixture must retain its own flat module and mock cleanup targets.
+        name = 'queue_fixture_' + os.urandom(16).hex()
+        m = core_loader.SourceFileLoader(name, str(CORE / 'bin/brain')).load_module()
         host = mock.patch.object(m, 'lifecycle_host_identity', return_value='fixture-boot-a', create=True)
         host.start()
         self.addCleanup(host.stop)
