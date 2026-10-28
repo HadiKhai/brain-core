@@ -139,7 +139,10 @@ def usage_restart_item(inst, n, row):
         crossed = delta['compactions'] is not None and delta['compactions'] >= 3
         if episode and record.get('trigger') != 'compactions' and delta['compactions'] is not None:
             if not crossed:
-                data['usage'][key] = {**record, 'episode': None}
+                # With no episode, old accounting treats `at` as a delivered
+                # restart time. Retiring an alert must preserve only a real
+                # round time, never promote the alert's observation time.
+                data['usage'][key] = {**record, 'episode': None, 'at': record.get('round_at')}
                 return None
             data['usage'][key] = {**record, 'trigger': 'compactions'}
         if not episode and not crossed:

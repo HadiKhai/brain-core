@@ -135,6 +135,33 @@ class UsageRounds(Scenario):
         self.assertIsNone(self.m.job_round_usage(self.inst, self.n,
                           {**self.row, 'Started': '2026-01-15T11:00Z'}, self.usage))
 
+    def test_retiring_initial_budget_alert_never_invents_a_delivered_restart(self):
+        key = self.m.digest([self.n['id'], self.m.job_key(self.row)])
+        self.usage.update(compactions=2, active_minutes=240)
+        for round_field in ({}, {'round_at': None}):
+            with self.subTest(round_field=round_field):
+                record = {'job': self.m.job_key(self.row), 'episode': 'a' * 24,
+                          'baseline': {'compactions': 0, 'processed': 0},
+                          'at': '2026-01-15T11:00Z', **round_field}
+                with self.m.lifecycle_store(self.inst) as data:
+                    data['usage'][key] = record
+                self.usage['compactions'] = 2
+                self.assertIsNone(self.m.job_round_usage(self.inst, self.n, self.row, self.usage))
+                self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, self.row))
+                self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][key]['baseline'], record['baseline'])
+                for compactions in (2, 3):
+                    self.usage['compactions'] = compactions
+                    self.m.usage_restart_item(self.inst, self.n, self.row)
+                    round_usage = self.m.job_round_usage(self.inst, self.n, self.row, self.usage)
+                    self.assertIsNone(round_usage)
+                    line = self.m.usage_line(self.usage, {'hours': 2}, 4, round_usage=round_usage)
+                    self.assertNotIn('since restart', line)
+                    self.assertIn('4.0 of 2 h', line)
+                self.m.acknowledge_usage_restart(self.inst, self.n, self.row)
+                round_usage = self.m.job_round_usage(self.inst, self.n, self.row, self.usage)
+                self.assertEqual(round_usage['hours'], 0)
+                self.assertEqual(round_usage['since'], self.inst.now())
+
     def test_bad_baseline_is_retained_for_repair(self):
         self.restart()
         key = self.m.digest([self.n['id'], self.m.job_key(self.row)])

@@ -786,7 +786,7 @@ class DueLifecycle(Scenario):
         key = self.m.digest([self.n['id'], self.m.job_key(row)])
         record = {'job': self.m.job_key(row), 'episode': 'a' * 24,
                   'baseline': {'processed': 100, 'compactions': 2},
-                  'at': self.inst.now(), 'round_at': self.inst.now()}
+                  'at': self.inst.now(), 'round_at': '2026-01-15T10:00Z'}
         with self.m.lifecycle_store(self.inst) as data:
             data['usage'][key] = record
         usage = {'processed': 1000000, 'compactions': 4}
@@ -797,11 +797,13 @@ class DueLifecycle(Scenario):
             self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][key], record)
             self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
             retired = self.m.lifecycle_read(self.inst)['usage'][key]
-            self.assertEqual(retired, {**record, 'episode': None})
+            self.assertEqual(retired, {**record, 'episode': None, 'at': record['round_at']})
+            self.assertEqual(self.m.job_round_usage(self.inst, self.n, row, usage)['hours'], 2)
             usage['compactions'] = 5
             restart = self.m.usage_restart_item(self.inst, self.n, row)
             self.assertNotEqual(restart['episode'], record['episode'])
             self.assertIn('from a brief (3 compactions)', restart['text'])
+            self.assertEqual(self.m.job_round_usage(self.inst, self.n, row, usage)['hours'], 2)
 
     def test_legacy_compaction_episode_keeps_identity_and_unknown_evidence(self):
         row = self.identity_row()
