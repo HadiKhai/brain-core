@@ -4293,3 +4293,18 @@ directory spans execution and is removed on normal or exceptional exit. Existing
 node gating, resource cleanup and private scrubbed logs remain authoritative;
 the focused receipt never becomes full readiness evidence. Legacy explicit
 command execution remains available without the new exact-head assertion.
+
+## 2026-10-28: Keep routine wait results with the initiating command
+
+Machine admission and managed commands report successful completion and resumption
+on the initiating command's output. Their durable private outcomes remain, but
+routine success and resumed notices do not append node inbox entries or wake a
+coordinator. Failed or abandoned commands and long unresolved holds retain their
+existing escalation path. Delivery also retires typed routine completion requests
+queued by older versions, including mixed requests without discarding their
+questions, hand-backs or explicit result notifications.
+
+Task aging and parked rows remain in due output and are excluded from watcher
+entries and pending wake delivery. Ready, unblocked, stalled and provider-pending
+tasks are recognized actionable kinds. Existing semantic identities and open
+receipts continue to determine when a real need changed or reopened.

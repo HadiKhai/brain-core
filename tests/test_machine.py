@@ -2366,6 +2366,20 @@ class TerminalProducer(Scenario):
     def waits(self):
         return json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
 
+    def test_success_returns_to_caller_without_coordinator_notice_or_replay(self):
+        inbox = self.root / 'inbox.md'
+        before = inbox.read_bytes()
+        with mock.patch.object(self.m, 'request_wake') as wake, contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.m.machine_run('heavy', self.inst, 'root', clock=self.clock) as token:
+                pass
+            self.m.machine_terminal(self.inst, token)
+            self.m.machine_wait_notices(self.inst, 100010.0)
+        self.assertEqual(output.getvalue().count('command completed successfully'), 1)
+        wake.assert_not_called()
+        self.assertEqual(inbox.read_bytes(), before)
+        self.assertEqual(self.waits()[token]['outcome'], 'success')
+        self.assertTrue(self.waits()[token]['notified_completed'])
+
     def test_launch_failure_keeps_original_cause_once_and_retries_wake(self):
         with mock.patch.object(self.m, 'request_wake', side_effect=[False, True]) as wake:
             with self.assertRaisesRegex(OSError, 'fixture launch failed'):
@@ -2461,8 +2475,7 @@ class RecordedAdmission(Scenario):
         waits = json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
         self.assertEqual(waits[token]['resumed_at'], 100900.0)
         self.assertEqual(waits[token]['outcome'], 'success')
-        self.assertEqual([c.kwargs['items'][0]['kind'] for c in wake.call_args_list],
-                         ['machine-resumed', 'machine-completed'])
+        wake.assert_not_called()  # resumption and success return to the initiating command
 
     def test_fifteen_and_fortyfive_minute_reports_are_once_per_wait(self):
         def pause(seconds):

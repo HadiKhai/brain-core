@@ -715,12 +715,20 @@ def machine_terminal(inst, token, error=None, result=0):
     if inst is None:
         return
     outcome, reason = machine_exit_fields(error, result)
+    completed = False
     with machine_hold_store(inst) as data:
         row = data.get('waits', {}).get(token)
         if row is not None:
             if machine_terminal_row(row, token.clock.time(), outcome, reason):
+                completed = outcome == 'success'
                 if getattr(token, 'cleanup_errors', None):
                     row['cleanup_errors'] = list(token.cleanup_errors)
+    if completed:
+        # Report to the initiating shell after the durable outcome is published.
+        try:
+            print('machine care: command completed successfully', flush=True)
+        except OSError:
+            pass  # a closed output pipe cannot rewrite the recorded outcome
     try:
         machine_wait_notices(inst, token.clock.time())
     except (Exception, SystemExit):
@@ -780,7 +788,8 @@ def machine_record_wait(inst, node, job, row, now):
         # Pending delivery is authority, not disposable history. Retired tokens must
         # outlive the historical inbox markers they suppress (which have no expiry).
         closed = sorted((k for k, v in waits.items() if
-                         ((v.get('notified_completed' if v.get('outcome') == 'success' else 'notified_exited')
+                         ((v.get('outcome') == 'success' and v.get('notified_completed')) or
+                          (v.get('notified_exited')
                            and getattr(_m_hosts, 'wake_terminal_delivered', lambda *_: False)(inst, hashlib.sha256(
                                (k + (':completed' if v.get('outcome') == 'success' else ':exited')).encode()).hexdigest())) or
                           (not v.get('managed') and v['state'] == 'running' and
@@ -845,7 +854,10 @@ def machine_wait_notices(inst, now=None):
             if row['state'] == 'exited':
                 events.append(('exited', row['node']))
             elif row['state'] == 'completed':
-                events.append(('completed', row['node']))
+                # Completion is returned on the owning command's stdout. Retain
+                # the private outcome, including old rows, without a node wake.
+                row['notified_completed'] = True
+                continue
             elif row.get('closed_at') is not None:
                 continue
             elif row['state'] == 'queued':
@@ -854,7 +866,9 @@ def machine_wait_notices(inst, now=None):
                 if elapsed >= 2700:
                     events.append(('root', 'root'))
             elif row.get('resumed_at') is not None:
-                events.append(('resumed', row['node']))
+                # machine_admit reports resumption to its waiting caller.
+                row['notified_resumed'] = True
+                continue
             for event, target in events:
                 if row.get('notified_' + event):
                     continue

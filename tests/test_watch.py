@@ -326,6 +326,84 @@ class Watcher(Scenario):
         self.root = self.cached_setup('watch', self.watch_fixture)
         self.inst = self.m.Instance(self.root)
 
+    def test_five_need_keys_survive_clock_ticks_and_one_edit_wakes_once(self):
+        m, inst = self.m, self.inst
+        items = [{'kind': 'inbox', 'text': '2026-10-28 07:00 +00:00 from fixture: Choose size ' + str(i)}
+                 for i in range(5)]
+        def ids():
+            return {i['id'] for g in m.watch_groups(inst).values() for i in g['items']}
+        with mock.patch.object(m, 'due_items', return_value=items), \
+                mock.patch.object(m, 'changes_due', return_value=[]), \
+                mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'request_wake', return_value=True) as wake:
+            before = ids()
+            self.assertEqual(len(before), 5)
+            self.watch(kinds={'inbox'})
+            self.assertEqual(wake.call_count, 1)
+            self.assertEqual(len(wake.call_args.kwargs['items']), 5)
+            wake.reset_mock()
+            items.reverse()
+            for item in items:
+                item['text'] = item['text'].replace('07:00', '07:02').replace('Choose size', 'Choose  size')
+            self.assertEqual(ids(), before)
+            self.watch(kinds={'inbox'})
+            wake.assert_not_called()
+            items[0]['text'] += ' with a new requirement'
+            after = ids()
+            self.assertEqual((len(before - after), len(after - before)), (1, 1))
+            self.watch(kinds={'inbox'})
+            self.assertEqual(wake.call_count, 1)
+            self.assertEqual(len(wake.call_args.kwargs['items']), 1)
+            self.watch(kinds={'inbox'})
+            self.assertEqual(wake.call_count, 1)
+
+    def test_task_aging_and_parked_rows_stay_in_due_without_wake_entries(self):
+        m, inst = self.m, self.inst
+        n = inst.node('root')
+        n['local']['wake_policy'] = 'visible'
+        passive = [{'node': 'root', 'kind': kind, 'text': 'Fixture unchanged parked task',
+                    'episode': 'task:2026-10-28', 'task': 'FIX-1'}
+                   for kind in ('task-aging', 'task-parked')]
+        actions = [{'node': 'root', 'kind': kind, 'text': 'Fixture action', 'episode': kind + ':1'}
+                   for kind in ('task-ready', 'task-unblocked', 'task-stalled', 'task-provider-pending')]
+        with mock.patch.object(m, 'due_items', return_value=passive + actions), \
+                mock.patch.object(m, 'due_evidence', return_value=({}, '', '')), \
+                mock.patch.object(m, 'changes_due', return_value=[]):
+            first = m.watch_items(inst, n)
+            passive[0]['text'] += '; age 2.01 days'
+            passive[1]['episode'] = 'task:metadata-edit'
+            second = m.watch_items(inst, n)
+        self.assertEqual(first, second)
+        self.assertEqual({i['kind'] for i in first}, {i['kind'] for i in actions})
+        self.assertTrue(all(m.watch_decision_item(i) for i in first))
+        routed = [{**i, 'node': n['id']} for i in first]
+        group = {'node': n, 'items': list(routed)}
+        rollup = [{**i, 'id': m.watch_digest(i), 'reported': False} for i in passive]
+        with mock.patch.object(m, 'inbox_items', return_value=(rollup, {})):
+            m.watch_inbox_rollup(inst, group)
+        self.assertEqual(group['items'], routed)
+
+    def test_legacy_noise_pending_retires_without_losing_real_notifications(self):
+        m, inst = self.m, self.inst
+        n = inst.node('root')
+        n['local']['wake_policy'] = 'visible'
+        inst.save_local()
+        kinds = ('machine-completed', 'task-aging', 'task-parked', 'question', 'handback',
+                 'notification', 'notification')  # RETURN and LANDED have distinct notice IDs
+        refs = [{'id': format(i, '064x'), 'kind': kind,
+                 **({'question': True} if kind == 'question' else {})}
+                for i, kind in enumerate(kinds, 1)]
+        directory = m.wake_directory(inst, n)
+        directory.mkdir(parents=True, exist_ok=True)
+        pending = directory / ('a' * 64 + '.pending')
+        pending.write_text(json.dumps({'items': refs, 'explicit_kinds': True}))
+        with mock.patch.object(m, 'wake_start'), mock.patch.object(m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(m, 'wake_send', return_value=True) as send:
+            self.assertTrue(m.wake_actionable_pending(inst, pending))
+            self.assertEqual(json.loads(pending.read_text())['items'], refs[3:])
+            m.wake_drain(inst, n, once=True)
+        send.assert_called_once()
+        self.assertFalse(pending.exists())
+
     def test_producer_inbox_wake_ref_is_the_scan_entry(self):
         self.b(self.root, 'new', 'kid', '--title', 'Kid')
         episode = 'a' * 32

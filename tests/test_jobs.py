@@ -797,16 +797,10 @@ class UnifiedHandbacks(Scenario):
     def test_merged_required_lesson_outcomes_due_and_facts_clear_on_resolution(self):
         r, home, wt = self.job()
         self.finish(r)
-        notice, = [i for i in self.due(r) if i['kind'] == 'inbox']
-        self.assertRegex(notice['text'], r'command completed: command completed successfully .*<!-- machine-wait:[0-9a-f]+:completed -->')
+        # Successful verification returns to its caller, without a coordinator inbox notice.
+        self.assertFalse(any(i['kind'] == 'inbox' and 'from machine: command completed:' in i['text']
+                             for i in self.due(r)))
         inbox = r / 'nodes/a/inbox.md'
-        source = inbox.read_bytes()
-        request, = [i for i in json.loads(self.b(r, 'inbox', 'a', '--json'))
-                    if i['kind'] == 'inbox' and ':completed -->' in i['text']]
-        # Terminal delivery is informational and expires; it cannot be answered later.
-        refused = self.b(r, 'answer', request['id'], 'Observed successful fixture verification', ok=False)
-        self.assertIn('unknown or ambiguous item ID; inspect the current inbox or due output', refused)
-        self.assertEqual(inbox.read_bytes(), source)
         # The lesson workflow still answers a real unresolved request and retains its source.
         request = self.b(r, 'inbox', 'a', '--add', 'question: Which retained lesson resolution should be recorded?').strip()
         self.b(r, 'queue', 'wait', request)

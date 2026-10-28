@@ -135,7 +135,7 @@ WAKE_BOOKKEEPING_KINDS = (
     'missing-worktree', 'core-changes', 'rule-activation-review', 'overlapping-inputs',
     'idle-with-runnable-work', 'missing-preview', 'ledger', 'lesson-outcome',
     'handback-attempt', 'invalid-handback', 'restart-repair', 'job', 'stale-status',
-    'wake', 'watcher', 'notification',
+    'wake', 'watcher', 'notification', 'task-aging', 'task-parked',
 )
 
 
@@ -297,6 +297,9 @@ def wake_is_question(item):
 
 
 def wake_root_policy(inst, n, refs):
+    from . import watch as _m_watch
+    # Retire old routine requests as well as filtering newly queued work.
+    refs = [i for i in refs if i['kind'] not in (*_m_watch.WATCH_PASSIVE_KINDS, 'machine-completed')]
     target, _ = wake_target(inst, n)
     if target['id'] == 'root' and target['local'].get('wake_policy') == 'questions':
         return [i for i in refs if wake_is_question(i)]

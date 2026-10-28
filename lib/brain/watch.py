@@ -29,10 +29,11 @@ _m_verify = _m_common.LazyModule(__package__, 'verify')
 
 
 WATCH_LOCAL_KINDS = ('unsettled-threads',)
+WATCH_PASSIVE_KINDS = ('task-aging', 'task-parked')
 
 
 WATCH_DECISION_KINDS = ('coordinator-queue', 'coordinator-busy', 'delegated-completion', 'question', 'handback', 'job-stall', 'blocked-overdue', 'restart', 'job-restart', 'rotate',
-                        'overdue-question')
+                        'overdue-question', 'task-ready', 'task-unblocked', 'task-stalled', 'task-provider-pending')
 
 
 def watch_decision_item(item):
@@ -455,6 +456,8 @@ def watch_items(inst, n):
                 out.append({'id': watch_digest([n['id'], item['kind'], entry['id']]),
                             'kind': item['kind'], 'text': 'Unread core change; run brain changes'})
             continue
+        if item['kind'] in WATCH_PASSIVE_KINDS:
+            continue  # parked work and age remain visible in due, without a doorbell
         entry = watch_item_entry(n, item, rows, signals, state['inbox'])
         if entry is not None:
             out.append(entry)
@@ -868,7 +871,7 @@ def watch_inbox_rollup(inst, group):
         return (item['node'], item['kind'], ' '.join(item['text'].split()))
     visible = {key(i) for i in group['items']}
     for item in items:
-        if item['reported']:
+        if item['reported'] or item['kind'] in WATCH_PASSIVE_KINDS:
             continue
         n = inst.node(item['node'])
         text = item['text'].removeprefix('inbox: ') if item['kind'] == 'inbox' else item['text']
