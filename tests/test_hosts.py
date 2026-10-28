@@ -81,8 +81,14 @@ class LockHotfix(Scenario):
         script = '''import sys,time
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from brain import cli, instance, ui, job_attempts, verify, spend, hosts, watch, events, tasks, review, preview_evidence
+from brain import cli, instance, ui, job_attempts, verify, spend, hosts, watch, events, tasks, review, preview_evidence, handback_queue, status
 site, marker, release = sys.argv[2:5]
+projection = site in ('handback_projection', 'task_projection')
+deferred = []
+if projection:
+    # Keep the real deferred drain in this instrumented child so its snapshot
+    # reaches the same lock/barrier hook after the producer has returned.
+    handback_queue.start_intent_drainer = deferred.append
 owner, name = {'sample': (ui, 'machine_load'), 'sample_watcher': (watch, 'watch_scan'),
                'handback_binding': (job_attempts, 'attempt_binding'),
                'handback_preflight': (verify, 'record_ready'), 'handback_accounting': (spend, 'live_usage'),
@@ -111,6 +117,18 @@ hosts.wake_start = lambda *args, **kwargs: None
 if site != 'sample_watcher': watch.watch_once = lambda inst, **kwargs: None
 sys.argv = ['brain', *sys.argv[5:]]
 cli.main()
+if projection:
+    assert not fired, 'producer computed a deferred projection before returning'
+    assert len(deferred) == 1, 'producer did not schedule its deferred drain'
+    current = deferred[0]
+    node = current.node('a' if site == 'handback_projection' else 'root')
+    assert events.read(current)[-1]['data'].get('deferred'), 'source commit was not deferred'
+    assert status.generated_stale(node), 'deferred view was not labelled stale'
+    handback_queue.drain_intents(current)
+    assert fired, 'deferred drain never computed its projection'
+    assert events.node_ref(node['id']) not in events.journal(instance.Instance(current.root)).state['invalid']
+    assert not status.generated_stale(node), 'deferred drain left the generated view stale'
+    assert events.events_view(current, node), 'deferred drain did not publish a usable view'
 '''
         env = {**self.env, 'BRAIN_ROOT': str(root)}
         child = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), site,
@@ -119,12 +137,27 @@ cli.main()
         stale = None
         try:
             self.wait_file(marker, child)
+            if site == 'task_projection':
+                batch_views = {path: path.read_bytes() if path.exists() else None
+                               for path in (root / 'status.md', root / 'status-archive.md')}
             writer_args = (['status', 'other', '--refresh'] if site.startswith('task') else
                            ['set', 'other', 'stack=concurrent'])
             writer = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), *writer_args],
                                     env=env, capture_output=True, text=True, timeout=5)
             self.assertEqual(writer.returncode, 0, writer.stdout + writer.stderr)
             self.assertIsNone(child.poll(), 'writer must finish while computation is paused')
+            if site == 'task_projection':
+                for path, before in batch_views.items():
+                    self.assertEqual(path.read_bytes() if path.exists() else None, before,
+                                     'peer refresh must leave the live batch view untouched')
+                reader = core_loader.SourceFileLoader('peer_batch_read', str(CORE / 'bin/brain')).load_module()
+                current = reader.Instance(root)
+                journal = reader._owners['Command']
+                self.assertIn(journal.node_ref('root'), journal.journal(current).state['invalid'])
+                batches = [ref for ref, event in journal.replay(current)[2].items()
+                           if event['data'].get('write_batch')]
+                self.assertEqual(len(batches), 1)
+                self.assertTrue(journal.lease_live(current, batches[0]))
             if drift and site == 'sample':
                 stale = b'{"samples": [], "episode": false, "newer": true}\n'
                 (root / '.brain/machine.json').write_bytes(stale)

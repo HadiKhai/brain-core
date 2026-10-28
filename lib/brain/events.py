@@ -1065,6 +1065,19 @@ def foreign_reconciliation(inst, node, snapshot, state, actual_map, opened, dead
                       if any(owner == 'root' or n['id'].startswith(owner + '/') for owner in owners))
         changed = [actual_map.get(k) or state[k] for k in state.keys() | actual_map.keys()
                    if state.get(k, {}).get('hash') != actual_map.get(k, {}).get('hash')]
+        # Deferred maintenance owns no pending source mutation. A valid peer
+        # may refresh beside that released projection without reconciling its
+        # invalid views or adopting their pending bytes. Source writers,
+        # invalid targets, stream damage and gaps outside those views stay strict.
+        if (node is not None and not dead and not journal(inst).state['faults']
+                and node_ref(node['id']) not in journal(inst).state['invalid']
+                and all(r.get('scope') in journal(inst).state['invalid'] for r in changed)
+                and all(e['data'].get('write_batch') is True for e in foreign)):
+            for op in reversed(_CURRENT):
+                if op.inst.root == inst.root and op.command == 'status' and op.node == node['id']:
+                    op.defer_invalid_views = True
+                    break
+            return True
         if (node is not None and node_ref(node['id']) not in scopes and healthy
                 and all(r.get('scope') in scopes for r in changed)):
             return True
@@ -1611,11 +1624,17 @@ def maintain(op, changed):
         return DEFERRED_VIEWS
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
-    for n in op.inst.nodes():
-        if not n['archived'] and (node_ref(n['id']) in journal(op.inst).state['invalid']
-                                  and not hasattr(op, 'project_nodes')
-                                  or n['id'] in getattr(op, 'project_nodes', ())):
-            selected[n['id']] = n
+    invalid = journal(op.inst).state['invalid']
+    if getattr(op, 'defer_invalid_views', False):
+        # Peer admission does not grant the refresh ownership of the live
+        # batch's invalid views, even if its own setup touched those scopes.
+        selected = {nid: n for nid, n in selected.items() if node_ref(nid) not in invalid}
+    else:
+        for n in op.inst.nodes():
+            if not n['archived'] and (node_ref(n['id']) in invalid
+                                      and not hasattr(op, 'project_nodes')
+                                      or n['id'] in getattr(op, 'project_nodes', ())):
+                selected[n['id']] = n
     prepared = {}
     # Every writer uses the same fenced preparation, including new commands.
     # An allowlist left question-answer, notify, jobs and check under the lock.

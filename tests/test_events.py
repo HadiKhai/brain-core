@@ -1006,6 +1006,43 @@ class EventViews(Scenario):
                     with self.assertRaises(SystemExit):
                         events.reconcile(inst, node=inst.node('other'))
 
+    def test_valid_peer_refresh_beside_deferred_batch_never_reconciles_its_sources(self):
+        r = self.init('deferred-peer')
+        self.b(r, 'new', 'other', '--title', 'Other')
+        inst = instance.Instance(r)
+        with instance.brain_lock(r):
+            deferred = events.Command(r, command='task')
+            deferred.defer_views = True
+            with deferred:
+                (r / 'backlog.md').write_text('- deferred source\n')
+            batch = events.Command(r, command='intent_queue')
+            batch.write_batch = True
+            with batch:
+                # An existing source gap in the invalid view stays unadopted.
+                (r / 'source.md').write_text('Pending source\n')
+                before = (r / '.brain/events.jsonl').read_bytes()
+                state = events.replay(inst)[0].copy()
+                invalid = events.journal(inst).state['invalid'].copy()
+                with mock.patch.object(events, '_CURRENT', []):
+                    for held in (False, True):
+                        with instance.held(r) if held else contextlib.nullcontext():
+                            events.reconcile(inst, node=inst.node('other'))
+                            for target in (None, inst.node('root')):
+                                with self.assertRaises(SystemExit):
+                                    events.reconcile(inst, node=target)
+                            for path in (r / 'nodes/other/backlog.md', r / '.brain/local.json'):
+                                original = path.read_bytes()
+                                try:
+                                    path.write_bytes(original + b' ')
+                                    with self.assertRaises(SystemExit):
+                                        events.reconcile(inst, node=inst.node('other'))
+                                finally:
+                                    path.write_bytes(original)
+                    self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
+                    self.assertEqual(events.replay(inst)[0], state)
+                    self.assertEqual(events.journal(inst).state['invalid'], invalid)
+                    self.assertTrue(events.lease_live(inst, batch.ref))
+
     def test_released_root_writer_keeps_event_reconciliation_out_of_descendants(self):
         r = self.init('demo')
         self.b(r, 'new', 'app', '--title', 'App')
