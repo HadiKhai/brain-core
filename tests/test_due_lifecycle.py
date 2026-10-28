@@ -745,14 +745,16 @@ class DueLifecycle(Scenario):
         self.inst.cfg['host'] = 'unsupported'
         self.assertIn('gap', self.m.wake_setup_plan(self.inst, self.n))
 
-    def test_fix3_restart_thresholds_are_independent_blocking_and_protected(self):
+    def test_restart_at_third_compaction_is_blocking_and_budgets_are_soft(self):
         row = self.identity_row()
         cases = [
             ({'compactions': 2, 'processed': 199}, 100, False),
+            ({'compactions': 2, 'processed': 1000000, 'active_minutes': 10000}, 100, False),
+            ({'compactions': 3, 'processed': 0}, None, True),
             ({'compactions': 3, 'processed': 0}, 100, True),
-            ({'compactions': 0, 'processed': 200}, 100, True),
+            ({'compactions': 0, 'processed': 200}, 100, False),
             ({'compactions': 3, 'processed': None}, None, True),
-            ({'compactions': None, 'processed': 200}, 100, True),
+            ({'compactions': None, 'processed': 200}, 100, False),
             ({'compactions': None, 'processed': None}, 100, False),
             ({'compactions': 0, 'processed': 999}, None, False),
             ({'compactions': 0, 'processed': 999}, 0, False),
@@ -763,7 +765,7 @@ class DueLifecycle(Scenario):
             with self.subTest(counts=counts, budget=budget):
                 current = {**row, 'Job': 'job/threshold-' + str(index)}
                 with mock.patch.object(self.m, 'live_usage', return_value=counts), \
-                        mock.patch.object(self.m, 'job_budget', return_value={'tokens': budget}):
+                        mock.patch.object(self.m, 'job_budget', return_value={'tokens': budget, 'hours': 1}):
                     item = self.m.usage_restart_item(self.inst, self.n, current)
                 self.assertEqual(item is not None, expected)
                 if item:
@@ -771,11 +773,92 @@ class DueLifecycle(Scenario):
                     self.assertTrue(item['blocking'])
                     self.assertTrue(item['protected'])
                     self.assertFalse(item.get('informational', False))
+                    self.assertIn(f"restart {current['Job']} from a brief (3 compactions)", item['text'])
                     self.assertIn('BLOCKING', item['text'])
+                    self.assertNotIn('twice the budget', item['text'])
                     self.assertIn(self.m.restart_command(self.n, current), item['text'])
                     self.assertTrue(self.m.watch_decision_item(item))
                     for action in ('ack', 'defer'):
                         self.assertFalse(self.m.reminder_eligible(item, action))
+
+    def test_legacy_budget_episode_retires_without_resetting_usage_baseline(self):
+        row = self.identity_row()
+        key = self.m.digest([self.n['id'], self.m.job_key(row)])
+        record = {'job': self.m.job_key(row), 'episode': 'a' * 24,
+                  'baseline': {'processed': 100, 'compactions': 2},
+                  'at': self.inst.now(), 'round_at': self.inst.now()}
+        with self.m.lifecycle_store(self.inst) as data:
+            data['usage'][key] = record
+        usage = {'processed': 1000000, 'compactions': 4}
+        with mock.patch.object(self.m, 'live_usage', side_effect=lambda *a: dict(usage)):
+            # The dashboard classifies a detached copy, never rewriting receipts.
+            with self.m.observe(self.inst):
+                self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
+            self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][key], record)
+            self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
+            retired = self.m.lifecycle_read(self.inst)['usage'][key]
+            self.assertEqual(retired, {**record, 'episode': None})
+            usage['compactions'] = 5
+            restart = self.m.usage_restart_item(self.inst, self.n, row)
+            self.assertNotEqual(restart['episode'], record['episode'])
+            self.assertIn('from a brief (3 compactions)', restart['text'])
+
+    def test_legacy_compaction_episode_keeps_identity_and_unknown_evidence(self):
+        row = self.identity_row()
+        key = self.m.digest([self.n['id'], self.m.job_key(row)])
+        record = {'job': self.m.job_key(row), 'episode': 'a' * 24,
+                  'baseline': {'processed': 0, 'compactions': 0}, 'at': self.inst.now()}
+        with self.m.lifecycle_store(self.inst) as data:
+            data['usage'][key] = record
+        usage = {'processed': 500, 'compactions': None}
+        with mock.patch.object(self.m, 'live_usage', side_effect=lambda *a: dict(usage)):
+            self.assertEqual(self.m.usage_restart_item(self.inst, self.n, row)['episode'], record['episode'])
+            self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][key], record)
+            usage['compactions'] = 3
+            self.assertEqual(self.m.usage_restart_item(self.inst, self.n, row)['episode'], record['episode'])
+            self.assertEqual(self.m.lifecycle_read(self.inst)['usage'][key]['trigger'], 'compactions')
+            usage['compactions'] = None
+            self.assertEqual(self.m.usage_restart_item(self.inst, self.n, row)['episode'], record['episode'])
+
+    def test_compaction_restart_wakes_once_and_stays_on_dashboard_until_rebrief_or_close(self):
+        row = self.identity_row()
+        self.m.write_jobs(self.inst, self.n, [row])
+        self.inst.local_of('root').update(coordinator='fixture-root', wake='fixture-send',
+            worktrees={row['Job']: {'path': str(self.root)}})
+        self.inst.save_local()
+        usage = {**self.m.spend_sum([]), 'processed': 1000000, 'compactions': 2, 'sessions': 1}
+        with mock.patch.object(self.m, 'live_usage', side_effect=lambda *a: dict(usage)), \
+                mock.patch.object(self.m, 'local_job_state', return_value={'exists': True, 'merged': False}), \
+                mock.patch.object(self.m, 'changes_due', return_value=[]), \
+                mock.patch.object(self.m, 'status_lag', return_value=None), \
+                mock.patch.object(self.m, 'watch_job_stalls', return_value=[]), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            def dashboard_restarts():
+                state = self.m.ui_state(self.m.UIInstance(self.root), problems=0, machine_spend={})
+                return [item for item in state['due'] if item['kind'] == 'job-restart']
+            self.assertEqual(dashboard_restarts(), [])
+            usage['compactions'] = 3
+            self.m.usage_restart_item(self.inst, self.n, row)
+            first = dashboard_restarts()
+            self.assertEqual(len(first), 1)
+            for compactions in (3, 4, 5):
+                usage['compactions'] = compactions
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.m.watch_once(self.inst)
+                self.m.wake_drain(self.inst, self.n, once=True)
+                current = dashboard_restarts()
+                self.assertEqual(len(current), 1)
+                self.assertEqual(current[0]['episode'], first[0]['episode'])
+                self.assertEqual(send.call_count, 1)
+            self.m.acknowledge_usage_restart(self.inst, self.n, row)
+            self.assertEqual(dashboard_restarts(), [])
+            usage['compactions'] = 8
+            again = dashboard_restarts()
+            self.assertEqual(len(again), 1)
+            self.assertNotEqual(again[0]['episode'], first[0]['episode'])
+            self.m.write_jobs(self.inst, self.n, [{**row, 'Ended': self.inst.now(), 'Outcome': 'closed'}])
+            self.assertEqual(dashboard_restarts(), [])
 
     def test_fix3_completed_jobs_do_not_restart_and_other_nodes_do_not_own_need(self):
         row = self.identity_row()
@@ -854,7 +937,7 @@ class DueLifecycle(Scenario):
             self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
             usage = {'compactions': 6, 'processed': 349}
             self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
-            usage['processed'] = 350
+            usage['compactions'] = 7
             again = self.m.usage_restart_item(self.inst, self.n, row)
             self.assertNotEqual(first['episode'], again['episode'])
             other = {**row, 'Started': '2026-01-15T11:00Z'}
@@ -867,7 +950,7 @@ class DueLifecycle(Scenario):
         with mock.patch.object(self.m, 'live_usage', side_effect=lambda *a: dict(usage)), \
                 mock.patch.object(self.m, 'job_budget', return_value={'tokens': 100}):
             first = self.m.usage_restart_item(self.inst, self.n, row)
-            self.assertIn('restart from brief', first['text'])
+            self.assertIn('restart job-fixture from a brief (3 compactions)', first['text'])
             self.assertIn('3 compactions', first['text'])
             self.assertIn('150', first['text'])
             usage.update(compactions=4, processed=210)
@@ -876,7 +959,7 @@ class DueLifecycle(Scenario):
             self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
             usage.update(compactions=6, processed=409)
             self.assertIsNone(self.m.usage_restart_item(self.inst, self.n, row))
-            usage['processed'] = 410
+            usage['compactions'] = 7
             again = self.m.usage_restart_item(self.inst, self.n, row)
             self.assertNotEqual(first['episode'], again['episode'])
             evidence = ({'jobs': [row], 'worktrees': {}, 'handbacks': {self.m.job_key(row): None}, 'inbox': []}, '', '')

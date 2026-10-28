@@ -119,8 +119,6 @@ def usage_restart_item(inst, n, row):
     counts = {k: (usage or {}).get(k) for k in ('compactions', 'processed')}
     counts = {k: v if type(v) is int and v >= 0 else None for k, v in counts.items()}
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
-    budget = (_m_spend.job_budget(n, row) or {}).get('tokens')
-    budget = budget if type(budget) in (int, float) and budget > 0 else None
     with usage_restart_store(inst, key) as (data, usage_size):
         record = data['usage'].get(key, {})
         if not isinstance(record, dict):
@@ -135,11 +133,15 @@ def usage_restart_item(inst, n, row):
         episode = record.get('episode')
         if episode is not None and not re.fullmatch(r'[0-9a-f]{24}', str(episode)):
             raise ValueError('invalid restart episode')
-        # Independent positive evidence opens a need. Once open, only a
-        # delivered rebrief or terminal job evidence resolves it, never a
-        # missing counter or a subsequently increased budget.
-        crossed = ((delta['compactions'] is not None and delta['compactions'] >= 3) or
-                   (budget is not None and delta['processed'] is not None and delta['processed'] >= 2 * budget))
+        # Budgets are soft. Retire legacy token-only episodes when known
+        # compaction evidence rules out the restart threshold. Unknown legacy
+        # evidence stays pending; new episodes record their compaction trigger.
+        crossed = delta['compactions'] is not None and delta['compactions'] >= 3
+        if episode and record.get('trigger') != 'compactions' and delta['compactions'] is not None:
+            if not crossed:
+                data['usage'][key] = {**record, 'episode': None}
+                return None
+            data['usage'][key] = {**record, 'trigger': 'compactions'}
         if not episode and not crossed:
             return None
         if not episode:
@@ -148,16 +150,14 @@ def usage_restart_item(inst, n, row):
             from . import ui_readmodel
             episode = ui_readmodel.episode(inst, [key, baseline, record])
             data['usage'][key] = {'job': _m_jobs.job_key(row), 'baseline': baseline,
-                                  'episode': episode, 'at': inst.now(),
+                                  'episode': episode, 'trigger': 'compactions', 'at': inst.now(),
                                   'round_at': record.get('round_at') or (record.get('at') if record and not record.get('episode') else None)}
-        budget_text = str(budget) if budget else 'not configured'
         shown = {k: value if value is not None else 'unknown' for k, value in delta.items()}
         command = _m_briefs.restart_command(n, row)
         return {'node': n['id'], 'kind': 'job-restart', 'job': _m_jobs.job_key(row), 'episode': episode,
                 'blocking': True, 'protected': True,
-                'text': (f"{row['Job']}: BLOCKING job restart from brief: {shown['compactions']} compactions since brief "
-                         f"(threshold 3); {shown['processed']} processed tokens since brief "
-                         f"(token budget {budget_text}; threshold twice the budget). "
+                'text': (f"BLOCKING: restart {row['Job']} from a brief ({shown['compactions']} compactions); "
+                         f"{shown['processed']} processed tokens since brief (recorded only; budgets are soft). "
                          f"Owning coordinator must restart its worker with `{command}` before continuing the job.")}
 
 

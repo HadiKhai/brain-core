@@ -232,8 +232,9 @@ The preview requirement and a `preview=none` setting remain intact. A changed or
 recurrent need reappears; questions, failures, restart markers and unreadable evidence
 remain visible. These receipts are local to this machine in `.brain/wake/lifecycle.json`.
 
-An open job raises one protected `restart from brief` item at three compactions or
-twice its configured token budget, naming both measures. The coordinator restarts
+An open job raises one protected, blocking `restart <job> from a brief (<n> compactions)`
+item at three compactions since its last restart. Token and hour budgets are soft:
+overruns remain recorded and never trigger a restart. The coordinator restarts
 it from a successfully delivered brief; that records a usage baseline so old counters
 do not immediately re-alert. Brain never automatically stops the worker.
 

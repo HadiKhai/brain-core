@@ -54,7 +54,7 @@ class UsageRounds(Scenario):
 
     def test_pending_second_restart_preserves_current_round_meter(self):
         self.restart()
-        self.usage['processed'] = 420
+        self.usage.update(processed=420, compactions=7)
         self.assertIsNotNone(self.m.usage_restart_item(self.inst, self.n, self.row))
         self.assertEqual(self.m.job_round_usage(self.inst, self.n, self.row, self.usage)['processed'], 210)
 
@@ -81,7 +81,7 @@ class UsageRounds(Scenario):
 
     def test_regressed_round_read_is_flagged_without_rewriting_strict_baseline(self):
         self.restart()
-        self.usage['processed'] = 420
+        self.usage.update(processed=420, compactions=7)
         self.assertIsNotNone(self.m.usage_restart_item(self.inst, self.n, self.row))
         before = self.m.lifecycle_read(self.inst)
         for counter in ('processed', 'compactions', 'active_minutes'):
@@ -184,7 +184,7 @@ class UsageRounds(Scenario):
 
     def test_captured_usage_cannot_regress_an_existing_round_baseline(self):
         self.restart()
-        self.usage.update(processed=420)
+        self.usage.update(processed=420, compactions=7)
         self.assertIsNotNone(self.m.usage_restart_item(self.inst, self.n, self.row))
         before = self.m.lifecycle_read(self.inst)
         with self.assertRaisesRegex(ValueError, 'regressed'):

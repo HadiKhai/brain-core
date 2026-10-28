@@ -5,6 +5,17 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-28: Restart at the third compaction; budgets stay soft
+
+Due and the dashboard retain one blocking restart item per running-job episode
+at three compactions since the last delivered restart brief. Token and hour
+budget overruns remain accounting and advice, never restart triggers.
+
+After upgrading: legacy token-only restart episodes clear when a known
+compaction count is below three. Unknown legacy evidence stays pending until
+it can be classified or the job is relaunched or closed. Existing compaction
+episodes keep their identity; no worker is stopped by reading due.
+
 ## 2026-10-28: Pinned core releases and own-node upgrades
 
 `brain upgrade` installs each core release into `.brain/cores/<sha>` with
