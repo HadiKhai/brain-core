@@ -723,6 +723,7 @@ def watch_groups(inst, nodes=None):
     except (OSError, ValueError):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
+        _m_status.due_once_forget()  # the fallback's due inventory follows its own generation
         generation = watch_source_signature(inst)
         groups = scan()
         if watch_source_signature(inst) != generation:

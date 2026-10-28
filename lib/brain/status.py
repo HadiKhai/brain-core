@@ -819,8 +819,50 @@ def _due_source_items(inst, n, state, include_ready):
     return before_advice, before_stale, items
 
 
+_DUE_ONCE = ContextVar('brain_due_once', default=None)
+
+
+@contextmanager
+def due_once(ready=()):
+    """One due command's inventory per node and option set, reused by its watch
+    publication, coordinator rollup and display. Nodes in `ready` will be shown
+    with readiness anyway, so their readiness-free requests share that inventory:
+    readiness changes only handback prose and fields, never ids or suppression.
+    The scope ends with the command; nothing survives into another command."""
+    token = _DUE_ONCE.set({'ready': frozenset(ready), 'items': {}})
+    try:
+        yield
+    finally:
+        _DUE_ONCE.reset(token)
+
+
+def due_once_forget():
+    """A fallback rescan observes afresh; earlier inventories must not answer it."""
+    scope = _DUE_ONCE.get()
+    if scope is not None:
+        scope['items'].clear()
+
+
+def due_once_inventory(inst, n):
+    """Any inventory this command already holds for n (handled included), else None."""
+    scope = _DUE_ONCE.get()
+    return next((items for key, items in (scope or {}).get('items', {}).items() if key[0] == n['id']), None)
+
+
 def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True,
               include_handled=False):
+    scope = _DUE_ONCE.get()
+    if scope is None or n['archived']:
+        return _due_items(inst, n, evidence, include_stale, include_ready, include_advice, include_handled)
+    key = (n['id'], include_stale, include_ready or n['id'] in scope['ready'], include_advice)
+    if key not in scope['items']:
+        scope['items'][key] = _due_items(inst, n, evidence, *key[1:], include_handled=True)
+    items = [dict(i) for i in scope['items'][key]]
+    # Equal to reminder_items' own filter: one reconciliation serves both views.
+    return items if include_handled else [i for i in items if not _m_reminders.reminder_handled(inst, i)]
+
+
+def _due_items(inst, n, evidence, include_stale, include_ready, include_advice, include_handled):
     if n["archived"]:
         return []
     # The fingerprint's status_facts and this inventory share observations even
@@ -881,17 +923,23 @@ def machine_due_items(inst, nodes, state, items):
               'scope': scope, 'text': _m_machine.machine_summary(state)}] if hold else [])
 
 
+def coordinator_sources(inst, nodes):
+    """(source, own) pairs whose work the selected coordinators roll up."""
+    selected = {n['id'] for n in nodes}
+    for source in inst.nodes():
+        if source['archived']:
+            continue
+        own = source['id'] in selected
+        if own or _m_hosts.wake_target(inst, source)[0]['id'] in selected:
+            yield source, own
+
+
 def coordinator_due_items(inst, nodes, include_handled=False):
     """Source work belongs to its nearest live coordinator, retaining source ids."""
     from . import watch as _m_watch
     selected = {n['id'] for n in nodes}
     items = []
-    for source in inst.nodes():
-        if source['archived']:
-            continue
-        own = source['id'] in selected
-        if not own and _m_hosts.wake_target(inst, source)[0]['id'] not in selected:
-            continue
+    for source, own in coordinator_sources(inst, nodes):
         items += [i for i in due_items(inst, source, include_stale=own, include_advice=own,
                                       include_handled=include_handled) + changes_due(inst, source)
                   if own or i['kind'] not in (*_m_watch.WATCH_LOCAL_KINDS, 'overdue-question')]
@@ -971,6 +1019,13 @@ def cmd_due(a):
         else:
             print(f"root: {upgraded}")
         return
+    # Each node's due inventory is worked out once for this tick: the rollup
+    # shows readiness for its sources, so their watch scans share that result.
+    with due_once(ready={source['id'] for source, _ in coordinator_sources(inst, nodes)}):
+        _due_tick(a, inst, nodes)
+
+
+def _due_tick(a, inst, nodes):
     # Docker observations precede every due evidence computation, including the
     # watcher scan, and are shared by all nodes selected for this tick.
     _m_docker_cleanup.docker_cleanup_nodes(inst, nodes)
@@ -1053,7 +1108,10 @@ def cmd_due(a):
         for n in escalation_nodes:
             if n["id"] == "root" or n["archived"]:
                 continue
-            items += [item for item in due_items(inst, n, include_stale=False, include_advice=False)
+            # Overdue questions are equal in every inventory of n and never handled.
+            held = due_once_inventory(inst, n)
+            items += [item for item in (held if held is not None else
+                                        due_items(inst, n, include_stale=False, include_advice=False))
                       if item["kind"] == "overdue-question"]
             if any("<!-- host-question:" in line or "<!-- handback:" in line for line in inbox_lines(n)):
                 items.append({"node": n["id"], "kind": "question", "text":

@@ -2812,6 +2812,53 @@ class RenderedFingerprint(Scenario):
         self.assertEqual(ready.call_count, 1)
         self.assertFalse(next(i for i in retried if i['kind'] == 'handback')['ready'])
 
+    def root_due(self, status):
+        out = io.StringIO()
+        args = argparse.Namespace(id='root', quiet=False, json=True)
+        with status._m_command_reads.snapshot(), contextlib.redirect_stdout(out):
+            status.cmd_due(args)
+        return [{k: v for k, v in i.items() if k != 'age_hours'} for i in json.loads(out.getvalue())]
+
+    def test_root_due_works_out_each_child_once_and_next_command_sees_changes(self):
+        status = self.m._owners['due_items']
+        def counted(scoped):
+            computed = []
+            real = status._due_items
+            def count(inst, n, *args, **kwargs):
+                computed.append(n['id'])
+                return real(inst, n, *args, **kwargs)
+            with mock.patch.object(status, '_due_items', side_effect=count), \
+                    mock.patch.object(status, 'due_once', status.due_once if scoped else
+                                      lambda ready=(): contextlib.nullcontext()):
+                return self.root_due(status), computed
+        # Without the command scope, the watch scan, rollup and escalation pass
+        # each work out the child's inventory: the old repeated path.
+        expected, unshared = counted(scoped=False)
+        self.assertEqual(unshared.count('sample'), 3)
+        actual, computed = counted(scoped=True)
+        self.assertEqual(actual, expected)
+        self.assertEqual(computed.count('sample'), 1)
+        self.assertIsNone(status._DUE_ONCE.get())
+        self.assertNotIn('A changed worker publication', next(i for i in actual if i['kind'] == 'handback')['text'])
+        # A mutation between two commands is observed by the next command.
+        self.signal['summary'] = 'A changed worker publication'
+        self.save_signal()
+        changed, computed = counted(scoped=True)
+        self.assertIn('A changed worker publication', next(i for i in changed if i['kind'] == 'handback')['text'])
+        self.assertEqual(computed.count('sample'), 1)
+
+    def test_due_once_readiness_share_keeps_watch_identities(self):
+        status, watch = self.m._owners['due_items'], self.m._owners['watch_items']
+        plain = watch.watch_items(self.inst, self.n)
+        with status.due_once(ready={'sample'}):
+            shared = watch.watch_items(self.inst, self.n)
+            held = status.due_once_inventory(self.inst, self.n)
+            self.assertTrue(next(i for i in held if i['kind'] == 'handback')['ready'])
+            status.due_once_forget()
+            self.assertIsNone(status.due_once_inventory(self.inst, self.n))
+        self.assertEqual([(i['id'], i['kind']) for i in shared], [(i['id'], i['kind']) for i in plain])
+        self.assertIsNone(status.due_once_inventory(self.inst, self.n))
+
     def facts(self):
         state, _, _ = self.m.due_evidence(self.inst, self.n)
         return self.m.status_facts(self.inst, self.n, state,

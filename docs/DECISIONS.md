@@ -4119,3 +4119,15 @@ lifecycle handling remain separate per caller, preserving ordering, partial-scan
 omissions, current suppression and damaged-receipt refusals. No due result or
 readiness verdict is retained across snapshots; mutations between calls are read
 again.
+
+## 2026-10-28: Work out each node's due inventory once per due command
+
+`brain due` holds a command-scoped inventory per node and option set. Its watch
+publication, coordinator rollup and root escalation pass reuse it. Rollup sources
+are shown with readiness anyway, so their readiness-free watch scan shares that
+inventory: readiness changes only handback prose and fields, never watch or
+reminder identities, suppression or delivered kinds. The escalation pass takes
+overdue questions from any inventory already held for the node. One lifecycle
+reconciliation serves handled and unhandled views. The watch fallback rescan
+discards held inventories. The scope ends with the command; other callers,
+reminder mutations and the next command observe afresh.

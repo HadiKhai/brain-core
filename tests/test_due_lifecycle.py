@@ -603,6 +603,34 @@ class DueLifecycle(Scenario):
             self.assertEqual(receipt.read_text(), '{damaged receipt')
             self.assertEqual(source.call_count, 4)  # each caller applies lifecycle independently
 
+    def test_due_once_reconciles_once_and_next_command_applies_new_handling(self):
+        self.n['fm']['labels'] = 'kind:code'
+        row = self.identity_row(Ended='2026-01-15T10:00Z', Outcome='merged', Settled='yes')
+        self.m.write_jobs(self.inst, self.n, [row])
+        status = self.m._owners['due_items']
+        evidence = (self.m.file_state(self.inst, self.n), '', '')
+        def inventory(**options):
+            return self.m.due_items(self.inst, self.n, evidence, include_stale=False,
+                                    include_advice=False, **options)
+        expected, expected_handled = inventory(), inventory(include_handled=True)
+        preview = next(i for i in expected if i['kind'] == 'missing-preview')
+        with mock.patch.object(status, '_due_items', wraps=status._due_items) as computed:
+            with status.due_once():
+                self.assertEqual(inventory(), expected)
+                self.assertEqual(inventory(include_handled=True), expected_handled)
+                inventory()[0]['text'] = 'caller-local change'
+                self.assertEqual(inventory(), expected)
+            self.assertEqual(computed.call_count, 1)  # one reconciliation serves every view
+            # A mutation between two commands is applied by the next command.
+            self.m.record_reminder(self.inst, self.n, expected, preview['id'], 'defer', 'Preview later',
+                                   until='2026-01-16T12:00:00Z')
+            with status.due_once():
+                self.assertFalse(any(i['kind'] == 'missing-preview' for i in inventory()))
+                handled = next(i for i in inventory(include_handled=True) if i['kind'] == 'missing-preview')
+            self.assertEqual(computed.call_count, 2)
+        self.assertEqual(handled['id'], preview['id'])
+        self.assertEqual(handled['handling']['reason'], 'Preview later')
+
     def test_p14_deferral_expires_and_changed_need_reappears(self):
         raw = [{'node': 'root', 'kind': 'missing-preview', 'episode': 'merge-one', 'text': 'Preview required'}]
         item = self.m.reminder_items(self.inst, self.n, raw)[0]
