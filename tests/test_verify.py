@@ -28,6 +28,130 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class ReadinessDirectGitReads(Scenario):
+    def setup_repo(self):
+        m = core_loader.SourceFileLoader('readiness_direct', str(CORE / 'bin/brain')).load_module()
+        repo = self.repo(self.tmp / 'repo')
+        for branch in ('job', 'packed', 'third'):
+            self.git('branch', branch, cwd=repo)
+        return m, repo
+
+    def native_head(self, path):
+        result = subprocess.run(['git', '-C', str(path), 'symbolic-ref', '-q', 'HEAD'],
+                                capture_output=True, text=True, env=self.env)
+        return result.stdout.strip() if result.returncode == 0 else ''
+
+    def test_worktree_heads_and_ref_tips_match_git(self):
+        m, repo = self.setup_repo()
+        linked = self.tmp / 'linked'
+        detached = self.tmp / 'detached'
+        packed = self.tmp / 'packed'
+        self.git('worktree', 'add', '-q', str(linked), 'job', cwd=repo)
+        self.git('worktree', 'add', '-q', '--detach', str(detached), 'main', cwd=repo)
+        self.git('worktree', 'add', '-q', str(packed), 'packed', cwd=repo)
+        self.git('pack-refs', '--all', cwd=repo)
+        self.assertFalse((repo / '.git/refs/heads/packed').exists())
+        self.git('commit', '-q', '--allow-empty', '-m', 'Loose again', cwd=linked)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for path in (repo, linked, detached, packed):
+                self.assertEqual(m.worktree_head(path), self.native_head(path), path)
+            self.assertEqual(m.worktree_head(detached), '')
+            self.assertIsNone(m.worktree_head(repo / 'missing'))
+            with mock.patch.dict(os.environ, {'GIT_DIR': str(repo / '.git')}):
+                self.assertIsNone(m.worktree_head(linked))
+            # A loose symbolic target recurses in Git; ask Git rather than guess.
+            (repo / '.git/refs/heads/alias').write_text('ref: refs/heads/third\n')
+            self.git('symbolic-ref', 'HEAD', 'refs/heads/alias', cwd=packed)
+            self.assertIsNone(m.worktree_head(packed))
+            self.assertEqual(self.native_head(packed), 'refs/heads/third')
+            with m.git_read_snapshot():
+                for ref in ('refs/heads/main', 'refs/heads/job', 'refs/heads/packed', 'refs/heads/none'):
+                    args = ('rev-parse', '--verify', '--quiet', ref + '^{commit}')
+                    native = subprocess.run(['git', '-C', str(repo), *args], capture_output=True, text=True)
+                    snap = m.git(*args, cwd=repo)
+                    self.assertEqual((snap.returncode, snap.stdout), (native.returncode, native.stdout), ref)
+
+    def test_split_index_detection_walks_entries(self):
+        m, repo = self.setup_repo()
+        (repo / 'linkage').mkdir()
+        (repo / 'linkage/link').write_text('link\n')
+        self.git('add', 'linkage', cwd=repo)
+        index = repo / '.git/index'
+        for version in ('2', '3', '4'):
+            self.git('update-index', '--index-version', version, cwd=repo)
+            if version == '3':
+                self.git('update-index', '--skip-worktree', 'linkage/link', cwd=repo)
+            self.assertFalse(m.index_has_split_link(index.read_bytes()), version)
+        self.assertTrue(m.index_has_split_link(index.read_bytes()[:-3]))
+        self.git('update-index', '--split-index', cwd=repo)
+        self.assertTrue(m.index_has_split_link(index.read_bytes()))
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                m.git_read_index(repo, dict(os.environ)) as child:
+            self.assertIn('GIT_INDEX_FILE', child)
+
+    def test_concurrent_status_keeps_each_jobs_answer_and_error(self):
+        m, repo = self.setup_repo()
+        paths = {}
+        for branch in ('job', 'packed', 'third'):
+            paths[branch] = self.tmp / branch
+            self.git('worktree', 'add', '-q', str(paths[branch]), branch, cwd=repo)
+        (paths['packed'] / 'dirty').write_text('x\n')
+        (paths['third'] / '.git').write_text('gitdir: ' + str(self.tmp / 'gone') + '\n')
+        n = dict(external=True, home_path=repo, fm={},
+                 local={'worktrees': {b: {'path': str(p)} for b, p in paths.items()}})
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            serial = [m.ready_preflight(n, b) for b in paths]
+            with m.worktree_status_batch(n, list(paths)):
+                self.assertEqual([m.ready_preflight(n, b) for b in reversed(paths)], serial[::-1])
+                # Consumed once: a later read in the same scope is live again.
+                (paths['job'] / 'dirty').write_text('x\n')
+                self.assertIn('job worktree is dirty or unreadable', m.ready_preflight(n, 'job')[0])
+            self.assertIn('job worktree is dirty or unreadable', serial[1][0])
+            self.assertIn('job worktree is dirty or unreadable', serial[2][0])
+            self.assertNotIn('job worktree is dirty or unreadable', serial[0][0])
+            (paths['job'] / 'dirty').unlink()
+            verify = sys.modules[m.ready_preflight.__module__]
+            original = verify._worktree_status
+            def failing(path, env):
+                if Path(path) == paths['packed']:
+                    raise OSError('status failed')
+                return original(path, env)
+            with mock.patch.object(verify, '_worktree_status', failing), \
+                    m.worktree_status_batch(n, list(paths)):
+                self.assertEqual(m.ready_preflight(n, 'job'), serial[0])
+                with self.assertRaisesRegex(OSError, 'status failed'):
+                    m.ready_preflight(n, 'packed')
+
+    def test_persisted_pinned_answers_follow_their_generation(self):
+        m, repo = self.setup_repo()
+        self.git('checkout', '-q', 'job', cwd=repo)
+        self.git('commit', '-q', '--allow-empty', '-m', 'Job', cwd=repo)
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        verify = sys.modules[m.ready_preflight.__module__]
+        store = {}
+        class Cache:
+            get = staticmethod(store.get)
+            put = staticmethod(store.__setitem__)
+        usage = sys.modules[verify.__package__ + '.usage_cache']
+        args = ('merge-base', '--is-ancestor', main, head)
+        def run():
+            with m.git_read_snapshot(), verify.pinned_git_store(object()), \
+                    mock.patch.object(m, 'git', wraps=m.git) as native:
+                code = verify.immutable_git_query(repo)(*args).returncode
+                return code, sum(call.args == args for call in native.call_args_list)
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(usage, 'database', lambda inst, readonly=False: contextlib.nullcontext(Cache)):
+            self.assertEqual(run(), (0, 1))
+            self.assertEqual(run(), (0, 0))  # a later command reuses the stored answer
+            tree = self.git('rev-parse', 'job^{tree}', cwd=repo).strip()
+            self.git('replace', head, self.git('commit-tree', tree, '-m', 'Root', cwd=repo).strip(), cwd=repo)
+            self.assertEqual(run(), (1, 1))  # the moved fence asks Git again
+            self.git('replace', '-d', head, cwd=repo)
+            self.git('config', 'core.abbrev', '12', cwd=repo)
+            self.assertEqual(run(), (0, 1))
+
+
 class ReadinessImmutableQueries(Scenario):
     def context(self):
         m = core_loader.SourceFileLoader('readiness_immutable', str(CORE / 'bin/brain')).load_module()
@@ -54,7 +178,7 @@ class ReadinessImmutableQueries(Scenario):
                 for command in ('merge-base', 'log'):
                     self.assertEqual(sum(args[0] == command for args in calls), 1, calls)
                 self.assertEqual(sum('status' in args for args in calls), 2)
-                self.assertEqual(sum(args[:2] == ('symbolic-ref', '--short') for args in calls), 2)
+                self.assertEqual(sum(args[0] == 'symbolic-ref' for args in calls), 0)  # read from HEAD
             with m.git_read_snapshot():
                 self.assertEqual(m.ready_preflight(n, 'job'), first)
             self.assertEqual(sum(args[0] == 'log' for args in calls), 2)
