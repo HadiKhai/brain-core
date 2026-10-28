@@ -824,11 +824,13 @@ _DUE_ONCE = ContextVar('brain_due_once', default=None)
 
 @contextmanager
 def due_once(ready=()):
-    """One due command's inventory per node and option set, reused by its watch
-    publication, coordinator rollup and display. Nodes in `ready` will be shown
-    with readiness anyway, so their readiness-free requests share that inventory:
-    readiness changes only handback prose and fields, never ids or suppression.
-    The scope ends with the command; nothing survives into another command."""
+    """One due command's source inventory per node and option set, reused by its
+    watch publication, coordinator rollup and display. Nodes in `ready` will be
+    shown with readiness anyway, so their readiness-free requests share that
+    inventory: readiness changes only handback prose and fields, never ids or
+    suppression. Reminder lifecycle receipts are reconciled on every call, so
+    handling recorded or damaged meanwhile is applied. The scope ends with the
+    command; nothing survives into another command."""
     token = _DUE_ONCE.set({'ready': frozenset(ready), 'items': {}})
     try:
         yield
@@ -843,28 +845,32 @@ def due_once_forget():
         scope['items'].clear()
 
 
-def due_once_inventory(inst, n):
-    """Any inventory this command already holds for n (handled included), else None."""
+def due_once_held(inst, n, include_handled=False):
+    """n's due items from an inventory this command already holds, else None."""
     scope = _DUE_ONCE.get()
-    return next((items for key, items in (scope or {}).get('items', {}).items() if key[0] == n['id']), None)
+    key = next((key for key in (scope or {}).get('items', {}) if key[0] == n['id']), None)
+    return due_items(inst, n, None, *key[1:], include_handled=include_handled) if key else None
 
 
 def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True,
               include_handled=False):
-    scope = _DUE_ONCE.get()
-    if scope is None or n['archived']:
-        return _due_items(inst, n, evidence, include_stale, include_ready, include_advice, include_handled)
-    key = (n['id'], include_stale, include_ready or n['id'] in scope['ready'], include_advice)
-    if key not in scope['items']:
-        scope['items'][key] = _due_items(inst, n, evidence, *key[1:], include_handled=True)
-    items = [dict(i) for i in scope['items'][key]]
-    # Equal to reminder_items' own filter: one reconciliation serves both views.
-    return items if include_handled else [i for i in items if not _m_reminders.reminder_handled(inst, i)]
-
-
-def _due_items(inst, n, evidence, include_stale, include_ready, include_advice, include_handled):
     if n["archived"]:
         return []
+    scope = _DUE_ONCE.get()
+    if scope is None:
+        items = _due_items(inst, n, evidence, include_stale, include_ready, include_advice)
+    else:
+        key = (n['id'], include_stale, include_ready or n['id'] in scope['ready'], include_advice)
+        if key not in scope['items']:
+            scope['items'][key] = _due_items(inst, n, evidence, *key[1:])
+        include_stale, include_ready, include_advice = key[1:]
+        items = [dict(i) for i in scope['items'][key]]
+    omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
+    return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
+
+
+def _due_items(inst, n, evidence, include_stale, include_ready, include_advice):
+    """Source, advice and staleness items before lifecycle reconciliation."""
     # The fingerprint's status_facts and this inventory share observations even
     # for direct callers. A surrounding read snapshot can share them further;
     # otherwise this scope expires on return, including on errors and retries.
@@ -889,8 +895,7 @@ def _due_items(inst, n, evidence, include_stale, include_ready, include_advice, 
                           'text': _m_guard.redact(lag + '; update judgement sections, then brain status <node> --refresh',
                                                   _m_guard.never_terms(n))})
         items.extend(after_stale)
-    omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
-    return _m_reminders.reminder_items(inst, n, items, include_handled=include_handled, omitted_kinds=omitted)
+    return items
 
 
 @_m_command_reads.memo
@@ -1109,7 +1114,7 @@ def _due_tick(a, inst, nodes):
             if n["id"] == "root" or n["archived"]:
                 continue
             # Overdue questions are equal in every inventory of n and never handled.
-            held = due_once_inventory(inst, n)
+            held = due_once_held(inst, n)
             items += [item for item in (held if held is not None else
                                         due_items(inst, n, include_stale=False, include_advice=False))
                       if item["kind"] == "overdue-question"]

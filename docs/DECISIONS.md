@@ -4127,7 +4127,9 @@ publication, coordinator rollup and root escalation pass reuse it. Rollup source
 are shown with readiness anyway, so their readiness-free watch scan shares that
 inventory: readiness changes only handback prose and fields, never watch or
 reminder identities, suppression or delivered kinds. The escalation pass takes
-overdue questions from any inventory already held for the node. One lifecycle
-reconciliation serves handled and unhandled views. The watch fallback rescan
-discards held inventories. The scope ends with the command; other callers,
-reminder mutations and the next command observe afresh.
+overdue questions from any inventory already held for the node. Only source,
+advice and staleness items are held: reminder lifecycle receipts are reconciled
+on every call, so handling recorded or a receipt damaged by another command
+mid-tick is applied or refused. The watch fallback rescan discards held
+inventories. The scope ends with the command; other callers and the next command
+observe afresh.

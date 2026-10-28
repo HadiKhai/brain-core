@@ -2852,12 +2852,12 @@ class RenderedFingerprint(Scenario):
         plain = watch.watch_items(self.inst, self.n)
         with status.due_once(ready={'sample'}):
             shared = watch.watch_items(self.inst, self.n)
-            held = status.due_once_inventory(self.inst, self.n)
+            held = status.due_once_held(self.inst, self.n)
             self.assertTrue(next(i for i in held if i['kind'] == 'handback')['ready'])
             status.due_once_forget()
-            self.assertIsNone(status.due_once_inventory(self.inst, self.n))
+            self.assertIsNone(status.due_once_held(self.inst, self.n))
         self.assertEqual([(i['id'], i['kind']) for i in shared], [(i['id'], i['kind']) for i in plain])
-        self.assertIsNone(status.due_once_inventory(self.inst, self.n))
+        self.assertIsNone(status.due_once_held(self.inst, self.n))
 
     def facts(self):
         state, _, _ = self.m.due_evidence(self.inst, self.n)
