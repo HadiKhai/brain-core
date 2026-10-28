@@ -3979,4 +3979,7 @@ handback request therefore carries the caller's session IDs, and publication
 records those rather than the applier's. Requests without the field keep the
 earlier behaviour. Verification still runs in the applier's environment, as c56
 already bound it at application. The replayed output keeps the last 16 KiB per
-stream; the receipt validates both as strings.
+stream; the receipt validates both as strings. A recovered request whose native
+run printed nothing in this applier rebuilds its final line from durable
+evidence: the saved verdict for a checked handback, the prepared publication for
+an unchecked one.

@@ -603,6 +603,48 @@ class HandbackLifecycle(Scenario):
         verify.assert_called_once()
         self.assertIsNone(m.intent_receipt(inst, request['id']))
 
+    def test_recovered_receipt_still_carries_the_native_result_line(self):
+        m, inst, n, row = self.fixture()
+        checked = self.checked_request(m, inst, row)
+        packet = dict(version=1, integration_base='b', verify_result=0, head='a', main='b', inputs='c')
+        store = m.intent_store
+        def no_receipt(current, name, data, **kwargs):
+            if name.endswith('.receipt'):
+                raise RuntimeError('owned kill before receipt')
+            return store(current, name, data, **kwargs)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}), \
+                mock.patch.object(m, 'record_ready', return_value=(packet, [])), \
+                mock.patch.object(m, 'ready_state', return_value=dict(reasons=['native verifier failed'])), \
+                mock.patch.object(m, 'actual_cost', return_value={}), mock.patch.object(m, 'job_size', return_value={}), \
+                mock.patch.object(m.Instance, 'commit'), mock.patch.object(m, 'request_wake'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(m, 'intent_store', side_effect=no_receipt), \
+                    self.assertRaisesRegex(RuntimeError, 'owned kill'):
+                m.drain_intents(inst)
+            m.drain_intents(inst)
+            receipt = m.intent_receipt(inst, checked['id'])
+            self.assertEqual((receipt['state'], receipt['exit_code']), ('applied', 1))
+            self.assertEqual(receipt['output'], 'not ready: native verifier failed\n')
+            with self.assertRaises(SystemExit) as exit, contextlib.redirect_stdout(io.StringIO()) as out:
+                m.await_handback(inst, n, checked['id'], 0)
+            self.assertEqual((exit.exception.code, out.getvalue()), (1, receipt['output']))
+            # An unchecked handback recovered after publication reprints its message.
+            args = dict(id='root', branch=row['Job'], state='blocked', summary='Recovered message', question=None,
+                        lessons='none: fixture', report=None, reviews=None, need_human=None,
+                        restart=None, reverify=False, full_receipt=None, record=None)
+            unchecked = m.submit_intent(inst, dict(kind='handback', node='root', job_key=m.job_key(row),
+                                                   args=args, sessions=[], carry_ready=True), start=False)
+            with mock.patch.object(m, 'intent_store', side_effect=no_receipt), \
+                    self.assertRaisesRegex(RuntimeError, 'owned kill'):
+                m.drain_intents(inst)
+            m.drain_intents(inst)
+            expected = m.format_worker_message('blocked', 'coordinator can see it with brain due', row['Job'],
+                                               m.tilde(m.handback_file(n, row))) + '\n'
+        receipt = m.intent_receipt(inst, unchecked['id'])
+        self.assertEqual(m.read_handback(n, row)['summary'], 'Recovered message')
+        self.assertEqual(receipt['output'], expected)
+
     def test_checked_binding_drift_is_refused_and_interruption_never_reruns_verify(self):
         m, inst, n, row = self.fixture()
         request = self.checked_request(m, inst, row)

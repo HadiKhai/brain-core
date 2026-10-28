@@ -777,6 +777,9 @@ def apply_view_batch(inst):
                     result['output'] = output.getvalue()[-MAX_REPLAY:]
                     if state == 'applied':
                         result['diagnostic'] = diagnostic.getvalue()[-MAX_REPLAY:]
+                        if not result['output']:
+                            # Recovery of a prepared request reprints nothing natively.
+                            result['output'] = native_result_line(current, data, verdict)
                 receipt = dict(id=data['id'], hash=data['hash'], sequence=sequence, state=state,
                                reason=reason or '; '.join(result.get('reasons', [])), **result)
                 if state == 'applied':
@@ -824,6 +827,22 @@ def drain_intents(inst, lease_fd=None):
         # a producer arriving after this inspection acquires the free lease itself.
         if not blocked and pending_intents(inst):
             start_intent_drainer(inst)
+
+
+def native_result_line(inst, request, verdict):
+    """The final line the native handback prints, from durable evidence only."""
+    from . import guard, messages, verify
+    n = inst.node(request['payload']['node'])
+    terms = guard.never_terms(n)
+    if verdict:
+        text = 'ready' if verdict['ready'] else 'not ready: ' + '; '.join(dict.fromkeys(verdict['reasons']))
+        return verify.VerifyScrubber(terms).feed(text, final=True) + '\n'
+    prepared = intent_read(inst, request['id'] + '.prepared')
+    after = prepared['after']
+    report = after.get('report') or _m_common.tilde(n['dir'] / 'job-handbacks' / (prepared['job_key'] + '.json'))
+    kind = 'blocked' if after['state'] == 'failed' else after['state']
+    return guard.redact(messages.format_worker_message(
+        kind, 'coordinator can see it with brain due', prepared['branch'], report), terms) + '\n'
 
 
 @contextlib.contextmanager
