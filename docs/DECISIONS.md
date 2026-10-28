@@ -4252,8 +4252,9 @@ enclosing UI display snapshot. The UI instance delegates scoped and fresh reads
 to the same discovery implementation. Mutable node records remain confined to
 the scan; the instance's ordinary node reads outside a scope remain uncached.
 
-The observation preserves the caller's existing retry policy. A scan whose
+The observation preserves the caller's existing retry policy. An attempt whose
 inputs change remains explicitly stale, cannot publish and cannot update due
-receipts. A later scan starts a new inventory and observes the changed tree and
-bindings. This helper adds no automatic rescan or dependency on optional source
-scan optimizations.
+receipts. Main's standalone `watch_groups` retries that attempt under the receipt
+lock; the retry starts a new inventory and observes the changed tree and bindings.
+Inside an enclosing read snapshot, main retains stale as unknown instead of
+retrying cached reads. Node observation adds no retry policy of its own.

@@ -121,18 +121,24 @@ class Watcher(Scenario):
             return original(*args)
         receipt = self.root / '.brain/wake/due-episodes.json'
         before = receipt.read_bytes() if receipt.exists() else None
+        reconcile = m.watch_due_episodes
+        def episodes(*args, **kwargs):
+            groups = reconcile(*args, **kwargs)
+            if len(seen) == 1:
+                self.assertTrue(groups.stale)
+                self.assertEqual(groups, {})
+                self.assertEqual(receipt.read_bytes() if receipt.exists() else None, before)
+                with m.watch_precomputed_publication(inst, groups) as current:
+                    self.assertFalse(current)
+            return groups
         with mock.patch.object(m, 'watch_scan', side_effect=scan), \
-                mock.patch.object(m, 'watch_items', side_effect=items):
-            # Main retains changed input as unknown. Its caller retries with a
-            # later scan; node observation must not add an automatic retry.
-            stale = m.watch_groups(inst)
-            self.assertTrue(stale.stale)
-            self.assertEqual(stale, {})
-            self.assertEqual(len(seen), 1)
-            self.assertEqual(receipt.read_bytes() if receipt.exists() else None, before)
-            with m.watch_precomputed_publication(inst, stale) as current:
-                self.assertFalse(current)
+                mock.patch.object(m, 'watch_items', side_effect=items), \
+                mock.patch.object(m, 'watch_due_episodes', side_effect=episodes) as attempts:
+            # Main retries a stale standalone scan under the receipt lock.
+            # The retry must discard the first scan's node inventory and binding.
             groups = m.watch_groups(inst)
+        self.assertEqual([call.kwargs.get('serialized', False) for call in attempts.call_args_list],
+                         [False, True])
         self.assertFalse(groups.stale)
         self.assertEqual([{nid for nid, _ in attempt} for attempt in seen],
                          [{'root', 'removed', 'archived'}, {'root', 'added'}])
