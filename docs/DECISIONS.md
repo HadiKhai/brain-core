@@ -4037,17 +4037,25 @@ symbolic link"), so a symlinked `core/` would break sync from another machine.
 release after any later swap. Re-exec treats the staged launcher as the instance's
 own core.
 
-Install copies the staged tree, or `git archive`s an older commit for the
-migration's rollback target. It renames the copy into place, then compiles
+Install always `git archive`s the commit, so local edits in the staged core never
+enter a sha's release. It renames the copy into place, then compiles
 checked-hash bytecode with the launcher's interpreter. Compiling happens at the
 final path because Apple's Python 3.9 keys its default pycache prefix by source
 path. The pin file is written last and marks completion. A failed compile or
-import smoke test removes the unpinned copy and never swaps. Swap renames a
-fresh relative symlink over core-previous, then over core-current.
+launcher smoke test (runpy of the release's bin/brain) removes the unpinned copy
+and never swaps. `brain upgrade` then checks the staged core back out at its
+prior commit, so the launcher a broken release shipped never stays installed.
+Swap renames a fresh relative symlink over core-current first, then over
+core-previous. If it is interrupted between the two, the new release runs and
+the older rollback target survives.
 `--rollback` swaps the two, checks the staged core out at the restored sha and
 commits the gitlink. Prune removes only releases that are neither current nor
 previous and whose pin it can lock exclusively. It deletes while holding that
-lock, and a launcher re-resolves when its release disappeared.
+lock, and a launcher re-resolves when its release disappeared. A gate exports
+BRAIN_CORE_RELEASE and holds an inheritable pin through its exec, so the gate's
+command and nested `brain` calls keep the gate's release. Services (machine
+sampler, usage poller) register STABLE_ENTRY_POINT, the instance launcher
+`core/bin/brain`, never a release path that prune may remove.
 
 The idle guard refuses only on the own node's work: gate, train lock, ledger
 and worktree inventory. The own node is `--node`, else the single node whose
@@ -4055,7 +4063,9 @@ home's origin matches core's origin. Other nodes' work and node-less machine
 admission rows become idle notices. The whole-brain guard remains when no own
 node can be named. It also remains for the first upgrade from a plain core,
 because those processes import from the directory the submodule update
-rewrites. Migration: that first upgrade installs the plain core's commit as
+rewrites. This matches the base upgrade, which rewrote `core/` under the same
+guard; the migration adds no new exposure, and processes started after it are
+pinned. Migration: that first upgrade installs the plain core's commit as
 core-previous and the new release as core-current. Rollback before migration is
 refused. Old cores interpreting post-upgrade `task migrate --all` records are
 not version-gated here.

@@ -32,6 +32,10 @@ from . import command_reads as _m_command_reads
 
 CORE = Path(__file__).resolve().parents[2]
 ENTRY_POINT = CORE / "bin" / "brain"
+# A pinned release (core_releases.py) lives in <root>/.brain/cores/<sha>; services persist
+# the instance launcher, which follows each swap, never a release a prune may remove.
+STABLE_ENTRY_POINT = (CORE.parents[2] / "core" / "bin" / "brain"
+                      if CORE.parent.name == "cores" and CORE.parents[1].name == ".brain" else ENTRY_POINT)
 NODE_FIELDS = ["id", "title", "owners", "labels", "home", "runtime", "created"]
 LOCAL_KEYS = ["coordinator", "host_project", "home_project", "host_instance", "preview", "preview_tour", "review_urls"]  # per machine (axiom 23)
 ITEM_FIELDS = ["id", "title", "kind", "source_node", "source_ref", "learned_at",

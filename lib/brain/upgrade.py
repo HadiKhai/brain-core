@@ -187,7 +187,10 @@ def cmd_upgrade(a):
             _m_core_releases.swap(root, old)
         _m_core_releases.swap(root, new)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
+        # The staged launcher must not stay on a release that failed to install.
+        restored = _m_common.git("checkout", "-q", "--detach", staged, cwd=root / "core").returncode == 0
         _m_common.die(f"couldn't install core {new[:7]} ({error}); running processes keep core {old[:7]}; "
+                      f"staged core {'restored to ' + staged[:7] if restored else 'NOT restored: check core/'}; "
                       f"retry brain upgrade")
     print(f"core {old[:7]} -> {new[:7]}")
     print(_m_common.git("log", "--oneline", f"{old}..{new}", cwd=root / "core").stdout.rstrip(), flush=True)

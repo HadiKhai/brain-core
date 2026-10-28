@@ -899,7 +899,7 @@ def usage_install(a):
               "background service (a systemd user unit, say)")
         return
     config = str(_m_instance.brains_file().resolve())
-    data = {"Label": USAGE_LABEL, "ProgramArguments": [sys.executable, str(_m_common.CORE / "bin/brain"),
+    data = {"Label": USAGE_LABEL, "ProgramArguments": [sys.executable, str(_m_common.STABLE_ENTRY_POINT),
             "usage", "--watch", "--every", f"{a.every:g}"], "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False}, "ThrottleInterval": 30, "ProcessType": "Background",
             "StandardOutPath": str(Path.home() / "Library/Logs/brain-usage.log"),

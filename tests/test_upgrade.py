@@ -123,6 +123,15 @@ class InstallAndUpgrade(Scenario):
         self.assertIn("Roll back core", self.git("log", "-1", "--format=%s", cwd=bob))
         self.assertIn("Improve the README", self.b(bob, "upgrade"))
         self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", second))
+        # a release whose launcher fails never activates, and the staged launcher is restored
+        (src / "bin/brain").write_text("raise SystemExit('broken launcher')\n")
+        self.git("commit", "-qam", "Break the launcher", cwd=src)
+        self.assertIn("staged core restored to", self.b(bob, "upgrade", ok=False))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=bob / "core").strip(), second)
+        self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", second))
+        t = subprocess.run([str(cmd), "tree"], cwd=self.tmp, env=env, capture_output=True, text=True)
+        self.assertIn("root: Bob", t.stdout, t.stderr)
+        self.git("revert", "--no-edit", "HEAD", cwd=src)
 
         # second machine: same Brain, its own bindings
         bob2 = self.tmp / "Brain2"
@@ -708,19 +717,39 @@ class PinnedCoreReleases(Scenario):
         self.assertIsNone(releases.swap(root, sha))
         self.assertEqual(os.readlink(root / ".brain/core-current"), os.path.join("cores", sha))
         second = self.advance(src, root, "B")
+        (root / "core/README.md").write_text("uncommitted local edit\n")
         releases.install(root, second)
+        self.assertNotIn("uncommitted", (root / ".brain/cores" / second / "README.md").read_text())
+        self.git("checkout", "-q", "--", "README.md", cwd=root / "core")
         with mock.patch.object(releases.os, "replace", wraps=os.replace) as rename:
             self.assertEqual(releases.swap(root, second), sha)
-        self.assertEqual([Path(c.args[1]).name for c in rename.call_args_list], ["core-previous", "core-current"])
+        self.assertEqual([Path(c.args[1]).name for c in rename.call_args_list], ["core-current", "core-previous"])
         self.assertEqual((releases.current(root), releases.previous(root)), (second, sha))
         self.assertEqual(list((root / ".brain").glob(".core-*")), [])
         self.assertEqual(list((root / ".brain/cores").glob(".partial-*")), [])
-        broken = self.advance(src, root, "C")
-        (root / "core/lib/brain/cli.py").write_text("raise SystemExit('broken release')\n")
+        third = self.advance(src, root, "C")
+        releases.install(root, third)
+        real_point = releases._point
+
+        def interrupted(where, name, target):
+            if name == releases.PREVIOUS:
+                raise OSError("interrupted")
+            real_point(where, name, target)
+
+        with mock.patch.object(releases, "_point", side_effect=interrupted):
+            with self.assertRaises(OSError):
+                releases.swap(root, third)
+        # Interrupted between the renames: the new release runs, the older rollback target survives.
+        self.assertEqual((releases.current(root), releases.previous(root)), (third, sha))
+        (src / "bin/brain").write_text("raise SystemExit('broken launcher')\n")
+        self.git("commit", "-qam", "broken launcher", cwd=src)
+        self.git("pull", "-q", "--ff-only", cwd=root / "core")
+        broken = self.git("rev-parse", "HEAD", cwd=root / "core").strip()
         with self.assertRaises(ValueError):
             releases.install(root, broken)
         self.assertFalse((root / ".brain/cores" / broken).exists())
-        self.assertEqual(releases.current(root), second)  # a failed install never swaps
+        self.assertFalse(releases.pin_path(root / ".brain/cores" / broken).exists())
+        self.assertEqual(releases.current(root), third)  # a failed install never swaps
 
     def test_process_started_before_swap_keeps_its_release_and_blocks_prune(self):
         m = core_loader.SourceFileLoader("pinned_process", str(CORE / "bin/brain")).load_module()
@@ -779,3 +808,48 @@ class PinnedCoreReleases(Scenario):
         self.assertEqual((releases.current(root), releases.previous(root)), (first, second))
         self.assertEqual(releases.rollback(root), (first, second))  # rolling forward again is the same swap
         self.assertEqual((releases.current(root), releases.previous(root)), (second, first))
+
+    def test_gate_command_keeps_its_release_across_exec_and_nested_commands(self):
+        m = core_loader.SourceFileLoader("pinned_gate", str(CORE / "bin/brain")).load_module()
+        releases = m._owners["cmd_upgrade"]._m_core_releases
+        root = self.init("demo")
+        core = root / "core"
+        shutil.rmtree(core / ".git", ignore_errors=True)
+        (core / "lib/brain/_pin_probe.py").write_text("VALUE = 'A'\n")
+        self.git("init", "-q", "-b", "main", cwd=core)
+        self.git("add", "-A", cwd=core)
+        self.git("commit", "-qm", "A", cwd=core)
+        first = self.git("rev-parse", "HEAD", cwd=core).strip()
+        releases.install(root, first)
+        releases.swap(root, first)
+        launcher = core / "bin/brain"
+        probe_nested = ("import runpy, sys; runpy.run_path(sys.argv[1], run_name='nested'); "
+                        "import brain._pin_probe as p, brain.common as c; print(p.VALUE, c.STABLE_ENTRY_POINT)")
+        probe = ("import os, subprocess, sys\n"
+                 "print(os.environ.get('BRAIN_CORE_RELEASE'), flush=True)\n"
+                 "sys.stdin.readline()\n"
+                 f"r = subprocess.run([sys.executable, '-c', {probe_nested!r}, sys.argv[1]], capture_output=True, text=True)\n"
+                 "print(r.stdout.strip() or r.stderr.strip()[-300:], flush=True)\n")
+        gate = subprocess.Popen([sys.executable, str(launcher), "gate-lock", "--label", "pin", "--",
+                                 sys.executable, "-u", "-c", probe, str(launcher)], cwd=root, env=self.env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            line = gate.stdout.readline().strip()
+            self.assertEqual(Path(line), (root / ".brain/cores" / first).resolve(), gate.stderr.read() if gate.poll() else "")
+            for value in ("B", "C"):
+                (core / "lib/brain/_pin_probe.py").write_text(f"VALUE = {value!r}\n")
+                self.git("commit", "-qam", value, cwd=core)
+                sha = self.git("rev-parse", "HEAD", cwd=core).strip()
+                releases.install(root, sha)
+                releases.swap(root, sha)
+            # The gate's launcher exec'd away; its inherited pin still protects the release.
+            self.assertEqual(releases.prune(root), ([], [first]))
+            out, err = gate.communicate("go\n", timeout=120)
+        finally:
+            if gate.poll() is None:
+                gate.kill()
+                gate.wait()
+        value, stable = out.split()[-2:]
+        self.assertEqual(value, "A", out + err)
+        self.assertEqual(Path(stable), launcher)  # services register the launcher, never a release
+        self.assertEqual(releases.prune(root), ([first], []))

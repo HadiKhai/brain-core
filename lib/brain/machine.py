@@ -496,7 +496,7 @@ def machine_service(inst, action, yes=False):
     if yes and os.environ.get("BRAIN_MACHINE_TESTING") == "1":
         _m_common.die("machine sampler: fixture mode cannot change OS services")
     label = "org.brain.machine." + hashlib.sha256(str(inst.root).encode()).hexdigest()[:16]
-    args = [sys.executable, str(_m_common.CORE / "bin/brain"), "machine", "sample"]
+    args = [sys.executable, str(_m_common.STABLE_ENTRY_POINT), "machine", "sample"]
     service_env = {"BRAIN_NO_REEXEC": "1", "BRAIN_CONFIG": str(_m_instance.brains_file())}
     if any("\n" in v or "\r" in v for v in args + [str(inst.root), str(_m_instance.brains_file())]):
         _m_common.die("machine sampler: service paths cannot contain line breaks")

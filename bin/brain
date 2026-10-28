@@ -12,24 +12,30 @@ sys.dont_write_bytecode = True
 def _pinned_lib(core):
     """An instance's staged core runs its current installed release (lib/brain/core_releases.py).
 
-    Resolve .brain/core-current once and hold a shared flock on that release's pin for this
+    Resolve .brain/core-current (or a gate's BRAIN_CORE_RELEASE) once and hold a shared flock on that release's pin for this
     process's life: a later swap never changes what this process imports, and prune skips it.
     """
     link = core.parent / ".brain" / "core-current"
     release = core
     if core.name == "core" and link.is_symlink():
         release = None
+        # Inside a gate, nested commands keep the release the gate started on (it holds that pin).
+        wanted = Path(os.environ.get("BRAIN_CORE_RELEASE") or link).resolve()
+        if wanted.parent != (link.parent / "cores").resolve():
+            wanted = link
         for _ in range(3):  # a prune racing this start removes a release only after two swaps
             try:
-                candidate = link.resolve(strict=True)
+                candidate = wanted.resolve(strict=True)
                 pin = os.open(str(candidate) + ".pin", os.O_RDONLY)
             except OSError:
+                wanted = link
                 continue
             fcntl.flock(pin, fcntl.LOCK_SH)
             if (candidate / "lib" / "brain").is_dir():
                 release = candidate
                 break
             os.close(pin)
+            wanted = link
         if release is None:
             print("brain: installed core release unavailable; running the staged core", file=sys.stderr)
             return core / "lib", None

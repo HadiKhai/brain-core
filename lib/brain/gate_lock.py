@@ -17,6 +17,7 @@ from . import instance as _m_instance
 
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_machine = _m_common.LazyModule(__package__, 'machine')
+_m_core_releases = _m_common.LazyModule(__package__, 'core_releases')
 
 
 GATE_ENV = ('BRAIN_GATE_FD', 'BRAIN_GATE_PATH', 'BRAIN_GATE_NODE')
@@ -213,8 +214,11 @@ def gate_acquire(inst, node, env, label):
 
 
 def gate_environment(inst, node, env, fd):
-    return {**env, 'BRAIN_GATE_FD': str(fd), 'BRAIN_GATE_PATH': str(gate_path(inst.root, node)),
-            'BRAIN_GATE_NODE': node}
+    env = {**env, 'BRAIN_GATE_FD': str(fd), 'BRAIN_GATE_PATH': str(gate_path(inst.root, node)),
+           'BRAIN_GATE_NODE': node}
+    if _m_common.STABLE_ENTRY_POINT != _m_common.ENTRY_POINT:
+        env['BRAIN_CORE_RELEASE'] = str(_m_common.CORE)  # nested commands stay on this gate's release
+    return env
 
 
 @contextlib.contextmanager
@@ -252,6 +256,7 @@ def cmd_gate_lock(a):
     n = gate_node(inst, getattr(a, 'node', None))
     fd, _ = gate_acquire(inst, n['id'], os.environ, a.label or command[0])
     os.set_inheritable(fd, True)
+    _m_core_releases.hold_pin(_m_common.CORE)  # the exec'd command keeps this release from prune
     env = gate_environment(inst, n['id'], os.environ, fd)
     sys.stdout.flush()
     sys.stderr.flush()
