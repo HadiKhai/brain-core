@@ -98,6 +98,157 @@ class HandbackLifecycle(Scenario):
         self.assertEqual(m.intent_receipt(inst, request['id']), receipt)
         self.assertEqual((n['dir'] / 'inbox.md').read_text().count(request['id']), 1)
 
+    def batch_fixture(self, count):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        requests = [m.submit_intent(inst, dict(kind='inbox', node='root', text=f'Batched {i}', at=inst.now()),
+                                    start=False) for i in range(count)]
+        return m, inst, n, events, queue, requests
+
+    def views(self, queue, inst, requests):
+        return [queue.intent_receipt(inst, request['id'])['view'] for request in requests]
+
+    def wait(self, m, inst, request):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(m, 'find_root', return_value=inst.root), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            m.cmd_intent_queue(argparse.Namespace(action='wait', id=request['id'], timeout=0))
+        return json.loads(out.getvalue()), err.getvalue()
+
+    def test_drain_batch_applies_each_request_then_maintains_views_once(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(10)
+        maintain, passes, deferred = events.maintain, [], []
+        def observed(op, changed):
+            if getattr(op, 'defer_views', False):
+                deferred.append(op.write_request['id'])
+            else:
+                # Receipts exist before the one pass and say pending until it succeeds.
+                passes.append(self.views(queue, inst, requests))
+                self.assertIn(events.node_ref('root'), events.journal(m.Instance(inst.root)).state['invalid'])
+            return maintain(op, changed)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(events, 'maintain', side_effect=observed):
+            m.drain_intents(inst)
+        self.assertEqual(deferred, [request['id'] for request in requests])
+        self.assertEqual(passes, [['pending'] * 10])
+        records = events.read(inst)
+        applies = [r for r in records if r['kind'] == 'commit' and r['data'].get('deferred')]
+        self.assertEqual(len(applies), 10)
+        for record in applies:
+            self.assertFalse(record['data']['maintenance_ok'])
+            self.assertIn(events.node_ref('root'), record['data']['invalidate'])
+        batches = [r for r in records if r['kind'] == 'begin' and r['data'].get('write_batch')]
+        self.assertEqual(len(batches), 1)
+        terminal = next(r for r in records if r['ref'] == batches[0]['ref'] and r['kind'] == 'commit')
+        self.assertTrue(terminal['data']['maintenance_ok'])
+        self.assertIn(events.node_ref('root'), terminal['data']['views'])
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+        self.assertEqual(self.views(queue, inst, requests), ['current'] * 10)
+        text = (n['dir'] / 'inbox.md').read_text()
+        self.assertTrue(all(request['id'] in text for request in requests))
+        receipt, err = self.wait(m, inst, requests[-1])
+        self.assertEqual((receipt['state'], receipt['view'], err), ('applied', 'current', ''))
+
+    def test_drain_batch_size_and_time_are_bounded(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(10)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'BATCH_REQUESTS', 4):
+            m.drain_intents(inst)
+        records = events.read(inst)
+        batches = [r['ref'] for r in records if r['kind'] == 'begin' and r['data'].get('write_batch')]
+        self.assertEqual(len(batches), 3)
+        markers = [queue.intent_read(inst, request['id'] + '.view')['ref'] for request in requests]
+        self.assertEqual(markers, [batches[0]] * 4 + [batches[1]] * 4 + [batches[2]] * 2)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'BATCH_SECONDS', 0):
+            later = [m.submit_intent(inst, dict(kind='inbox', node='root', text=f'Later {i}', at=inst.now()),
+                                     start=False) for i in range(2)]
+            m.drain_intents(inst)
+        self.assertEqual(len([r for r in events.read(inst) if r['kind'] == 'begin' and r['data'].get('write_batch')]), 5)
+        self.assertEqual(self.views(queue, inst, later), ['current'] * 2)  # time bound: one request each
+
+    def test_drain_batch_crash_after_apply_leaves_invalid_views_for_next_drain(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(3)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            # SIGKILL after the receipts, before the batch maintenance operation begins.
+            with mock.patch.object(queue, 'maintain_view_batch', side_effect=KeyboardInterrupt), \
+                    self.assertRaises(KeyboardInterrupt):
+                m.drain_intents(inst)
+            state = events.journal(m.Instance(inst.root)).state
+            self.assertIn(events.node_ref('root'), state['invalid'])
+            self.assertNotIn(events.node_ref('root'), state['views'])
+            self.assertEqual(self.views(queue, inst, requests), ['pending'] * 3)
+            self.assertEqual(sum((n['dir'] / 'inbox.md').read_text().count(r['id']) for r in requests), 3)
+            with mock.patch.object(queue, 'start_intent_drainer') as start, \
+                    mock.patch.object(m, 'find_root', return_value=inst.root), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaisesRegex(SystemExit, 'generated view pending'):
+                    m.cmd_intent_queue(argparse.Namespace(action='wait', id=requests[0]['id'], timeout=0))
+            start.assert_called_once()
+            m.drain_intents(inst)
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+        self.assertEqual(self.views(queue, inst, requests), ['current'] * 3)
+        self.assertEqual(sum((n['dir'] / 'inbox.md').read_text().count(r['id']) for r in requests), 3)
+
+    def test_drain_batch_crash_during_maintenance_is_reconciled_before_next_request(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(2)
+        maintain = events.maintain
+        def killed(op, changed):
+            if getattr(op, 'write_batch', False):
+                (n['dir'] / 'status.md').write_text('partial generated bytes\n')
+                raise KeyboardInterrupt  # SIGKILL mid-projection: begin stays, lease dies
+            return maintain(op, changed)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            with mock.patch.object(events, 'maintain', side_effect=killed), self.assertRaises(KeyboardInterrupt):
+                m.drain_intents(inst)
+            _, _, opened = events.replay(inst)
+            dead = [ref for ref, e in opened.items() if e['data'].get('write_batch')]
+            self.assertEqual(len(dead), 1)
+            self.assertFalse(events.lease_live(inst, dead[0]))
+            self.assertEqual(self.views(queue, inst, requests), ['pending'] * 2)
+            self.assertIn(events.node_ref('root'), events.journal(m.Instance(inst.root)).state['invalid'])
+            later = m.submit_intent(inst, dict(kind='inbox', node='root', text='After crash', at=inst.now()), start=False)
+            m.drain_intents(inst)
+        state = events.journal(m.Instance(inst.root)).state
+        self.assertFalse(state['opened'])
+        self.assertFalse(state['invalid'])
+        self.assertFalse(events.detect_gaps(m.Instance(inst.root), 'root', record=False))
+        self.assertEqual(self.views(queue, inst, requests + [later]), ['current'] * 3)
+        self.assertIn('<!-- brain:facts v1 -->', (n['dir'] / 'status.md').read_text())  # regenerated view
+
+    def test_damaged_view_marker_never_reads_current(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(1)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'maintain_view_batch'):
+            m.drain_intents(inst)
+        self.assertEqual(self.views(queue, inst, requests), ['pending'])
+        marker = dict(id=requests[0]['id'], hash=requests[0]['hash'], view='current')
+        for damaged in (marker, {**marker, 'ref': ''}, {**marker, 'ref': 'x' * 32}, {**marker, 'ref': 'a' * 32, 'extra': 1}):
+            queue.intent_store(inst, requests[0]['id'] + '.view', damaged)
+            with self.assertRaisesRegex(ValueError, 'invalid view marker'):
+                queue.intent_receipt(inst, requests[0]['id'])
+
+    def test_drain_batch_maintenance_failure_keeps_receipts_honest(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(2)
+        maintain = events.maintain
+        def refused(op, changed):
+            if getattr(op, 'write_batch', False):
+                raise RuntimeError('projection refused')
+            return maintain(op, changed)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            with mock.patch.object(events, 'maintain', side_effect=refused), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                m.drain_intents(inst)
+            self.assertIn(events.node_ref('root'), events.journal(m.Instance(inst.root)).state['invalid'])
+            self.assertFalse(events.read(inst)[-1]['data']['maintenance_ok'])
+            self.assertEqual(self.views(queue, inst, requests), ['invalid'] * 2)
+            receipt, err = self.wait(m, inst, requests[0])
+            self.assertEqual((receipt['state'], receipt['view']), ('applied', 'invalid'))
+            self.assertIn('needs repair', err)
+            m.drain_intents(inst)  # the next drain retries the refused views
+        self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+        self.assertEqual(self.views(queue, inst, requests), ['current'] * 2)
+
     def test_write_events_source_resumes_exact_dead_operation_and_keeps_unrelated_gap(self):
         m, inst, n, row = self.fixture()
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):

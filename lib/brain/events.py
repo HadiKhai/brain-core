@@ -686,6 +686,8 @@ class Command:
             if request is not None:
                 from . import handback_queue
                 data.update(handback_queue.prepare_intent_operation(self, request))
+            if getattr(self, 'write_batch', False):
+                data['write_batch'] = True
             if not journal(self.inst).positions:
                 data["baseline"] = resource_list(self.inst, self.before)
             append(self.inst, self.node, "begin", self.ref, data)
@@ -796,6 +798,10 @@ class Command:
             maintenance_error = None
             try:
                 views = maintain(self, changed)
+                if views is DEFERRED_VIEWS:
+                    # The queue drain batch owns this projection; until it
+                    # succeeds the commit below marks the affected views invalid.
+                    maintenance_ok, views, self.views_deferred = False, {}, True
             except (Exception, SystemExit) as error:
                 maintenance_ok = False
                 maintenance_error = str(error) or type(error).__name__
@@ -809,6 +815,8 @@ class Command:
                         'views': views, 'maintenance_ok': maintenance_ok}
                 if not maintenance_ok:
                     data['invalidate'] = [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]
+                if getattr(self, 'views_deferred', False):
+                    data['deferred'] = True
                 # Prepare all display text before publication; no display failure may strand begin.
                 data = screen(self.inst, data)
             except (Exception, SystemExit):
@@ -816,6 +824,8 @@ class Command:
                         'resources': resource_list(self.inst, changed, display=False),
                         'maintenance_ok': False,
                         'invalidate': [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]}
+            self.maintenance_ok = data.get('maintenance_ok') is True
+            self.invalidated = list(data.get('invalidate', []))
             if not maintenance_ok and getattr(self, 'unpublished_contention', False) and not self.owned(changed):
                 # Plain contention refused the refresh before it published or
                 # changed anything. Bytes another writer left during the
@@ -1429,6 +1439,7 @@ def affected_nodes(inst, changed, preferred):
 
 
 RELEASED_PROJECTION_ATTEMPTS = 3
+DEFERRED_VIEWS = object()  # maintain(): a queue drain batch projects these views once
 WT_COMMANDS = ('wt_add', 'wt_setup', 'wt_rm', 'wt_prune')
 # These writers fence their released projection on their own node's records
 # and recompute a view a concurrent writer made stale.
@@ -1524,6 +1535,8 @@ def maintain(op, changed):
         # Task files are outside this ledger/status projection. Preserve the
         # native command journal without re-reading every job's live usage.
         return {}
+    if getattr(op, 'defer_views', False):
+        return DEFERRED_VIEWS
     changed = {**{path: None for path in op.record_paths}, **changed}
     views = {}
     # Cleanup records current metadata for replay, but never rewrites the status
@@ -1546,7 +1559,8 @@ def maintain(op, changed):
     _, recorded_views, _ = replay(op.inst)
     selected = {n['id']: n for n in affected_nodes(op.inst, changed, op.node)}
     for n in op.inst.nodes():
-        if not n['archived'] and node_ref(n['id']) in journal(op.inst).state['invalid']:
+        if not n['archived'] and (node_ref(n['id']) in journal(op.inst).state['invalid']
+                                  or n['id'] in getattr(op, 'project_nodes', ())):
             selected[n['id']] = n
     prepared = {}
     released_projection = op.command in ('set', 'handback', 'task', 'review', 'preview_receipt',

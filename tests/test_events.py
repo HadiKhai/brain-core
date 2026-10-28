@@ -34,8 +34,10 @@ class EventAppend(Scenario):
             view = original(current, node, known)
             rendered.append(node['id'])
             if node['id'] == 'peer' and not concurrent:
-                self.b(root, 'inbox', 'app', '--add', 'concurrent question')
-                concurrent.append(self.records(root)[-1]['data']['views'][events.node_ref('app')])
+                request = self.b(root, 'inbox', 'app', '--add', 'concurrent question').strip()
+                self.b(root, 'queue', 'wait', request)  # its batch view is published
+                concurrent.append(next(r['data']['views'][events.node_ref('app')] for r in reversed(self.records(root))
+                                       if events.node_ref('app') in r['data'].get('views', {})))
             return view
 
         with mock.patch.object(events, 'snapshot_view', side_effect=observed):
@@ -168,6 +170,35 @@ class EventAppend(Scenario):
         self.assertFalse(records[-1]['data']['maintenance_ok'])
         self.assertIn(events.node_ref('root'), records[-1]['data']['invalidate'])
         self.assertEqual(events.pending(records), {})
+
+    def test_deferred_queue_view_is_invalid_until_one_batch_maintenance(self):
+        root = self.init('deferred-view')
+        inst = instance.Instance(root)
+        with mock.patch.object(events, 'released_view', side_effect=AssertionError('deferred view rendered')):
+            with instance.brain_lock(inst):
+                op = events.Command(root, command='intent_queue', node='root')
+                op.defer_views = True
+                with op:
+                    (root / 'backlog.md').write_text('- deferred mutation\n')
+        commit = self.records(root)[-1]
+        self.assertEqual((commit['kind'], commit['ref']), ('commit', op.ref))
+        self.assertFalse(commit['data']['maintenance_ok'])
+        self.assertTrue(commit['data']['deferred'])
+        self.assertIn(events.node_ref('root'), commit['data']['invalidate'])
+        self.assertTrue(commit['data']['resources'])
+        self.assertIn(events.node_ref('root'), events.journal(instance.Instance(root)).state['invalid'])
+        with instance.brain_lock(inst):
+            batch = events.Command(root, command='intent_queue', node='root')
+            batch.write_batch = True
+            with batch:
+                pass
+        begin = next(r for r in self.records(root) if r['ref'] == batch.ref and r['kind'] == 'begin')
+        self.assertTrue(begin['data']['write_batch'])
+        terminal = self.records(root)[-1]
+        self.assertEqual(terminal['ref'], batch.ref)
+        self.assertTrue(terminal['data']['maintenance_ok'])
+        self.assertIn(events.node_ref('root'), terminal['data']['views'])
+        self.assertFalse(events.journal(instance.Instance(root)).state['invalid'])
 
     def test_resource_scopes_and_gap_scan_discover_nodes_once_per_batch(self):
         root = self.init('batch-scopes')
@@ -548,9 +579,15 @@ class EventAppend(Scenario):
         for args in commands:
             with self.subTest(command=args[0]):
                 result = self.b(r, *args)
+                count += 1
                 if args[0] == 'inbox' and '--add' in args:
                     self.b(r, 'queue', 'wait', result.strip())
-                count += 1
+                    # The queued write commits deferred; its drain batch adds one maintenance commit.
+                    begins = {e['ref'] for e in self.records(r) if e['kind'] == 'begin' and e['data'].get('write_batch')}
+                    self.assertEqual([c['data']['maintenance_ok'] for c in self.commits(r)[-2:]
+                                      if c['ref'] in begins], [True])
+                    self.assertTrue(self.commits(r)[-2]['data']['deferred'])
+                    count += 1
                 self.assertEqual(len(self.commits(r)), count)
         local = json.loads((r / '.brain/local.json').read_text())
         wt = Path(local['nodes']['app']['worktrees']['job-one']['path'])
