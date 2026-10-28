@@ -87,6 +87,45 @@ def ready_refs(n, branch):
                  for ref in ("refs/heads/" + branch, integration_ref(home)))
 
 
+_PINNED_STORE = contextvars.ContextVar('brain_pinned_git_store', default=None)
+
+
+@contextlib.contextmanager
+def pinned_git_store(inst):
+    """Let one read command reuse pinned object answers recorded by earlier commands.
+
+    Only answers the snapshot itself would retain are stored, under the same live
+    interpretation generation; refs, worktrees and policy are still read live.
+    """
+    token = _PINNED_STORE.set(inst)
+    try:
+        yield
+    finally:
+        _PINNED_STORE.reset(token)
+
+
+def _pinned_stored(repo, generation, args, result=None):
+    inst = _PINNED_STORE.get()
+    if inst is None:
+        return None
+    from . import spend as _m_spend, usage_cache as _m_usage_cache
+    # Git reads its configuration through these names; other variables never
+    # change a pinned object answer, and the generation fences their files.
+    env = sorted((k, v) for k, v in os.environ.items() if k.startswith('GIT_') or k in ('HOME', 'XDG_CONFIG_HOME'))
+    key = 'pinned-git:' + hashlib.sha256(json.dumps(
+        [str(Path(repo).resolve()), env, generation.hex(), list(args)]).encode()).hexdigest()
+    with _m_usage_cache.database(inst, readonly=_m_spend._SPEND_READ_ONLY.get()) as cache:
+        if result is not None:
+            cache.put(key, [result.returncode, result.stdout, result.stderr])
+            return None
+        value = cache.get(key)
+    if (isinstance(value, list) and len(value) == 3 and type(value[0]) is int
+            and (value[0] == 0 or (value[0] == 1 and args[:2] == ('merge-base', '--is-ancestor')))
+            and all(isinstance(text, str) for text in value[1:])):
+        return subprocess.CompletedProcess(['git', *args], value[0], value[1], value[2])
+    return None
+
+
 def immutable_git_query(repo):
     """Reuse only pinned object queries in the enclosing Git read snapshot.
 
@@ -191,6 +230,13 @@ def immutable_git_query(repo):
             except (OSError, ValueError, RuntimeError):
                 pass  # Uncertain metadata retains the native Git verdict.
         key = ('immutable-git-query', str(Path(repo).resolve()), tuple(sorted(env.items())), before, args)
+        if before is not None and key not in reads:
+            try:
+                stored = _pinned_stored(repo, before, args)
+            except (OSError, ValueError, TypeError):
+                stored = None
+            if stored is not None:
+                reads[key] = stored
         if before is not None and key in reads:
             result = reads[key]
             observer = _m_common._GIT_OBSERVER.get()
@@ -211,7 +257,8 @@ def immutable_git_query(repo):
             try:
                 if generation() == before:
                     reads[key] = result
-            except (OSError, ValueError, RuntimeError):
+                    _pinned_stored(repo, before, args, result)
+            except (OSError, ValueError, RuntimeError, TypeError):
                 pass
         return result
 

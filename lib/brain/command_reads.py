@@ -81,9 +81,11 @@ def snapshot():
     discovery = spend._UI_DISCOVERY.set({})
     try:
         root = nodes.try_find_root()
-        keys = {(n['id'], branch): True for n in instance.Instance(root).nodes()
-                for branch in n['local'].get('worktrees', {})} if root else {}
-        with common.git_read_snapshot(), status.local_job_snapshot(), verify.display_cache({}, keys):
+        inst = instance.Instance(root) if root else None
+        keys = {(n['id'], branch): True for n in inst.nodes()
+                for branch in n['local'].get('worktrees', {})} if inst else {}
+        with common.git_read_snapshot(), status.local_job_snapshot(), verify.display_cache({}, keys), \
+                (verify.pinned_git_store(inst) if inst else contextlib.nullcontext()):
             yield
     finally:
         spend._UI_DISCOVERY.reset(discovery)
