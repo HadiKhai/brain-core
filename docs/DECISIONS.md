@@ -4102,3 +4102,9 @@ merged worktree, an older blocked inbox line owning the wake, an informational
 or non-durable line, an acknowledged need, unknown reminder state or any
 helper failure returns None and keeps the scan fallback. Producer
 refs never substitute an invented or empty identity.
+## 2026-10-28: Skip unused due fingerprints in descendant scans
+
+When due_items omits stale-status checks and receives no evidence, it reads
+file_state directly. The full evidence fingerprint remains required for stale
+checks, and supplied evidence is reused. Due items, reminder lifecycle and live
+readiness are still evaluated on each call; no result or verdict cache is added.

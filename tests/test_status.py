@@ -2724,6 +2724,32 @@ class RenderedFingerprint(Scenario):
     def save_signal(self):
         self.hb.write_text(json.dumps(self.signal))
 
+    def test_due_without_staleness_uses_file_state_and_keeps_live_readiness(self):
+        evidence = self.m.due_evidence(self.inst, self.n)
+        expected = self.m.due_items(self.inst, self.n, evidence=evidence, include_stale=False)
+        self.assertTrue(next(i for i in expected if i['kind'] == 'handback')['ready'])
+        with mock.patch.object(self.m, 'due_evidence', side_effect=AssertionError('unused evidence')), \
+                mock.patch.object(self.m, 'status_fingerprint', side_effect=AssertionError('unused fingerprint')), \
+                mock.patch.object(self.m, 'status_lag', side_effect=AssertionError('unused staleness')):
+            self.assertEqual(self.m.due_items(self.inst, self.n, include_stale=False), expected)
+            self.n['fm']['verify'] = 'false'
+            changed = self.m.due_items(self.inst, self.n, include_stale=False)
+        self.assertFalse(next(i for i in changed if i['kind'] == 'handback')['ready'])
+
+    def test_due_with_staleness_keeps_full_evidence_and_supplied_evidence(self):
+        self.m.refresh_status(self.inst, self.n)
+        self.n['fm']['verify'] = 'false'
+        with mock.patch.object(self.m, 'due_evidence', wraps=self.m.due_evidence) as build:
+            items = self.m.due_items(self.inst, self.n, include_stale=True)
+        build.assert_called_once_with(self.inst, self.n)
+        self.assertIn('stale-status', [i['kind'] for i in items])
+        evidence = self.m.due_evidence(self.inst, self.n)
+        with mock.patch.object(self.m, 'due_evidence', side_effect=AssertionError('evidence supplied')), \
+                mock.patch.object(self.m, 'file_state', side_effect=AssertionError('state supplied')):
+            self.assertEqual(self.m.due_items(self.inst, self.n, evidence=evidence), items)
+            cheap = self.m.due_items(self.inst, self.n, evidence=evidence, include_stale=False)
+        self.assertEqual(cheap, [i for i in items if i['kind'] != 'stale-status'])
+
     def facts(self):
         state, _, _ = self.m.due_evidence(self.inst, self.n)
         return self.m.status_facts(self.inst, self.n, state,

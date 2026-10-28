@@ -35,6 +35,24 @@ class DueLifecycle(Scenario):
         return {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/palette',
                 'Started': '2026-01-15T08:00Z', **fields}
 
+    def test_cheap_due_observes_inbox_resolution_and_reappearance(self):
+        inbox = self.root / 'inbox.md'
+        def notices():
+            return [i for i in self.m.due_items(self.inst, self.n, include_stale=False,
+                                               include_advice=False) if i['kind'] == 'inbox']
+        with mock.patch.object(self.m, 'due_evidence', side_effect=AssertionError('unused evidence')):
+            inbox.write_text('- Choose a fabricated paint color\n')
+            first = notices()
+            self.assertEqual(len(first), 1)
+            self.assertEqual(notices(), first)
+            inbox.write_text('')
+            self.assertEqual(notices(), [])
+            inbox.write_text('- Choose a fabricated paint color\n')
+            again = notices()
+        self.assertEqual(len(again), 1)
+        self.assertEqual(again[0]['text'], first[0]['text'])
+        self.assertNotEqual(again[0]['id'], first[0]['id'])
+
     def ledger_need(self, row, kind):
         self.m.write_jobs(self.inst, self.n, [row])
         self.n['local']['worktrees'] = {row['Job']: {'path': str(self.root)}} if not row['Ended'] else {}

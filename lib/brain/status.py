@@ -692,7 +692,8 @@ def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, in
               include_handled=False):
     if n["archived"]:
         return []
-    evidence = evidence or due_evidence(inst, n)
+    # Descendant scans omit staleness; its display fingerprint is unused there.
+    evidence = evidence or (due_evidence(inst, n) if include_stale else (file_state(inst, n), None, None))
     state, _, _ = evidence
     items = []
     def add(kind, text, **extra):
