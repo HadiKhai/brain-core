@@ -1618,6 +1618,43 @@ class Tasks(Scenario):
         self.assertIn('diff', queries)
         self.assertNotIn('merge-base', queries)
 
+    def test_snapshot_delivery_reads_keep_live_verdicts_for_prefixes_and_ambiguous_framing(self):
+        import subprocess
+        from brain import task_flow
+        # SHA-256 repository: Git resolves a recorded 40-hex ID as a prefix of the full ID.
+        self.git('init', '-q', '-b', 'main', '--object-format=sha256', cwd=self.root)
+        (self.root / 'engine.py').write_text('value = 1\n')
+        self.git('add', '-A', cwd=self.root)
+        self.git('commit', '-qm', 'init', cwd=self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        (self.root / 'engine.py').write_text('value = 2\n')
+        self.git('commit', '-qam', 'Deliver engine', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.assertEqual(len(head), 64)
+        self.add('PREFIX', status='done', baseline_sha=base[:40], merge_sha=head[:40], code_path='engine.py',
+                 scope=['engine.py'], evidence=['Tests passed'])
+        snapshot = tasks.ui_tasks(self.inst, self.n)
+        self.assertEqual([r['delivery_state'] for r in snapshot['rows']], ['verified'])
+        # A changed path spelled like the next pair's head must not shift the batch framing.
+        a, b, c, d = ('1' * 40, '2' * 40, '3' * 40, '4' * 40)
+        reads = task_flow.DeliveryReads.__new__(task_flow.DeliveryReads)
+        reads.parents = {b: [a], d: [c], a: [], c: []}
+        rows = [{'baseline_sha': a, 'merge_sha': b}, {'baseline_sha': c, 'merge_sha': d}]
+        framed = subprocess.CompletedProcess([], 0, f'{b}\n{d}\nengine.py\n{d}\nother.py\n', '')
+        with mock.patch.object(task_flow._m_common, 'git', side_effect=[
+                subprocess.CompletedProcess([], 0, ''.join(f'{k} {" ".join(v)}\n' for k, v in reads.parents.items()), ''),
+                subprocess.CompletedProcess([], 1, '', '')]), \
+                mock.patch.object(task_flow.subprocess, 'run', return_value=framed):
+            reads.__init__(self.root, rows)
+        self.assertEqual(reads.changed, {})
+        clean = subprocess.CompletedProcess([], 0, f'{b}\nengine.py\n{d}\nother.py\n', '')
+        with mock.patch.object(task_flow._m_common, 'git', side_effect=[
+                subprocess.CompletedProcess([], 0, ''.join(f'{k} {" ".join(v)}\n' for k, v in reads.parents.items()), ''),
+                subprocess.CompletedProcess([], 1, '', '')]), \
+                mock.patch.object(task_flow.subprocess, 'run', return_value=clean):
+            reads.__init__(self.root, rows)
+        self.assertEqual(reads.changed, {(a, b): {'engine.py'}, (c, d): {'other.py'}})
+
     def test_shared_task_sync_keeps_public_default_and_existing_mode(self):
         from brain import task_linear
         self.linear_config()

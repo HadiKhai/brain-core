@@ -105,10 +105,13 @@ class DeliveryReads:
         listed = _m_common.git('rev-list', '--parents', 'refs/heads/main', cwd=home)
         self.parents = {} if listed.returncode else {
             commit[0]: commit[1:] for commit in map(str.split, listed.stdout.splitlines()) if commit}
+        # Full object IDs only: Git also resolves a shorter recorded ID as a prefix.
+        self.width = {len(commit) for commit in self.parents}
         self.changed = {}
         pairs = sorted({(r.get('baseline_sha', ''), r.get('merge_sha', '')) for r in rows
-                        if r.get('completion_kind', 'merge') == 'merge' and r.get('merge_sha') in self.parents
-                        and r.get('baseline_sha') != r.get('merge_sha') and self.ancestor(r.get('baseline_sha'), r['merge_sha'])})
+                        if r.get('completion_kind', 'merge') == 'merge' and self.covers(r.get('baseline_sha'), r.get('merge_sha'))
+                        and r['merge_sha'] in self.parents and r['baseline_sha'] != r['merge_sha']
+                        and self.ancestor(r['baseline_sha'], r['merge_sha'])})
         # Porcelain-only diff settings would change the paths a batched diff-tree reports.
         configured = _m_common.git('config', '--get-regexp',
                                    r'^(diff\.(renames|relative|renamelimit|ignoresubmodules)|submodule\..*\.ignore)$', cwd=home)
@@ -133,8 +136,15 @@ class DeliveryReads:
                 return
             else:
                 changed[pairs[index]].add(field)
-        if index == len(pairs) - 1:
+        # A path spelled like a batch head could have shifted the framing: keep live diffs.
+        heads = {head for _, head in pairs}
+        if index == len(pairs) - 1 and not any(paths & heads for paths in changed.values()):
             self.changed = changed
+
+    def covers(self, base, head):
+        """Answers exactly what the live calls would, for these recorded IDs."""
+        return (len(self.width) == 1 and isinstance(base, str) and isinstance(head, str)
+                and len(base) in self.width and len(head) in self.width)
 
     def ancestor(self, base, head):
         """git merge-base --is-ancestor base head, for a head on main."""
@@ -153,7 +163,11 @@ class DeliveryReads:
 def delivery_reads(n, rows):
     """Display-only scope; acting commands keep completion's live per-task git calls."""
     home = n.get('home_path')
-    token = _DELIVERY.set(DeliveryReads(home, rows) if home and rows else None)
+    try:
+        reads = DeliveryReads(home, rows) if home and rows else None
+    except OSError:
+        reads = None  # each task keeps its live per-task reads
+    token = _DELIVERY.set(reads)
     try:
         yield
     finally:
@@ -180,7 +194,7 @@ def completion(n, row, seen=None, records=None):
             raise ValueError('code completion requires a changed baseline, delivering SHA, code paths and scope')
         home = n.get('home_path')
         reads = _DELIVERY.get()
-        if reads is not None and reads.home != home:
+        if reads is not None and (reads.home != home or not reads.covers(base, head)):
             reads = None
         if not home or (head not in reads.parents if reads is not None else
                         _m_common.git('merge-base', '--is-ancestor', head, 'refs/heads/main', cwd=home).returncode):
