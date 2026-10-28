@@ -1016,6 +1016,16 @@ def install_observer(events, root, trace, read=False):
             if before is not None:
                 ui_record(before, Path(path).name, text.encode())
             return result
+        # Only the snapshot producers are proven. The optional view cache takes
+        # its native refusal path, and no background re-read leaves this process.
+        @contextlib.contextmanager
+        def ui_publish_refused(inst):
+            raise OSError('frozen read: optional view cache unobserved')
+            yield
+        if hasattr(ui_json, 'ui_json_publish_lock'):
+            ui_json.ui_json_publish_lock = ui_publish_refused
+        if hasattr(ui_json, 'ui_json_request_revalidate'):
+            ui_json.ui_json_request_revalidate = lambda inst: False
         ui_json.ui_json_fill_lock = ui_lock
         ui_json._m_ui_readmodel.ReadModel.write = ui_write
         events.common.atomic_write = ui_atomic
