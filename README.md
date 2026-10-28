@@ -617,6 +617,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain workbench <id>`, `brain report <id> "topic"`, `brain reports` | scripts and reports, in a predictable place |
 | `brain schedule list/add/bind` | recurring work, shared; each machine runs what it binds |
 | `brain now` | the time, in the brain's timezone, with its offset |
+| `brain timings [--command C] [--node N] [--since ISO] [--until ISO] [--slowest N] [--summary] [--json]` | query local timings, including p50/p95 over matching records |
+| `brain time [--node N] [--threshold SECONDS] -- <command> ...` | time a command and sample slow process trees; [optional runtime hooks](docs/operation-timing.md) are shipped without installation |
 </details>
 
 <details>

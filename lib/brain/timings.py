@@ -4,6 +4,8 @@ import contextvars
 import cProfile
 import functools
 import json
+import math
+import datetime
 import pstats
 import re
 import time
@@ -15,6 +17,29 @@ MAX_RECORD_BYTES = 16 * 1024
 _CURRENT = contextvars.ContextVar('brain_command_timing', default=None)
 _LABEL = contextvars.ContextVar('brain_command_label', default='invalid')
 _PERSIST = contextvars.ContextVar('brain_command_timing_persist', default=True)
+_NODE = contextvars.ContextVar('brain_command_timing_node', default=None)
+
+
+def select_node(ref):
+    _NODE.set(ref)
+
+
+def timing_node(inst, ref=None):
+    candidates = inst.nodes()
+    if isinstance(ref, str):
+        match = next((n for n in candidates if n['id'] == ref), None)
+        if match:
+            return match
+    cwd = Path.cwd().resolve()
+    matches = []
+    for n in candidates:
+        places = [n['dir'], n['home_path'], n['local'].get('workbench'),
+                  *[w.get('path') for w in n['local'].get('worktrees', {}).values()]]
+        for place in places:
+            path = Path(place).expanduser().resolve() if place else None
+            if path and (path == cwd or path in cwd.parents):
+                matches.append((len(path.parts), n))
+    return max(matches, key=lambda row: row[0])[1] if matches else inst.node('root')
 
 
 def select_command(name, persist=True):
@@ -56,6 +81,7 @@ def command(persist=True):
     token = _CURRENT.set(phases)
     label_token = _LABEL.set('invalid')
     persist_token = _PERSIST.set(persist)
+    node_token = _NODE.set(None)
     # Function totals are sufficient for top-N diagnostics. Omitting caller
     # edges and individual C builtins keeps ordinary read commands inexpensive.
     profiler = cProfile.Profile(subcalls=False, builtins=False)
@@ -81,6 +107,7 @@ def command(persist=True):
         finally:
             _LABEL.reset(label_token)
             _PERSIST.reset(persist_token)
+            _NODE.reset(node_token)
 
 
 def publish(elapsed, phases, profiler, success):
@@ -106,7 +133,8 @@ def publish(elapsed, phases, profiler, success):
             row['function'] = nodes.import_text(row['function'], terms, metadata=True)[:256]
         profile = {'command': name, 'elapsed_s': data['elapsed_s'], 'top': top}
         data['profile'] = profile
-    record = dict(ts=inst.now(), node=events.node_ref('root'), kind='timing', actor='brain', ref=identity, data=data)
+    record = dict(ts=inst.now(), node=events.node_ref(timing_node(inst, _NODE.get())['id']),
+                  kind='timing', actor='brain', ref=identity, data=data)
     def size():
         return len((json.dumps(record, ensure_ascii=False, separators=(',', ':'), sort_keys=True) + '\n').encode())
     while size() > MAX_RECORD_BYTES and data.get('profile', {}).get('top'):
@@ -118,8 +146,33 @@ def publish(elapsed, phases, profiler, success):
 
 
 def cmd_timings(a):
-    from . import events, nodes
+    from . import common, events, nodes
     inst = nodes.load()
+    def stamp(value):
+        if isinstance(value, (float, int)):
+            number = float(value)
+        else:
+            try:
+                number = float(value)
+            except (ValueError, TypeError):
+                value = re.sub(r'\s+([+-]\d{2}:\d{2})$', r'\1', value.replace('Z', '+00:00'))
+                parsed = datetime.datetime.fromisoformat(value)
+                if parsed.tzinfo is None:
+                    raise ValueError('timestamp needs a timezone')
+                number = parsed.timestamp()
+        if not math.isfinite(number):
+            raise ValueError('timestamp must be finite')
+        return number
+    try:
+        since = stamp(a.since) if a.since else None
+        until = stamp(a.until) if a.until else None
+        if since is not None and until is not None and since > until:
+            raise ValueError('since is after until')
+        if a.slowest is not None and a.slowest < 1:
+            raise ValueError('slowest must be positive')
+    except (ValueError, TypeError, OverflowError) as error:
+        common.die('invalid timing filter: ' + str(error))
+    node = events.node_ref(inst.node(a.node)['id']) if a.node else None
     records = []
     paths = [inst.root / '.brain/timings/events.jsonl']
     for path in paths:
@@ -131,9 +184,13 @@ def cmd_timings(a):
                         data = row.get('data', {})
                         if (row.get('kind') == 'timing' and isinstance(data, dict)
                                 and isinstance(data.get('elapsed_s'), (int, float))
+                                and math.isfinite(data['elapsed_s']) and data['elapsed_s'] >= 0
+                                and (not node or events.same_node(row.get('node'), a.node))
+                                and (since is None or stamp(row.get('ts')) >= since)
+                                and (until is None or stamp(row.get('ts')) <= until)
                                 and (not a.slow or data.get('slow'))
                                 and (not a.command or data.get('command') == a.command)):
-                            item = dict(ts=row.get('ts'), **data)
+                            item = dict(data, ts=row.get('ts'), node=row.get('node'))
                             legacy = item.get('profile')
                             if isinstance(legacy, str) and re.fullmatch(r'[0-9a-f]{32}\.json', legacy):
                                 try:
@@ -143,11 +200,19 @@ def cmd_timings(a):
                                 except (OSError, ValueError, SystemExit):
                                     pass  # retained legacy reference remains visible when unavailable
                             records.append(item)
-                    except (ValueError, TypeError, AttributeError):
+                    except (ValueError, TypeError, AttributeError, OverflowError):
                         continue
         except (OSError, ValueError, SystemExit):
             continue
-    records = records[-50:]
+    if a.summary:
+        values = sorted(row['elapsed_s'] for row in records)
+        result = dict(count=len(values), p50_s=values[math.ceil(len(values) * .50) - 1] if values else None,
+                      p95_s=values[math.ceil(len(values) * .95) - 1] if values else None)
+        print(json.dumps(result, indent=2) if a.json else
+              f"count={result['count']} p50_s={result['p50_s']} p95_s={result['p95_s']}")
+        return
+    records = (sorted(records, key=lambda row: row['elapsed_s'], reverse=True)[:a.slowest]
+               if a.slowest else records[-50:])
     if a.json:
         print(json.dumps(records, indent=2))
     elif not records:

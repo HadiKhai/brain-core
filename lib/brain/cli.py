@@ -118,7 +118,7 @@ def reexec_into_instance_core():
 
 # Commands that change nothing in the instance: they never wait for the lock.
 READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
-             "cmd_due", "cmd_inbox", "cmd_timings", "cmd_index", "cmd_scorecard", "cmd_introspect",
+             "cmd_due", "cmd_inbox", "cmd_timings", "cmd_time", "cmd_index", "cmd_scorecard", "cmd_introspect",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
@@ -724,7 +724,14 @@ def _main():
         opt("--project", action="store_true", help="explicit phase for configured generated-facts ownership"),
         opt("--from-events", action="store_true"), opt("--json", action="store_true"))
     cmd("timings", _m_timings.cmd_timings, "recent command durations and automatic slow profiles",
-        opt("--slow", action="store_true"), opt("--command"), opt("--json", action="store_true"))
+        opt("--slow", action="store_true"), opt("--command"), opt("--node"),
+        opt("--since", help="inclusive ISO timestamp or Unix seconds"),
+        opt("--until", help="inclusive ISO timestamp or Unix seconds"),
+        opt("--slowest", type=int, metavar="N"), opt("--summary", action="store_true"),
+        opt("--json", action="store_true"))
+    cmd("time", _Command("operation_timings", "cmd_time"), "time a command inside a Brain; never log arguments or output",
+        opt("--node"), opt("--threshold", type=float, default=5.0),
+        opt("command", nargs=argparse.REMAINDER))
     cmd("events", _Command("events", "cmd_events"), "private event metadata; --compare summarizes the last day", "id",
         opt("--compare", action="store_true"), opt("--json", action="store_true"),
         opt("--metrics", action="store_true"), opt("--explain", metavar="DIFFERENCE_ID"), opt("--reason"),
@@ -782,6 +789,7 @@ def _main():
     _m_timings.select_command(a.cmd or 'dashboard', persist=bool(handler) and
                              not local_source_registration and
                              (writes(a) or handler.__name__ not in READ_ONLY or command_read(a)))
+    _m_timings.select_node(getattr(a, 'node', None) or getattr(a, 'id', None))
     if not getattr(a, "f", None):
         if a.cmd in ("item", "specialist", "wt", "hook"):
             sub.choices[a.cmd].print_help()
