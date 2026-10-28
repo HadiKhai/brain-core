@@ -1267,7 +1267,7 @@ def install_observer(events, root, trace, read=False):
     events.cap_now = projection(events.cap_now, 'cap-now')
     events.status_commit = projection(events.status_commit, 'status-commit')
     original_comparison = events.comparison
-    def comparison(inst, node, current=None, record=True, prepared=None):
+    def comparison(inst, node, current=None, record=True, prepared=None, evidence=None):
         # Observe the native call's view without moving its computation or writes.
         captured = []
         previous_view = events.snapshot_view
@@ -1278,6 +1278,8 @@ def install_observer(events, root, trace, read=False):
         events.snapshot_view = observe_view
         try:
             options = {'prepared': prepared} if prepared is not None else {}
+            if evidence is not None:
+                options['evidence'] = evidence
             row = original_comparison(inst, node, current=current, record=record, **options)
         finally:
             events.snapshot_view = previous_view
