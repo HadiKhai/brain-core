@@ -389,6 +389,31 @@ def wake_snapshot(inst, n, refs):
         return []  # a contradictory snapshot cannot block an opaque wake
 
 
+def wake_comparison_before(inst, n, history):
+    """Display baseline only: older delivered refs, never an acknowledgement of new work."""
+    if history:
+        previous = history[-1]
+        if previous.get('ack_binding') not in (None, wake_owner_binding(inst, n)):
+            return []  # a replacement coordinator must see its own fresh comparison
+        refs = previous.get('before', []) + previous.get('snapshot', previous['items'])
+    else:
+        # Typed pre-log sent receipts can preserve their comparison baseline.
+        # Opaque receipts and queued-but-undelivered work prove no item was shown.
+        refs = []
+        binding = _m_wake_turns.wake_turn_binding(inst, n)
+        for path in wake_directory(inst, n).glob('*.sent'):
+            try:
+                value, delivered = wake_pending_value(path)
+                if value.get('binding') == binding:
+                    refs.extend(delivered)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+    try:
+        return wake_item_refs(refs)
+    except ValueError:
+        return []  # contradictory comparison evidence must leave work visible
+
+
 def wake_previous_items(directory):
     """Use the same baseline while a host starts its turn and after send returns."""
     import fcntl
@@ -862,6 +887,7 @@ def wake_drain(inst, n, once=False):
                     generation = _m_instance.state_signature(current, target)
                     refs = wake_delivery_items(current, target, pending)
                     snapshot = wake_snapshot(current, target, refs)
+                    before = wake_comparison_before(current, target, history)
                     latest = _m_instance.Instance(inst.root)
                     latest_target = latest.node(target['id'])
                     if _m_instance.state_signature(latest, latest_target) != generation:
@@ -870,8 +896,6 @@ def wake_drain(inst, n, once=False):
                     if action == 'hold':
                         attempted.update(path.name for path in pending)
                         return
-                    # A first delivery compares with nothing: its snapshot holds only the delivered refs.
-                    before = history[-1].get('snapshot', history[-1]['items']) if history else []
                     _m_common.atomic_write(last, str(WAKE_CLOCK.time()), private=True)  # failures are rate-limited too
                     inflight = directory / 'inflight.json'
                     try:

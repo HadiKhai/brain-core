@@ -769,7 +769,7 @@ class Watcher(Scenario):
                 [{'id': first[0]['id'], 'kind': 'inbox'}], [{'id': new[0]['id'], 'kind': 'inbox'}]])
             self.assertNotIn('fabricated', (directory / 'history.json').read_text())
             self.assertEqual([i['id'] for i in self.since()], [new[0]['id']])
-            # Third wake still hides A and B: snapshots contain all work due at each wake.
+            # Third wake still hides A and B, which earlier deliveries already covered.
             inbox.write_text(inbox.read_text() + '- fabricated third item\n')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             with mock.patch.object(self.m, 'wake_send', return_value=True):

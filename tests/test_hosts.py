@@ -1866,6 +1866,20 @@ class AckAllShown(Scenario):
         self.b(self.root, 'set', 'root', 'wake=fixture-send', 'coordinator=fixture-root')
         self.inst = self.m.Instance(self.root)
 
+    def test_legacy_comparison_uses_only_sent_metadata_for_the_live_binding(self):
+        m, n = self.m, self.inst.node('root')
+        directory = m.wake_directory(self.inst, n)
+        directory.mkdir(parents=True, exist_ok=True)
+        binding = m.wake_turn_binding(self.inst, n)
+        refs = [{'id': str(index) * 64, 'kind': 'inbox'} for index in (1, 2, 3)]
+        for name, owner, ref in (('a.sent', binding, refs[0]), ('b.sent', 'old-binding', refs[1]),
+                                  ('c.pending', binding, refs[2])):
+            (directory / name).write_text(json.dumps({'binding': owner, 'items': [ref]}))
+        (directory / 'd.sent').write_text('delivered\n')
+        with mock.patch.object(m, 'watch_groups', side_effect=AssertionError('comparison scanned')):
+            self.assertEqual(m.wake_comparison_before(self.inst, n, []), refs[:1])
+        self.assertEqual(m.wake_shown(self.inst, n), set(), 'display comparison grants no acknowledgement')
+
     def test_shown_item_queued_later_is_acknowledged_but_new_item_wakes(self):
         m, n = self.m, self.inst.node('root')
         refs = [{'id': str(i) * 64, 'kind': 'inbox'} for i in (1, 2, 3)]

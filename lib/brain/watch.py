@@ -749,7 +749,7 @@ def watch_since_wake(inst, nodes):
     for n in nodes:
         target, _ = _m_hosts.wake_target(inst, n)
         # The coordinator is handling the latest wake: compare with the wake before it,
-        # so the items that just woke it remain visible. Snapshots retain older due work.
+        # so the items that just woke it remain visible. The baseline retains older deliveries.
         seen = {i['id'] for i in _m_hosts.wake_previous_items(_m_hosts.wake_directory(inst, target))}
         out.extend(i for i in groups.get(target['id'], {}).get('items', []) if i['id'] not in seen
                    and (target['id'] == n['id'] or i['node'] == n['id']))
