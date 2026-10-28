@@ -4206,7 +4206,10 @@ stays open after its response deadline, because that deadline cannot grant
 consent. Explicit expiry or closure remains authoritative. Coordinator orders and unstructured imports
 remain inspectable there without contributing to operator counts. Native open
 inbox data keeps its API semantics; retained source records use the additive
-`inbox_archive` field. The projection never acknowledges messages or rewrites
+`inbox_archive` field. Open request metadata uses the additive `inbox_requests`
+field, leaving `inbox` equal to the CLI records plus their sender. The client
+prefers `inbox_requests` and falls back to `inbox` for older snapshots.
+The projection never acknowledges messages or rewrites
 source files. Source text and its location remain available in the reader.
 
 Sidebar history is opt-in and does not change live-thread totals. Closed ledger

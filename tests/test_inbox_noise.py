@@ -615,7 +615,8 @@ class InboxNoise(Scenario):
         before = source.read_bytes()
         state = json.loads(self.b(self.root, 'ui', '--json'))
         self.assertEqual(next(n['inbox'] for n in state['nodes'] if n['id'] == 'root'), [question[2:]])
-        self.assertFalse(any(fyi[2:] in i['text'] for i in state['inbox'] + state['attention']))
+        self.assertFalse(any(fyi[2:] in i['text'] for i in
+                             state['inbox'] + state['attention'] + state['inbox_requests'] + state['inbox_archive']))
         routine = next(i for i in state['due'] if i['kind'] == 'inbox' and i['text'] == fyi[2:])
         self.assertTrue(routine['informational'])
         ask = next(i for i in state['due'] if i['kind'] == 'inbox' and i['text'] == question[2:])

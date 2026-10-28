@@ -423,7 +423,7 @@ export function requestInfo(item: RecordData, now = Date.now(), operator = "oper
 export function needsView(s: RecordData, node?: string) {
   const inScope = (item: RecordData) => node === undefined || item.node === node;
   const requestKinds = ["inbox", "blocked", "blocked-overdue", "question", "decision", "host-question"];
-  const requests = needRows([...list(s.inbox).filter(inScope), ...list(s.inbox_archive).filter(inScope), ...list(s.due).filter(inScope).filter(item => requestKinds.includes(item.kind))]);
+  const requests = needRows([...list(s.inbox_requests ?? s.inbox).filter(inScope), ...list(s.inbox_archive).filter(inScope), ...list(s.due).filter(inScope).filter(item => requestKinds.includes(item.kind))]);
   const now = nowOf(s), operator = s.brain?.operator || "operator";
   const inbox = requests.filter(item => openDecision(item, now, operator));
   const requestIds = new Set(requests.map(item => item.id).filter(Boolean));

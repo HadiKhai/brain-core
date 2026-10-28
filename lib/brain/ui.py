@@ -567,9 +567,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
             item["branch"] = branches[(item["node"], item["job"])]
     machine_due = _m_status.machine_due_items(inst, nodes, machine, due)
     inbox = []
-    for item in _m_ui_status.ui_inbox_projection(inst, nodes, _m_status.inbox_items(inst, nodes)[0]):
-        if item.get('informational'):
-            continue
+    for item in _m_status.inbox_items(inst, nodes)[0]:
         extra = {}
         if item['kind'] in ('blocked', 'blocked-overdue'):
             node = next(n for n in nodes if n['id'] == item['node'])
@@ -578,6 +576,11 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
                              if _m_guard.redact(t, terms) == item['text']), item['text'])
             extra = _m_ui_status.ui_blocked_metadata(inst, node, original)
         inbox.append({**item, **extra, "from": inbox_sender(item)})
+    # Keep the CLI-compatible inbox intact; request routing is an additive view.
+    requests = [{**item, "from": inbox_sender(item)}
+                for item in _m_ui_status.ui_inbox_projection(inst, nodes, inbox)
+                if not item.get('informational')]
+    inbox = [item for item in inbox if not item.get('informational')]
     def need_key(item):
         text = item.get("text", "")
         if item.get("kind") == "inbox":
@@ -603,8 +606,9 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
                             **(_m_ui_status.ui_blocked_metadata(inst, next(n for n in nodes if n["id"] == a), t) if k in ("blocked", "blocked-overdue") else {})})
                       for a, k, t in _m_status.attention_items(inst, nodes)
                       if k != 'inbox' or not _m_inbox_notices.informational_notice('- ' + t.removeprefix('inbox: '))],
-        "inbox": [item for item in inbox if item.get('open') is not False],
-        "inbox_archive": [item for item in inbox if item.get('open') is False],
+        "inbox": inbox,
+        "inbox_requests": [item for item in requests if item.get('open') is not False],
+        "inbox_archive": [item for item in requests if item.get('open') is False],
         "commits": commits[:300], "hours": UI_HOURS, "activity": {"start": start, "counts": activity},
         "commits_24h": sum(1 for c in commits if c["t"] > time.time() - 86400), "commits_total": len(commits),
         "specialists": specialists,

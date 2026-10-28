@@ -32,6 +32,16 @@ test("requests, decisions and coordinator steps share lifecycle filtering and re
   assert.equal(state.inbox.length, 4);
 });
 
+test("additive request metadata drives asks while the native inbox stays unchanged", () => {
+  const native = { id: ask.id, node: ask.node, kind: ask.kind, text: ask.text };
+  const state = { inbox: [native], inbox_requests: [ask], due: [{ ...native }] };
+  const view = m.needsView(state);
+  assert.deepEqual(view.inbox, [ask]);
+  assert.deepEqual(view.archive, []);
+  assert.deepEqual(state.inbox, [native]);
+  assert.deepEqual(m.needsView({ ...state, inbox_requests: [] }).inbox, []);
+});
+
 test("sidebar hides closed jobs but retains unfinished and reopened branches behind no age cutoff", () => {
   const nodes = [{ id: "demo", work: [{ branch: "job/old", state: "merged" }, { branch: "job/open", state: "blocked" }, { branch: "job/unrecorded", state: "Review approved" }],
     jobs: { rows: [{ Job: "job/old", Ended: "2020-01-01" }, { Job: "job/open", Ended: "2020-01-01" }], open: [{ Job: "job/open" }] },
