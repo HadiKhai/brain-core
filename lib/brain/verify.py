@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -34,10 +35,10 @@ def ready_path(inst, n, branch):
     return _m_worktrees.workbench(inst, n) / "scratch" / "ready" / f"{key}.json"
 
 
-def integration_ref(home):
+def integration_ref(home, *, env=None):
     """Cached remote default, never a network request or a local-branch fallback for origin."""
-    if "origin" in _m_common.git("remote", cwd=home).stdout.split():
-        target = _m_common.git("symbolic-ref", "refs/remotes/origin/HEAD", cwd=home).stdout.strip()
+    if "origin" in _m_common.git("remote", cwd=home, env=env).stdout.split():
+        target = _m_common.git("symbolic-ref", "refs/remotes/origin/HEAD", cwd=home, env=env).stdout.strip()
         return target if target.startswith("refs/remotes/origin/") else ""
     return "refs/heads/main"
 
@@ -86,28 +87,194 @@ def ready_refs(n, branch):
                  for ref in ("refs/heads/" + branch, integration_ref(home)))
 
 
+def immutable_git_query(repo):
+    """Reuse only pinned object queries in the enclosing Git read snapshot.
+
+    Refs, index/worktree state and policy never enter this cache. Commit IDs
+    identify their trees; the entire query retains the range and path selection.
+    Replacement refs, shallow boundaries and config still change interpretation,
+    so their live generation fences both hits and insertion. Includes disable
+    reuse because they can introduce configuration outside this observed set.
+    """
+    env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+    reads = _m_common._GIT_READS.get()
+    if any(name in env for name in ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE',
+            'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+            'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_CONFIG')):
+        reads = None  # Nonstandard metadata needs its native live interpretation.
+    if any(name in env and not Path(env[name]).is_absolute()
+           for name in ('GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM')):
+        reads = None
+    sha = r'(?:[0-9a-f]{40}|[0-9a-f]{64})'
+    def pinned(args):
+        if args[:2] == ('merge-base', '--is-ancestor'):
+            return len(args) == 4 and all(re.fullmatch(sha, value) for value in args[2:])
+        if args[:2] == ('log', '--format=%s'):
+            return len(args) == 3 and re.fullmatch(sha + r'\.\.' + sha, args[2])
+        return (len(args) == 10 and args[:7] == (
+            'diff', '--name-status', '-z', '--no-renames', '--no-ext-diff',
+            '--no-textconv', '--ignore-submodules=none')
+            and all(re.fullmatch(sha, value) for value in args[7:9]) and args[-1] == '--')
+
+    def signature(paths):
+        h = hashlib.sha256()
+        marker_dirs = {(parent / '.git').resolve() for parent in (Path(repo), *Path(repo).parents)}
+        marker_dirs.update(Path(path).parent for path in paths if Path(path).name == 'config')
+        def visit(path, seen):
+            path = Path(path)
+            h.update(os.fsencode(path))
+            try:
+                st = path.lstat()
+                h.update(str((st.st_dev, st.st_ino, st.st_mode)).encode())
+                marker = path.name == '.git' or path in marker_dirs
+                if stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or (stat.S_ISDIR(st.st_mode) and not marker):
+                    h.update(str((st.st_mtime_ns, st.st_ctime_ns, st.st_size)).encode())
+                if path.is_symlink():
+                    target = path.resolve(strict=True)
+                    if target in seen:
+                        raise ValueError('cyclic Git metadata')
+                    visit(target, seen | {target})
+                elif path.is_dir() and not marker:
+                    for child in sorted(path.iterdir()):
+                        visit(child, seen)
+            except (FileNotFoundError, NotADirectoryError):
+                h.update(b'missing')
+        for path in sorted(set(paths)):
+            visit(path, set())
+        return h.digest()
+
+    def generation():
+        # git_state_paths discovers linked/bare administration, symbolic replace
+        # targets and reftables. Reuse discovery only while its paths stay equal.
+        key = ('immutable-git-layout', str(Path(repo).absolute()), str(Path(repo).resolve()),
+               tuple(sorted(env.items())))
+        previous = reads.get(key)
+        if previous is not None and signature(previous[0]) == previous[1]:
+            return previous[1] if previous[2] else None
+        markers = []
+        for parent in (Path(repo), *Path(repo).parents):
+            marker = parent / '.git'
+            markers.extend((marker, marker.resolve()))
+            if marker.exists():
+                break
+        marker_stamp = signature(markers)
+        paths = _m_instance.git_state_paths(repo, refs=(), include_head=False) + markers
+        discovered = signature(paths)
+        again = _m_instance.git_state_paths(repo, refs=(), include_head=False) + markers
+        if set(paths) != set(again) or signature(markers) != marker_stamp or signature(paths) != discovered:
+            return None
+        configs = [p for p in paths if p.name == 'config']
+        configs += [p.with_name('config.worktree') for p in configs]
+        configs += [Path(env.get('GIT_CONFIG_SYSTEM', '/etc/gitconfig')),
+                    Path(env.get('GIT_CONFIG_GLOBAL', str(Path.home() / '.gitconfig'))),
+                    Path(env.get('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'git/config']
+        paths += configs
+        config_before = signature(paths)
+        reusable = any(p.name == 'config' for p in paths)
+        for config in configs:
+            if config.is_file() and re.search(r'(?im)^\s*\[\s*include(?:if)?\b', config.read_text()):
+                reusable = False
+        if any('include' in value.lower() for name, value in env.items()
+               if name.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_PARAMETERS'))):
+            reusable = False
+        current = signature(paths)
+        if current != config_before:
+            return None
+        reads[key] = (paths, current, reusable)
+        return current if reusable else None
+
+    def query(*args):
+        before = None
+        if reads is not None and pinned(args):
+            try:
+                before = generation()
+            except (OSError, ValueError, RuntimeError):
+                pass  # Uncertain metadata retains the native Git verdict.
+        key = ('immutable-git-query', str(Path(repo).resolve()), tuple(sorted(env.items())), before, args)
+        if before is not None and key in reads:
+            result = reads[key]
+            observer = _m_common._GIT_OBSERVER.get()
+            if observer is not None:
+                observer(args, repo, env, None)
+                observer(args, repo, env, result)
+            try:
+                if generation() == before:
+                    return result
+            except (OSError, ValueError, RuntimeError):
+                pass
+            before = None  # Drift during a hit must take the native path.
+        result = _m_common.git(*args, cwd=repo, env=env)
+        # Failed reads are retried live; a transient unreadable object is never
+        # retained as either an exemption or a permanent refusal.
+        if before is not None and (result.returncode == 0 or
+                (args[:2] == ('merge-base', '--is-ancestor') and result.returncode == 1)):
+            try:
+                if generation() == before:
+                    reads[key] = result
+            except (OSError, ValueError, RuntimeError):
+                pass
+        return result
+
+    def ref_environment():
+        # Preserve the existing display ref snapshot, but validate its live
+        # source generation before every preflight. A changed binding discards
+        # its old common.git reads; uncertainty uses uncached native reads.
+        if _m_common._GIT_READS.get() is None:
+            return None
+        if reads is None:
+            return env
+        try:
+            interpretation = generation()
+            if interpretation is None:
+                return env
+            location = str(Path(repo).absolute())
+            key = ('readiness-ref-fence', location, tuple(sorted(env.items())), interpretation)
+            previous = reads.get(key)
+            if previous is not None and signature(previous[0]) == previous[1]:
+                return None
+            paths = _m_instance.git_state_paths(repo)
+            stamp = signature(paths)
+            for cached in list(reads):
+                if cached[0] == location:
+                    del reads[cached]
+            reads[key] = (paths, stamp)
+            return None
+        except (OSError, ValueError, RuntimeError):
+            return env
+    query.ref_environment = ref_environment
+    return query
+
+
 def ready_preflight(n, branch, base=None):
     """Test the proposed integration against the cached remote default (local main without origin)."""
     reasons = []
     if not n["external"] or not n["home_path"] or not n["home_path"].exists():
         return ["an external git home on this machine is required"], "", ""
-    head, main = ready_refs(n, branch)
+    home = n['home_path']
+    env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+    query = immutable_git_query(home)
+    ref_env = query.ref_environment()
+    ref = integration_ref(home, env=ref_env)
+    head, main = (_m_common.git('rev-parse', '--verify', '--quiet', value + '^{commit}',
+                               cwd=home, env=ref_env).stdout.strip()
+                  for value in ('refs/heads/' + branch, ref))
+    remote_main = main
     if not head or not main:
         return ["branch or integration main is missing (origin needs a valid cached origin/HEAD)"], head, main
     if base is not None:
-        local_main = _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}", cwd=n["home_path"]).stdout.strip()
+        local_main = _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/main^{commit}", cwd=home, env=ref_env).stdout.strip()
         if (n["fm"].get("merge", "local") == "pr" or not isinstance(base, str)
                 or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base)
-                or not local_main or _m_common.git("merge-base", "--is-ancestor", base, local_main, cwd=n["home_path"]).returncode):
+                or not local_main or query("merge-base", "--is-ancestor", base, local_main).returncode):
             reasons.append("train requires a recorded base ancestor of local main in merge=local mode")
         else:
             main = base
     if branch == "main" or ("refs/heads/" + branch ==
-                            integration_ref(n["home_path"]).replace("refs/remotes/origin/", "refs/heads/")):
+                            ref.replace("refs/remotes/origin/", "refs/heads/")):
         reasons.append("the job branch must differ from main")
-    if _m_common.git("merge-base", "--is-ancestor", main, head, cwd=n["home_path"]).returncode:
+    if query("merge-base", "--is-ancestor", main, head).returncode:
         reasons.append("worker must rebase on current main")
-        result = _m_common.git("merge-tree", "--write-tree", main, head, cwd=n["home_path"])
+        result = query("merge-tree", "--write-tree", main, head)
         if result.returncode == 1:
             reasons.append("merge-tree is not clean")
         elif result.returncode == 129:
@@ -115,18 +282,17 @@ def ready_preflight(n, branch, base=None):
         elif result.returncode:
             reasons.append(f"merge-tree failed (exit {result.returncode}); merge cleanliness is unknown")
     # A local merge integrates with unpublished local work too; PR mode integrates on the host.
-    ref = integration_ref(n["home_path"])
     if n["fm"].get("merge", "local") != "pr" and ref.startswith("refs/remotes/origin/"):
         local_ref = ref.replace("refs/remotes/origin/", "refs/heads/", 1)
-        local = _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=n["home_path"]).stdout.strip()
+        local = _m_common.git("rev-parse", "--verify", "--quiet", local_ref + "^{commit}", cwd=home, env=ref_env).stdout.strip()
         if not local:
             reasons.append("local integration branch is missing; configure merge=pr for host merges")
-        elif _m_common.git("merge-base", "--is-ancestor", ready_refs(n, branch)[1], local, cwd=n["home_path"]).returncode:
+        elif query("merge-base", "--is-ancestor", remote_main, local).returncode:
             reasons.append("local default must include origin default for merge=local; coordinator must update it "
                            "in a coordinator-owned worktree, or configure merge=pr; never change the operator checkout")
-        elif _m_common.git("merge-base", "--is-ancestor", base or local, head, cwd=n["home_path"]).returncode:
+        elif query("merge-base", "--is-ancestor", base or local, head).returncode:
             reasons.append("worker must rebase on current local main as well as origin default for merge=local")
-    titles = _m_common.git("log", "--format=%s", main + ".." + head, cwd=n["home_path"])
+    titles = query("log", "--format=%s", main + ".." + head)
     if titles.returncode:
         reasons.append("branch commit titles are unreadable")
     else:
@@ -137,10 +303,10 @@ def ready_preflight(n, branch, base=None):
         reasons.append("job worktree is missing")
     else:
         path = w["path"]
-        if _m_common.git("symbolic-ref", "--short", "HEAD", cwd=path).stdout.strip() != branch:
+        if _m_common.git("symbolic-ref", "--short", "HEAD", cwd=path, env=env).stdout.strip() != branch:
             reasons.append("job worktree is on a different branch")
         status = _m_common.git("-c", "diff.ignoreSubmodules=none", "-c", "status.showUntrackedFiles=all", "status", "--porcelain",
-                     "--ignore-submodules=none", "--untracked-files=all", cwd=path)
+                     "--ignore-submodules=none", "--untracked-files=all", cwd=path, env=env)
         if status.returncode or status.stdout.strip():
             reasons.append("job worktree is dirty or unreadable")
     return reasons, head, main

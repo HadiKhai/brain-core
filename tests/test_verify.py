@@ -28,6 +28,207 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class ReadinessImmutableQueries(Scenario):
+    def context(self):
+        m = core_loader.SourceFileLoader('readiness_immutable', str(CORE / 'bin/brain')).load_module()
+        repo = self.repo(self.tmp / 'repo')
+        self.git('checkout', '-qb', 'job', cwd=repo)
+        (repo / 'feature').write_text('first\n')
+        self.git('add', 'feature', cwd=repo)
+        self.git('commit', '-qm', 'Add feature', cwd=repo)
+        n = dict(external=True, home_path=repo, fm={},
+                 local={'worktrees': {'job': {'path': str(repo)}}})
+        return m, repo, n
+
+    def test_identical_pinned_queries_run_once_per_snapshot_but_live_checks_repeat(self):
+        m, repo, n = self.context()
+        original, calls = m.git, []
+        def counted(*args, **kwargs):
+            calls.append(args)
+            return original(*args, **kwargs)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'git', side_effect=counted):
+            with m.git_read_snapshot():
+                first = m.ready_preflight(n, 'job')
+                self.assertEqual(first[0], [])
+                self.assertEqual(m.ready_preflight(n, 'job'), first)
+                for command in ('merge-base', 'log'):
+                    self.assertEqual(sum(args[0] == command for args in calls), 1, calls)
+                self.assertEqual(sum('status' in args for args in calls), 2)
+                self.assertEqual(sum(args[:2] == ('symbolic-ref', '--short') for args in calls), 2)
+            with m.git_read_snapshot():
+                self.assertEqual(m.ready_preflight(n, 'job'), first)
+            self.assertEqual(sum(args[0] == 'log' for args in calls), 2)
+
+    def test_ref_moves_new_commits_and_dirty_worktrees_remain_live_within_snapshot(self):
+        m, repo, n = self.context()
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
+            first = m.ready_preflight(n, 'job')
+            (repo / 'feature').write_text('second\n')
+            self.assertIn('job worktree is dirty or unreadable', m.ready_preflight(n, 'job')[0])
+            self.git('commit', '-qam', 'wip: unfinished', cwd=repo)
+            changed = m.ready_preflight(n, 'job')
+            self.assertNotEqual(first[1], changed[1])
+            self.assertIn('unfinished commit: wip: unfinished', changed[0])
+            self.git('update-ref', 'refs/heads/main', changed[1], cwd=repo)
+            self.assertEqual(m.ready_preflight(n, 'job'), ([], changed[1], changed[1]))
+            self.git('checkout', '-qb', 'other', cwd=repo)
+            self.assertIn('job worktree is on a different branch', m.ready_preflight(n, 'job')[0])
+
+    def test_replacement_refs_change_pinned_ancestry_and_titles(self):
+        m, repo, n = self.context()
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        tree = self.git('rev-parse', 'job^{tree}', cwd=repo).strip()
+        replacement = self.git('commit-tree', tree, '-m', 'wip: replaced title', cwd=repo).strip()
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
+            self.assertEqual(m.ready_preflight(n, 'job')[0], [])
+            self.git('replace', head, replacement, cwd=repo)
+            reasons = m.ready_preflight(n, 'job')[0]
+            self.assertIn('worker must rebase on current main', reasons)
+            self.assertIn('unfinished commit: wip: replaced title', reasons)
+            self.git('replace', '-d', head, cwd=repo)
+            self.assertEqual(m.ready_preflight(n, 'job'), ([], head, main))
+
+    def test_failed_object_reads_are_retried_and_mutable_queries_never_memoize(self):
+        m, repo, n = self.context()
+        original, pending = m.git, [True]
+        def unreadable(*args, **kwargs):
+            if args[:2] == ('log', '--format=%s') and pending[0]:
+                pending[0] = False
+                return subprocess.CompletedProcess(args, 128, '', 'unreadable')
+            return original(*args, **kwargs)
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot(), \
+                mock.patch.object(m, 'git', side_effect=unreadable):
+            self.assertIn('branch commit titles are unreadable', m.ready_preflight(n, 'job')[0])
+            self.assertEqual(m.ready_preflight(n, 'job')[0], [])
+            query = m.immutable_git_query(repo)
+            before = query('rev-parse', '--verify', 'main').stdout
+            self.git('update-ref', 'refs/heads/main', 'job', cwd=repo)
+            self.assertNotEqual(query('rev-parse', '--verify', 'main').stdout, before)
+
+    def test_shallow_boundaries_and_included_config_remain_live(self):
+        m, repo, n = self.context()
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
+            query = m.immutable_git_query(repo)
+            args = ('merge-base', '--is-ancestor', main, head)
+            self.assertEqual(query(*args).returncode, 0)
+            (repo / '.git/shallow').write_text(head + '\n')
+            self.assertEqual(query(*args).returncode, 1)
+            (repo / '.git/shallow').unlink()
+            self.assertEqual(query(*args).returncode, 0)
+            include = self.tmp / 'included-config'
+            include.write_text('[diff]\n\trenames = false\n')
+            self.git('config', 'include.path', str(include), cwd=repo)
+            with mock.patch.object(m, 'git', wraps=m.git) as native:
+                query(*args)
+                query(*args)
+                self.assertEqual(sum(call.args == args for call in native.call_args_list), 2)
+
+    def test_retargeted_metadata_for_an_ancestor_repo_cannot_reuse_old_proofs(self):
+        m, repo, n = self.context()
+        subdir = repo / 'nested'
+        subdir.mkdir()
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        alternate = self.tmp / 'alternate-git'
+        tree = self.git('rev-parse', 'job^{tree}', cwd=repo).strip()
+        replacement = self.git('commit-tree', tree, '-m', 'Replacement root', cwd=repo).strip()
+        # Copy the replacement object too, then give only the alternate metadata
+        # a replacement mapping for the very same queried commit IDs.
+        shutil.copytree(repo / '.git', alternate)
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
+            query = m.immutable_git_query(subdir)
+            args = ('merge-base', '--is-ancestor', main, head)
+            self.assertEqual(query(*args).returncode, 0)
+            (repo / '.git').rename(self.tmp / 'old-git')
+            (repo / '.git').symlink_to(alternate, target_is_directory=True)
+            self.git('replace', head, replacement, cwd=repo)
+            self.assertEqual(query(*args).returncode, 1)
+
+    def test_cached_object_queries_still_register_with_a_new_publication_observer(self):
+        m, repo, n = self.context()
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
+            query = m.immutable_git_query(repo)
+            args = ('merge-base', '--is-ancestor', main, head)
+            result = query(*args)
+            observations = []
+            token = m._GIT_OBSERVER.set(lambda *values: observations.append(values))
+            try:
+                self.assertIs(query(*args), result)
+            finally:
+                m._GIT_OBSERVER.reset(token)
+            self.assertEqual([values[0] for values in observations], [args, args])
+            self.assertIsNone(observations[0][-1])
+            self.assertIs(observations[1][-1], result)
+
+    def test_config_include_added_during_discovery_cannot_enable_reuse(self):
+        m, repo, n = self.context()
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        config, include = repo / '.git/config', self.tmp / 'included-config'
+        include.write_text('[diff]\n\trenames = false\n')
+        original, pending = Path.read_text, [True]
+        def add_include(path, *args, **kwargs):
+            text = original(path, *args, **kwargs)
+            if path == config and pending[0]:
+                pending[0] = False
+                config.write_text(text + '\n[include]\n\tpath = ' + str(include) + '\n')
+            return text
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot(), \
+                mock.patch.object(Path, 'read_text', add_include), mock.patch.object(m, 'git', wraps=m.git) as native:
+            query = m.immutable_git_query(repo)
+            args = ('merge-base', '--is-ancestor', main, head)
+            self.assertEqual(query(*args).returncode, 0)
+            self.assertEqual(query(*args).returncode, 0)
+            self.assertEqual(sum(call.args == args for call in native.call_args_list), 2)
+
+    def test_config_drift_during_a_cache_hit_forces_a_native_query(self):
+        m, repo, n = self.context()
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        config = repo / '.git/config'
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot(), \
+                mock.patch.object(m, 'git', wraps=m.git) as native:
+            query = m.immutable_git_query(repo)
+            args = ('merge-base', '--is-ancestor', main, head)
+            self.assertEqual(query(*args).returncode, 0)
+            pending = [True]
+            def mutate(*values):
+                if values[0] == args and pending[0]:
+                    pending[0] = False
+                    config.write_text(config.read_text() + '\n[core]\n\tabbrev = 9\n')
+            token = m._GIT_OBSERVER.set(mutate)
+            try:
+                self.assertEqual(query(*args).returncode, 0)
+            finally:
+                m._GIT_OBSERVER.reset(token)
+            self.assertEqual(sum(call.args == args for call in native.call_args_list), 2)
+
+    def test_merge_tree_rechecks_external_custom_driver_state(self):
+        m = core_loader.SourceFileLoader('readiness_merge_driver', str(CORE / 'bin/brain')).load_module()
+        repo = self.repo(self.tmp / 'repo', {'file.txt': 'base\n', '.gitattributes': 'file.txt merge=fixture\n'})
+        self.git('checkout', '-qb', 'job', cwd=repo)
+        (repo / 'file.txt').write_text('job\n')
+        self.git('commit', '-qam', 'Change job input', cwd=repo)
+        self.git('checkout', 'main', cwd=repo)
+        (repo / 'file.txt').write_text('main\n')
+        self.git('commit', '-qam', 'Change main input', cwd=repo)
+        marker = self.tmp / 'driver-success'
+        marker.write_text('ready\n')
+        self.git('config', 'merge.fixture.driver', 'test -f ' + shlex.quote(str(marker)), cwd=repo)
+        main = self.git('rev-parse', 'main', cwd=repo).strip()
+        head = self.git('rev-parse', 'job', cwd=repo).strip()
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
+            query = m.immutable_git_query(repo)
+            self.assertEqual(query('merge-tree', '--write-tree', main, head).returncode, 0)
+            marker.unlink()
+            self.assertEqual(query('merge-tree', '--write-tree', main, head).returncode, 1)
+
+
 class WorkerReadyPackets(Scenario):
     def test_port_changes_rerun_monolithic_and_lane_commands(self):
         m = core_loader.SourceFileLoader('brain_port_reuse', str(CORE / 'bin/brain')).load_module()

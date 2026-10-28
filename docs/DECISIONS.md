@@ -4133,3 +4133,26 @@ on every call, so handling recorded or a receipt damaged by another command
 mid-tick is applied or refused. The watch fallback rescan discards held
 inventories. The scope ends with the command; other callers and the next command
 observe afresh.
+
+## 2026-10-28: Share pinned readiness Git queries within one read snapshot
+
+Readiness and preview classification reuse only explicit commit-to-commit
+ancestry, title and path-diff queries within one Git read snapshot.
+The key retains the repository identity, complete query and environment; commit
+IDs also identify their trees. Mutable refs, worktree status, branch identity,
+preview declarations and receipts are read live. Replacement refs, shallow
+history, grafts and Git configuration fence reuse, including linked-worktree
+administration. Configuration includes and nonstandard metadata environment
+overrides fall back to native reads. Unreadable queries are retried rather than
+cached; a negative ancestry answer remains a valid pinned result. No result
+survives the enclosing snapshot or authorizes publication without its existing
+source fence.
+Preview classification uses a rename's delete/add path set, retaining both sides
+of a rendered boundary without similarity computation or attribute-dependent
+rename decisions.
+The existing display ref snapshot is reused only while its live ref/config
+generation stays equal. Changed bindings discard those prior reads; uncertain
+configuration uses native queries. Worktree status and checkout identity always
+retain their native checks.
+Merge-tree checks remain native because configured merge drivers can depend on
+external state even when both commit IDs and repository configuration are fixed.

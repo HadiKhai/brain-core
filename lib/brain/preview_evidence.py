@@ -294,9 +294,11 @@ def preview_requirement(inst, n, branch, head, packet=None):
             return evidence
         repo = n['home_path']
         env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+        from . import verify as _m_verify
+        object_query = _m_verify.immutable_git_query(repo)
 
         def query(*args):
-            result = _m_common.git(*args, cwd=repo, env=env)
+            result = object_query(*args)
             if result.returncode or '\ufffd' in result.stdout:
                 raise ValueError('unreadable preview diff')
             return result.stdout
@@ -305,8 +307,7 @@ def preview_requirement(inst, n, branch, head, packet=None):
             return evidence
         if query('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}').strip() != head:
             return evidence
-        from . import verify as _m_verify
-        ref = _m_verify.integration_ref(repo)
+        ref = _m_verify.integration_ref(repo, env=env)
         if not ref:
             return evidence
         if n['fm'].get('merge', 'local') != 'pr':
@@ -320,7 +321,10 @@ def preview_requirement(inst, n, branch, head, packet=None):
         query('merge-base', '--is-ancestor', base, current_base)
         query('merge-base', '--is-ancestor', base, head)
         evidence['base'] = base
-        raw = query('diff', '--name-status', '-z', '--find-renames', '--no-ext-diff',
+        # Classification needs the full path set, not similarity scores. A
+        # rename's delete/add pair retains both boundary paths and avoids
+        # mutable worktree attributes influencing rename similarity.
+        raw = query('diff', '--name-status', '-z', '--no-renames', '--no-ext-diff',
                     '--no-textconv', '--ignore-submodules=none', base, head, '--')
         fields = raw.split('\0')
         if fields.pop() != '':
