@@ -238,6 +238,23 @@ class CoordinatorAdvisories(unittest.TestCase):
         with mock.patch.object(hosts,'wake_turn_queue',return_value=known,create=True):
             self.assertEqual(self.m.coordinator_advisories(self.inst), first)
 
+    def test_ui_projection_reads_recorded_backlog_without_lock_or_write(self):
+        import importlib
+        readmodel = importlib.import_module(self.m.coordinator_advisories.__globals__['__package__'] + '.ui_readmodel')
+        hosts = self.m.coordinator_advisories.__globals__['_m_hosts']
+        known = {'known':True,'item_count':4,'oldest_at':self.now.timestamp()-300,'unconsumed_wake':True}
+        lock, record = self.root / '.brain/coordinator-queue.lock', self.root / '.brain/coordinator-queue.json'
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=known,create=True):
+            with readmodel.observe(self.inst), mock.patch('fcntl.flock', side_effect=AssertionError('projection lock')):
+                self.assertEqual(len(self.m.coordinator_advisories(self.inst)), 1)
+            self.assertFalse(lock.exists() or record.exists())
+            first = self.m.coordinator_advisories(self.inst)
+            stored = record.read_bytes()
+            known['oldest_at'] = self.now.timestamp()-5  # delivery: only the recorded start keeps the episode
+            with readmodel.observe(self.inst), mock.patch('fcntl.flock', side_effect=AssertionError('projection lock')):
+                self.assertEqual(self.m.coordinator_advisories(self.inst), first)
+            self.assertEqual(record.read_bytes(), stored)
+
     def test_transport_only_doorbells_raise_no_busy_advisory(self):
         import importlib
         observations = importlib.import_module(self.m.coordinator_advisories.__globals__['__package__'] + '.host_observations')

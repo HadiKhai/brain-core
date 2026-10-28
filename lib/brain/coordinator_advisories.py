@@ -151,14 +151,34 @@ def coordinator_condition_valid(record):
                  and type(severity[0]) is int and severity[0] >= 0 and type(severity[1]) is bool))
 
 
+def coordinator_conditions_read(path):
+    recorded = {}
+    if path.exists():
+        data, _ = coordinator_read(path)
+        if data.get('version') == 1 and isinstance(data.get('conditions'), dict):
+            recorded = {k: v for k, v in data['conditions'].items() if coordinator_condition_valid(v)}
+    return recorded
+
+
 @contextlib.contextmanager
 def coordinator_conditions(inst):
     """Each continuing backlog's start and highest notified severity, under one lock.
 
     Yields (recorded, kept): the caller fills kept, which replaces the record when it
     differs. Unavailable state yields None, and episodes fall back to the observation.
+    A UI projection reads the record once, lock-free, and never writes it.
     """
     path = inst.root / '.brain/coordinator-queue.json'
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if view is not None:
+        try:
+            _m_common.safe_target(path)
+            recorded = view.store(path, lambda: coordinator_conditions_read(path))
+        except (OSError, ValueError, TypeError, AttributeError):
+            recorded = None
+        yield recorded, {}
+        return
     try:
         _m_common.safe_target(path)
         fd = os.open(path.with_suffix('.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -171,10 +191,7 @@ def coordinator_conditions(inst):
             if os.fstat(stream.fileno()).st_nlink != 1:
                 raise ValueError('linked coordinator queue lock')
             fcntl.flock(stream, fcntl.LOCK_EX)
-            if path.exists():
-                data, _ = coordinator_read(path)
-                if data.get('version') == 1 and isinstance(data.get('conditions'), dict):
-                    recorded = {k: v for k, v in data['conditions'].items() if coordinator_condition_valid(v)}
+            recorded = coordinator_conditions_read(path)
         except (OSError, ValueError, TypeError, AttributeError):
             yield None, {}
             return
