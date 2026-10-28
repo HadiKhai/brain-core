@@ -3714,3 +3714,14 @@ drift refuses publication and marks maintenance unsuccessful. Direct calls and
 archived-node refreshes retain their existing immediate path. No preparation or
 read observation survives the operation, and event-source views still come from
 committed replay.
+
+## 2026-10-28: Keep handback timeout evidence separate from enqueue race repair
+
+The inherited HandbackLifecycle WIP uses a 30-second process budget and a
+pipe-bound foreign helper. Rechecking the saved 12/20 baseline found seven
+subprocess timeouts and one child-readiness timeout, with no unlocked-state
+fencing failure. The concurrent-attempt creation repair is already in main
+(`572f305e`); the WIP does not constitute another queue-race repair. Preserve
+the outcome assertions and treat the timeout change as provisional until the
+rebased candidate passes the required admitted runs and independent review.
+Old-head run counts do not establish the result on the rebased candidate.
