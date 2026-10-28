@@ -70,6 +70,8 @@ def wake_configured_route(inst, n):
     while not target['local'].get('coordinator') and target.get('parent') is not None:
         target = target['parent']
     if not target['local'].get('coordinator'):
+        # During a source scan this lookup uses its observation's ID map.
+        # Outside that explicit scope it retains ordinary fresh discovery.
         target = inst.node('root')
     return target, target["local"].get("wake") or inst.local_of("root").get("wake_default", "")
 

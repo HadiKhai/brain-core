@@ -437,6 +437,22 @@ class QuestionWake(Scenario):
     # Keep all asserted CLI, HTTP, child-process and wake-launcher calls real.
     fixture_init_in_process = True
 
+    def test_scoped_routes_reuse_inventory_and_refresh_in_memory_binding(self):
+        inst, m = self.inst, self.module
+        with inst.node_observation(), \
+                mock.patch.object(inst, '_discover_nodes', wraps=inst._discover_nodes) as discover:
+            for _ in range(5):
+                node = inst.node('a')
+                self.assertEqual(m.wake_target(inst, node)[0]['id'], 'a')
+            self.assertEqual(discover.call_count, 1)
+            inst.local_of('a').pop('coordinator')
+            self.assertEqual(m.wake_target(inst, inst.node('a'))[0]['id'], 'root')
+            self.assertEqual(discover.call_count, 2)
+        with mock.patch.object(inst, '_discover_nodes', wraps=inst._discover_nodes) as discover:
+            m.wake_configured_route(inst, inst.node('a'))
+            m.wake_configured_route(inst, inst.node('a'))
+            self.assertGreaterEqual(discover.call_count, 2)
+
     def setUp(self):
         super().setUp()
         environment = mock.patch.dict(os.environ, self.env, clear=True)

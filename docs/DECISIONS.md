@@ -3892,6 +3892,7 @@ configuration, home and worktree binding. A rebind before that snapshot refuses
 before executing an isolated test or reading a quarantine request, so a clean
 replacement checkout cannot validate execution from a stale, dirty checkout.
 The same fence applies to later context checks and both disposition commands.
+
 ## 2026-10-28: Stage refresh overflow and wait outside writer ownership
 
 Explicit refresh prepares the capped Now section and archive bytes inside the
@@ -4232,3 +4233,21 @@ next actions resolve their option labels. Selecting a sidebar history or ledger-
 job explicitly includes that job in the destination's thread collection.
 Archive reads preserve original line endings before checksum verification, matching
 the native archive producer for CRLF source lines as well as LF source lines.
+
+## 2026-10-28: Reuse node discovery within one watcher source scan
+
+Each watcher source scan opens an explicit node observation with one tree list
+and ID map. Routing, completion targeting and visible inbox rollups share those
+records; decisions still run at each call. A supplied node selection contributes
+IDs only, so a retry cannot reuse removed or archived records. Every scan,
+including a nested scan or retry, starts a new observation. In-memory binding
+changes rebuild it; a changed binding file is reloaded before a new observation
+or a fresh source check. Equivalent rewrites and own saves preserve live binding
+references and subsequent unsaved edits; empty binding placeholders do not
+invalidate discovery. Records and inherited owners/home resolution keep the
+ordinary discovery behavior, including errors.
+
+Source signatures and publication checks bypass this observation, including an
+enclosing UI display snapshot. The UI instance delegates scoped and fresh reads
+to the same discovery implementation. Mutable node records remain confined to
+the scan; the instance's ordinary node reads outside a scope remain uncached.

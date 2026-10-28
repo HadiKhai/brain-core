@@ -1,6 +1,8 @@
 """Instance mechanics for Brain."""
 import datetime
 import contextlib
+import contextvars
+import copy
 import hashlib
 import json
 import os
@@ -15,6 +17,8 @@ from . import timings as _m_timings
 
 from . import common as _m_common
 
+_NODE_OBSERVATION = contextvars.ContextVar('brain_node_observation', default=None)
+
 
 class Instance:
     def __init__(self, root):
@@ -25,7 +29,9 @@ class Instance:
         self.runtimes = _m_common.lst(self.cfg.get("runtimes"))
         self.tz = self.cfg.get("timezone", "UTC")
         self.local_path = root / ".brain" / "local.json"
+        self._local_observed_stamp = self._local_stamp()
         self.local = self._load_local()
+        self._local_observed_data = copy.deepcopy(self.local)
 
     # time (axiom 17)
     def zone(self):
@@ -63,6 +69,13 @@ class Instance:
         return d
 
     # this machine's bindings (axiom 23)
+    def _local_stamp(self):
+        try:
+            st = self.local_path.stat()
+            return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+        except FileNotFoundError:
+            return None
+
     def _load_local(self):
         if self.local_path.exists():
             data = json.loads(self.local_path.read_text())
@@ -72,9 +85,22 @@ class Instance:
         data.setdefault("nodes", {})
         return data
 
+    def _refresh_local_observation(self):
+        stamp = self._local_stamp()
+        if stamp != self._local_observed_stamp:
+            data = self._load_local()
+            # An own save (or an equivalent rewrite) must not detach records
+            # held by callers, or discard their subsequent unsaved edits.
+            if data != self._local_observed_data and data != self.local:
+                self.local = data
+            self._local_observed_data = copy.deepcopy(data)
+            self._local_observed_stamp = stamp
+
     def save_local(self):
+        data = copy.deepcopy(self.local)
         with _m_common.durable_directory_target(self.local_path, private=True) as target:
-            target.atomic_write(json.dumps(self.local, indent=2, sort_keys=True) + "\n")
+            target.atomic_write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        self._local_observed_data = data
 
     def local_of(self, nid):
         return self.local["nodes"].setdefault(nid, {})
@@ -97,7 +123,40 @@ class Instance:
             d = d / "nodes" / seg
         return d
 
-    def nodes(self):
+    @contextlib.contextmanager
+    def node_observation(self):
+        """Reuse discovery only inside one source scan, never across retries.
+
+        Nested scopes start fresh too. Source/publication guards use fresh=True
+        and never receive these mutable observational records.
+        """
+        self._refresh_local_observation()
+        token = _NODE_OBSERVATION.set({'instance': self, 'local': None, 'nodes': None, 'ids': {}})
+        try:
+            yield
+        finally:
+            _NODE_OBSERVATION.reset(token)
+
+    def _node_observation(self):
+        observation = _NODE_OBSERVATION.get()
+        if observation is None or observation['instance'] is not self:
+            return None
+        # local_of creates empty placeholders during reads. They change no
+        # binding and must not turn an unconfigured scan into two discoveries.
+        local = {**self.local, 'nodes': {key: value for key, value in self.local['nodes'].items() if value}}
+        if observation['nodes'] is None or observation['local'] != local:
+            observation['nodes'] = self._discover_nodes()
+            observation['ids'] = {n['id']: n for n in observation['nodes']}
+            observation['local'] = copy.deepcopy(local)
+        return observation
+
+    def nodes(self, *, fresh=False):
+        if fresh:
+            self._refresh_local_observation()
+        observation = None if fresh else self._node_observation()
+        return list(observation['nodes']) if observation is not None else self._discover_nodes()
+
+    def _discover_nodes(self):
         out = []
 
         def rec(d, nid, parent):
@@ -132,6 +191,11 @@ class Instance:
         return out
 
     def node(self, nid):
+        observation = self._node_observation()
+        if observation is not None:
+            if nid in observation['ids']:
+                return observation['ids'][nid]
+            _m_common.die(f"no node '{nid}'")
         for n in self.nodes():
             if n["id"] == nid:
                 return n

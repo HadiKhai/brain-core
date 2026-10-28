@@ -312,7 +312,9 @@ class UIInstance(_m_instance.Instance):
         view._nodes, view._items = None, None
         return view
 
-    def nodes(self):
+    def nodes(self, *, fresh=False):
+        if fresh or self._node_observation() is not None:
+            return super().nodes(fresh=fresh)
         if self._nodes is None:
             self._nodes = super().nodes()
         return self._nodes

@@ -40,6 +40,149 @@ class Watcher(Scenario):
         self.assertEqual(paths, dict.fromkeys(hashed))
         self.assertEqual(stamp_paths, paths)
 
+    def inventory_node(self, nid, extra=''):
+        folder = self.inst.node_dir(nid)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / 'node.md').write_text('---\ntitle: Fixture\n' + extra + '---\n')
+        return folder
+
+    def test_scan_discovers_tree_once_for_routes_completions_and_visible_rollup(self):
+        m, inst = self.m, self.inst
+        for nid in ('app', 'app/leaf', 'other'):
+            self.inventory_node(nid)
+        inst.local_of('root').update(wake_policy='visible')
+        with mock.patch.object(inst, '_discover_nodes', wraps=inst._discover_nodes) as discover:
+            m.watch_scan(inst)
+        self.assertEqual(discover.call_count, 1)
+        completions = [{'id': str(i), 'source': nid, 'node': 'root', 'kind': 'job-landed', 'text': 'Fixture'}
+                       for i, nid in enumerate(('app', 'app/leaf', 'other') * 3)]
+        with mock.patch.object(inst, '_discover_nodes', wraps=inst._discover_nodes) as discover, \
+                mock.patch.object(m, 'watch_items', return_value=[]), \
+                mock.patch.object(m, 'watch_completion_items', return_value=completions):
+            groups = m.watch_scan(inst)
+        self.assertEqual(discover.call_count, 1)
+        self.assertEqual(len([i for i in groups['root']['items'] if i['kind'] == 'job-landed']), 9)
+        inst.local['nodes'] = {}  # unconfigured routing creates only empty placeholders
+        with mock.patch.object(inst, '_discover_nodes', wraps=inst._discover_nodes) as discover:
+            m.watch_scan(inst)
+        self.assertEqual(discover.call_count, 1)
+
+    def test_saved_binding_keeps_live_records_and_later_unsaved_edits(self):
+        inst = self.inst
+        node = inst.node('root')
+        inst.save_local()
+        node['local']['fixture-binding'] = 'unsaved'
+        with inst.node_observation():
+            self.assertIs(inst.node('root')['local'], node['local'])
+            self.assertEqual(inst.node('root')['local']['fixture-binding'], 'unsaved')
+        self.m.watch_source_signature(inst)
+        self.assertIs(inst.local_of('root'), node['local'])
+        inst.save_local()
+        self.assertEqual(json.loads(inst.local_path.read_text())['nodes']['root']['fixture-binding'], 'unsaved')
+
+    def test_node_observation_preserves_owners_homes_and_does_not_survive_scope(self):
+        m, inst = self.m, self.inst
+        self.inventory_node('app', 'owners: oak\n')
+        self.inventory_node('app/leaf', 'home: external\n')
+        inst.local_of('app/leaf')['home'] = str(self.tmp / 'external-home')
+        with inst.node_observation():
+            leaf = inst.node('app/leaf')
+            self.assertEqual(leaf['owners'], ['oak'])
+            self.assertFalse(leaf['sealed'])
+            self.assertEqual(leaf['home_path'], self.tmp / 'external-home')
+            self.assertIs(leaf, inst.node('app/leaf'))
+            self.inventory_node('new')
+            self.assertNotIn('new', {n['id'] for n in inst.nodes()})
+            self.assertIn('new', {n['id'] for n in inst.nodes(fresh=True)})
+        with inst.node_observation():
+            self.assertIn('new', {n['id'] for n in inst.nodes()})
+            self.assertIsNot(inst.node('app/leaf'), leaf)
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                inst.node('missing')
+
+    def test_retry_refreshes_added_removed_archived_nodes_and_disk_binding(self):
+        m, inst = self.m, self.inst
+        removed = self.inventory_node('removed')
+        archived = self.inventory_node('archived')
+        seen = []
+        def items(observed, n):
+            seen[-1].append((n['id'], m.wake_target(observed, n)[1]))
+            if len(seen) == 1 and n['id'] == 'root':
+                self.inventory_node('added')
+                (removed / 'node.md').unlink()
+                (archived / 'node.md').write_text('---\nlabels: state:archived\n---\n')
+                local = json.loads(inst.local_path.read_text())
+                local['nodes']['root']['wake'] = 'fixture-new-binding'
+                inst.local_path.write_text(json.dumps(local))
+            return []
+        original = m.watch_scan
+        def scan(*args):
+            seen.append([])
+            return original(*args)
+        with mock.patch.object(m, 'watch_scan', side_effect=scan), \
+                mock.patch.object(m, 'watch_items', side_effect=items):
+            groups = m.watch_groups(inst)
+        self.assertFalse(groups.stale)
+        self.assertEqual([{nid for nid, _ in attempt} for attempt in seen],
+                         [{'root', 'removed', 'archived'}, {'root', 'added'}])
+        self.assertTrue(all(command == 'fixture-new-binding' for _, command in seen[1]))
+
+    def test_supplied_selection_uses_fresh_records_and_archived_state(self):
+        m, inst = self.m, self.inst
+        folder = self.inventory_node('app')
+        selected = [inst.node('app')]
+        (folder / 'node.md').write_text('---\nlabels: state:archived\n---\n')
+        with mock.patch.object(m, 'watch_items') as items:
+            m.watch_scan(inst, selected)
+        items.assert_not_called()
+        (folder / 'node.md').write_text('---\ntitle: Updated fixture\n---\n')
+        with mock.patch.object(m, 'watch_items', return_value=[]) as items:
+            m.watch_scan(inst, selected)
+        self.assertEqual(items.call_args.args[1]['fm']['title'], 'Updated fixture')
+        self.assertIsNot(items.call_args.args[1], selected[0])
+
+    def test_source_and_publication_revalidation_bypass_enclosing_observation(self):
+        m, inst = self.m, self.inst
+        with inst.node_observation():
+            inst.nodes()
+            before = m.watch_source_signature(inst)
+            groups = m.watch_groups(inst)
+            self.inventory_node('added')
+            self.assertNotIn('added', {n['id'] for n in inst.nodes()})
+            self.assertNotEqual(m.watch_source_signature(inst), before)
+            with m.watch_precomputed_publication(inst, groups) as current:
+                self.assertFalse(current)
+
+    def test_ui_node_snapshot_cannot_hide_scan_inventory_or_publication_drift(self):
+        m = self.m
+        inst = m.UIInstance.from_instance(self.inst)
+        inst.nodes()  # prime the enclosing display's older node snapshot
+        self.inventory_node('added')
+        visited = []
+        with mock.patch.object(m, 'watch_items', side_effect=lambda _, n: visited.append(n['id']) or []), \
+                mock.patch.object(inst, '_discover_nodes', wraps=inst._discover_nodes) as discover:
+            m.watch_scan(inst)
+        self.assertIn('added', visited)
+        self.assertEqual(discover.call_count, 1)
+        groups = m.watch_groups(inst)
+        self.inventory_node('later')
+        with m.watch_precomputed_publication(inst, groups) as current:
+            self.assertFalse(current)
+
+    def test_failed_observation_is_discarded_and_next_scan_keeps_node_diagnostics(self):
+        inst = self.inst
+        with self.assertRaises(ValueError):
+            with inst.node_observation():
+                inst.nodes()
+                raise ValueError('fixture scan failed')
+        folder = self.inventory_node('added')
+        with inst.node_observation():
+            self.assertEqual(inst.node('added')['dir'], folder)
+        with mock.patch.object(self.m, 'read_fm', side_effect=ValueError('invalid fixture node')):
+            with self.assertRaisesRegex(ValueError, 'invalid fixture node'):
+                with inst.node_observation():
+                    inst.nodes()
+
     def test_direct_wake_snapshot_batches_discovery_and_refreshes_after_append(self):
         m, inst = self.m, self.inst
         cfg = self.tmp / 'watch-transcripts'

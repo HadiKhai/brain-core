@@ -171,7 +171,7 @@ def watch_source_signature(inst, layout=None):
     """
     from . import events
     inst._load_local()  # malformed binding evidence must still fail closed
-    nodes = list(inst.nodes())
+    nodes = list(inst.nodes(fresh=True))
     paths = [inst.root / 'instance.md', inst.root / '.brain/local.json']
     paths += [n['dir'] / name for n in nodes for name in ('node.md', 'never-name.txt', 'tasks', 'requirements')]
     layout = {} if layout is None else layout
@@ -881,8 +881,15 @@ def watch_inbox_rollup(inst, group):
 
 
 def watch_scan(inst, nodes=None):
-    """Collect source facts only while the due receipt transaction owns its lock."""
-    nodes = nodes if nodes is not None else [n for n in inst.nodes() if not n['archived']]
+    """Collect facts with one inventory; receipt/publication fences stay fresh."""
+    with inst.node_observation():
+        return watch_scan_observed(inst, nodes)
+
+
+def watch_scan_observed(inst, nodes=None):
+    # A supplied selection carries IDs, not reusable records from an older scan.
+    selected = None if nodes is None else {n['id'] for n in nodes}
+    nodes = [n for n in inst.nodes() if not n['archived'] and (selected is None or n['id'] in selected)]
     groups = {}
     for n in nodes:
         # Uncoordinated nodes route actionable work to root; root needs no explicit binding.
