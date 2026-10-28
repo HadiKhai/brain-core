@@ -1,11 +1,13 @@
-"""Short-lived, read-command snapshots. Never retained across mutations."""
+"""Short-lived read snapshots, with explicit content-bound refresh reuse."""
 import contextlib
 import contextvars
 import functools
 import json
+import copy
 
 _VALUES = contextvars.ContextVar('brain_command_reads', default=None)
 _SCOPED = contextvars.ContextVar('brain_scoped_reads', default=None)
+_CONTENT = contextvars.ContextVar('brain_content_reads', default=None)
 
 
 def memo(fn):
@@ -27,9 +29,29 @@ def memo(fn):
             return json.dumps(arg, sort_keys=True, default=str)
         identity = (fn, tuple(key(a) for a in args), tuple((k, key(v)) for k, v in sorted(kwargs.items())))
         if identity not in values:
-            values[identity] = fn(*args, **kwargs)
+            content = _CONTENT.get()
+            if content is not None and fn in content[0]:
+                version = content[0][fn](*args, **kwargs)
+                cache_key = (identity, version)
+                if cache_key not in content[1]:
+                    # The reader parses exactly the captured bytes, rather than
+                    # racing a second physical read under an older content key.
+                    content[1][cache_key] = copy.deepcopy(fn(*args, **kwargs, _content=version))
+                values[identity] = copy.deepcopy(content[1][cache_key])
+            else:
+                values[identity] = fn(*args, **kwargs)
         return values[identity]
     return read
+
+
+@contextlib.contextmanager
+def content_scope(read, fingerprint, values):
+    """Reuse a pure reader accepting _content, only inside an explicit refresh."""
+    token = _CONTENT.set(({getattr(read, '__wrapped__', read): fingerprint}, values))
+    try:
+        yield
+    finally:
+        _CONTENT.reset(token)
 
 
 @contextlib.contextmanager

@@ -562,6 +562,11 @@ def status_fingerprint(lines):
 @_m_command_reads.memo
 @_m_timings.timed("file_state")
 def file_state(inst, n):
+    from . import status_refresh
+    return status_refresh.view(inst, n, lambda: _file_state(inst, n), 'file-state', backlog_projection=True)
+
+
+def _file_state(inst, n):
     # Attempt ownership checks revisit this ledger for every projection. Share
     # its parse only within this observation, before inbox delivery can write.
     with _m_command_reads.scope(_m_jobs.read_jobs):
@@ -1243,6 +1248,13 @@ def ledger_facts(inst, n, state, known_merges, metadata_only, sections, terms):
 @_m_command_reads.memo
 @_m_timings.timed("status_facts")
 def status_facts(inst, n, state, known_merges, metadata_only=False):
+    from . import status_refresh
+    return status_refresh.view(
+        inst, n, lambda: _status_facts(inst, n, state, known_merges, metadata_only),
+        ['status-facts', state, known_merges, metadata_only], backlog_projection=True)
+
+
+def _status_facts(inst, n, state, known_merges, metadata_only=False):
     """Incremental display only; time, tasks, inbox and readiness stay live."""
     from . import facts_cache, usage_cache
     terms = _m_guard.never_terms(n)

@@ -617,6 +617,295 @@ class AutonomyFacts(AutonomyProject):
             jobs.read_jobs(inst.node('app'))
             self.assertEqual(len(reads) - start, 2)
 
+    def test_refresh_retry_reuses_unchanged_views_and_reflects_the_overtaking_write(self):
+        root = self.init('alice')
+        self.b(root, 'new', 'app', '--title', 'App')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_views')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        backlog = root / 'nodes/app/backlog.md'
+        builds, attempts = [], []
+        original = events._snapshot_view
+        def counted(current, node, known=None):
+            builds.append(node['id'])
+            return original(current, node, known)
+        def prepare(current, node):
+            result = {n['id']: events.snapshot_view(current, n) for n in current.nodes()}
+            if len(attempts) == 1:
+                backlog.write_text('# Backlog\n\n## Build order\n\n- [ ] Overtaking work\n')
+            return result
+        def attempt():
+            attempts.append(True)
+            return refresh.compute(inst, inst.node('app'), prepare, all_nodes=True, incremental=True)
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(events, '_snapshot_view', side_effect=counted), \
+                mock.patch.object(instance.Instance, 'now', return_value='2026-10-28 10:00 +02:00'), \
+                mock.patch('random.uniform', return_value=0):
+            result = cli.refresh_with_retry(attempt, root)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(builds.count('root'), 1)
+        self.assertEqual(builds.count('app'), 2)
+        self.assertIn('Overtaking work', backlog.read_text())
+        quiet = events.snapshot_view(m.Instance(root), m.Instance(root).node('app'))
+        self.assertEqual(events.normalize(result['app']), events.normalize(quiet))
+
+    def test_refresh_retry_reuses_git_queries_but_observes_a_new_oid(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_git')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        query = ('rev-parse', '--verify', '--quiet', 'HEAD')
+        native = refresh.common.subprocess.run
+        queries = []
+        def counted(argv, *args, **kwargs):
+            if tuple(argv[-4:]) == query:
+                queries.append(True)
+            return native(argv, *args, **kwargs)
+        def prepare(current, node):
+            return refresh.common.git(*query, cwd=root).stdout
+        with mock.patch.object(refresh.common.subprocess, 'run', side_effect=counted), refresh.invocation():
+            first = refresh.compute(inst, inst.node('root'), prepare)
+            self.assertEqual(refresh.compute(inst, inst.node('root'), prepare), first)
+            self.assertEqual(len(queries), 1)
+            self.git('commit', '--allow-empty', '-qm', 'new relevant oid', cwd=root)
+            second = refresh.compute(inst, inst.node('root'), prepare)
+            self.assertNotEqual(first, second)
+            self.assertEqual(len(queries), 2)
+        with mock.patch.object(refresh.common.subprocess, 'run', side_effect=counted), refresh.invocation():
+            self.assertEqual(refresh.compute(inst, inst.node('root'), prepare), second)
+        self.assertEqual(len(queries), 3, 'a later command owns a fresh memo')
+
+    def test_refresh_content_reads_are_fresh_after_a_write_and_own_their_rows(self):
+        root, home, wt = self.project()
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_content')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        jobs = importlib.import_module(cli.__package__ + '.jobs')
+        inst = m.Instance(root)
+        node = inst.node('app')
+        def prepare(current, target):
+            return jobs.read_jobs(target)
+        with refresh.invocation():
+            first = refresh.compute(inst, node, prepare)
+            first[0]['Outcome'] = 'caller edit'
+            second = refresh.compute(inst, node, prepare)
+            self.assertNotEqual(second[0]['Outcome'], 'caller edit')
+            path = node['dir'] / jobs.JOBS_FILE
+            path.write_text(path.read_text().replace('job-a', 'job-new'))
+            third = refresh.compute(inst, node, prepare)
+        self.assertEqual(third[0]['Job'], 'job-new')
+
+    def test_refresh_cached_view_keeps_its_git_fence_until_publication(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_cached_fence')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        builds = []
+        def read():
+            builds.append(True)
+            return refresh.common.git('rev-parse', '--verify', 'HEAD', cwd=root).stdout
+        def prepare(current, node):
+            return refresh.view(current, node, read)
+        original = (root / 'status.md').read_bytes()
+        with refresh.invocation():
+            first = refresh.compute(inst, inst.node('root'), prepare)
+            def overtaken(current, node):
+                self.assertEqual(prepare(current, node), first)
+                self.assertEqual(len(builds), 1, 'the view should have been reused')
+                self.git('commit', '--allow-empty', '-qm', 'overtake cached view', cwd=root)
+                return first
+            with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+                refresh.compute(inst, inst.node('root'), overtaken)
+        self.assertEqual((root / 'status.md').read_bytes(), original)
+
+    def test_refresh_git_memo_observes_changed_included_config_between_attempts(self):
+        root = self.init('alice')
+        config = self.tmp / 'retry-included.gitconfig'
+        config.write_text('[remote "first"]\nurl = https://example.test/first\n')
+        self.git('config', 'include.path', str(config), cwd=root)
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_config')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        def prepare(current, node):
+            return refresh.common.git('remote', cwd=root).stdout
+        with refresh.invocation():
+            self.assertIn('first', refresh.compute(inst, inst.node('root'), prepare))
+            config.write_text('[remote "second"]\nurl = https://example.test/second\n')
+            result = refresh.compute(inst, inst.node('root'), prepare)
+            self.assertIn('second', result)
+            self.assertNotIn('first', result)
+
+    def test_refresh_converges_while_an_owned_writer_keeps_appending(self):
+        root = self.init('alice')
+        self.b(root, 'new', 'app', '--title', 'App')
+        self.b(root, 'status', 'app', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_live_writer')
+        marker, stop = self.tmp / 'writer-go', self.tmp / 'writer-stop'
+        count = self.tmp / 'writer-count'
+        script = '''import sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from brain import instance
+root,marker,stop,count=map(Path,sys.argv[2:])
+inst=instance.Instance(root)
+while not marker.exists(): time.sleep(.01)
+i=0
+while not stop.exists():
+    with instance.brain_lock(inst):
+        with (root/'nodes/app/backlog.md').open('a') as stream:
+            stream.write('\\n- live writer %d\\n' % i)
+        i+=1; count.write_text(str(i))
+    time.sleep(.2)
+'''
+        writer = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'),
+                                   str(root), str(marker), str(stop), str(count)],
+                                  env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        original, builds = events._snapshot_view, []
+        def slow(current, node, known=None):
+            builds.append(node['id'])
+            result = original(current, node, known)
+            if not marker.exists():
+                self.assertIsNone(instance._LOCK['fh'])
+                marker.write_text('go')
+                time.sleep(.45)
+            return result
+        start = time.monotonic()
+        try:
+            with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                    mock.patch.object(sys, 'argv', ['brain', 'status', 'app', '--refresh']), \
+                    mock.patch.object(events, '_snapshot_view', side_effect=slow), \
+                    mock.patch.object(instance.Instance, 'now', return_value='2026-10-28 10:00 +02:00'), \
+                    mock.patch('random.uniform', return_value=0), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli.main()
+            self.assertIsNone(writer.poll(), 'writer must remain live through publication')
+            self.assertGreaterEqual(int(count.read_text()), 2)
+            self.assertLess(time.monotonic() - start, 60)
+            terminal = events.read(m.Instance(root))[-1]
+            self.assertEqual(terminal['kind'], 'commit')
+            self.assertTrue(terminal['data']['maintenance_ok'])
+        finally:
+            stop.write_text('stop')
+            marker.touch()
+            out, err = writer.communicate(timeout=30)
+        self.assertEqual(writer.returncode, 0, err.decode())
+
+    def assert_reconciliation_rechecks_new_lease(self, relative):
+        root, home, wt = self.project()
+        self.b(root, 'status', 'root', '--refresh')
+        (root / 'brief.md').write_text((root / 'brief.md').read_text() + '\nUntracked source gap.\n')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_new_lease_' + Path(relative).stem)
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        ref, held = 'd' * 32, []
+        original = events._snapshot_view
+        path = root / relative
+        baseline = events.replay(inst)[0].copy()
+        start = len(events.read(inst))
+        def foreign(current, node, known=None):
+            result = original(current, node, known)
+            if node['id'] == 'root' and not held:
+                self.assertIsNone(instance._LOCK['fh'])
+                owner = 'app' if relative.startswith('nodes/') else 'root'
+                events.append(inst, owner, 'begin', ref, {'command': 'fixture'})
+                lease = events.lease_path(inst, ref, create=True)
+                lease.write_text('')
+                held.append(os.open(lease, os.O_RDONLY))
+                events.fcntl.flock(held[0], events.fcntl.LOCK_EX)
+                text = path.read_text()
+                path.write_text(text.replace('job-a', 'job-pending') if relative.endswith('job-ledger.md')
+                                else text + '\n- pending foreign decision\n')
+            return result
+        try:
+            with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst), refresh.invocation(), \
+                    mock.patch.object(events, '_snapshot_view', side_effect=foreign):
+                events.reconcile(inst, node=inst.node('app'), snapshot=True)
+            self.assertTrue(held)
+            self.assertFalse(any(row['kind'] == 'reconcile' for row in events.read(inst)[start:]))
+            self.assertEqual(events.replay(inst)[0], baseline)
+            self.assertIn(ref, events.replay(inst)[2])
+        finally:
+            for fd in held:
+                os.close(fd)
+
+    def test_reconciliation_rechecks_a_new_decision_writers_lease(self):
+        self.assert_reconciliation_rechecks_new_lease('decisions.md')
+
+    def test_reconciliation_rechecks_a_later_nodes_pending_ledger_lease(self):
+        self.assert_reconciliation_rechecks_new_lease('nodes/app/job-ledger.md')
+
+    def assert_reconciliation_owns_leftover_dead_lease(self, mode):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        if mode == 'events':
+            policy = root / 'node.md'
+            policy.write_text(policy.read_text().replace('---\n', '---\nstatus_source: events\n', 1))
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_dead_lease_' + mode)
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst, ref = m.Instance(root), 'c' * 32
+        with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst):
+            events.append(inst, 'root', 'begin', ref, {'command': 'crashed'})
+            lease = events.lease_path(inst, ref, create=True)
+            lease.write_text('')  # a killed writer left an unlocked lease file
+            brief = root / 'brief.md'
+            brief.write_text(brief.read_text() + '\nCrashed writer source gap.\n')
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            if mode == 'explicit':
+                with instance.brain_lock(inst), refresh.invocation():
+                    events.reconcile(inst)
+            else:
+                with mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']):
+                    cli.main()
+        self.assertNotIn(ref, events.replay(inst)[2])
+        self.assertFalse(lease.exists())
+        self.assertTrue(any(row['kind'] == 'reconcile' and row['ref'] == ref for row in events.read(inst)))
+        if mode != 'explicit':
+            self.assertTrue(events.read(inst)[-1]['data']['maintenance_ok'])
+
+    def test_snapshot_refresh_reconciles_a_leftover_dead_lease_file(self):
+        self.assert_reconciliation_owns_leftover_dead_lease('snapshot')
+
+    def test_events_refresh_reconciles_a_leftover_dead_lease_file(self):
+        self.assert_reconciliation_owns_leftover_dead_lease('events')
+
+    def test_explicit_reconcile_owns_a_leftover_dead_lease_file(self):
+        self.assert_reconciliation_owns_leftover_dead_lease('explicit')
+
+    def test_refresh_renews_its_observation_clock_after_a_long_retry_wait(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_clock_renewal')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        clock = [datetime.datetime(2026, 10, 28, 9, tzinfo=datetime.timezone.utc)]
+        inst = m.Instance(root)
+        def prepare(current, node):
+            return refresh.view(current, node, lambda: current.now_dt())
+        with mock.patch.object(instance.Instance, 'now_dt', lambda self: clock[0]), refresh.invocation():
+            first = refresh.compute(inst, inst.node('root'), prepare)
+            clock[0] += datetime.timedelta(seconds=121)
+            second = refresh.compute(inst, inst.node('root'), prepare)
+        self.assertEqual(second, clock[0])
+        self.assertNotEqual(first, second)
+
+    def test_incremental_refresh_fences_a_symlinked_instance_policy_target(self):
+        root = self.init('alice')
+        policy = root / 'instance.md'
+        target = root / 'instance-policy.md'
+        target.write_bytes(policy.read_bytes())
+        policy.unlink()
+        policy.symlink_to(target.name)
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_policy_alias')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        original = (root / 'status.md').read_bytes()
+        def prepare(current, node):
+            result = refresh.view(current, node, lambda: current.tz)
+            target.write_text(target.read_text().replace('timezone: UTC', 'timezone: Europe/Paris'))
+            return result
+        with instance.brain_lock(inst), refresh.invocation():
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                refresh.compute(inst, inst.node('root'), prepare, incremental=True)
+        self.assertEqual((root / 'status.md').read_bytes(), original)
+
     def test_refresh_computes_unlocked_beside_a_real_background_commit(self):
         root, home, wt = self.project()
         (wt / 'feature.txt').write_text('worker change\n')

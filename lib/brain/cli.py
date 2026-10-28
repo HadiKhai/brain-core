@@ -861,6 +861,11 @@ REFRESH_WRITER_WAIT = 120  # one deadline across all live-owner waits and admiss
 
 
 def refresh_with_retry(attempt, root):
+    with _m_status_refresh.invocation():
+        return _refresh_with_retry(attempt, root)
+
+
+def _refresh_with_retry(attempt, root):
     """Retry fresh state, then use bounded final admission and unlocked builds."""
     import contextlib
     import random

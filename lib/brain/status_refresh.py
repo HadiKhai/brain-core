@@ -5,12 +5,26 @@ import hashlib
 import json
 import re
 import stat
+import copy
 from contextvars import ContextVar
 from pathlib import Path
 
 from . import common, instance, timings
 
 _ACTIVE = ContextVar('brain_status_refresh_prepare', default=False)
+_INVOCATION = ContextVar('brain_status_refresh_invocation', default=None)
+_VIEW_INPUTS = ContextVar('brain_status_refresh_view_inputs', default=None)
+_VIEW_FENCES = ContextVar('brain_status_refresh_view_fences', default=None)
+
+
+@contextlib.contextmanager
+def invocation():
+    """One refresh's immutable observations; never retained by a later command."""
+    token = _INVOCATION.set({'views': {}, 'git': {}, 'reads': {}, 'contents': {}, 'dirty': set(), 'layouts': {}})
+    try:
+        yield
+    finally:
+        _INVOCATION.reset(token)
 
 
 def active():
@@ -31,6 +45,9 @@ def generation(paths, shallow=False):
             if path.name == '.git' and stat.S_ISDIR(st.st_mode):
                 result.append((str(path), st.st_dev, st.st_ino, st.st_mode))
                 return  # metadata marker identity, never the object store
+            if path == Path(os.devnull) and stat.S_ISCHR(st.st_mode):
+                result.append((str(path), st.st_dev, st.st_ino, st.st_mode, st.st_rdev))
+                return  # an explicitly disabled Git config has no mutable bytes
             result.append((str(path), st.st_dev, st.st_ino, st.st_mode, st.st_size,
                            st.st_mtime_ns, st.st_ctime_ns))
             if stat.S_ISLNK(st.st_mode):
@@ -48,12 +65,18 @@ def generation(paths, shallow=False):
 class GitInputs:
     """Fence query dependencies without rerunning hundreds of immutable proofs."""
     def __init__(self):
-        self.layouts = {}
+        session = _INVOCATION.get()
+        self.layouts = session['layouts'] if session is not None else {}
         self.queries = {}
         self.pending = {}
+        self.results = {}
+        self.invalid = set()
+        self.memo = session['git'] if session is not None else {}
 
     def bases(self, cwd, env):
-        cached = self.layouts.get(cwd)
+        context = dict(os.environ) if env is None else dict(env)
+        layout_key = (cwd, tuple(sorted(context.items())))
+        cached = self.layouts.get(layout_key)
         if cached is not None and generation(cached[1]) == cached[2]:
             return cached[0]
         markers = []
@@ -73,12 +96,22 @@ class GitInputs:
                 common._GIT_OBSERVER.reset(token)
         first = discover()
         bases = [(home / line).resolve() for line in first.stdout.splitlines()] if not first.returncode else []
-        layout_paths = markers + [base / 'commondir' for base in bases]
+        # Config includes may live outside Git's metadata directories. Carry
+        # every origin, and missing default entry points, into the query fence.
+        config = common.git('config', '--show-origin', '--null', '--list', cwd=cwd, env=context)
+        origins = [Path(part[5:]) for part in config.stdout.split('\0') if part.startswith('file:')]
+        defaults = [Path(context.get('GIT_CONFIG_SYSTEM', '/etc/gitconfig')),
+                    Path(context.get('GIT_CONFIG_GLOBAL', str(Path(context.get('HOME', str(Path.home()))) / '.gitconfig'))),
+                    Path(context.get('XDG_CONFIG_HOME', str(Path(context.get('HOME', str(Path.home()))) / '.config'))) / 'git/config']
+        config_paths = [(home / path).absolute() for path in [*origins, *defaults]]
+        layout_paths = markers + [base / 'commondir' for base in bases] + config_paths
         stamp = generation(layout_paths)
         second = discover()
-        if (first.returncode, first.stdout) != (second.returncode, second.stdout) or generation(markers) != marker_stamp or generation(layout_paths) != stamp:
+        if (first.returncode, first.stdout) != (second.returncode, second.stdout) or generation(markers) != marker_stamp:
             common.die('status refresh Git dependency bindings changed; retry from fresh state')
-        self.layouts[cwd] = (bases, layout_paths, stamp)
+        if generation(layout_paths) != stamp:
+            common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
+        self.layouts[layout_key] = (bases, layout_paths, stamp)
         return bases
 
     def paths(self, args, cwd, env):
@@ -143,6 +176,8 @@ class GitInputs:
             replacements = base / os.environ.get('GIT_REPLACE_REF_BASE', 'refs/replace/')
             if replacements.is_dir():
                 refs.update(p.relative_to(base).as_posix() for p in replacements.rglob('*') if p.is_file())
+        context = dict(os.environ) if env is None else dict(env)
+        paths.extend(self.layouts[(cwd, tuple(sorted(context.items())))][1])
         # A linked worktree's HEAD may point into common refs; replacement
         # symbolic chains can likewise cross either metadata directory.
         pending, seen = list(refs), set()
@@ -168,10 +203,28 @@ class GitInputs:
     def observe(self, args, cwd, env, result):
         key = (args, str(cwd) if cwd is not None else None)
         if result is None:
+            context = tuple(sorted((os.environ if env is None else env).items()))
+            previous = self.results.get((key, context))
+            if previous is not None:
+                # A build observes one answer per query. The complete dependency
+                # set is still checked under ownership before it can publish.
+                self.pending[key] = None
+                return previous
             paths, replay = self.paths(args, key[1], env)
-            self.pending[key] = (paths, replay, generation(paths))
+            before = generation(paths)
+            # Only dependencies covered by the native revision grammar are
+            # reusable. Working-tree reads and external Git config stay live.
+            command = next((a for a in args if not a.startswith('-')), '')
+            cacheable = not replay and command in ('remote', 'symbolic-ref', 'rev-parse', 'merge-base',
+                                                   'rev-list', 'log', 'diff', 'for-each-ref')
+            cacheable = cacheable and not any(str(arg).startswith('--output') for arg in args)
+            memo_key = (key, context, tuple(before)) if cacheable else None
+            self.pending[key] = (paths, replay, before, memo_key, context)
+            return self.memo.get(memo_key) if memo_key is not None else None
+        pending = self.pending.pop(key)
+        if pending is None:
             return
-        paths, replay, before = self.pending.pop(key)
+        paths, replay, before, memo_key, context = pending
         value = (result.returncode, result.stdout)
         discovered, _ = self.paths(args, key[1], env)
         if set(discovered) != set(paths):
@@ -184,8 +237,23 @@ class GitInputs:
             if checked != value:
                 common.die('status refresh inputs changed during computation; retry from fresh state')
         if key in self.queries and self.queries[key][-1] != value:
+            self.invalid = {key}
+            invalidate_views(self)
             common.die('status refresh inputs changed during computation; retry from fresh state')
         self.queries[key] = (env, paths, replay, after, value)
+        if memo_key is not None and before == after:
+            self.memo[memo_key] = result
+            self.results[(key, context)] = result
+
+    def absorb(self, other):
+        for key, entry in other.queries.items():
+            if key in self.queries and self.queries[key][-1] != entry[-1]:
+                self.invalid = {key}
+                invalidate_views(self)
+                common.die('status refresh inputs changed during computation; retry from fresh state')
+            self.queries[key] = entry
+
+
 
     def reread(self, args, cwd, env, paths):
         # A semantic reread may adopt new ref values, never a new dependency
@@ -207,11 +275,14 @@ class GitInputs:
 
     def validate(self):
         validated = []
+        self.invalid = set()
         for (args, cwd), (env, paths, replay, stamp, before) in self.queries.items():
             if replay or generation(paths) != stamp:
+                self.invalid = {(args, cwd)}
                 after, stamp = self.reread(args, cwd, env, paths)
                 if after != before:
                     common.die('status refresh inputs changed during computation; retry from fresh state')
+                self.invalid = set()
             validated.append([args, cwd, env, paths, stamp, before])
         # A later query must not invalidate an earlier answer. One final
         # semantic check tolerates a single unrelated commit at this boundary;
@@ -219,15 +290,19 @@ class GitInputs:
         for item in validated:
             args, cwd, env, paths, stamp, before = item
             if generation(paths) != stamp:
+                self.invalid = {(args, cwd)}
                 after, item[4] = self.reread(args, cwd, env, paths)
                 if after != before:
                     common.die('status refresh inputs changed during computation; retry from fresh state')
-        if any(generation(item[3]) != item[4] for item in validated):
+                self.invalid = set()
+        self.invalid = {(item[0], item[1]) for item in validated if generation(item[3]) != item[4]}
+        if self.invalid:
             common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
         self.validated = validated
 
     def final_check(self):
-        if any(generation(item[3]) != item[4] for item in self.validated):
+        self.invalid = {(item[0], item[1]) for item in self.validated if generation(item[3]) != item[4]}
+        if self.invalid:
             common.die('status refresh Git inputs kept changing during validation; retry from fresh state')
 
 
@@ -333,6 +408,103 @@ def membership_paths(inst, selected):
     return tuple(sorted(set(paths)))
 
 
+def content_identity(paths):
+    """Content plus namespace identity, including recursively followed aliases."""
+    result = []
+    session = _INVOCATION.get()
+    contents = session['contents'] if session is not None else {}
+    seen = set()
+    def visit(path):
+        if path in seen:
+            return
+        seen.add(path)
+        try:
+            st = path.lstat()
+            if stat.S_ISLNK(st.st_mode):
+                result.append((str(path), 'link', os.readlink(path)))
+                visit(path.resolve())
+            elif stat.S_ISDIR(st.st_mode):
+                result.append((str(path), 'directory'))
+                for child in sorted(path.iterdir()):
+                    visit(child)
+            else:
+                version = (str(path), st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+                if version not in contents:
+                    contents[version] = hashlib.sha256(path.read_bytes()).digest()
+                result.append((str(path), st.st_mode, st.st_mtime_ns, contents[version]))
+        except FileNotFoundError:
+            result.append((str(path), None))
+    for path in sorted(set(paths)):
+        visit(path)
+    return tuple(result)
+
+
+def view(inst, node, build, variant=None, *, backlog_projection=False, reuse=True):
+    """Reuse an unchanged node, carrying its Git evidence into the batch fence."""
+    session = _INVOCATION.get()
+    observer = common._GIT_OBSERVER.get()
+    parent = getattr(observer, '__self__', None)
+    if session is None or not active() or not isinstance(parent, GitInputs):
+        return build()
+    from . import status, jobs
+    discovered = _VIEW_INPUTS.get()
+    node_paths = discovered[0].get(node['id']) if discovered is not None else None
+    if node_paths is None:
+        node_paths = input_paths(inst, node)
+    directories = discovered[1] if discovered is not None else membership_paths(inst, [node])
+    fences = _VIEW_FENCES.get()
+    backlog = node['dir'] / 'backlog.md'
+    observed_paths = [p for p in node_paths if not backlog_projection or p != backlog]
+    before_stamp = generation(observed_paths)
+    before_membership = generation(directories, shallow=True)
+    runnable = status.runnable_work(node, jobs.read_jobs(node)) if backlog_projection else None
+    def semantic_input():
+        return status.runnable_work.__wrapped__(node, jobs.read_jobs.__wrapped__(node)) if backlog_projection else None
+    def fence():
+        if fences is not None:
+            if (generation(observed_paths) != before_stamp or
+                    generation(directories, shallow=True) != before_membership or semantic_input() != runnable):
+                session['dirty'].add(node['id'])
+                common.die('state changed during the unlocked step; retry from fresh state')
+            fences.setdefault(node['id'], []).append(
+                (observed_paths, before_stamp, directories, before_membership, semantic_input, runnable))
+    def identity():
+        # snapshot_view reads backlog only through runnable_work. Re-evaluate
+        # that projection on every use: append-only notes cannot force expensive
+        # ledger/ready checks when the displayed runnable work is unchanged.
+        return (content_identity([*observed_paths, inst.root / 'instance.md']), runnable,
+                tuple(generation(directories, shallow=True)),
+                tuple((w['path'], Path(w['path']).is_dir()) for w in node['local'].get('worktrees', {}).values()),
+                inst.now(), copy.deepcopy(status.status_machine_alert(inst)), tuple(sorted(os.environ.items())))
+    key = (str(inst.root), node['id'], json.dumps(variant, sort_keys=True), backlog_projection)
+    before = identity()
+    cached = session['views'].get(key) if reuse else None
+    if cached is not None and cached[0] == before:
+        # Replays belong to the final owned batch fence. Running them here
+        # would open another long source window for each unchanged view.
+        parent.absorb(cached[1])
+        fence()
+        return copy.deepcopy(cached[2])
+    inputs = GitInputs()
+    token = common._GIT_OBSERVER.set(inputs.observe)
+    try:
+        result = build()
+    finally:
+        common._GIT_OBSERVER.reset(token)
+    parent.absorb(inputs)
+    if reuse and before == identity():
+        session['views'][key] = (before, inputs, copy.deepcopy(result))
+    fence()
+    return result
+
+
+def view_order(nodes):
+    """Prepare overtaken nodes last, just before the final owned validation."""
+    session = _INVOCATION.get()
+    dirty = session['dirty'] if session is not None else ()
+    return sorted(nodes, key=lambda node: node['id'] in dirty)
+
+
 GIT_DRIFT = ('status refresh inputs changed during computation',
              'status refresh Git inputs kept changing during validation')
 # Plain contention: another writer moved inputs or held a lease during this
@@ -355,7 +527,7 @@ def settings_changed():
     return instance.settings(instance.Instance(instance._LOCK['held_root'])) != instance._LOCK['held_settings']
 
 
-def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
+def compute(inst, n, build, *, all_nodes=False, targets=None, extra=(), incremental=False):
     """Release physical ownership, prepare once, then refuse relevant drift.
 
     Query-result fences preserve path-specific history and ancestry semantics:
@@ -365,12 +537,13 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     """
     if active():
         return build(inst, n)
+    incremental = incremental and _INVOCATION.get() is not None
     if instance.holding():
         # The final attempt retains its admission policy, but preparation still
         # releases physical ownership. Drift gets only a bounded fresh rebuild.
         for _ in range(HELD_BUILDS):
             try:
-                result = fenced(inst, n, build, all_nodes, targets, extra)
+                result = fenced(inst, n, build, all_nodes, targets, extra, incremental)
             except SystemExit as error:
                 # A settings or binding edit is not retried: it refuses as before.
                 if not contended(error) or settings_changed():
@@ -381,10 +554,10 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
             return result
         common.die(f'status refresh inputs kept changing through {HELD_BUILDS} unlocked builds; '
                    'retry from fresh state')
-    return fenced(inst, n, build, all_nodes, targets, extra)
+    return fenced(inst, n, build, all_nodes, targets, extra, incremental)
 
 
-def fenced(inst, n, build, all_nodes, targets, extra):
+def fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
     git_inputs = GitInputs()
     with instance.brain_lock(inst):
         current = instance.Instance(inst.root)
@@ -393,12 +566,15 @@ def fenced(inst, n, build, all_nodes, targets, extra):
                     [current.node(nid) for nid in targets] if targets is not None else [node])
         bindings = [(Path(w['path']), Path(w['path']).is_dir())
                     for target in selected for w in target['local'].get('worktrees', {}).values()]
+        selected_paths = {}
         def paths():
             # Instance policy (inherited status_source, timezone) is read too;
             # released() fences it, and a held build must as well.
             policy = [current.root / 'instance.md', (current.root / 'instance.md').resolve()]
-            return ([path for target in selected for path in input_paths(current, target)] + policy +
-                    list(extra() if callable(extra) else extra))
+            extras = list(extra() if callable(extra) else extra)
+            selected_paths.update((target['id'], input_paths(current, target) + policy + extras) for target in selected)
+            return ([path for target_paths in selected_paths.values() for path in target_paths] + policy +
+                    extras)
         from . import events
         owner = next((op for op in reversed(events._CURRENT) if isinstance(op, events.Command)
                       and op.inst.root == inst.root), None)
@@ -424,29 +600,93 @@ def fenced(inst, n, build, all_nodes, targets, extra):
                     # Repeated projections in this one fenced read share source
                     # observations. Discovery and every publication guard stay
                     # outside the scope; no result survives a compute boundary.
-                    with command_reads.scope(jobs.read_jobs, status.file_state, status.status_facts,
+                    session = _INVOCATION.get()
+                    def ledger_bytes(target):
+                        path = target['dir'] / jobs.JOBS_FILE
+                        return path.read_bytes() if path.exists() else None
+                    with contextlib.ExitStack() as scopes:
+                        view_token = _VIEW_INPUTS.set((dict(selected_paths), before_directories))
+                        scopes.callback(_VIEW_INPUTS.reset, view_token)
+                        view_fences = {}
+                        if incremental:
+                            fence_token = _VIEW_FENCES.set(view_fences)
+                            scopes.callback(_VIEW_FENCES.reset, fence_token)
+                        if session is not None:
+                            # All display views in one invocation share an
+                            # observation clock, renewed after 60s on a fresh
+                            # compute. Action/publisher instances keep
+                            # their live clock; this detached reader never grants
+                            # authority or renews a deadline.
+                            now = current.now_dt()
+                            observed_at = session.setdefault('observed_at', now)
+                            if (now - observed_at).total_seconds() > 60:
+                                observed_at = session['observed_at'] = now
+                                session['views'].clear()
+                            current.now_dt = lambda: observed_at
+                            scopes.callback(delattr, current, 'now_dt')
+                        if session is not None:
+                            scopes.enter_context(command_reads.content_scope(jobs.read_jobs, ledger_bytes, session['reads']))
+                        scopes.enter_context(command_reads.scope(jobs.read_jobs, status.file_state, status.status_facts,
                                              status.facts_meta, status.status_section, status.active_work,
-                                             status.inbox_lines, status.blocked_entries, status.pending_imports):
+                                             status.inbox_lines, status.blocked_entries, status.pending_imports,
+                                             status.runnable_work))
                         result = build(current, node)
-                    final_paths = tuple(sorted(set(paths())))
-                    expected = generation(final_paths)
-                    final_directories = membership_paths(current, selected)
-                    expected_membership = generation(final_directories, shallow=True)
-                    if (before_paths != final_paths or before != expected or before_directories != final_directories or
-                            before_membership != expected_membership or not status.machine_alerts_current(current, alerts)):
-                        common.die('state changed during the unlocked step; retry from fresh state')
+                    if not incremental:
+                        final_paths = tuple(sorted(set(paths())))
+                        expected = generation(final_paths)
+                        final_directories = membership_paths(current, selected)
+                        expected_membership = generation(final_directories, shallow=True)
+                        if (before_paths != final_paths or before != expected or before_directories != final_directories or
+                                before_membership != expected_membership or not status.machine_alerts_current(current, alerts)):
+                            common.die('state changed during the unlocked step; retry from fresh state')
             finally:
                 common._GIT_OBSERVER.reset(observer)
                 common._GIT_READS.reset(reads)
                 _ACTIVE.reset(token)
         with timings.phase('refresh_revalidate'):
+            if incremental:
+                # Each view owns its own source window. A write to a later node
+                # need not invalidate earlier, unchanged views. Discovery and
+                # stamps are checked while writers are excluded; facts and Git
+                # preparation remain outside physical ownership.
+                final_paths = tuple(sorted(set(paths())))
+                final_directories = membership_paths(current, selected)
+                if (before_paths != final_paths or before_directories != final_directories or
+                        set(view_fences) != {target['id'] for target in selected}):
+                    common.die('state changed during the unlocked step; retry from fresh state')
+                expected = generation(final_paths)
+                expected_membership = generation(final_directories, shallow=True)
+                dirty = [nid for nid, observations in view_fences.items()
+                         if any(generation(observed) != stamp or generation(directories, shallow=True) != membership
+                                or semantic() != value
+                                for observed, stamp, directories, membership, semantic, value in observations)]
+                if dirty:
+                    _INVOCATION.get()['dirty'].update(dirty)
+                    common.die('state changed during the unlocked step; retry from fresh state')
             if generation(final_paths) != expected or generation(final_directories, shallow=True) != expected_membership:
                 common.die('state changed during the unlocked step; retry from fresh state')
             if any(path.is_dir() != existed for path, existed in bindings):
                 common.die('status refresh inputs changed during computation; retry from fresh state')
-            git_inputs.validate()
+            try:
+                git_inputs.validate()
+            except SystemExit:
+                invalidate_views(git_inputs)
+                raise
             if (not status.machine_alerts_current(current, alerts) or generation(final_paths) != expected or
                     generation(final_directories, shallow=True) != expected_membership):
                 common.die('state changed during the unlocked step; retry from fresh state')
-            git_inputs.final_check()
+            try:
+                git_inputs.final_check()
+            except SystemExit:
+                invalidate_views(git_inputs)
+                raise
         return result
+
+
+def invalidate_views(inputs):
+    session = _INVOCATION.get()
+    if session is not None:
+        for key, cached in list(session['views'].items()):
+            if inputs.invalid & cached[1].queries.keys():
+                session['views'].pop(key)
+                session['dirty'].add(key[1])

@@ -53,12 +53,17 @@ def uncell(v):
 
 
 @_m_command_reads.memo
-def read_jobs(n):
+def read_jobs(n, _content=...):
     """Rows of the node's ledger; None if a file of that name exists but isn't one (brain never overwrites it)."""
     f = n["dir"] / JOBS_FILE
-    if not f.exists():
+    if _content is ...:
+        if not f.exists():
+            return []
+        text = f.read_text()
+    elif _content is None:
         return []
-    text = f.read_text()
+    else:
+        text = _content.decode()
     if JOBS_MARK not in text and not any(m in text for m in JOBS_LEGACY_MARKS):
         return None
     # Repeated attempt/readiness observations still read the file every time.

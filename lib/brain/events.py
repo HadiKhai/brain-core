@@ -898,10 +898,14 @@ def cmd_backlog(a):
 
 # Views store generated metadata only. Human prose stays in snapshot files.
 def snapshot_view(inst, n, known_merges=None):
-    from . import jobs, status
     from . import status_refresh
     if not status_refresh.active() and (status_refresh.requested(inst) or instance._LOCK['fh'] is not None):
         return status_refresh.compute(inst, n, lambda current, node: snapshot_view(current, node, known_merges))
+    return status_refresh.view(inst, n, lambda: _snapshot_view(inst, n, known_merges), known_merges)
+
+
+def _snapshot_view(inst, n, known_merges=None):
+    from . import jobs, status
     state = status.file_state(inst, n)
     known = status.facts_meta(n).get('merged_before', []) if known_merges is None else known_merges
     lines, merged = status.status_facts(inst, n, state, known, metadata_only=True)
@@ -991,14 +995,17 @@ def source(inst, n):
     return n['fm'].get('status_source', inst.node('root')['fm'].get('status_source', inst.cfg.get('status_source', 'files')))
 
 
-def comparison(inst, n, current=None, record=True, prepared=None):
+def comparison(inst, n, current=None, record=True, prepared=None, evidence=None):
     # A refresh may publish this result only after its complete input fence.
     if prepared is not None:
         if record:
             append_line(inst.root / '.brain/events-compare.jsonl', screen(inst, prepared))
         return prepared
-    state, views, opened = replay(inst)
-    actual = resource_list(inst, resources(inst))
+    if evidence is None:
+        state, views, opened = replay(inst)
+        actual = resource_list(inst, resources(inst))
+    else:
+        (state, views, opened), actual = evidence
     actual = {r['id']: r for r in actual}
     def belongs(r):
         return r.get('scope', '*') in ('*', node_ref(n['id']))
@@ -1019,24 +1026,16 @@ def comparison(inst, n, current=None, record=True, prepared=None):
     return result
 
 
-def reconcile(inst, node=None, snapshot=False):
-    state, _, opened = replay(inst)
-    dead = [ref for ref in opened if not lease_live(inst, ref)]
-    actual = resource_list(inst, resources(inst))
-    actual_map = {r["id"]: r for r in actual}
-    gap = any(state.get(k, {}).get("hash") != actual_map.get(k, {}).get("hash")
-              for k in state.keys() | actual_map.keys())
-    if not dead and not gap and not journal(inst).state["faults"] and not journal(inst).state["invalid"]:
-        return
+def foreign_reconciliation(inst, node, snapshot, state, actual_map, opened, dead, held=()):
     ours = {op.ref for op in _CURRENT if op.inst.root == inst.root}
-    foreign = [e for ref, e in opened.items() if ref not in ours and lease_live(inst, ref)]
+    foreign = [e for ref, e in opened.items() if ref not in ours and ref not in held and lease_live(inst, ref)]
     if foreign:
         # Snapshot rendering does not own an active writer's event baseline.
         # Defer only a healthy live operation, never a separate partial write or
         # damaged replay. Explicit/event-source reconciliation stays strict.
         healthy = not dead and not journal(inst).state['faults'] and not journal(inst).state['invalid']
         if snapshot and node is not None and healthy:
-            return
+            return True
         # A node refresh may proceed beside a released writer, but must not
         # adopt that writer's pending bytes or close its operation. Explicit
         # whole-instance reconciliation still refuses every live foreign lease.
@@ -1048,46 +1047,67 @@ def reconcile(inst, node=None, snapshot=False):
                    if state.get(k, {}).get('hash') != actual_map.get(k, {}).get('hash')]
         if (node is not None and node_ref(node['id']) not in scopes and healthy
                 and all(r.get('scope') in scopes for r in changed)):
-            return
+            return True
         if node is not None and instance.holding():
             if healthy:
                 # The final contended refresh holds the lock: reconciling now would
                 # adopt that writer's pending bytes, so leave it to a later refresh.
                 print('brain: another write is active; its reconciliation is left to a later refresh',
                       file=__import__('sys').stderr)
-                return
+                return True
             if not dead and not journal(inst).state['faults']:
                 raise RefreshBlocked(e['ref'] for e in foreign)
             common.die('an interrupted write, stream damage or invalid view needs reconciliation, '
                        'and another write is active; refresh again after it finishes')
         common.die("another write is active; cannot reconcile its snapshot")
+    return False
+
+
+def reconcile(inst, node=None, snapshot=False):
+    state, _, opened = replay(inst)
+    dead = [ref for ref in opened if not lease_live(inst, ref)]
+    actual = resource_list(inst, resources(inst))
+    actual_map = {r["id"]: r for r in actual}
+    gap = any(state.get(k, {}).get("hash") != actual_map.get(k, {}).get("hash")
+              for k in state.keys() | actual_map.keys())
+    if not dead and not gap and not journal(inst).state["faults"] and not journal(inst).state["invalid"]:
+        return
+    if foreign_reconciliation(inst, node, snapshot, state, actual_map, opened, dead):
+        return
     with contextlib.ExitStack() as stack:
         leases = {ref: stack.enter_context(dead_lease(inst, ref)) for ref in dead}
         marker = stack.enter_context(common.directory_target(inst.root / '.brain/events-repair-needed.json', private=True))
         marker_st = marker.stat()
         from . import status_refresh
         if status_refresh.requested(inst) or instance._LOCK['fh'] is not None:
-            def reconciliation_inputs():
-                paths = [inst.root / name for name in resources(inst) if not name.startswith('@ready/')]
-                paths.extend(inst.root / '.brain' / name for name in
-                             ('events.jsonl', 'events-leases', 'events-repair-needed.json',
-                              'hook-events.jsonl', 'hook-events-offset'))
-                paths.extend(Path(n['local']['workbench']).expanduser() / 'scratch/ready'
-                             for n in inst.nodes() if n['local'].get('workbench'))
-                return paths
+            coordination = [inst.root / '.brain' / name for name in
+                            ('events.jsonl', 'events-leases', 'events-repair-needed.json',
+                             'hook-events.jsonl', 'hook-events-offset')]
+            coordination_stamp = status_refresh.generation(coordination)
             def prepare_reconciliation(current_inst, _node):
-                projected = {n['id']: snapshot_view(current_inst, n) for n in current_inst.nodes()}
-                comparisons = [(n['id'], projected[n['id']],
-                                comparison(current_inst, n, current=projected[n['id']], record=False))
-                               for n in current_inst.nodes()]
-                current_resources = resource_list(current_inst, resources(current_inst))
-                views = {n['id']: projected[n['id']] for n in current_inst.nodes() if not n['archived']}
-                return comparisons, current_resources, views
+                return {n['id']: snapshot_view(current_inst, n)
+                        for n in status_refresh.view_order(current_inst.nodes())}
             # One fence covers the complete baseline and every view until their
             # shared reconcile event is published. No per-node stale adoption.
-            comparisons, current, views = status_refresh.compute(
+            projected = status_refresh.compute(
                 inst, node or inst.node('root'), prepare_reconciliation,
-                all_nodes=True, extra=reconciliation_inputs)
+                all_nodes=True, incremental=True)
+            # This metadata is sampled once under writer ownership, after the
+            # complete view batch passed its per-node and Git fences.
+            current = resource_list(inst, resources(inst))
+            latest = replay(inst)  # sync the journal under the retaken lock
+            latest_dead = [ref for ref in latest[2] if ref in leases or not lease_live(inst, ref)]
+            if foreign_reconciliation(inst, node, snapshot, latest[0],
+                                      {r['id']: r for r in current}, latest[2], latest_dead, held=leases):
+                return
+            if (set(latest_dead) != set(dead) or
+                    status_refresh.generation(coordination) != coordination_stamp):
+                common.die('state changed during the unlocked step; retry from fresh state')
+            evidence = (latest, current)
+            comparisons = [(n['id'], projected[n['id']],
+                            comparison(inst, n, current=projected[n['id']], record=False, evidence=evidence))
+                           for n in inst.nodes()]
+            views = {n['id']: projected[n['id']] for n in inst.nodes() if not n['archived']}
             for node_id, view, result in comparisons:
                 comparison(inst, inst.node(node_id), current=view, prepared=result)
         else:
@@ -1584,29 +1604,34 @@ def maintain(op, changed):
         from . import status_refresh
         def prepare_views(current, _node):
             result = {}
-            for nid in selected:
-                target = current.node(nid)
-                # A deferred explicit refresh consumes the previous merged set
-                # once. Other maintained views retain their existing baseline.
-                meta = status.facts_meta(target)
-                compared = snapshot_view(current, target, meta.get('merged_before', []))
-                if source(current, target) == 'events':
-                    view = events_view_without_current(current, target)
-                elif nid == refresh_node:
-                    view = snapshot_view(current, target, meta.get('merged', [])) if meta.get('merged', []) != meta.get('merged_before', []) else compared
-                else:
-                    view = compared
-                text = status.refreshed_text(current, target, view)
-                overflow = plan_cap_now(current, target) if materialize else None
-                # Keep the publication plan relative to the fenced source, so
-                # cap_now owns exactly its usual transformation. The refreshed
-                # document must retain that same cap when it publishes next.
-                capped = plan_cap_now(current, target, text=text) if overflow else None
-                result[nid] = (view, capped[0] if capped else text, compared, overflow)
+            for target in status_refresh.view_order([current.node(nid) for nid in selected]):
+                nid = target['id']
+                result[nid] = status_refresh.view(
+                    current, target, lambda: prepare_target(current, target, nid),
+                    'maintenance-plan', backlog_projection=True, reuse=False)
             return result
+        def prepare_target(current, target, nid):
+            # A deferred explicit refresh consumes the previous merged set
+            # once. Other maintained views retain their existing baseline.
+            meta = status.facts_meta(target)
+            compared = snapshot_view(current, target, meta.get('merged_before', []))
+            if source(current, target) == 'events':
+                view = events_view_without_current(current, target)
+            elif nid == refresh_node:
+                view = snapshot_view(current, target, meta.get('merged', [])) if meta.get('merged', []) != meta.get('merged_before', []) else compared
+            else:
+                view = compared
+            text = status.refreshed_text(current, target, view)
+            overflow = plan_cap_now(current, target) if materialize else None
+            # Keep the publication plan relative to the fenced source, so
+            # cap_now owns exactly its usual transformation. The refreshed
+            # document must retain that same cap when it publishes next.
+            capped = plan_cap_now(current, target, text=text) if overflow else None
+            return view, capped[0] if capped else text, compared, overflow
         try:
             prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
-                                              targets=list(selected), extra=[n['dir'] / 'status-archive.md' for n in selected.values()] +
+                                              targets=list(selected), incremental=True,
+                                              extra=[n['dir'] / 'status-archive.md' for n in selected.values()] +
                                               ([op.inst.root / '.brain/events.jsonl']
                                                if any(source(op.inst, n) == 'events' for n in selected.values()) else []))
         except SystemExit as error:
