@@ -5,6 +5,7 @@ import datetime
 import io
 import json
 import os
+from pathlib import Path
 import sys
 import threading
 import time
@@ -22,6 +23,22 @@ EXPLICIT_DELIVERY_KINDS = {'inbox', 'handback', 'unsettled-threads', 'overlappin
 class Watcher(Scenario):
     fixture_templates = True
     fixture_init_in_process = True
+
+    def test_resource_scan_supports_stamps_and_write_queue_path_discovery(self):
+        # The watch fence uses stamps; queue recovery needs paths without reads.
+        # Both modes must survive rebasing the scan change onto the write queue.
+        events = self.m._owners['resources']
+        hashed = events.resources(self.inst)
+        with mock.patch.object(Path, 'read_bytes', side_effect=AssertionError('resource body read')), \
+                mock.patch.object(events, 'private_read', side_effect=AssertionError('private resource read')):
+            stamped = events.resources(self.inst, content=False)
+            paths = events.resources(self.inst, paths_only=True)
+            stamp_paths = events.resources(self.inst, content=False, paths_only=True)
+        self.assertTrue(hashed)
+        self.assertEqual(set(stamped), set(hashed))
+        self.assertTrue(all(value is not None for value in stamped.values()))
+        self.assertEqual(paths, dict.fromkeys(hashed))
+        self.assertEqual(stamp_paths, paths)
 
     def test_direct_wake_snapshot_batches_discovery_and_refreshes_after_append(self):
         m, inst = self.m, self.inst

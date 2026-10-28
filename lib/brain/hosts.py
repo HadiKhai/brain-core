@@ -336,8 +336,8 @@ def wake_history_parse(data):
 def wake_delivery_items(inst, n, pending):
     """Identities of the queued requests; legacy/direct ones keep their opaque reason keys.
 
-    The drain runs no watch scan: a request without parseable metadata is
-    delivered under its opaque key, as when a scan fails.
+    Metadata capture runs no watch scan: a request without parseable metadata
+    is delivered under its opaque key, as when a scan fails.
     """
     refs = []
     for path in pending:
@@ -857,8 +857,8 @@ def wake_drain(inst, n, once=False):
                         if broken.exists():
                             broken.replace(directory / ('history-invalid-' + os.urandom(8).hex() + '.json'))
                         history = []
-                    # Recheck the transport generation before reserving a turn or
-                    # recording a delivery attempt. No watch scan precedes the send.
+                    # Fence the transport binding around metadata and acknowledgement
+                    # capture. Neither capture needs a watch scan.
                     generation = _m_instance.state_signature(current, target)
                     refs = wake_delivery_items(current, target, pending)
                     snapshot = wake_snapshot(current, target, refs)

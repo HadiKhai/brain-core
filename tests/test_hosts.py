@@ -526,6 +526,24 @@ class QuestionWake(Scenario):
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
         self.assertFalse(list(directory.glob("*.pending")))
 
+    def test_closed_window_exits_before_pending_revalidation(self):
+        self.enqueue("closed window")
+        directory = self.module.wake_directory(self.inst, self.n)
+        (directory / "last").write_text("1000")
+        clock = types.SimpleNamespace(time=lambda: 1001, monotonic=lambda: 1,
+                                      sleep=mock.Mock(side_effect=AssertionError("drain slept")))
+        with mock.patch.object(self.module, "WAKE_CLOCK", clock), \
+                mock.patch.object(self.module, "wake_actionable_pending",
+                                  side_effect=AssertionError("closed window revalidated pending")), \
+                mock.patch.object(self.module, "wake_snapshot",
+                                  side_effect=AssertionError("closed window captured snapshot")), \
+                mock.patch.object(self.module, "wake_schedule") as schedule:
+            self.module.wake_drain(self.inst, self.n)
+        schedule.assert_called_once_with(self.inst, self.n)
+        clock.sleep.assert_not_called()
+        self.assertEqual(len(list(directory.glob("*.pending"))), 1)
+        self.assertFalse(self.calls.exists())
+
     def test_failed_and_hanging_transport_leave_pending(self):
         self.enqueue("failure")
         directory = self.module.wake_directory(self.inst, self.n)
