@@ -2,6 +2,7 @@
 import contextlib
 import argparse
 import datetime
+import importlib
 import io
 import json
 import os
@@ -550,6 +551,24 @@ class Watcher(Scenario):
         self.assertTrue(stale.stale)
         self.assertFalse(stale.complete)
         self.assertNotIn('overdue_keys', json.loads(receipt_path.read_text()))
+
+    def test_overdue_scan_keeps_full_watchers_task_parsing_cache(self):
+        m, inst = self.m, self.inst
+        with mock.patch.object(m, 'watch_items', return_value=[]):
+            m.watch_groups(inst)
+        tasks = m._owners['read_records']
+        cache_module = importlib.import_module(tasks.__package__ + '.usage_cache')
+        folder = self.root / 'tasks'
+        folder.mkdir(exist_ok=True)
+        (folder / 'fixture.md').write_text('---\nversion: 1\nid: "fixture"\n---\nFixture task\n')
+        with tasks.record_scan(inst):
+            tasks.read_records(inst.node('root'))
+        with cache_module.database(inst) as cache:
+            before = cache.get('watch-records-v2')
+        self.assertTrue(before['sources'])
+        self.assertFalse(m.watch_groups(inst, overdue_only=True).complete)
+        with cache_module.database(inst) as cache:
+            self.assertEqual(cache.get('watch-records-v2'), before)
 
     def test_stale_precomputed_scan_cannot_retire_new_pending_or_restore_closed_episode(self):
         m, inst = self.m, self.inst

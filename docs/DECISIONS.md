@@ -4348,5 +4348,6 @@ acknowledgements while retaining every other receipt and pending item. Only full
 watcher scans reconcile the other kinds. Legacy receipts take one full scan before
 using the narrow path; uncertain ownership never authorizes closing receipts.
 Both paths retain the source-generation and receipt-generation publication
-fences, and share episode identities across resolution and recurrence. Selected
-nodes still receive live worktree, readiness, policy and status checks.
+fences and share each open episode's identity; resolution followed by recurrence
+opens a new one. Selected nodes still receive live worktree, readiness, policy
+and status checks.

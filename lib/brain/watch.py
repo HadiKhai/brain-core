@@ -862,7 +862,7 @@ def watch_groups(inst, nodes=None, episode_blocking=True, *, overdue_only=False)
             pass
     def scan():
         from . import tasks
-        with command_reads.snapshot(), tasks.record_scan(inst):
+        with command_reads.snapshot(), (contextlib.nullcontext() if narrow else tasks.record_scan(inst)):
             return watch_scan(inst, nodes, overdue_only=True) if narrow else watch_scan(inst, nodes)
     layout = {}  # stamp-validated generations only; each scan still reads afresh
     try:
