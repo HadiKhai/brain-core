@@ -578,8 +578,9 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
         if item.get("job") and (item["node"], item["job"]) in branches:
             item["branch"] = branches[(item["node"], item["job"])]
     machine_due = _m_status.machine_due_items(inst, nodes, machine, due)
+    attention = _m_status.attention_items(inst, nodes)
     inbox = []
-    for item in _m_status.inbox_items(inst, nodes)[0]:
+    for item in _m_status.inbox_items(inst, nodes, attention=attention)[0]:
         extra = {}
         if item['kind'] in ('blocked', 'blocked-overdue'):
             node = next(n for n in nodes if n['id'] == item['node'])
@@ -616,7 +617,7 @@ def _ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=N
         "nodes": out_nodes,
         "attention": [safe({"node": a, "kind": k, "text": t,
                             **(_m_ui_status.ui_blocked_metadata(inst, next(n for n in nodes if n["id"] == a), t) if k in ("blocked", "blocked-overdue") else {})})
-                      for a, k, t in _m_status.attention_items(inst, nodes)
+                      for a, k, t in attention
                       if k != 'inbox' or not _m_inbox_notices.informational_notice('- ' + t.removeprefix('inbox: '))],
         "inbox": inbox,
         "inbox_requests": [item for item in requests if item.get('open') is not False],

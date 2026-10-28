@@ -114,6 +114,43 @@ class Spend(Scenario):
         with mock.patch.object(m, 'live_threads', return_value={(node['id'], m.job_key(row))}):
             self.assertTrue(m.live_usage_eligible(inst, node, row))
 
+    def test_live_usage_checks_the_discovery_fingerprint_before_mapping_cached_sessions(self):
+        sid = '11111111-fingerprint'
+        path = self.cx(self.wt, sid, [(1, *self.record(sid, 'one', 10, 0, 1))])
+        m = core_loader.SourceFileLoader('usage_fingerprint', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst, row = m.Instance(self.r), self.row()
+            node = inst.node('app')
+            expected = m.job_usage(inst, node, row)
+            with m.accounting_snapshot(), mock.patch.object(m, 'job_sessions', side_effect=AssertionError('remapped')):
+                self.assertEqual(m._live_usage(inst, node, row), expected)
+            self.jsonl(path, [{'timestamp': self.at(2), 'type': 'token_usage_record',
+                               'payload': self.record(sid, 'two', 20, 0, 2)[1]}])
+            with m.accounting_snapshot():
+                self.assertEqual(m._live_usage(inst, node, row)['processed'], 33)
+            with m.accounting_snapshot(), mock.patch.object(m, 'spend_sources', return_value=([], set(), set())):
+                self.assertEqual(m._live_usage(inst, node, row)['processed'], 0)
+
+    def test_exact_shared_file_aggregate_skips_private_cache_and_rechecks_append_and_permission(self):
+        path = self.cl(self.wt, '11111111-shared', 'A fabricated task.', [('said', 1, 'one', (10, 0, 0, 1))])
+        m = core_loader.SourceFileLoader('shared_file_aggregate', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(self.r)
+            _, allowed, forbidden = m.spend_sources(inst)
+            expected = m.spend_file(inst, path, 'claude', allowed, forbidden)
+            m._SPEND_MEM.clear()
+            model = m.ReadModel(inst, '')
+            with model.usage_scope(), mock.patch.object(model, 'read', side_effect=AssertionError('private lookup')), \
+                    mock.patch.object(model, 'write', side_effect=AssertionError('duplicate publication')), \
+                    mock.patch.object(m, 'spend_read', side_effect=AssertionError('source replay')):
+                self.assertEqual(m.spend_file(inst, path, 'claude', allowed, forbidden), expected)
+                self.assertIsNone(m.spend_file(inst, path, 'claude', allowed, {path.parent.resolve()}))
+            self.jsonl(path, [{'timestamp': self.at(2), 'type': 'assistant', 'message': {
+                'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 20, 'output_tokens': 2}}}])
+            with model.usage_scope():
+                current = m.spend_file(inst, path, 'claude', allowed, forbidden)
+            self.assertEqual(m.spend_sum([current])['processed'], 33)
+
     def setUp(self):
         super().setUp()
         self.cfg = self.tmp / "config"

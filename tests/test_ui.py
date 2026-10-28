@@ -195,6 +195,20 @@ class LiveView(Scenario):
 
 
 class ExpandedUI(Scenario):
+    def test_inbox_reuses_attention_and_reads_one_detached_lifecycle_for_all_item_ids(self):
+        root = self.init('demo')
+        inst = self.m.UIInstance(root)
+        lines = [f'- 2026-01-01 00:00 +00:00 from worker: question: Pick shape {i}?' for i in range(3)]
+        (root / 'inbox.md').write_text('\n'.join(lines) + '\n')
+        attention = [('root', 'inbox', 'inbox: ' + line[2:]) for line in lines]
+        with self.m.observe(inst), \
+                mock.patch.object(self.m, 'attention_items', side_effect=AssertionError('recomputed attention')), \
+                mock.patch.object(self.m, 'lifecycle_read', wraps=self.m.lifecycle_read) as read:
+            items, _ = self.m.inbox_items(inst, inst.nodes(), attention=attention)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual([item['text'] for item in items], [item[2] for item in attention])
+        self.assertEqual(len({item['id'] for item in items}), len(lines))
+
     def test_parallel_worktree_reads_keep_order_scopes_and_a_four_reader_bound(self):
         root = self.init('demo')
         inst = self.m.UIInstance(root)

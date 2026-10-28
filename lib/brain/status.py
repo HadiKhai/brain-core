@@ -1484,12 +1484,17 @@ def inbox_seen_snapshot(inst):
         return {}, None
 
 
-def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only=False, lifecycle_data=None):
+def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only=False, lifecycle_data=None,
+                attention=None):
     """The existing UI attention sources, with identities independent of line positions or other items.
     Read-only; until reported, first_seen comes from the source's git introduction (mtime if uncommitted)."""
-    if lifecycle_data is None and (readonly or requests_only):
+    from . import ui_readmodel
+    view = ui_readmodel.projection(inst.root)
+    if lifecycle_data is None and (readonly or requests_only or view is not None):
         try:
-            lifecycle_data = _m_reminders.lifecycle_read(inst)
+            lifecycle_data = (view.store(inst.root / '.brain/wake/lifecycle.json',
+                                        lambda: _m_reminders.lifecycle_read(inst))
+                              if view is not None else _m_reminders.lifecycle_read(inst))
         except (OSError, ValueError):
             pass  # Display remains fail-open; mutations require a valid locked store.
     try:
@@ -1513,9 +1518,11 @@ def inbox_items(inst, nodes=None, reporter="root", readonly=False, requests_only
                           for b in blocked_entries(inst, n)]
             attention += [(n['id'], 'inbox', 'inbox: ' + line[2:])
                           for line in inbox_lines(n, readonly=True, lifecycle_data=lifecycle_data)]
-    else:
+    elif attention is None:
         attention = [item for item in attention_items(inst, list(by_id.values()), readonly=readonly,
                                                      lifecycle_data=lifecycle_data) if item[1] != "job"]
+    else:
+        attention = [item for item in attention if item[1] != "job"]
     # Explicit node inboxes are coordinator views. Root's inbox is the human rollup;
     # root-owned job advice remains available in due, never in that human rollup.
     owner = by_id.get(reporter)

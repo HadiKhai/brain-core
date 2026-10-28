@@ -405,10 +405,16 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, resourc
         display_cache = ui_readmodel.usage_cache()
         if display_cache is not None and display_cache.inst.root.resolve() != inst.root.resolve():
             display_cache = None
-        loaded_private = False
+        loaded_current = False
+        if agg is None:
+            candidate = cache.get("file:" + key)
+            if (spend_cache_valid(candidate, key, ident, runtime, stamp, packed)
+                    and candidate.get('stamp') == stamp):
+                agg = candidate  # exact shared aggregate; no private-file lookup or source replay
+                loaded_current = True
         if agg is None and display_cache is not None:
             agg = display_cache.read("usage-" + key)
-            loaded_private = spend_cache_valid(agg, key, ident, runtime, stamp, packed)
+            loaded_current = spend_cache_valid(agg, key, ident, runtime, stamp, packed)
         if agg is None:
             try:
                 agg = cache.get("file:" + key)
@@ -424,7 +430,7 @@ def _spend_file(inst, path, runtime, allowed, forbidden, budget, window, resourc
         # and a cache holding one is written again.
         screened = [m if not _m_guard.find_terms(m, terms) else "other" for m in agg["models"]]
         stale, agg["models"] = screened != agg["models"], screened
-        update_private = not loaded_private or stale or agg.get("stamp") != stamp or not agg.get("complete", True)
+        update_private = not loaded_current or stale or agg.get("stamp") != stamp or not agg.get("complete", True)
         # Who the session is, never kept on disk: Claude names a session's file by its id, its sub-agents' files
         # sit below it; a Codex transcript says so in its first line.
         if runtime == "claude":
@@ -1346,7 +1352,7 @@ def _live_usage(inst, n, row):
         # Its later read never rediscovers every historical session.
         return host_row_usage(row)
     key = (str(inst.root), n["id"], _m_jobs.job_key(row))
-    signature = job_usage_signature(inst, n, row)
+    signature = (job_usage_signature(inst, n, row, discover=False), spend_discovery_signature(inst))
     hit = _LIVE.get(key)
     if hit and hit[0] == signature:
         return hit[1]
