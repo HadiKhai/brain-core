@@ -475,10 +475,33 @@ class Watcher(Scenario):
                 signature()
                 signature()
             self.assertEqual(asked(home), calls + 2)
-        # With the production window, inputs changed just now may postdate Git's read.
+        # Inputs inside the settle window may postdate Git's read: never memoized.
         fresh = {}
-        owner.git_state_paths(home, locations=fresh)
+        with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', 10 ** 30):
+            owner.git_state_paths(home, locations=fresh)
         self.assertEqual(fresh, {})
+        # Another owner's repository depends on global safe.directory policy.
+        with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18), \
+                mock.patch.object(owner.os, 'geteuid', return_value=os.geteuid() + 1):
+            owner.git_state_paths(home, locations=fresh)
+        self.assertEqual(fresh, {})
+        # A repository swapped while Git answered keeps no memo of the old answer.
+        spare = self.tmp / 'fixture-spare-git'
+        shutil.copytree(str(home / '.git'), str(spare))
+        real = owner._m_common.git
+        def swapping(*args, **kwargs):
+            result = real(*args, **kwargs)
+            if '--absolute-git-dir' in args:
+                shutil.move(str(home / '.git'), str(self.tmp / 'fixture-swapped-git'))
+                shutil.move(str(spare), str(home / '.git'))
+            return result
+        with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18), \
+                mock.patch.object(owner._m_common, 'git', side_effect=swapping):
+            owner.git_state_paths(home, locations=fresh)
+        self.assertEqual(fresh, {})
+        with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18):
+            owner.git_state_paths(home, locations=fresh)
+        self.assertIn(str(home), fresh, 'the same settled repository is memoizable once unchanged')
 
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst

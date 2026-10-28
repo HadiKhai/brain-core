@@ -398,28 +398,31 @@ GIT_LOCATION_ENV = ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_CEILING_D
                     'GIT_DISCOVERY_ACROSS_FILESYSTEM', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES')
 
 
-def git_location_inputs(home, values, settled=None):
+def git_location_inputs(home, values=None, settled=None):
     """Reusable inputs for an ordinary repository's own metadata, else None.
 
     Only a real `.git` directory without commondir, which Git reports as both
     its own and common directory, is memoizable: that answer names a path, so
-    it holds while the repository stays valid there (HEAD, objects, refs).
-    Gitfiles, symlinks, linked worktrees, environment overrides and ancestor
-    discovery always ask Git. `settled` rejects a HEAD changed so recently it
-    may postdate Git's own read.
+    it holds while the repository stays valid there (HEAD, objects, refs,
+    config). Gitfiles, symlinks, linked worktrees, environment overrides,
+    ancestor discovery and other owners (whose acceptance depends on global
+    safe.directory policy) always ask Git. `settled` rejects a file changed
+    so recently it may postdate Git's own read. Without `values`, only the
+    stamps are taken, for comparison around a query.
     """
     marker = Path(home) / '.git'
     if any(name in os.environ for name in GIT_LOCATION_ENV):
         return None
     try:
         own = os.path.realpath(marker)
-        if [os.path.realpath(Path(home) / value.strip()) for value in values] != [own, own]:
+        if values is not None and [os.path.realpath(Path(home) / value.strip()) for value in values] != [own, own]:
             return None
         inputs = [os.path.realpath(home), own, sorted((k, v) for k, v in os.environ.items() if k.startswith('GIT_'))]
         for path, kind in ((home, stat.S_ISDIR), (marker, stat.S_ISDIR), (marker / 'objects', stat.S_ISDIR),
-                           (marker / 'refs', stat.S_ISDIR), (marker / 'HEAD', stat.S_ISREG)):
+                           (marker / 'refs', stat.S_ISDIR), (marker / 'HEAD', stat.S_ISREG),
+                           (marker / 'config', stat.S_ISREG)):
             info = os.lstat(path)
-            if not kind(info.st_mode):
+            if not kind(info.st_mode) or info.st_uid != os.geteuid():
                 return None
             stamp = (info.st_dev, info.st_ino, info.st_mode, info.st_uid)
             if kind is stat.S_ISREG:
@@ -456,12 +459,15 @@ def git_state_paths(home, *, task_proof=False, refs=None, include_head=True, loc
     if cached and git_location_inputs(home, cached[1]) == cached[0]:
         values = cached[1]
     else:
+        # Stamps taken on both sides of the query: a repository swapped while
+        # Git answered must not pair the old answer with the new identity.
+        before = git_location_inputs(home) if locations is not None else None
         started = time.time_ns()
         result = _m_common.git('rev-parse', '--absolute-git-dir', '--git-common-dir', cwd=home, env=dict(os.environ))
         values = result.stdout.splitlines() if result.returncode == 0 else []
         if locations is not None:
             inputs = git_location_inputs(home, values, settled=started - GIT_LOCATION_SETTLE_NS)
-            if inputs is None:
+            if inputs is None or inputs != before:
                 locations.pop(str(home), None)
             else:
                 locations[str(home)] = (inputs, values)
