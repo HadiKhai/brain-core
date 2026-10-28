@@ -347,51 +347,61 @@ def semantic_item_key(item):
     return None
 
 
-def latch_job_advice(inst, n, row, conditions, readonly=False):
+def job_advice_context(inst, n, row):
+    """Observe job sources before entering a batched lifecycle transaction."""
+    projection = _m_attempts.job_projection(inst, n, row)
+    signal = projection['signal'] or {}
+    attempt = projection['attempt'] or {}
+    w = n['local'].get('worktrees', {}).get(row['Job'])
+    local = _m_status.local_job_state(n, row['Job'], w) if w else {}
+    # Recorded episode evidence only: never attempt timestamps, owners,
+    # queue positions, usage counters, display prose or moving thresholds.
+    return {'state': projection['state'], 'attempt': attempt.get('id'),
+            'publication': signal.get('wake_id'), 'restart': signal.get('restart_id'),
+            'merged': bool(local.get('merged')),
+            'merged_tip': local.get('tip') if local.get('merged') else None}
+
+
+def latch_job_advice(inst, n, row, conditions, readonly=False, *, lifecycle_data=None, context=None):
     """Keep each first crossing open until a successful rebrief, even if medians move."""
+    if lifecycle_data is None:
+        with lifecycle_store(inst, readonly=readonly) as data:
+            return latch_job_advice(inst, n, row, conditions, readonly=readonly,
+                                    lifecycle_data=data, context=context)
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
-    with lifecycle_store(inst, readonly=readonly) as data:
-        advice = data.setdefault('advice', {})
-        if not isinstance(advice, dict) or (key not in advice and len(advice) >= LIFECYCLE_LIMIT):
-            raise ValueError('invalid or oversized job advice state')
-        record = advice.get(key)
-        if record is None:
-            if not conditions:
-                return []
-            record = {'episode': _m_jobs.digest([key, 'initial-advice-baseline']), 'conditions': {}}
-        if (not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('episode'))) or
-                not isinstance(record.get('conditions'), dict) or
-                any(code not in ADVICE_CONDITIONS or not isinstance(text, str)
-                    for code, text in record['conditions'].items())):
-            raise ValueError('invalid job advice baseline')
-        for code, text in conditions.items():
-            record['conditions'].setdefault(code, text)
-        advice[key] = record
-        projection = _m_attempts.job_projection(inst, n, row)
-        signal = projection['signal'] or {}
-        attempt = projection['attempt'] or {}
-        w = n['local'].get('worktrees', {}).get(row['Job'])
-        local = _m_status.local_job_state(n, row['Job'], w) if w else {}
-        # Recorded episode evidence only: never attempt timestamps, owners,
-        # queue positions, usage counters, display prose or moving thresholds.
-        context = {'state': projection['state'], 'attempt': attempt.get('id'),
-                   'publication': signal.get('wake_id'), 'restart': signal.get('restart_id'),
-                   'merged': bool(local.get('merged')),
-                   'merged_tip': local.get('tip') if local.get('merged') else None}
-        previous = record.get('context_episode')
-        if previous is not None and not re.fullmatch(r'[0-9a-f]{24}', str(previous)):
-            raise ValueError('invalid job advice context episode')
-        if record.get('context') != context:
-            # Chaining also distinguishes A -> B -> A in owning inboxes, even
-            # when no due scan reconciled the intermediate B reminder.
-            record['context_episode'] = _m_jobs.digest([record['episode'], previous, context])
-            record['context'] = context
-        state = projection['state']
-        return [{'node': n['id'], 'kind': 'job', 'job': _m_jobs.job_key(row), 'condition': code,
-                 'state': state, 'episode': record['context_episode'], 'informational': True,
-                 'text': _m_guard.redact(f"job {row['Job']}: " + (conditions[code] if code in conditions else
-                          'crossed since brief: ' + record['conditions'][code]), _m_guard.never_terms(n))}
-                for code in ADVICE_CONDITIONS if code in record['conditions']]
+    data = lifecycle_data
+    advice = data.setdefault('advice', {})
+    if not isinstance(advice, dict) or (key not in advice and len(advice) >= LIFECYCLE_LIMIT):
+        raise ValueError('invalid or oversized job advice state')
+    record = advice.get(key)
+    if record is None:
+        if not conditions:
+            return []
+        record = {'episode': _m_jobs.digest([key, 'initial-advice-baseline']), 'conditions': {}}
+    if (not isinstance(record, dict) or not re.fullmatch(r'[0-9a-f]{24}', str(record.get('episode'))) or
+            not isinstance(record.get('conditions'), dict) or
+            any(code not in ADVICE_CONDITIONS or not isinstance(text, str)
+                for code, text in record['conditions'].items())):
+        raise ValueError('invalid job advice baseline')
+    for code, text in conditions.items():
+        record['conditions'].setdefault(code, text)
+    advice[key] = record
+    if context is None:
+        context = job_advice_context(inst, n, row)
+    previous = record.get('context_episode')
+    if previous is not None and not re.fullmatch(r'[0-9a-f]{24}', str(previous)):
+        raise ValueError('invalid job advice context episode')
+    if record.get('context') != context:
+        # Chaining also distinguishes A -> B -> A in owning inboxes, even
+        # when no due scan reconciled the intermediate B reminder.
+        record['context_episode'] = _m_jobs.digest([record['episode'], previous, context])
+        record['context'] = context
+    state = context['state']
+    return [{'node': n['id'], 'kind': 'job', 'job': _m_jobs.job_key(row), 'condition': code,
+             'state': state, 'episode': record['context_episode'], 'informational': True,
+             'text': _m_guard.redact(f"job {row['Job']}: " + (conditions[code] if code in conditions else
+                      'crossed since brief: ' + record['conditions'][code]), _m_guard.never_terms(n))}
+            for code in ADVICE_CONDITIONS if code in record['conditions']]
 
 
 def reminder_key(item):

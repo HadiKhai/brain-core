@@ -8,7 +8,7 @@ import sys
 import time
 import urllib.parse
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -1931,7 +1931,7 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
     rows = _m_jobs.read_jobs(n) or []
     if not any(not r["Ended"] for r in rows):
         return []
-    j, out = _m_jobs.jobs_summary(inst, n), []
+    j, observations = _m_jobs.jobs_summary(inst, n), []
     for r in j["open"]:
         if (not str(r.get('Usage', '')).startswith('host') and
                 not _m_spend.live_usage_eligible(inst, n, r)):
@@ -1939,19 +1939,38 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
         # Open ledger records include stopped workers awaiting settlement. Their
         # latched advice stays visible; final usage is a cached observation.
         u = _m_spend.live_usage(inst, n, r)
+        budget = _m_spend.job_budget(n, r)
+        context = _m_reminders.job_advice_context(inst, n, r) if structured else None
+        observations.append((r, u, budget, context))
+    if not observations:
+        return []
+    # Parse once per observation, and publish all advice with one transaction.
+    # Transcript discovery and job Git observations never hold the lifecycle lock.
+    with ExitStack() as stack:
+        try:
+            data = stack.enter_context(_m_reminders.lifecycle_store(inst, readonly=readonly or not structured))
+        except (OSError, ValueError):
+            if structured:
+                raise
+            data = None  # retain the existing per-job unavailable diagnostics
+        return _runaway_jobs_observed(inst, n, j, observations, structured, readonly, data)
+
+
+def _runaway_jobs_observed(inst, n, j, observations, structured, readonly, lifecycle_data):
+    out = []
+    for r, u, b, context in observations:
         why = {}
         if j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]:
             why['median-age'] = f"open {r['age_h']} h, over twice the median of {j['median_hours']} h"
         if u and j["median_tokens"] and u["processed"] > 2 * j["median_tokens"]:
             why['median-tokens'] = f"{_m_spend.tokens_text(u['processed'])} tokens, over twice the median of {_m_spend.tokens_text(j['median_tokens'])}"
-        round_usage = _m_spend.job_round_usage_read(inst, n, r, u)
+        round_usage = _m_spend.job_round_usage_read(inst, n, r, u, lifecycle_data=lifecycle_data)
         if round_usage is not None and round_usage.get('state') in ('regressed', 'unavailable'):
             why['usage-repair'] = ('usage counters regressed below the retained restart baseline; current round unavailable'
                                    if round_usage['state'] == 'regressed' else
                                    'round usage unavailable; retain receipt for review')
         meter = round_usage if round_usage is not None else u
         hours = round_usage['hours'] if round_usage is not None else r['age_h']
-        b = _m_spend.job_budget(n, r)
         if b and meter and b.get("tokens") and meter.get("processed") is not None and meter["processed"] > b["tokens"]:
             why['budget-tokens'] = f"over its {_m_spend.tokens_text(b['tokens'])}-token budget"
         if b and b.get("hours") and hours is not None and hours > b["hours"]:
@@ -1961,7 +1980,8 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
         if u and u["subagents"] and u["sub_share"] > 0.5:
             why['subagent-share'] = f"sub-agents spent {round(100 * u['sub_share'])}% of its tokens"
         if structured:
-            out.extend(_m_reminders.latch_job_advice(inst, n, r, why, readonly=readonly))
+            out.extend(_m_reminders.latch_job_advice(inst, n, r, why, readonly=readonly,
+                                                    lifecycle_data=lifecycle_data, context=context))
         elif why:
             out.append(_m_guard.redact(f"job {r['Job']}: " + "; ".join(why.values()), _m_guard.never_terms(n)))
     return out

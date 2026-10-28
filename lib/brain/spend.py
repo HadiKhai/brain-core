@@ -1098,7 +1098,7 @@ class RoundUsageRegression(ValueError):
     """A retained round belongs to counters newer than the current observation."""
 
 
-def job_round_usage(inst, n, row, usage):
+def job_round_usage(inst, n, row, usage, *, lifecycle_data=None):
     """Budget counters since the last delivered restart; lifetime totals remain untouched.
 
     Missing counters stay unknown. Legacy receipts without active minutes use elapsed
@@ -1108,7 +1108,9 @@ def job_round_usage(inst, n, row, usage):
     from . import ui_readmodel
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     view = ui_readmodel.projection(inst.root)
-    if view is not None:
+    if lifecycle_data is not None:
+        record = lifecycle_data['usage'].get(key)
+    elif view is not None:
         record = view.store(inst.root / '.brain/wake/lifecycle.json',
                             lambda: _m_reminders.lifecycle_read(inst),
                             select=lambda data: data['usage'].get(key))
@@ -1147,10 +1149,10 @@ def job_round_usage(inst, n, row, usage):
     return out
 
 
-def job_round_usage_read(inst, n, row, usage):
+def job_round_usage_read(inst, n, row, usage, *, lifecycle_data=None):
     """Display uncertainty without resetting a baseline or relaxing writer validation."""
     try:
-        return job_round_usage(inst, n, row, usage)
+        return job_round_usage(inst, n, row, usage, lifecycle_data=lifecycle_data)
     except RoundUsageRegression:
         # A relaunch can change counter generations. Do not mix generations or
         # infer a restart instant from a read: keep every round counter unknown.

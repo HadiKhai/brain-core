@@ -2611,6 +2611,105 @@ cli.main()
         self.assertIsNone(projection['signal'])
 
 
+class RunawayLifecycleBatch(Scenario):
+    fixture_init_in_process = True
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.init('oak')
+        self.m = core_loader.SourceFileLoader('runaway_batch_fixture', str(CORE / 'bin/brain')).load_module()
+        self.inst = self.m.Instance(self.root)
+        self.node = self.inst.node('root')
+        self.rows = [{**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/' + name,
+                      'Usage': 'host', 'Started': self.inst.now(), 'age_h': 1}
+                     for name in ('one', 'two', 'three')]
+        self.usage = self.m.host_row_usage({'Usage': 'host', 'Fresh in': '210', 'Compactions': '4'})
+        self.context = {'state': 'open', 'attempt': None, 'publication': None,
+                        'restart': None, 'merged': False, 'merged_tip': None}
+        self.summary = {'open': self.rows, 'median_hours': None, 'median_tokens': None}
+        for patch in (mock.patch.object(self.m, 'read_jobs', return_value=self.rows),
+                      mock.patch.object(self.m, 'jobs_summary', return_value=self.summary),
+                      mock.patch.object(self.m, 'live_usage', side_effect=lambda *a: dict(self.usage)),
+                      mock.patch.object(self.m, 'job_budget', return_value={'tokens': 100, 'hours': None}),
+                      mock.patch.object(self.m, 'job_advice_context', side_effect=lambda *a: dict(self.context))):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_batch_matches_sequential_advice_and_publishes_once(self):
+        expected = []
+        for row in self.rows:
+            expected.extend(self.m.latch_job_advice(self.inst, self.node, row,
+                {'budget-tokens': 'over its 100-token budget', 'compaction-limit': '4 compactions'}))
+        path = self.root / '.brain/wake/lifecycle.json'
+        path.unlink()
+        with mock.patch.object(self.m, 'lifecycle_read', wraps=self.m.lifecycle_read) as reads, \
+                mock.patch.object(self.m, 'machine_publish', wraps=self.m.machine_publish) as publishes:
+            actual = self.m.runaway_jobs(self.inst, self.node, structured=True)
+        self.assertEqual(actual, expected)
+        self.assertEqual(reads.call_count, 1)
+        self.assertEqual(publishes.call_count, 1)
+        stored = self.m.lifecycle_read(self.inst)
+        self.assertEqual(len(stored['advice']), len(self.rows))
+        self.assertEqual(stored['usage'], {})
+
+    def test_source_observations_precede_lock_and_next_call_reads_new_baseline(self):
+        original = self.m.lifecycle_store
+        inside = [False]
+        @contextlib.contextmanager
+        def observed_store(*args, **kwargs):
+            with original(*args, **kwargs) as data:
+                inside[0] = True
+                try:
+                    yield data
+                finally:
+                    inside[0] = False
+        def usage(*args):
+            self.assertFalse(inside[0], 'transcript discovery holds lifecycle lock')
+            return dict(self.usage)
+        def context(*args):
+            self.assertFalse(inside[0], 'job Git observation holds lifecycle lock')
+            return dict(self.context)
+        with mock.patch.object(self.m, 'lifecycle_store', side_effect=observed_store), \
+                mock.patch.object(self.m, 'live_usage', side_effect=usage), \
+                mock.patch.object(self.m, 'job_advice_context', side_effect=context):
+            first = self.m.runaway_jobs(self.inst, self.node, structured=True)
+            self.assertEqual(len(first), 6)
+        # A delivered rebrief resets advice and establishes fresh round counters.
+        with original(self.inst) as data:
+            data['advice'] = {}
+            for row in self.rows:
+                key = self.m.digest([self.node['id'], self.m.job_key(row)])
+                data['usage'][key] = {'job': self.m.job_key(row), 'round_at': self.inst.now(),
+                    'baseline': {'processed': 210, 'compactions': 4, 'active_minutes': 0}}
+        self.assertEqual(self.m.runaway_jobs(self.inst, self.node, structured=True), [])
+        self.usage['processed'] = 10
+        warnings = self.m.runaway_jobs(self.inst, self.node, structured=True)
+        self.assertEqual([item['condition'] for item in warnings], ['usage-repair'] * 3)
+        self.assertTrue(all('counters regressed' in item['text'] for item in warnings))
+
+    def test_readonly_batch_does_not_publish_and_keeps_single_read(self):
+        path = self.root / '.brain/wake/lifecycle.json'
+        before = path.read_bytes() if path.exists() else None
+        with mock.patch.object(self.m, 'lifecycle_read', wraps=self.m.lifecycle_read) as reads, \
+                mock.patch.object(self.m, 'machine_publish', wraps=self.m.machine_publish) as publishes:
+            result = self.m.runaway_jobs(self.inst, self.node, structured=True, readonly=True)
+        self.assertEqual(len(result), 6)
+        self.assertEqual(reads.call_count, 1)
+        publishes.assert_not_called()
+        self.assertEqual(path.read_bytes() if path.exists() else None, before)
+
+    def test_corrupt_ledger_keeps_usage_unavailable_and_is_not_overwritten(self):
+        path = self.root / '.brain/wake/lifecycle.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{broken')
+        warnings = self.m.runaway_jobs(self.inst, self.node)
+        self.assertEqual(len(warnings), 3)
+        self.assertTrue(all('round usage unavailable' in line for line in warnings))
+        with self.assertRaises(ValueError):
+            self.m.runaway_jobs(self.inst, self.node, structured=True)
+        self.assertEqual(path.read_text(), '{broken')
+
+
 class NodeHygiene(Scenario):
     def setUp(self):
         super().setUp()
