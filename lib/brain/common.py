@@ -788,6 +788,8 @@ def worktree_head(cwd, env=None):
         if not match or match.group(1).endswith('/') or '..' in match.group(1):
             return None
         ref = match.group(1)
+        if not ref.startswith('refs/heads/'):
+            return None  # per-worktree namespaces and other targets: ask Git
         target = common / ref
         if target.is_symlink():
             return None
@@ -806,16 +808,20 @@ def index_has_split_link(contents):
     """Whether index bytes carry a split-index `link` extension.
 
     Entries are walked by the index format (versions 2-4, SHA-1 or SHA-256),
-    so a path containing "link" is not mistaken for the extension. Anything that
-    does not parse exactly to the trailing checksum answers True (copy it).
+    so a path containing "link" is not mistaken for the extension. A reading is
+    accepted only when its checksum verifies; a zero checksum (index.skipHash)
+    only when every reading that parses agrees. Anything else answers True.
     """
     if len(contents) < 12 or contents[:4] != b'DIRC':
         return True
     version, count = int.from_bytes(contents[4:8], 'big'), int.from_bytes(contents[8:12], 'big')
     if version not in (2, 3, 4):
         return True
-    for size in (20, 32):
+    verified, unverified = set(), set()
+    for size, digest in ((20, hashlib.sha1), (32, hashlib.sha256)):
         end, pos, ok = len(contents) - size, 12, True
+        if end < 12:
+            continue
         for _ in range(count):
             fixed = pos + 40 + size + 2
             if fixed > end:
@@ -843,9 +849,15 @@ def index_has_split_link(contents):
         while pos + 8 <= end:
             signatures.append(contents[pos:pos + 4])
             pos += 8 + int.from_bytes(contents[pos + 4:pos + 8], 'big')
-        if pos == end:
-            return b'link' in signatures
-    return True
+        if pos != end:
+            continue
+        trailer = contents[end:]
+        if trailer == digest(contents[:end]).digest():
+            verified.add(b'link' in signatures)
+        elif trailer == bytes(size):
+            unverified.add(b'link' in signatures)
+    answers = verified or unverified
+    return answers != {False}
 
 
 _INDEX_SPLIT = {}

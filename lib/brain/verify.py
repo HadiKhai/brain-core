@@ -306,7 +306,9 @@ def worktree_status_batch(n, branches):
 
     Each answer is consumed once, by the next preflight of that worktree in this
     scope, and is never kept for a later read; exceptions surface at that same
-    preflight. Unconsumed reads are discarded. Observed Git reads stay serial.
+    preflight. Reads start at most one pool width ahead of the preflight order,
+    so an answer is never older than the few preflights before it. Unconsumed
+    reads are discarded. Observed Git reads stay serial.
     """
     worktrees = n.get("local", {}).get("worktrees", {})
     paths = [str(worktrees[b]["path"]) for b in dict.fromkeys(branches)
@@ -319,10 +321,12 @@ def worktree_status_batch(n, branches):
         return
     from concurrent.futures import ThreadPoolExecutor
     env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
-    pool = ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1, len(paths)))
+    width = min(8, os.cpu_count() or 1, len(paths))
+    pool = ThreadPoolExecutor(max_workers=width)
     try:
-        futures = {path: pool.submit(_worktree_status, path, env) for path in paths}
-        token = _STATUS_BATCH.set((env, futures))
+        batch = _StatusBatch(pool, env, paths, width)
+        batch.advance()
+        token = _STATUS_BATCH.set(batch)
         try:
             yield
         finally:
@@ -331,9 +335,35 @@ def worktree_status_batch(n, branches):
         pool.shutdown(wait=True, cancel_futures=True)
 
 
+class _StatusBatch:
+    """Reads run at most `width` ahead of the preflight order; each is used once."""
+    def __init__(self, pool, env, paths, width):
+        self.pool, self.env, self.order, self.width = pool, env, paths, width
+        self.position = {path: i for i, path in enumerate(paths)}
+        self.next, self.futures = 0, {}
+
+    def advance(self):
+        while self.next < len(self.order) and len(self.futures) < self.width:
+            path = self.order[self.next]
+            self.futures[path] = self.pool.submit(_worktree_status, path, self.env)
+            self.next += 1
+
+    def take(self, path):
+        future = self.futures.pop(path, None)
+        position = self.position.get(path)
+        if position is not None:
+            # Earlier worktrees that were skipped lose their answers, and a
+            # worktree asked before its turn is read live, never queued ahead.
+            for earlier in [p for p in self.futures if self.position[p] < position]:
+                self.futures.pop(earlier).cancel()
+            self.next = max(self.next, position + 1)
+        self.advance()
+        return future
+
+
 def _batched_status(path, env):
     batch = _STATUS_BATCH.get()
-    future = batch[1].pop(str(path), None) if batch is not None and batch[0] == env else None
+    future = batch.take(str(path)) if batch is not None and batch.env == env else None
     return future.result() if future is not None else _worktree_status(path, env)
 
 

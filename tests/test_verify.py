@@ -122,6 +122,45 @@ class ReadinessDirectGitReads(Scenario):
                 with self.assertRaisesRegex(OSError, 'status failed'):
                     m.ready_preflight(n, 'packed')
 
+    def test_status_reads_start_at_most_one_pool_width_ahead(self):
+        m, repo = self.setup_repo()
+        paths = {}
+        for branch in ('job', 'packed', 'third'):
+            paths[branch] = self.tmp / branch
+            self.git('worktree', 'add', '-q', str(paths[branch]), branch, cwd=repo)
+        n = dict(external=True, home_path=repo, fm={},
+                 local={'worktrees': {b: {'path': str(p)} for b, p in paths.items()}})
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(os, 'cpu_count', return_value=1), \
+                m.worktree_status_batch(n, list(paths)):
+            time.sleep(0.5)  # the first read has finished; later ones have not started
+            (paths['packed'] / 'untracked').write_text('x\n')
+            self.assertEqual(m.ready_preflight(n, 'job')[0], [])
+            self.assertIn('job worktree is dirty or unreadable', m.ready_preflight(n, 'packed')[0])
+
+    def test_private_worktree_refs_and_sha256_split_indexes_ask_git(self):
+        m, repo = self.setup_repo()
+        linked = self.tmp / 'linked'
+        self.git('worktree', 'add', '-q', str(linked), 'job', cwd=repo)
+        self.git('symbolic-ref', 'refs/worktree/alias', 'refs/heads/job', cwd=linked)
+        self.git('symbolic-ref', 'HEAD', 'refs/worktree/alias', cwd=linked)
+        n = dict(external=True, home_path=repo, fm={}, local={'worktrees': {'job': {'path': str(linked)}}})
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertIsNone(m.worktree_head(linked))
+            self.assertNotIn('job worktree is on a different branch', m.ready_preflight(n, 'job')[0])
+        wide = self.tmp / 'wide'
+        self.git('init', '-q', '--object-format=sha256', str(wide), cwd=self.tmp)
+        for name in ('a', 'linkage'):
+            (wide / name).write_text(name + '\n')
+        self.git('add', '.', cwd=wide)
+        self.git('update-index', '--split-index', cwd=wide)
+        self.assertTrue(m.index_has_split_link((wide / '.git/index').read_bytes()))
+        self.git('update-index', '--no-split-index', cwd=wide)
+        self.assertFalse(m.index_has_split_link((wide / '.git/index').read_bytes()))
+        # A checksum that verifies under no reading never skips the private copy.
+        data = bytearray((wide / '.git/index').read_bytes())
+        data[-1] ^= 1
+        self.assertTrue(m.index_has_split_link(bytes(data)))
+
     def test_persisted_pinned_answers_follow_their_generation(self):
         m, repo = self.setup_repo()
         self.git('checkout', '-q', 'job', cwd=repo)
