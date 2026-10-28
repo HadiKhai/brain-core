@@ -168,6 +168,51 @@ class HandbackLifecycle(Scenario):
         self.assertEqual(len([r for r in events.read(inst) if r['kind'] == 'begin' and r['data'].get('write_batch')]), 5)
         self.assertEqual(self.views(queue, inst, later), ['current'] * 2)  # time bound: one request each
 
+    def test_drain_reads_pending_history_once_per_batch_and_once_at_exhaustion(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(10)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'BATCH_SECONDS', 1000), \
+                mock.patch.object(queue, 'pending_intents', wraps=queue.pending_intents) as pending:
+            queue.apply_view_batch(inst)
+        self.assertEqual(pending.call_count, 2)
+        self.assertEqual(self.views(queue, inst, requests), ['current'] * 10)
+
+    def test_drain_batch_observes_producer_append_at_snapshot_exhaustion(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(2)
+        apply, appended = queue.apply_intent, []
+        def produce(current, data):
+            result = apply(current, data)
+            if not appended:
+                appended.append(m.submit_intent(inst, dict(kind='inbox', node='root',
+                    text='Concurrent producer', at=inst.now()), start=False))
+            return result
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'apply_intent', side_effect=produce):
+            self.assertTrue(queue.apply_view_batch(inst))
+            self.assertIsNone(m.intent_receipt(inst, appended[0]['id']))
+            m.drain_intents(inst)
+        receipts = [m.intent_receipt(inst, r['id']) for r in requests + appended]
+        self.assertTrue(all(r['state'] == 'applied' for r in receipts))
+        self.assertEqual([r['sequence'] for r in receipts], sorted(r['sequence'] for r in receipts))
+
+    def test_drain_batch_refuses_payload_replacement_after_selection(self):
+        m, inst, n, events, queue, requests = self.batch_fixture(2)
+        apply = queue.apply_intent
+        def replace(current, data):
+            result = apply(current, data)
+            if data['id'] == requests[0]['id']:
+                replacement = {**requests[1], 'payload': {**requests[1]['payload'], 'text': 'Changed'}}
+                replacement['hash'] = m.intent_hash(replacement['payload'])
+                m.intent_store(inst, requests[1]['id'] + '.request', replacement)
+            return result
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'), \
+                mock.patch.object(queue, 'BATCH_SECONDS', 1000), \
+                mock.patch.object(queue, 'apply_intent', side_effect=replace), \
+                self.assertRaisesRegex(ValueError, 'selected request evidence changed'):
+            queue.apply_view_batch(inst)
+        self.assertIsNone(m.intent_receipt(inst, requests[1]['id']))
+        self.assertNotIn('Batched 1', (n['dir'] / 'inbox.md').read_text())
+
     def test_drain_batch_crash_after_apply_leaves_invalid_views_for_next_drain(self):
         m, inst, n, events, queue, requests = self.batch_fixture(3)
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):

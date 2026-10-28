@@ -839,17 +839,26 @@ def apply_view_batch(inst):
     from . import events
     started, applied, more = time.monotonic(), 0, True
     try:
+        # The index is append-only and requests are immutable. Select one FIFO
+        # prefix per bounded batch instead of rereading all receipt history for
+        # every item. Producers appended during this pass join the next batch.
+        pending = iter(pending_intents(inst))
         while applied == 0 or applied < BATCH_REQUESTS and time.monotonic() - started < BATCH_SECONDS:
-            pending = pending_intents(inst)
-            if not pending:
-                more = False
+            item = next(pending, None)
+            if item is None:
+                more = bool(pending_intents(inst)) if applied else False
                 break
-            sequence, data = pending[0]
+            sequence, data = item
             state, reason = 'applied', ''
             verdict = None
             diagnostic, output = io.StringIO(), io.StringIO()
             operation = None
             with intent_touched(), _m_instance.brain_lock(inst):
+                # Selection grants no authority to apply replaced payloads or
+                # requests that acquired a terminal receipt in the meantime.
+                if (intent_read(inst, data['id'] + '.request') != data
+                        or intent_receipt(inst, data['id']) is not None):
+                    raise ValueError('blocked write queue: selected request evidence changed')
                 current = _m_instance.Instance(inst.root)
                 args = argparse.Namespace(cmd='queue', action='apply', id=data['payload']['node'], f=cmd_intent_queue)
                 try:

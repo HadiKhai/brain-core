@@ -1,5 +1,14 @@
 # Code decisions
 
+## Queue batches select one immutable FIFO prefix
+
+A bounded write batch reads the complete pending queue once, then rechecks each
+selected immutable request and absence of its receipt under writer ownership
+before application. Exhausting that prefix checks for producer appends; the
+next batch reads fresh queue evidence. No selection survives a batch or restart.
+This removes receipt-history scans per application while retaining the existing
+batch limits, receipt publication, projection and final lease-release handoff.
+
 ## Writer maintenance prepares every generated view without physical lock ownership
 
 All mutating commands use fenced, unlocked preparation for generated facts and
