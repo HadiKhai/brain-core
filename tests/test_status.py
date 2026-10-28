@@ -3039,7 +3039,7 @@ class RenderedFingerprint(Scenario):
     def setUp(self):
         super().setUp()
         self.env['BRAIN_NO_UPDATE_CHECK'] = '1'
-        env = mock.patch.dict(os.environ, self.env)
+        env = mock.patch.dict(os.environ, self.env, clear=True)
         env.start()
         self.addCleanup(env.stop)
         self.m = core_loader.SourceFileLoader('rendered_facts', str(CORE / 'bin/brain')).load_module()
@@ -3169,11 +3169,22 @@ class RenderedFingerprint(Scenario):
     def root_due(self, status):
         out = io.StringIO()
         args = argparse.Namespace(id='root', quiet=False, json=True)
-        with status._m_command_reads.snapshot(), contextlib.redirect_stdout(out):
+        # cmd_due loads its instance independently: neither an enclosing gate's
+        # BRAIN_ROOT nor the runner's cwd/default may select a different brain.
+        with mock.patch.dict(os.environ, {'BRAIN_ROOT': str(self.root)}), \
+                status._m_command_reads.snapshot(), contextlib.redirect_stdout(out):
             status.cmd_due(args)
         return [{k: v for k, v in i.items() if k != 'age_hours'} for i in json.loads(out.getvalue())]
 
-    @unittest.skip('quarantined: root due inventory count failed only in aggregate n8 full; unchanged isolated rerun passed on cfdc97ec')
+    def test_root_due_uses_its_fixture_when_another_instance_is_selected(self):
+        status = self.m._owners['due_items']
+        foreign = self.init('elsewhere')
+        with mock.patch.dict(os.environ, {'BRAIN_ROOT': str(foreign)}):
+            self.assertEqual(status._m_nodes.find_root(), foreign)
+            items = self.root_due(status)
+            self.assertTrue(any(i['node'] == 'sample' and i['kind'] == 'handback' for i in items))
+            self.assertEqual(status._m_nodes.find_root(), foreign)
+
     def test_root_due_works_out_each_child_once_and_next_command_sees_changes(self):
         status = self.m._owners['due_items']
         def counted(scoped):
