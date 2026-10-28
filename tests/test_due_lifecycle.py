@@ -351,6 +351,98 @@ class DueLifecycle(Scenario):
     def requests(self):
         return [i for i in self.m.inbox_items(self.inst)[0] if i['kind'] == 'inbox']
 
+    def test_retired_reminder_fallback_preserves_successor_and_deduplicates(self):
+        item = {'node': 'root', 'kind': 'overdue-question',
+                'text': 'question unanswered past its threshold; root must follow up'}
+        old = self.m.reminder_items(self.inst, self.n, [item])[0]['id']
+        self.m.reminder_items(self.inst, self.n, [])
+        current = self.m.reminder_items(self.inst, self.n, [item])[0]['id']
+        self.assertNotEqual(current, old)
+        self.assertEqual([i['id'] for i in self.m.reminder_items(self.inst, self.n, [item] * 7)], [current])
+        data = self.m.lifecycle_read(self.inst)
+        data['reminders']['root']['f' * 24] = {'id': 'e' * 24, 'kind': 'inbox'}
+        data['reminders_retired']['root'].update({f'{i:024x}': f'{i + 100:024x}' for i in range(6)})
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        receipt.write_text(json.dumps(data))
+        before = receipt.read_bytes()
+        with mock.patch.object(self.m, 'LIFECYCLE_LIMIT', 7):
+            with self.assertRaisesRegex(ValueError, 'retired reminder bound reached'):
+                self.m.reminder_reconcile(self.inst, self.n, [item] * 7, data)
+            visible = self.m.reminder_items(self.inst, self.n, [item] * 7)
+        self.assertEqual([i['id'] for i in visible], [current])
+        self.assertIn('lifecycle_error', visible[0])
+        self.assertEqual(receipt.read_bytes(), before)
+
+    def test_due_skips_retired_episode_even_if_stale_active_record_remains(self):
+        item = {'node': 'root', 'kind': 'inbox', 'text': 'Choose a color?'}
+        old = self.m.reminder_items(self.inst, self.n, [item])[0]['id']
+        data = self.m.lifecycle_read(self.inst)
+        data['reminders_retired']['root'] = {self.m.reminder_key(item): old}
+        (self.root / '.brain/wake/lifecycle.json').write_text(json.dumps(data))
+        self.assertEqual(self.m.reminder_items(self.inst, self.n, [item] * 7), [])
+
+    def test_answer_accepts_inbox_and_single_overdue_reminder_ids(self):
+        for kind in ('inbox', 'overdue-question'):
+            with self.subTest(kind=kind):
+                line = self.request('Choose a color for ' + kind + '? <!-- host-question:color -->')
+                due = self.m.due_items(self.inst, self.n, include_stale=False, include_advice=False)
+                reminder = next(i for i in due if i['kind'] == kind)
+                request = self.requests()[0]['id']
+                self.assertNotEqual(reminder['id'], request)
+                self.assertEqual(self.m.answer_inbox(self.inst, reminder['id'][:8], 'Blue'), request)
+                self.assertEqual(self.requests(), [])
+                self.assertIn(line, (self.root / 'inbox.md').read_text())
+                self.assertEqual(self.m.lifecycle_read(self.inst)['answers'][-1]['answer'], 'Blue')
+
+    def test_answer_retired_reminder_is_explicit_and_does_not_write(self):
+        item = {'node': 'root', 'kind': 'inbox', 'text': 'Choose a color?'}
+        old = self.m.reminder_items(self.inst, self.n, [item])[0]['id']
+        self.m.reminder_items(self.inst, self.n, [])
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        before = receipt.read_bytes()
+        for identity in (old[:8], old):
+            with self.assertRaisesRegex(SystemExit, 'reminder is retired; nothing left to answer'):
+                self.m.answer_inbox(self.inst, identity, 'Blue')
+        self.assertEqual(receipt.read_bytes(), before)
+
+    def test_stale_answer_reminder_cannot_answer_a_recurrent_request(self):
+        line = self.request('Choose a color? <!-- host-question:color -->')
+        old = [i for i in self.m.due_items(self.inst, self.n, include_stale=False, include_advice=False)
+               if i['kind'] in ('inbox', 'overdue-question')]
+        self.m.answer_inbox(self.inst, old[0]['id'], 'Blue')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text('')
+        self.assertEqual(self.requests(), [])
+        inbox.write_text(line)
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        before = receipt.read_bytes()
+        for item in old:
+            with self.assertRaises(SystemExit):
+                self.m.answer_inbox(self.inst, item['id'], 'Obsolete answer')
+        self.assertEqual(receipt.read_bytes(), before)
+        current = [i for i in self.m.due_items(self.inst, self.n, include_stale=False, include_advice=False)
+                   if i['kind'] in ('inbox', 'overdue-question')]
+        self.assertTrue({i['id'] for i in old}.isdisjoint(i['id'] for i in current))
+        for item in old:
+            with self.assertRaisesRegex(SystemExit, 'reminder is retired; nothing left to answer'):
+                self.m.answer_inbox(self.inst, item['id'], 'Obsolete answer')
+        self.m.answer_inbox(self.inst, current[0]['id'], 'Green')
+        self.assertEqual(self.requests(), [])
+
+    def test_overdue_reminders_bind_distinct_requests_and_deduplicate_repeated_sources(self):
+        self.request('Choose a color? <!-- host-question:color -->')
+        self.request('Choose a shape? <!-- host-question:shape -->')
+        inbox = self.root / 'inbox.md'
+        inbox.write_text(inbox.read_text() * 7)
+        due = self.m.due_items(self.inst, self.n, include_stale=False, include_advice=False)
+        reminders = [i for i in due if i['kind'] == 'overdue-question']
+        self.assertEqual(len(reminders), 2)
+        self.assertNotEqual(reminders[0]['id'], reminders[1]['id'])
+        self.m.answer_inbox(self.inst, reminders[0]['id'], 'Blue')
+        self.assertEqual(len(self.requests()), 1)
+        self.m.answer_inbox(self.inst, reminders[1]['id'], 'Circle')
+        self.assertEqual(self.requests(), [])
+
     def test_fix1_stale_answer_refuses_unscanned_recurrence(self):
         line = self.request()
         old = self.requests()[0]['id']

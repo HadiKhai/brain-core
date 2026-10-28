@@ -810,14 +810,16 @@ def _due_source_items_unbatched(inst, n, state, include_ready):
             continue  # legacy autonomous transitions are informational, never coordinator work
         else:
             from . import inbox_notices
-            add("inbox", line[2:], informational=inbox_notices.informational_notice(line))
+            add("inbox", line[2:], informational=inbox_notices.informational_notice(line),
+                episode=_m_reminders.request_episode_id(inst, n, line))
     before_advice, items = items, []
     if n['id'] == 'root':
         episode = status_machine_alert(inst)
         if episode:
             add(episode['kind'], episode['text'], **{k: v for k, v in episode.items() if k not in ('kind', 'text')})
     for line in overdue_questions(inst, n, state["inbox"]):
-        add("overdue-question", "question unanswered past its threshold; root must follow up", escalate_to="root")
+        add("overdue-question", "question unanswered past its threshold; root must follow up", escalate_to="root",
+            episode=_m_reminders.request_episode_id(inst, n, line))
     before_stale, items = items, []
     from . import watch as _m_watch
     items.extend(_m_watch.watch_job_stalls(inst, n))
@@ -1601,9 +1603,41 @@ def answer_inbox(inst, item_id, text):
     try:
         with _m_reminders.lifecycle_store(inst) as data:
             items, _ = inbox_items(inst, readonly=True, requests_only=True, lifecycle_data=data)
-            item = _m_reminders.resolve_lifecycle_id(items, item_id)
+            candidates = list(items)
+            requests = {i['id']: i for i in items if i['kind'] == 'inbox'}
+            for nid in {i['node'] for i in requests.values()}:
+                n = inst.node(nid)
+                lines = inbox_lines(n, readonly=True, lifecycle_data=data)
+                overdue = set(overdue_questions(inst, n, lines))
+                seen = set()
+                for line in lines:
+                    request = requests.get(_m_reminders.request_episode_id(inst, n, line, lifecycle_data=data))
+                    if request is None or request['id'] in seen:
+                        continue
+                    seen.add(request['id'])
+                    reminders = [('inbox', line[2:])]
+                    if line in overdue:
+                        reminders.append(('overdue-question', 'question unanswered past its threshold; root must follow up'))
+                    for kind, body in reminders:
+                        raw = {'node': nid, 'kind': kind, 'text': body, 'episode': request['id']}
+                        key = _m_reminders.reminder_key(raw)
+                        record = data['reminders'].get(nid, {}).get(key)
+                        retired = data.get('reminders_retired', {}).get(nid, {})
+                        identity = (_m_jobs.digest([key, 'recurrence', retired[key]]) if key in retired else key)
+                        candidates.append({**request, 'id': record['id'] if record else identity,
+                                           'request_id': request['id']})
+            for nid, retired in data.get('reminders_retired', {}).items():
+                if not isinstance(retired, dict) or any(not re.fullmatch(r'[0-9a-f]{24}', str(v))
+                                                       for v in retired.values()):
+                    raise ValueError('invalid retired reminder state')
+                candidates.extend({'id': identity, 'node': nid, 'kind': 'retired'}
+                                  for identity in set(retired.values()))
+            item = _m_reminders.resolve_lifecycle_id(candidates, item_id)
+            if item['kind'] == 'retired':
+                _m_common.die('this reminder is retired; nothing left to answer for this reminder')
             if item['kind'] != 'inbox':
                 _m_common.die('this item is not an answerable inbox request')
+            item = {**item, 'id': item.get('request_id', item['id'])}
             n = inst.node(item['node'])
             _m_guard.no_terms_in(n, text, 'the recorded answer')
             line = next((line for line in inbox_lines(n, readonly=True, lifecycle_data=data)

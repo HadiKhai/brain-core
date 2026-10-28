@@ -465,6 +465,16 @@ def reminder_reconcile(inst, n, items, data, omitted_kinds=()):
         data.setdefault('reminders_retired', {})[n['id']] = closed
     if current or n['id'] in data['reminders']:
         data['reminders'][n['id']] = current
+    return reminder_display(out, retired.values())
+
+
+def reminder_display(items, retired=()):
+    """A retired episode is never current work; repeated IDs render once."""
+    seen, out = set(retired), []
+    for item in items:
+        if item['id'] not in seen:
+            seen.add(item['id'])
+            out.append(item)
     return out
 
 
@@ -489,12 +499,28 @@ def reminder_handled(inst, item):
 
 
 def reminder_items(inst, n, items, include_handled=False, omitted_kinds=()):
+    data = None
     try:
         with lifecycle_store(inst) as data:
             out = reminder_reconcile(inst, n, items, data, omitted_kinds=omitted_kinds)
             return out if include_handled else [i for i in out if not reminder_handled(inst, i)]
     except (OSError, ValueError):
-        return [{**i, 'id': reminder_key(i), 'lifecycle_error': 'receipt state unknown; no suppression'} for i in items]
+        # A full retirement ledger can refuse publication even though its open
+        # episode IDs are known. Never fall back to a retired source key then.
+        previous = data['reminders'].get(n['id'], {}) if data is not None else {}
+        retired = data.get('reminders_retired', {}).get(n['id'], {}) if data is not None else {}
+        previous = previous if isinstance(previous, dict) else {}
+        retired = retired if isinstance(retired, dict) and all(
+            re.fullmatch(r'[0-9a-f]{24}', str(v)) for v in retired.values()) else {}
+        out = []
+        for item in items:
+            key = reminder_key(item)
+            identity = _m_jobs.digest([key, 'recurrence', retired[key]]) if key in retired else key
+            record = previous.get(key)
+            if isinstance(record, dict) and re.fullmatch(r'[0-9a-f]{24}', str(record.get('id'))):
+                identity = record['id']
+            out.append({**item, 'id': identity, 'lifecycle_error': 'receipt state unknown; no suppression'})
+        return reminder_display(out, retired.values())
 
 
 def record_reminder(inst, n, items, item_id, action, reason, until=None, resume_condition=None):
