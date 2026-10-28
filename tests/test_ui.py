@@ -2237,6 +2237,14 @@ ui_json.ui_json_background(root, '[]')
         self.assertEqual({i["kind"] for i in self.m.ui_search(many, "all", "project", 0, 100)["items"]}, {"node", "specialist"})
         self.assertEqual(self.m.ui_search(many, "specialist", "rev")["items"][0]["secondary"], "Project 00 · 0 hires")
 
+    def test_ui_sender_accepts_fractional_second_record_timestamps(self):
+        for timestamp in ("2026-10-28T20:00:00.123456+00:00", "2026-10-28T20:00:00.1Z",
+                          "2026-10-28 22:00:00.123 +02:00"):
+            with self.subTest(timestamp=timestamp):
+                text = timestamp + " from worker: question: which key?"
+                self.assertEqual(self.m.inbox_sender({"kind": "inbox", "text": text}), "worker")
+                self.assertEqual(self.m.inbox_sender({"kind": "blocked", "text": text}), "")
+
     def test_ui_sender_comes_from_the_record_and_due_names_its_job(self):
         sender = self.m.inbox_sender
         self.assertEqual(sender({"kind": "inbox", "text": "2026-01-01 09:30 +01:00 from worker: question: which key?"}), "worker")

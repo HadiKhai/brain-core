@@ -4351,3 +4351,9 @@ Both paths retain the source-generation and receipt-generation publication
 fences and share each open episode's identity; resolution followed by recurrence
 opens a new one. Selected nodes still receive live worktree, readiness, policy
 and status checks.
+## 2026-10-28: Preserve inbox sender attribution for fractional timestamps
+
+Dashboard inbox records may carry ISO timestamps with fractional seconds. The
+sender parser accepts that precision after the seconds field while retaining
+its anchored timestamp, inbox-kind check and bounded sender delimiter. Other
+record kinds continue to display their source rather than infer a sender from prose.

@@ -640,7 +640,7 @@ def inbox_sender(item):
     """Who wrote an inbox line, from its record: only inbox lines carry a sender ("<time> from <who>: ...")."""
     if item.get("kind") != "inbox":
         return ""
-    m = re.match(r"^(?:inbox:\s*)?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?: ?(?:Z|[+-]\d{2}:?\d{2}))? from ([^:\n]{1,60}):",
+    m = re.match(r"^(?:inbox:\s*)?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?: ?(?:Z|[+-]\d{2}:?\d{2}))? from ([^:\n]{1,60}):",
                  item.get("text") or "")
     return m.group(1).strip() if m else ""
 
