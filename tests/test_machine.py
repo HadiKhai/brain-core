@@ -340,6 +340,28 @@ class MachineCare(Scenario):
         finally:
             observer.references.clear()
 
+    def test_heavy_run_linux_recycles_dead_fds_without_reusing_signal_authority(self):
+        import select
+        import signal
+        observer = object.__new__(self.m.MachineProcesses)
+        observer.pidfds, observer.references = {777: (1, 99)}, {1: 99}
+        observer.next_reference = 1
+        try:
+            with mock.patch.object(sys, 'platform', 'linux'), \
+                    mock.patch.object(os, 'pidfd_open', return_value=99, create=True), \
+                    mock.patch.object(os, 'close') as close, \
+                    mock.patch.object(select, 'select', side_effect=[([99], [], []), ([], [], [])]), \
+                    mock.patch.object(signal, 'pidfd_send_signal', create=True) as send:
+                self.assertIsNone(observer.identity(777))
+                close.assert_called_once_with(99)
+                self.assertEqual(observer.identity(777), (2, 99))
+                observer.send(777, (1, 99), signal.SIGTERM)
+                send.assert_not_called()
+                observer.send(777, (2, 99), signal.SIGTERM)
+                send.assert_called_once_with(99, signal.SIGTERM)
+        finally:
+            observer.references.clear()
+
     def test_heavy_run_queue_preserves_session_after_both_helpers_die(self):
         owner = [123, 'fixture']
         row = dict(token='1' * 32, owner=owner, child=owner, kind='verify', state='running', session=123)

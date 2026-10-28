@@ -1435,6 +1435,7 @@ class MachineProcesses:
         import errno
         self.errno = errno
         self.pidfds, self.references, self.dead = {}, {}, {}
+        self.next_reference = 0
         if sys.platform == 'darwin':
             import ctypes
             self.ctypes = ctypes
@@ -1473,18 +1474,22 @@ class MachineProcesses:
         if previous is not None:
             if select.select([previous[1]], [], [], 0)[0]:
                 del self.pidfds[pid]
+                self.references.pop(previous[0])
+                os.close(previous[1])
                 return None
             return previous
         try:
             fd = os.pidfd_open(pid)
         except ProcessLookupError:
             return None
-        # Keep the descriptor open for this observer's lifetime. A dead reference
-        # cannot be recycled into another process even after numeric PID reuse.
-        identity = (len(self.references) + 1, fd)
-        self.references[identity[0]] = fd
+        # A serial is never reused, even when a dead descriptor is closed and
+        # the OS recycles its fd number. Stale serials cannot signal a new owner.
+        self.next_reference += 1
+        identity = (self.next_reference, fd)
         if select.select([fd], [], [], 0)[0]:
+            os.close(fd)
             return None
+        self.references[identity[0]] = fd
         self.pidfds[pid] = identity
         return identity
 
@@ -1927,7 +1932,7 @@ def machine_thermal_recovered(samples):
 
 
 
-def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled):
+def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter=print, cancelled=None):
     """A live queued process owns its continuation; no replay of arbitrary commands."""
     clock = clock or time
     token.clock = clock
