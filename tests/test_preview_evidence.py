@@ -1,6 +1,7 @@
 """Pinned preview diff reuse must retain live classification authority."""
 import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -53,12 +54,28 @@ class PreviewImmutableQueries(Scenario):
             self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'not_applicable')
             # Only the post-classification drift check stays a live read.
             self.assertEqual([c[3:] for c in ref_reads()],
-                             [('rev-parse', '--verify', 'refs/heads/job^{commit}'),
+                             [('rev-parse', '--verify', 'refs/heads/job^{commit}'), ('remote',),
                               ('rev-parse', '--verify', 'refs/heads/main^{commit}')])
             self.git('update-ref', 'refs/heads/job', 'main', cwd=n['home_path'])
             spawned.clear()
             self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'required')
             self.assertTrue(ref_reads())
+
+    def test_integration_ref_switch_during_classification_refuses_the_exemption(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        verify = sys.modules[m.preview_requirement.__module__.rsplit('.', 1)[0] + '.verify']
+        original, selected = verify.integration_ref, []
+        def switching(*args, **kwargs):
+            selected.append(original(*args, **kwargs) if not selected else 'refs/heads/release')
+            return selected[-1]
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
+            m.ready_preflight(n, 'job')
+            with mock.patch.object(verify, 'integration_ref', side_effect=switching):
+                scope = m.preview_requirement(inst, n, 'job', data['head'])
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(scope['status'], 'required')
+        self.assertEqual(scope['reason'], 'preview classification refs changed')
 
     def test_new_head_and_base_get_new_diffs_and_existing_receipts_still_refuse(self):
         m, inst, n, data = self.context()

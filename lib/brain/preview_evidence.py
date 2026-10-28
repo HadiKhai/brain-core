@@ -316,7 +316,7 @@ def preview_requirement(inst, n, branch, head, packet=None):
             return evidence
         if commit('refs/heads/' + branch) != head:
             return evidence
-        ref = _m_verify.integration_ref(repo, env=ref_env)
+        integration = ref = _m_verify.integration_ref(repo, env=ref_env)
         if not ref:
             return evidence
         if n['fm'].get('merge', 'local') != 'pr':
@@ -396,7 +396,10 @@ def preview_requirement(inst, n, branch, head, packet=None):
             for pattern in patterns:
                 _m_lanes.glob_regex(pattern)
         evidence['globs'] = groups
+        # The integration ref's identity is read live here: the fenced read
+        # above cannot see a default-branch switch during classification.
         if (query('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}').strip() != head or
+                _m_verify.integration_ref(repo, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}) != integration or
                 query('rev-parse', '--verify', ref + '^{commit}').strip() != current_base):
             return {**evidence, 'reason': 'preview classification refs changed'}
         current = _m_instance.Instance(inst.root)
