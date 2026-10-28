@@ -401,6 +401,12 @@ class R2VersionAndUpgrade(Scenario):
         self.git("branch", "-f", "stable", cwd=root)
         self.git("checkout", "-q", "stable", cwd=root)
         self.assertEqual(target(root), stable)  # "." follows the superproject's branch
+        self.git("tag", "stable", cwd=root)
+        self.assertEqual(target(root), stable)  # a same-named tag never renames the inherited branch
+        self.git("checkout", "-q", "--detach", cwd=root)
+        with self.assertRaises(SystemExit) as error:
+            target(root)  # like Git, a detached brain has no branch to inherit
+        self.assertIn("detached", str(error.exception))
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=core).strip(), main)  # resolving never checks out
 
     def test_unknown_node_gate_inventory_refuses_before_upgrade(self):

@@ -154,7 +154,10 @@ def _fetch_core_target(root):
               _m_common.git("config", "-f", str(root / ".gitmodules"), "--get", "submodule.core.branch",
                             cwd=root).stdout.strip())
     if branch == ".":
-        branch = _m_common.git("symbolic-ref", "-q", "--short", "HEAD", cwd=root).stdout.strip()
+        head = _m_common.git("symbolic-ref", "-q", "HEAD", cwd=root).stdout.strip()
+        if not head.startswith("refs/heads/"):
+            _m_common.die("couldn't update core: submodule.core.branch is '.', but the brain's HEAD is detached")
+        branch = head[len("refs/heads/"):]
     ref = f"refs/remotes/origin/{branch}" if branch else cached_origin_ref(core)
     target = _version_git("rev-parse", "--verify", ref + "^{commit}", cwd=core)
     if target.returncode or not _m_core_releases.SHA.fullmatch(target.stdout.strip()):
