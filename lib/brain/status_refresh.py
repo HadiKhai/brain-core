@@ -350,6 +350,10 @@ def contended(error):
     return any(text in message for text in CONTENTION)
 
 
+def settings(inst):
+    return inst.cfg, inst.local, [(node['id'], node['fm']) for node in inst.nodes()]
+
+
 def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
     """Release physical ownership, prepare once, then refuse relevant drift.
 
@@ -366,10 +370,16 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
         # fenced, drift rebuilds under the lock, and only a bounded number.
         for _ in range(HELD_BUILDS):
             try:
-                return fenced(inst, n, build, all_nodes, targets, extra)
+                result = fenced(inst, n, build, all_nodes, targets, extra)
             except SystemExit as error:
                 if not contended(error):
                     raise
+                continue
+            # The caller publishes with its own loaded instance: a rebuild may
+            # not carry settings that instance does not have.
+            if settings(instance.Instance(inst.root)) != settings(inst):
+                common.die('instance or node settings changed during the locked refresh; refresh again')
+            return result
         common.die(f'status refresh inputs kept changing through {HELD_BUILDS} locked builds; '
                    'worktree files and Git are outside the Brain lock')
     return fenced(inst, n, build, all_nodes, targets, extra)
@@ -390,7 +400,19 @@ def fenced(inst, n, build, all_nodes, targets, extra):
             policy = [current.root / 'instance.md', (current.root / 'instance.md').resolve()]
             return ([path for target in selected for path in input_paths(current, target)] + policy +
                     list(extra() if callable(extra) else extra))
-        with (contextlib.nullcontext() if instance.holding() else instance.released(inst, list(current.nodes()))):
+        from . import events
+        owner = next((op for op in reversed(events._CURRENT)
+                      if op.command == 'status' and op.inst.root == inst.root), None)
+        window = events.resources(inst) if owner is not None and not instance.holding() else None
+        def attribute_window():
+            # Runs after released() retook the lock: whatever moved is foreign.
+            after = events.resources(inst)
+            owner.foreign.update(k for k in window.keys() | after.keys() if window.get(k) != after.get(k))
+        with contextlib.ExitStack() as stack:
+            if window is not None:
+                stack.callback(attribute_window)
+            stack.enter_context(contextlib.nullcontext() if instance.holding() else
+                                instance.released(inst, list(current.nodes())))
             token = _ACTIVE.set(True)
             observer = common._GIT_OBSERVER.set(git_inputs.observe)
             reads = common._GIT_READS.set(None)

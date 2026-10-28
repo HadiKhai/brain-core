@@ -657,6 +657,8 @@ class Command:
             self.command = "project_status"
         self.lease = None
         self.lease_target = None
+        self.failure = None
+        self.foreign = set()
         self.record_paths = set()
         self.study_handback = (self.command == 'handback' and
                                str(getattr(args, 'branch', '')).startswith('import:'))
@@ -759,7 +761,13 @@ class Command:
                 if self.before.get(k) != after.get(k)
                 and recorded.get(digest(k.encode()), {}).get('hash') != after.get(k)}
 
+    def owned(self, changed):
+        # Bytes that landed while a refresh compute released the lock belong to
+        # the writers that held it then, not to this refresh.
+        return {k for k in changed if k not in self.foreign}
+
     def finish(self, success, exit_code=0):
+        from . import status_refresh
         self.inst = instance.Instance(self.inst.root)
         # Hooks own their durable writes even when this command failed. Attribute
         # them before deciding whether the command left partial writes behind.
@@ -791,8 +799,7 @@ class Command:
                         'resources': resource_list(self.inst, changed, display=False),
                         'maintenance_ok': False,
                         'invalidate': [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]}
-            if (not maintenance_ok and getattr(self, 'unpublished_contention', False)
-                    and not self.changes(self.before_compute)):
+            if not maintenance_ok and getattr(self, 'unpublished_contention', False) and not self.owned(changed):
                 # Plain contention refused the refresh before it published or
                 # changed anything. Bytes another writer left during the
                 # compute stay that writer's; committed views stay valid.
@@ -802,11 +809,14 @@ class Command:
             if self.command == 'status' and not data.get('maintenance_ok'):
                 reason = f'; cause: {maintenance_error}' if maintenance_error is not None else ''
                 common.die('status refresh maintenance refused; generated view needs repair; retry from fresh state' + reason)
-        elif not changed:
+        elif not changed or (self.command == 'status' and isinstance(self.failure, SystemExit)
+                             and status_refresh.contended(self.failure) and not self.owned(changed)):
+            # A refresh body refused by contention publishes nothing before it.
             append(self.inst, self.node, "abort", self.ref, {"command": self.command})
         # Persisted partial changes require reconciliation, never a false commit.
 
     def __exit__(self, typ, value, tb):
+        self.failure = value
         try:
             with instance.brain_lock(self.inst):
                 try:
@@ -1519,8 +1529,6 @@ def maintain(op, changed):
                     view = compared
                 result[nid] = (view, status.refreshed_text(current, target, view), compared)
             return result
-        # Held since start(): only the released compute below admits other writers.
-        op.before_compute = resources(op.inst)
         try:
             prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
                                               targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)

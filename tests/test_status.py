@@ -889,6 +889,23 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         with mock.patch.dict(os.environ, self.env), refresh.instance.held():
             self.assertEqual(refresh.compute(inst, inst.node('root'), changed), 2)
 
+    def test_held_refresh_refuses_settings_its_publisher_has_not_loaded(self):
+        root = self.init('alice')
+        loader = core_loader.SourceFileLoader('refresh_held_settings', str(CORE / 'bin/brain'))
+        m = loader.load_module()
+        refresh = importlib.import_module(loader.package_name + '.status_refresh')
+        inst = m.Instance(root)
+        policy, builds = root / 'instance.md', []
+        def changed(current, target):
+            if not builds:  # an editor changes a parsed setting during the held build
+                policy.write_text(policy.read_text().replace('---\n', '---\nnote: edited\n', 1))
+            builds.append(True)
+            return len(builds)
+        with mock.patch.dict(os.environ, self.env), refresh.instance.held():
+            with self.assertRaisesRegex(SystemExit, 'settings changed during the locked refresh'):
+                refresh.compute(inst, inst.node('root'), changed)
+        self.assertEqual(len(builds), 2)
+
     def test_refresh_fences_complete_ref_names(self):
         root, home, wt = self.project()
         loader = core_loader.SourceFileLoader('refresh_complete_refs', str(CORE / 'bin/brain'))
@@ -1104,6 +1121,44 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                              for r in ours))
         self.assertTrue(ours[-1]['data']['maintenance_ok'])
         self.assertIn(ref, events.replay(m.Instance(root))[2])  # the writer's operation stays open
+
+    def test_contended_reconciliation_does_not_strand_the_refresh(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_reconcile')
+        inbox = root / 'inbox.md'
+        inbox.write_text(inbox.read_text() + '\n- out-of-band edit\n')  # a gap: reconciliation runs
+        ref, writer = 'f' * 32, []
+        facts = status.status_facts
+        def foreign(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            if not writer and instance._LOCK['fh'] is None:
+                inst = m.Instance(root)  # a live writer leaves pending bytes in the reconcile compute
+                events.append(inst, 'root', 'begin', ref, {'command': 'fixture'})
+                lease = events.lease_path(inst, ref, create=True)
+                lease.write_text('')
+                writer.append(os.open(lease, os.O_RDONLY))
+                events.fcntl.flock(writer[0], events.fcntl.LOCK_EX)
+                (root / 'backlog.md').write_text((root / 'backlog.md').read_text() + '\n- pending item\n')
+            return result
+        start = len(events.read(m.Instance(root)))
+        try:
+            with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                    mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                    mock.patch.object(status, 'status_facts', side_effect=foreign), \
+                    mock.patch('random.uniform', return_value=0), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli.main()  # exit 0: no SystemExit
+            records = events.read(m.Instance(root))[start:]
+        finally:
+            for fd in writer:
+                os.close(fd)
+        self.assertTrue(writer)
+        opened = events.replay(m.Instance(root))[2]
+        self.assertEqual(set(opened), {ref})  # no refresh attempt is left open
+        ours = [r for r in records if r['ref'] != ref]
+        self.assertIn('abort', [r['kind'] for r in ours])
+        self.assertTrue(ours[-1]['data']['maintenance_ok'])
 
     def test_refresh_does_not_retry_a_real_repair_refusal(self):
         root = self.init('alice')
