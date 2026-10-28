@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1084,6 +1085,88 @@ def recorded_job_start(n, row):
     return None if start in ('0' * 40, '0' * 64) else start
 
 
+def landing_patches(home, revision):
+    """Patch IDs plus exact code deltas; only prose whitespace is disposable."""
+    result = _m_common.git('log', '--reverse', '--topo-order', '--no-merges', '--format=commit %H',
+                           '--patch', '--binary', '--full-index', '--no-renames', '--no-ext-diff',
+                           '--no-textconv', '--unified=0', revision, cwd=home)
+    if result.returncode:
+        return None
+    ids = subprocess.run(['git', 'patch-id', '--stable'], input=result.stdout,
+                         capture_output=True, text=True, cwd=home)
+    if ids.returncode:
+        return None
+    patch_ids = {sha: ident for ident, sha in (line.split() for line in ids.stdout.splitlines())}
+    parts = re.split(r'^commit ([0-9a-f]{40}|[0-9a-f]{64})\n', result.stdout, flags=re.M)
+    patches = []
+    for sha, patch in zip(parts[1::2], parts[2::2]):
+        if sha not in patch_ids:  # empty commits cannot be inferred as delivered
+            patches.append((sha, None, None, False))
+            continue
+        signature = []
+        meaningful = False
+        has_prose = False
+        for section in re.split(r'(?=^diff --git )', patch.strip('\n'), flags=re.M)[1:]:
+            lines = section.splitlines()
+            path = re.fullmatch(r'diff --git a/(\S+) b/\1', lines[0])
+            prose = bool(path and Path(path[1]).suffix.lower() in ('.md', '.rst')
+                         and not any(line.startswith(('old mode ', 'new mode ')) for line in lines)
+                         and not any(line.startswith(('new file mode ', 'deleted file mode '))
+                                     and line.split()[-1] != '100644' for line in lines)
+                         and not any(line.startswith('index ') and not line.endswith(' 100644')
+                                     for line in lines))
+            has_prose |= prose
+            meaningful |= not prose
+            for line in lines:
+                if line.startswith('index '):
+                    # Blob IDs and line positions differ after rebasing; modes do not.
+                    signature.append('mode ' + (line.split()[2] if len(line.split()) == 3 else ''))
+                elif line.startswith('@@'):
+                    if not prose:
+                        signature.append('@@')
+                elif prose and line[:1] in ('+', '-') and not line.startswith(('+++', '---')):
+                    content = re.sub(r'\s+', '', line[1:])
+                    if content:
+                        signature.append(line[0] + content)
+                        meaningful = True
+                else:
+                    signature.append(line)
+                    if line[:1] in ('+', '-') and not line.startswith(('+++', '---')):
+                        meaningful = True
+        exact = hashlib.sha256(json.dumps(signature).encode()).hexdigest() if signature and meaningful else None
+        patches.append((sha, patch_ids[sha], exact, has_prose))
+    return patches
+
+
+def patch_landing(home, head, main):
+    """Every source commit must map to a distinct, ordered main commit."""
+    base = _m_common.git('merge-base', head, main, cwd=home)
+    if base.returncode or not base.stdout.strip():
+        return False
+    base = base.stdout.strip()
+    merges = _m_common.git('rev-list', '--min-parents=2', base + '..' + head, cwd=home)
+    if merges.returncode or merges.stdout.strip():
+        return False  # merge resolutions have no single-parent patch proof
+    source = landing_patches(home, base + '..' + head)
+    if not source or any(not ident or not exact for _, ident, exact, _ in source):
+        return False
+    delivered = landing_patches(home, base + '..' + main)
+    if not delivered:
+        return False
+    position = 0
+    for _, ident, exact, prose in source:
+        for offset in range(position, len(delivered)):
+            _, candidate_id, candidate_exact, candidate_prose = delivered[offset]
+            # Equal signatures also admit a changed patch ID caused solely by
+            # prose whitespace (e.g. a removed blank line during cherry-pick).
+            if exact == candidate_exact and (ident == candidate_id or prose and candidate_prose):
+                position = offset + 1
+                break
+        else:
+            return False
+    return True
+
+
 def manual_landing(n, row):
     home = n.get('home_path')
     if not home:
@@ -1092,9 +1175,10 @@ def manual_landing(n, row):
         return _m_common.git('rev-parse', '--verify', '--quiet', name + '^{commit}', cwd=home).stdout.strip()
     head, main = ref('refs/heads/' + row['Job']), ref('refs/heads/main')
     start = recorded_job_start(n, row)
-    if (head and main and head != start
-            and _m_common.git('merge-base', '--is-ancestor', head, main, cwd=home).returncode == 0):
-        return head, main
+    if head and main and head != start:
+        if (_m_common.git('merge-base', '--is-ancestor', head, main, cwd=home).returncode == 0
+                or patch_landing(home, head, main)):
+            return head, main
     return None
 
 
@@ -1109,6 +1193,9 @@ def prepare_ledger_close(inst, n, row, reason=None):
         row.update({'Outcome': 'merged', 'Head commit': landed[0], 'Main commit': landed[1],
                     'Lesson check': 'required', 'Cause': 'manual landing confirmed in local main'})
         base = recorded_job_start(n, row)
+        if _m_common.git('merge-base', '--is-ancestor', landed[0], landed[1], cwd=n['home_path']).returncode:
+            base = _m_common.git('merge-base', landed[0], landed[1], cwd=n['home_path']).stdout.strip()
+            row['Base commit'] = base
         # Delivered paths are Git facts, independent of verification/readiness.
         paths = (_m_common.git('diff', '--name-only', '-z', base, landed[0], cwd=n['home_path']) if base else
                  _m_common.git('diff-tree', '--root', '--no-commit-id', '--name-only', '-r', '-z',
@@ -1162,7 +1249,7 @@ def jobs_need_reconciliation(a):
 
 
 def reconcile_manual_landings(inst, n, branch=None):
-    """Local Git ancestry closes ledger work; it never invents gate evidence."""
+    """Local Git delivery closes ledger work; it never invents gate evidence."""
     if next(manual_landing_candidates(n, branch), None) is None:
         return []
     closed = []

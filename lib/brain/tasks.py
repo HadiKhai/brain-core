@@ -695,16 +695,24 @@ def prepare_job_closed(inst, n, row, records=None):
     changes = {'status': 'parked', 'park_reason': row.get('Cause') or 'Job closed without proven task completion',
                'resume': 'Start a new task job or supply verified main landing evidence'}
     head = row.get('Head commit') or packet.get('head', '')
-    if row.get('Outcome') == 'merged' and packet.get('verify_result') == 0 and head == packet.get('head'):
-        base = packet.get('integration_base') or packet.get('main')
+    # Manual reconciliation records Git facts independently of gate readiness.
+    # Re-prove them here, including all patches when delivery rewrote the SHAs.
+    landed = (_m_jobs.manual_landing(n, row) if row.get('Outcome') == 'merged'
+              and row.get('Head commit') and row.get('Main commit') and row.get('Code paths') else None)
+    delivery = landed == (head, row.get('Main commit')) if landed else False
+    verified = packet.get('verify_result') == 0 and head == packet.get('head')
+    if row.get('Outcome') == 'merged' and (delivery or verified):
+        base = (row.get('Base commit') or _m_jobs.recorded_job_start(n, row) if delivery else
+                packet.get('integration_base') or packet.get('main'))
         main = _m_common.git('rev-parse', '--verify', 'refs/heads/main^{commit}', cwd=n['home_path']).stdout.strip()
         diff = _m_common.git('diff', '--name-only', base or head + '^', head, cwd=n['home_path'])
         if (diff.returncode == 0 and diff.stdout.strip() and SHA.fullmatch(main) and
-                _m_common.git('merge-base', '--is-ancestor', head, main, cwd=n['home_path']).returncode == 0):
+                (delivery and main == landed[1] or
+                 verified and _m_common.git('merge-base', '--is-ancestor', head, main, cwd=n['home_path']).returncode == 0)):
             changes = {'status': 'done', 'merge_sha': main, 'code_path': ', '.join(diff.stdout.splitlines()),
                        'baseline_sha': current.get('baseline_sha') or base or '',
                        'evidence': list(dict.fromkeys(current['evidence'] + [
-                           'Verified job ' + row['Job'] + ' at ' + head + '; landed on main ' + main])),
+                           ('Delivered job ' if delivery else 'Verified job ') + row['Job'] + ' at ' + head + '; landed on main ' + main])),
                        'park_reason': '', 'resume': ''}
     from . import task_flow as _m_flow
     if changes['status'] == 'parked':

@@ -195,6 +195,116 @@ class LedgerFollowsMain(Scenario):
         self.assertEqual(self.rows()[0]['Outcome'], 'merged')
         self.assertEqual(json.loads(self.rows()[0]['Code paths']), ['feature.py'])
 
+    def separate_main(self):
+        self.git('commit', '--allow-empty', '-qm', 'Separate main change', cwd=self.home)
+
+    def test_jobs_closes_every_cherry_picked_commit_and_retains_original_head(self):
+        first = self.commit_work()
+        (self.wt / 'second.py').write_text('second = 2\n')
+        self.git('add', 'second.py', cwd=self.wt)
+        self.git('commit', '-qm', 'Second feature', cwd=self.wt)
+        head = self.git('rev-parse', 'HEAD', cwd=self.wt).strip()
+        self.separate_main()
+        self.git('cherry-pick', first, cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])  # never close a partial delivery
+        self.git('cherry-pick', head, cwd=self.home)
+        main = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
+        self.assertNotEqual(main, head)
+        self.b(self.root, 'jobs', 'a')
+        row, = self.rows()
+        self.assertEqual((row['Outcome'], row['Head commit'], row['Main commit']), ('merged', head, main))
+        self.assertEqual(json.loads(row['Code paths']), ['feature.py', 'second.py'])
+
+    def test_landing_reconciler_accepts_rebased_patch(self):
+        original = self.commit_work()
+        self.separate_main()
+        self.git('rebase', 'main', cwd=self.wt)
+        self.assertNotEqual(self.git('rev-parse', 'HEAD', cwd=self.wt).strip(), original)
+        # Deliver that rewritten patch while the ledger branch keeps its original SHA.
+        rebased = self.git('rev-parse', 'HEAD', cwd=self.wt).strip()
+        self.git('reset', '--hard', original, cwd=self.wt)
+        self.git('cherry-pick', rebased, cwd=self.home)
+        inst = self.module.Instance(self.root)
+        with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(io.StringIO()):
+            self.module._owners['cmd_land'].reconcile_manual_landings(inst, inst.node('a'))
+        self.assertEqual(self.rows()[0]['Outcome'], 'merged')
+
+    def test_documentation_whitespace_may_differ_only_with_exact_code_delta(self):
+        self.commit_work()
+        (self.wt / 'README.md').write_text('hello\n\nDelivery notes\n')
+        self.git('add', 'README.md', cwd=self.wt)
+        self.git('commit', '--amend', '--no-edit', '-q', cwd=self.wt)
+        self.separate_main()
+        (self.home / 'README.md').write_text('hello\nDelivery   notes\n')
+        (self.home / 'feature.py').write_text('value = 1\n')
+        self.git('add', 'README.md', 'feature.py', cwd=self.home)
+        self.git('commit', '-qm', 'Delivered with prose spacing changed', cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertEqual(self.rows()[0]['Outcome'], 'merged')
+
+    def test_patch_id_does_not_allow_code_whitespace_or_prose_content_changes(self):
+        self.commit_work()
+        (self.wt / 'README.md').write_text('hello\nDelivery notes\n')
+        self.git('add', 'README.md', cwd=self.wt)
+        self.git('commit', '--amend', '--no-edit', '-q', cwd=self.wt)
+        self.separate_main()
+        base = self.git('rev-parse', 'HEAD', cwd=self.home).strip()
+        for code, prose in [('value=1\n', 'Delivery notes'), ('value = 1\n', 'Different notes')]:
+            with self.subTest(code=code, prose=prose):
+                (self.home / 'feature.py').write_text(code)
+                (self.home / 'README.md').write_text('hello\n' + prose + '\n')
+                self.git('add', 'feature.py', 'README.md', cwd=self.home)
+                self.git('commit', '-qm', 'Incomplete equivalence', cwd=self.home)
+                self.b(self.root, 'jobs', 'a')
+                self.assertFalse(self.rows()[0]['Ended'])
+                self.git('reset', '--hard', base, cwd=self.home)
+
+    def test_unlanded_empty_followup_is_not_a_complete_patch_match(self):
+        head = self.commit_work()
+        self.git('commit', '--allow-empty', '-qm', 'Unlanded followup', cwd=self.wt)
+        self.separate_main()
+        self.git('cherry-pick', head, cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_dependency_file_whitespace_is_compared_as_code(self):
+        self.commit_work()
+        (self.wt / 'requirements-test.txt').write_text('example == 1.0\n')
+        self.git('add', 'requirements-test.txt', cwd=self.wt)
+        self.git('commit', '--amend', '--no-edit', '-q', cwd=self.wt)
+        self.separate_main()
+        (self.home / 'feature.py').write_text('value = 1\n')
+        (self.home / 'requirements-test.txt').write_text('example==1.0\n')
+        self.git('add', 'feature.py', 'requirements-test.txt', cwd=self.home)
+        self.git('commit', '-qm', 'Code matches but dependency whitespace differs', cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_matching_patches_in_reverse_order_stay_open(self):
+        first = self.commit_work()
+        (self.wt / 'second.py').write_text('second = 2\n')
+        self.git('add', 'second.py', cwd=self.wt)
+        self.git('commit', '-qm', 'Second feature', cwd=self.wt)
+        second = self.git('rev-parse', 'HEAD', cwd=self.wt).strip()
+        self.separate_main()
+        self.git('cherry-pick', second, first, cwd=self.home)
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
+    def test_patch_delivery_preserves_live_read_only_and_publication_refusal(self):
+        head = self.commit_work()
+        self.separate_main()
+        self.git('cherry-pick', head, cwd=self.home)
+        self.b(self.root, 'jobs', 'a', '--live')
+        self.assertFalse(self.rows()[0]['Ended'])
+        folder = self.root / 'nodes/a/job-trains'
+        folder.mkdir()
+        (folder / 'uncertain.json').write_text(json.dumps({'state': 'publication_failed',
+            'accepted': [{'key': self.module.job_key(self.rows()[0])}]}))
+        self.b(self.root, 'jobs', 'a')
+        self.assertFalse(self.rows()[0]['Ended'])
+
 
 class LedgerReviewEvidence(Scenario):
     def test_next_write_repairs_only_rows_with_retained_review_evidence(self):

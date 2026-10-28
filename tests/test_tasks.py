@@ -1015,6 +1015,31 @@ class Tasks(Scenario):
         self.assertEqual(row['merge_sha'], head)
         self.assertEqual(row['code_path'], 'engine.py')
 
+    def test_cherry_picked_job_completes_task_from_git_evidence_without_gate_claim(self):
+        from brain import jobs, sync
+        self.repo(self.root)
+        base = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.add(status='ready', scope=['engine.py'])
+        jobs.job_started(self.inst, self.n, 'job/example', 'codex', task_id='APP-1')
+        self.n['local']['worktrees'] = {'job/example': {'start': base}}
+        self.git('checkout', '-qb', 'job/example', cwd=self.root)
+        (self.root / 'engine.py').write_text('VERSION = 1\n')
+        self.git('add', 'engine.py', cwd=self.root)
+        self.git('commit', '-qm', 'Implement example', cwd=self.root)
+        head = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        self.git('checkout', '-q', 'main', cwd=self.root)
+        self.git('commit', '--allow-empty', '-qm', 'Separate main work', cwd=self.root)
+        self.git('cherry-pick', head, cwd=self.root)
+        main = self.git('rev-parse', 'HEAD', cwd=self.root).strip()
+        row = jobs.prepare_ledger_close(self.inst, self.n, jobs.read_jobs(self.n)[0])
+        with mock.patch.object(sync, 'integration_packet', return_value=None):
+            tasks.job_closed(self.inst, self.n, row)
+        task = tasks.read_records(self.n)['APP-1']
+        self.assertEqual((task['status'], task['merge_sha'], task['code_path']), ('done', main, 'engine.py'))
+        self.assertIn('Delivered job job/example at ' + head, ' '.join(task['evidence']))
+        self.assertNotIn('Verified job', ' '.join(task['evidence']))
+        tasks.validate(self.n, tasks.read_records(self.n))
+
     def test_backfill_is_additive_idempotent_and_preserves_exact_source(self):
         from brain import tasks_backfill
         path = self.root / 'backlog.md'
