@@ -17,9 +17,12 @@ from . import common as _m_common
 _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_reports = _m_common.LazyModule(__package__, 'reports')
 _m_spend = _m_common.LazyModule(__package__, 'spend')
 _m_ui_readmodel = _m_common.LazyModule(__package__, 'ui_readmodel')
 _m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_verify = _m_common.LazyModule(__package__, 'verify')
+_m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 
 UI_JSON_WAIT = 1  # static capability for cross-version rehearsal callers
@@ -165,19 +168,116 @@ def ui_json_fingerprint(value):
     return hashlib.sha256(json.dumps(canonical(value), sort_keys=True).encode()).hexdigest()
 
 
-def ui_json_views(inst, model, privacy, inputs, signature, cache):
-    """Load persisted node views whose input fingerprint still matches; others rebuild."""
-    keys = {nid: ui_json_fingerprint(key) for nid, key in inputs.node_keys(inst, signature).items()}
+def ui_json_git_dirs(path):
+    """A checkout's own and common Git directories, read from files without running Git."""
+    dot = path / '.git'
+    if dot.is_dir():
+        return dot, dot
+    try:
+        text = dot.read_text()
+    except OSError:
+        return None, None
+    if not text.startswith('gitdir:'):
+        return None, None
+    own = Path(text[len('gitdir:'):].strip())
+    own = own if own.is_absolute() else (path / own).resolve()
+    try:
+        common = (own / (own / 'commondir').read_text().strip()).resolve()
+    except OSError:
+        common = own
+    return own, common
+
+
+def ui_json_stamps(inst):
+    """Per-node metadata stamps: node files, ledger, bindings and branch tips; never home listings.
+
+    One for-each-ref per repository gives every branch tip by SHA; each checkout's
+    HEAD/index metadata covers commits, checkouts and staging inside it.
+    """
+    from . import ui
+    stamp = ui.UIInputs.stamp
+    root = inst.root
+    try:
+        runs = json.loads((root / '.brain/worker-runs.json').read_text()).get('runs', [])
+        runs = runs if isinstance(runs, list) else []
+    except (OSError, ValueError, AttributeError, UnicodeError):
+        runs = None
+    shared = (stamp(root / 'instance.md'), stamp(root / '.brain/wake/lifecycle.json'),
+              json.dumps({k: v for k, v in inst.local.items() if k != 'nodes'}, sort_keys=True, default=str),
+              os.path.realpath(root / '.brain/core-current'), runs is None)
+    nodes, repos, homes = inst.nodes(), {}, {}
+    for n in nodes:
+        paths = [n['home_path']] if n['external'] and n['home_path'] else []
+        paths += [Path(w['path']) for w in ui.ui_live_worktrees(n).values() if w.get('path')]
+        homes[n['id']] = []
+        for home in paths:
+            own, common = ui_json_git_dirs(home)
+            homes[n['id']].append((home, own, common))
+            if common is not None:
+                repos.setdefault(str(common), None)
+    for common in repos:  # one tip listing per repository, shared by its worktrees
+        result = _m_common.git('for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads', 'refs/remotes',
+                               cwd=common)
+        repos[common] = (result.returncode, result.stdout)
+    out = {}
+    for n in nodes:
+        files = []
+        for directory, dirs, names in os.walk(n['dir']):
+            if Path(directory) == n['dir']:  # a child node has its own views
+                dirs[:] = [d for d in dirs if d != 'nodes' and not (n['dir'] == root and (
+                    d.startswith('.') or d in ('core', 'cores')))]  # the instance's own state is `shared`
+            dirs[:] = sorted(d for d in dirs if d != '.git')
+            files.extend(stamp(Path(directory) / name) for name in sorted(names))
+        parent = n['parent']
+        while parent:
+            files.extend(stamp(parent['dir'] / name) for name in ('node.md', 'never-name.txt'))
+            parent = parent['parent']
+        files.append(stamp(_m_spend.spend_node_file(inst, n)))
+        files.append(stamp(_m_reports.preview_receipt_file(inst, n)))
+        try:
+            wb = _m_worktrees.workbench(inst, n)
+            files.append(stamp(wb / 'reports'))
+            files.extend(stamp(path) for path in sorted((wb / 'reports').glob('*/index.md')))
+            for tree in ('scratch/ready', 'scratch/rehearse'):
+                for directory, dirs, names in os.walk(wb / tree):
+                    dirs.sort()
+                    files.extend(stamp(Path(directory) / name) for name in sorted(names))
+        except SystemExit:
+            files.append(('workbench', None))
+        patterns = _m_common.lst(n['fm'].get('verify_inputs')) or _m_common.lst(_m_verify.VERIFY_INPUTS)
+        git = []
+        for home, own, common in homes[n['id']]:
+            git.append((str(home), stamp(home), str(common), repos.get(str(common)),
+                        *(stamp(own / name) for name in (('HEAD', 'index', 'packed-refs', 'config') if own else ())),
+                        *(stamp(path) for pattern in patterns for path in sorted(home.glob(pattern)))))
+        mine = [r for r in runs or [] if isinstance(r, dict) and r.get('node') == n['id']]
+        out[n['id']] = ui_json_fingerprint([shared, json.dumps(n['local'], sort_keys=True, default=str),
+                                            files, git, mine])
+    return out
+
+
+def ui_json_views(inst, model, privacy, keys, cache):
+    """Load persisted node views whose stamp still matches; others rebuild."""
     record = model.read('node-views')
     if not isinstance(record, dict) or record.get('binding') != model.binding(privacy):
-        return keys, set()
+        return {}, set()
     hits = set()
     for nid, entry in (record.get('nodes') or {}).items():
         if (isinstance(entry, dict) and nid in keys and entry.get('key') == keys[nid]
                 and isinstance(entry.get('row'), dict) and isinstance(entry.get('commits'), list)):
             cache.nodes[nid] = (keys[nid], entry['row'], entry['commits'])
             hits.add(nid)
-    return keys, hits
+    return record, hits
+
+
+# Due items and problems also compare against the clock (overdue thresholds, stale
+# status): their stamp hit is reusable for at most this long.
+UI_JSON_CLOCKED_SECONDS = 300
+
+
+def ui_json_clocked(entry, key):
+    return (isinstance(entry, dict) and entry.get('key') == key and type(entry.get('at')) in (int, float)
+            and 0 <= time.time() - entry['at'] < UI_JSON_CLOCKED_SECONDS)
 
 
 def ui_json_view_usage(inst, state, hits):
@@ -205,19 +305,27 @@ def ui_json_view_usage(inst, state, hits):
 
 
 def ui_json_build(inst, scan, code, cache=True):
-    from . import check, ui
+    from . import check, status, ui
     before = ui_json_privacy_key(inst, code)
     model = _m_ui_readmodel.ReadModel(inst, code)
-    # Node views persist under their input fingerprint; a mismatch rebuilds that view only.
-    inputs = ui.UIInputs(inst)
-    signature = inputs.signature()
+    # Node views persist under their own node stamp; a changed stamp rebuilds that view only.
+    keys = ui_json_stamps(inst)
     views = ui.UIStateCache()
-    views.worktree_keys = inputs.worktree_keys(inst, signature)
-    keys, hits = ui_json_views(inst, model, before, inputs, signature, views)
+    record, hits = ui_json_views(inst, model, before, keys, views)
+    # Integrity reads every node: its count reuses only an all-nodes stamp match.
+    everything = ui_json_fingerprint(sorted(keys.items()))
+    problems_entry = record.get('problems') if cache else None
+    due_entries = record.get('due') if cache and isinstance(record.get('due'), dict) else {}
+    due_memo = {nid: entry['items'] for nid, entry in due_entries.items()
+                if nid in keys and ui_json_clocked(entry, keys[nid]) and isinstance(entry.get('items'), dict)}
+    due_seen = {}
     # The full guard/check and recorded readiness observations stay unchanged.
     # No exclusive instance lock surrounds this computation or cache publication.
-    with _m_ui_readmodel.cache_writes(cache):
-        problems = len(check.collect_problems(inst)[0])
+    with _m_ui_readmodel.cache_writes(cache), status.due_memo(due_memo, due_seen):
+        if ui_json_clocked(problems_entry, everything) and type(problems_entry.get('count')) is int:
+            problems, problems_at = problems_entry['count'], problems_entry['at']
+        else:
+            problems, problems_at = len(check.collect_problems(inst)[0]), time.time()
         state = ui.ui_state(inst, problems, scan, spend_budget=None, cache=views, node_keys=keys)
         if hits and not ui_json_view_usage(inst, state, hits):
             views.nodes.clear()
@@ -225,10 +333,19 @@ def ui_json_build(inst, scan, code, cache=True):
     current = ui.UIInstance(inst.root)
     if before != ui_json_privacy_key(current, code):
         return None  # do not publish text observed under an obsolete visibility policy
-    unclocked = lambda rows: tuple(row for row in rows if row[0] != 'clock')  # noqa: E731
-    if cache and unclocked(inputs.signature()) == unclocked(signature):  # unchanged while observed
-        model.write('node-views', {'binding': model.binding(before), 'nodes': {
-            nid: {'key': key, 'row': row, 'commits': commits} for nid, (key, row, commits) in views.nodes.items()}})
+    if cache:
+        # Publish only what was observed under a stamp that still holds after the build.
+        after = ui_json_stamps(current)
+        held = {nid for nid, key in keys.items() if after.get(nid) == key}
+        due = {nid: {'key': keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else time.time(),
+                     'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
+               for nid in set(due_memo) | set(due_seen) if nid in held}
+        model.write('node-views', {
+            'binding': model.binding(before),
+            'nodes': {nid: {'key': key, 'row': row, 'commits': commits}
+                      for nid, (key, row, commits) in views.nodes.items() if nid in held and key == keys[nid]},
+            'due': due,
+            'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)})
     state['brain'].pop('filling_in', None)
     state.pop('loading', None)  # snapshot metadata only; progress belongs to /api/loading
     record = {'version': 1, 'privacy': before, 'built_at': time.time(), 'state': state,

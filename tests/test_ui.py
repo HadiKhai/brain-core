@@ -1207,6 +1207,66 @@ ui_json.ui_json_background(root, '[]')
                 self.assertEqual(len(workers), 1)
             self.assertEqual(len(attempts), 3, 'shutdown restarted initialization')
 
+    def view_builds(self, root, during=None):
+        """One cached ui_json_build, counting node views, integrity checks and due scans."""
+        ui = self.m._owners['ui_state']
+        package = ui.__package__
+        module = __import__(package + '.ui_json', fromlist=['snapshot'])
+        check = __import__(package + '.check', fromlist=['check'])
+        status = __import__(package + '.status', fromlist=['status'])
+        built, original = [], ui.ui_node
+        def node(inst, n, *args, **kwargs):
+            built.append(n['id'])
+            if during:
+                during(n)
+            return original(inst, n, *args, **kwargs)
+        with mock.patch.object(ui, 'ui_node', side_effect=node), \
+                mock.patch.object(check, 'collect_problems', wraps=check.collect_problems) as problems, \
+                mock.patch.object(status, '_due_items', wraps=status._due_items) as due:
+            record = module.ui_json_build(self.m.UIInstance(root), [], self.m.ui_code_version())
+        return record, sorted(built), problems.call_count, {c.args[1]['id'] for c in due.call_args_list}
+
+    def test_unchanged_node_stamps_reuse_views_problems_and_due_items(self):
+        root = self.first_paint_root()
+        first, built, problems, due = self.view_builds(root)
+        self.assertEqual((built, problems), (['meadow', 'root'], 1))
+        self.assertTrue(due)
+        second, built, problems, due = self.view_builds(root)
+        self.assertEqual((built, problems, due), ([], 0, set()))
+        for key in ('nodes', 'due', 'problems'):
+            self.assertEqual(json.dumps(second['state'][key], sort_keys=True),
+                             json.dumps(first['state'][key], sort_keys=True))
+        self.assertNotIn('loading', second['state'])
+
+    def test_changed_node_stamp_rebuilds_only_that_nodes_views(self):
+        root = self.first_paint_root()
+        self.view_builds(root)
+        (root / 'nodes/meadow/status.md').write_text('## Now\nMeadow moved on.\n')
+        record, built, problems, due = self.view_builds(root)
+        self.assertEqual(built, ['meadow'])
+        self.assertEqual(due, {'meadow'})
+        self.assertEqual(problems, 1)  # integrity reads every node
+        meadow = next(n for n in record['state']['nodes'] if n['id'] == 'meadow')
+        self.assertEqual(meadow['status'], {'Now': 'Meadow moved on.'})
+
+    def test_stamp_changed_mid_build_never_publishes_that_view(self):
+        root = self.first_paint_root()
+        self.view_builds(root)
+        (root / 'nodes/meadow/status.md').write_text('## Now\nFirst edit.\n')
+        def edit(n):  # the node moves after its view began reading
+            if n['id'] == 'meadow':
+                (root / 'nodes/meadow/status.md').write_text('## Now\nSecond edit, mid-build.\n')
+        self.view_builds(root, during=edit)
+        views = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('node-views')
+        self.assertEqual(sorted(views['nodes']), ['root'])  # only views whose stamp held are published
+        self.assertNotIn('meadow', views['due'])
+        self.assertIsNone(views['problems'])
+        record, built, problems, _ = self.view_builds(root)
+        self.assertEqual(built, ['meadow'])  # the mid-build view was not reused
+        self.assertEqual(problems, 1)
+        meadow = next(n for n in record['state']['nodes'] if n['id'] == 'meadow')
+        self.assertEqual(meadow['status'], {'Now': 'Second edit, mid-build.'})
+
     def first_paint_root(self, name='alice'):
         root = self.tmp / name
         root.mkdir()

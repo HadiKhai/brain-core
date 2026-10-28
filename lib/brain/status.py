@@ -903,17 +903,53 @@ def due_once_held(inst, n, include_handled=False):
     return due_items(inst, n, None, *key[1:], include_handled=include_handled) if key else None
 
 
+_DUE_MEMO = ContextVar('brain_due_memo', default=None)
+
+
+@contextmanager
+def due_memo(stored, seen):
+    """A dashboard build reuses a node's pre-lifecycle due items under its unchanged stamp.
+
+    `stored` maps node id -> {flags: items} already validated by the caller; fresh
+    computations are recorded in `seen`. Lifecycle reconciliation always re-runs.
+    """
+    token = _DUE_MEMO.set((stored, seen))
+    try:
+        yield
+    finally:
+        _DUE_MEMO.reset(token)
+
+
+def _due_items_memo(inst, n, evidence, include_stale, include_ready, include_advice):
+    memo = _DUE_MEMO.get()
+    if memo is None or evidence is not None:
+        return _due_items(inst, n, evidence, include_stale, include_ready, include_advice)
+    stored, seen = memo
+    flags = json.dumps([bool(include_stale), bool(include_ready), bool(include_advice)])
+    items = (stored.get(n['id']) or {}).get(flags)
+    if isinstance(items, list) and all(isinstance(i, dict) for i in items):
+        return [dict(i) for i in items]
+    items = _due_items(inst, n, evidence, include_stale, include_ready, include_advice)
+    try:
+        text = json.dumps(items, sort_keys=True)
+        if json.loads(text) == items:  # only plain data is reusable
+            seen.setdefault(n['id'], {})[flags] = json.loads(text)
+    except (TypeError, ValueError):
+        pass
+    return items
+
+
 def due_items(inst, n, evidence=None, include_stale=True, include_ready=True, include_advice=True,
               include_handled=False):
     if n["archived"]:
         return []
     scope = _DUE_ONCE.get()
     if scope is None:
-        items = _due_items(inst, n, evidence, include_stale, include_ready, include_advice)
+        items = _due_items_memo(inst, n, evidence, include_stale, include_ready, include_advice)
     else:
         key = (n['id'], include_stale, include_ready or n['id'] in scope['ready'], include_advice)
         if key not in scope['items']:
-            scope['items'][key] = _due_items(inst, n, evidence, *key[1:])
+            scope['items'][key] = _due_items_memo(inst, n, evidence, *key[1:])
         include_stale, include_ready, include_advice = key[1:]
         items = [dict(i) for i in scope['items'][key]]
     omitted = (['stale-status'] if not include_stale else []) + (['job'] if not include_advice else [])
