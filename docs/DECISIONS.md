@@ -2873,8 +2873,17 @@ leave source-based reads available. Existing JSON aggregates remain compatible.
 
 Every CLI invocation records elapsed and phase durations, including instance-lock
 wait, in `.brain/timings/events.jsonl`. The operational journal retains its
-existing transaction records. Commands over five seconds also save cumulative
-function profiles. `brain timings --slow --command due` retrieves observations;
+existing transaction records. Command and queue records also carry process CPU
+(self plus reaped children, user and system), start/end one-minute load, and
+uniform lock wait/hold. CPU plus lock hold over five seconds is slow; slow commands
+also save cumulative function profiles. Wall time and lock wait never qualify.
+Command CPU includes profiler overhead; queue scopes have no profiler of their own.
+Nested scopes contribute phases and physical lock totals once to their enclosing
+scope. CPU during lock hold contributes to both operands of this diagnostic score.
+Records without valid CPU, including legacy records, have unknown speed: they
+remain listed but are excluded from `--slow` and `--summary` percentiles, which
+count them separately. Wall time is displayed beside start/end load (or unknown).
+`brain timings --slow --command due` retrieves observations;
 arguments, transcript text and raw session identities never enter these records.
 The timing stream has a separate `lock_wait_s` field, and timing-write failures never fail the command.
 
