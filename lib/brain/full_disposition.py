@@ -135,9 +135,15 @@ def red_receipt(inst, n, branch, identity, head, main, inputs, port_context, exp
     return data, failed
 
 
+def candidate_binding(n, branch, env):
+    return _m_jobs.digest([n['fm'], n['local']['worktrees'][branch], str(n['home_path']),
+                           _m_lanes.lane_environment(env)])
+
+
 def candidate_context(inst, n, branch):
     # Execution releases the writer lock; never compare only a stale in-memory
     # node after another command changes configuration or checkout bindings.
+    original = n
     n = _m_instance.Instance(inst.root).node(n['id'])
     reasons, head, main = _m_verify.ready_preflight(n, branch)
     if reasons:
@@ -149,7 +155,9 @@ def candidate_context(inst, n, branch):
     env = _m_verify.verify_env(n, branch, w)
     env.update(BRAIN_ROOT=str(inst.root), BRAIN_VERIFY_HEAD=head,
                BRAIN_VERIFY_BASE=_m_verify.integration_parent(n, main), BRAIN_VERIFY_SCOPE='full')
-    binding = _m_jobs.digest([n['fm'], w, str(n['home_path']), _m_lanes.lane_environment(env)])
+    binding = candidate_binding(n, branch, env)
+    if candidate_binding(original, branch, env) != binding:
+        raise ValueError('candidate configuration or checkout binding changed')
     return (head, main, _m_verify.verify_inputs(n, w), _m_verify.verify_port_context(n, env),
             _m_jobs.job_key(row), binding, env)
 

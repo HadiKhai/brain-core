@@ -296,6 +296,59 @@ class IsolatedDisposition(Scenario):
             m.cmd_full_isolate(argparse.Namespace(id='a', branch='one', full_receipt=self.red.stem, test=self.tests[0]))
         self.assertEqual(set(self.folder.glob('*')), before)
 
+    def test_initial_snapshot_refuses_rebinding_and_configuration_drift_before_execution(self):
+        import argparse
+        import contextlib
+        import io
+        import os
+        from unittest import mock
+        import core_loader
+        from scenario import CORE
+        root, home = self.prepare(isolate=False)
+        m = core_loader.SourceFileLoader('initial_isolate_binding', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        original_node = inst.node
+        node_path, local_path = root / 'nodes/a/node.md', root / '.brain/local.json'
+        node_bytes, local_bytes = node_path.read_bytes(), local_path.read_bytes()
+        rebound = self.tmp / 'app-work/worktrees/rebound'
+        self.git('worktree', 'add', '--force', str(rebound), 'one', cwd=home)
+        before = set(self.folder.glob('*'))
+        for drift in ('configuration', 'checkout'):
+            for action in ('isolate', 'quarantine'):
+                def stale_node(ident):
+                    result = original_node(ident)
+                    if drift == 'configuration':
+                        node_path.write_text(node_bytes.decode().replace(
+                            'verify:', 'verify_isolation_changed: true\nverify:', 1))
+                    else:
+                        local = json.loads(local_bytes)
+                        local['nodes']['a']['worktrees']['one']['path'] = str(rebound)
+                        local_path.write_text(json.dumps(local))
+                        (self.wt / 'tests/test_sample.py').write_text(self.source.replace(
+                            'any("::" in a for a in sys.argv)', 'True'))
+                    return result
+                error = io.StringIO()
+                try:
+                    with self.subTest(drift=drift, action=action), \
+                            mock.patch.dict(os.environ, self.env, clear=True), \
+                            mock.patch.object(inst, 'node', side_effect=stale_node), \
+                            mock.patch.object(m, 'load', return_value=inst), \
+                            mock.patch.object(m, 'run_verify') as execute, \
+                            contextlib.redirect_stderr(error), self.assertRaises(SystemExit):
+                        if action == 'isolate':
+                            m.cmd_full_isolate(argparse.Namespace(id='a', branch='one',
+                                full_receipt=self.red.stem, test=self.tests[0]))
+                        else:
+                            m.cmd_full_quarantine(argparse.Namespace(id='a', branch='one',
+                                file=str(self.tmp / 'unread-request.json')))
+                    execute.assert_not_called()
+                    self.assertIn('configuration or checkout binding changed', error.getvalue())
+                    self.assertEqual(set(self.folder.glob('*')), before)
+                finally:
+                    node_path.write_bytes(node_bytes)
+                    local_path.write_bytes(local_bytes)
+                    (self.wt / 'tests/test_sample.py').write_text(self.source)
+
 
 class DispositionIntegrity(Scenario):
     def module(self):

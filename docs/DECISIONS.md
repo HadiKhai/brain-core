@@ -3872,3 +3872,9 @@ interpreter, quoted as a command argument. Its isolated HOME must not make
 receipt coverage depend on an unrelated shell `python3` or user-site packages.
 The fixture therefore uses the same installed pytest and timeout plugin as the
 authorized parent run, without relaxing inventory or receipt validation.
+
+The first fresh disposition context must also match the caller's original node
+configuration, home and worktree binding. A rebind before that snapshot refuses
+before executing an isolated test or reading a quarantine request, so a clean
+replacement checkout cannot validate execution from a stale, dirty checkout.
+The same fence applies to later context checks and both disposition commands.
