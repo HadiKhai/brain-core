@@ -485,9 +485,9 @@ _DISPLAY_CACHE = contextvars.ContextVar('brain_ui_ready_cache', default=None)
 
 
 @contextlib.contextmanager
-def display_cache(values, keys):
+def display_cache(values, keys, policy_stamped=False):
     """A dashboard can reuse display validation for unchanged job inputs; full gates never do."""
-    token = _DISPLAY_CACHE.set((values, keys))
+    token = _DISPLAY_CACHE.set((values, keys, policy_stamped))
     try:
         yield
     finally:
@@ -498,7 +498,7 @@ def ready_state(inst, n, branch, train=False, display=False):
     cached = _DISPLAY_CACHE.get() if display and not train else None
     if cached is None:
         return _ready_state(inst, n, branch, train, display)
-    values, keys = cached
+    values, keys, policy_stamped = cached
     job = (n['id'], branch)
     key = keys.get(job)
     if key is None:
@@ -510,7 +510,7 @@ def ready_state(inst, n, branch, train=False, display=False):
         values[job] = (key, result)
     else:
         result = previous[1]
-        if isinstance(result, ReadyStateResult):
+        if isinstance(result, ReadyStateResult) and not policy_stamped:
             policy = ready_policy_reasons(inst, n, branch, result.policy_head, result.get('packet'))
             if tuple(policy) != result.policy_reasons:
                 # Preserve cached Git/input facts. Only replace reasons contributed

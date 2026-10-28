@@ -334,7 +334,8 @@ class UIInstance(_m_instance.Instance):
 
 @_m_ui_readmodel.read_view
 def ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=None, cache=None, node_keys=None):
-    readiness = _m_verify.display_cache(cache.ready, cache.worktree_keys) if cache is not None else contextlib.nullcontext()
+    readiness = (_m_verify.display_cache(cache.ready, cache.worktree_keys, cache.policy_stamped)
+                 if cache is not None else contextlib.nullcontext())
     # Only the live server's revisioned usage aggregate selects snapshot usage reads.
     usage = (_m_spend.live_usage_snapshot(cache.usage, cache.usage_revision)
              if cache is not None and cache.usage_revision is not None else contextlib.nullcontext())
@@ -478,6 +479,7 @@ class UIStateCache:
         self.ready, self.worktrees, self.worktree_keys = {}, {}, {}
         self.checked = {}  # job -> when its worktree row and readiness were read
         self.local_jobs = {}
+        self.policy_stamped = False  # only complete JSON stamps may reuse receipt policy
         self.usage, self.usage_revision = {}, None
         self.problems, self.problem_key, self.problem_at = None, None, float('-inf')
 

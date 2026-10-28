@@ -53,6 +53,33 @@ class ReadyPolicies(Scenario):
         self.assertIn('preview missing', reasons)
         self.assertIn('preview missing', state['reasons'])
 
+    def test_dashboard_policy_reuses_only_stamped_reads_and_actions_stay_live(self):
+        root, _ = self.project()
+        self.job('one')
+        m, inst, n = self.module(root)
+        job = (n['id'], 'one')
+        keys, values = {job: 'first'}, {}
+        result = m.ReadyStateResult({'ready': True, 'reasons': []}, (), '1' * 40)
+        with mock.patch.object(m, '_ready_state', return_value=result) as facts, \
+                mock.patch.object(m, 'ready_policy_reasons', return_value=['policy changed']) as policy, \
+                m.display_cache(values, keys, policy_stamped=True):
+            for _ in range(3):
+                self.assertTrue(m.ready_state(inst, n, 'one', display=True)['ready'])
+            facts.assert_called_once()
+            policy.assert_not_called()
+            keys[job] = 'second'
+            m.ready_state(inst, n, 'one', display=True)
+            self.assertEqual(facts.call_count, 2)
+            m.ready_state(inst, n, 'one')
+            m.ready_state(inst, n, 'one', train=True, display=True)
+            self.assertEqual(facts.call_count, 4)
+        with mock.patch.object(m, '_ready_state', return_value=result) as facts, \
+                mock.patch.object(m, 'ready_policy_reasons', return_value=['policy changed']) as policy, \
+                m.display_cache(values, keys):
+            self.assertFalse(m.ready_state(inst, n, 'one', display=True)['ready'])
+            policy.assert_called_once()  # ordinary callers have no complete policy stamp
+            facts.assert_not_called()
+
 
 import ast
 import subprocess

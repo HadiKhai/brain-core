@@ -1209,6 +1209,22 @@ ui_json.ui_json_background(root, '[]')
                 self.assertEqual(len(workers), 1)
             self.assertEqual(len(attempts), 3, 'shutdown restarted initialization')
 
+    def test_live_server_keeps_its_problem_scan_batching_interval(self):
+        ui = self.m._owners['UIStateCache']
+        cache = ui.UIStateCache()
+        with mock.patch.object(ui._m_check, 'collect_problems', side_effect=[(['first'], [], []),
+                                                                           (['first', 'second'], [], [])]) as read, \
+                mock.patch.object(ui.time, 'monotonic', return_value=100) as clock:
+            self.assertEqual(cache.problems_for(None, [('input', 'one'), ('clock', 0)]), 1)
+            clock.return_value = 101
+            self.assertEqual(cache.problems_for(None, [('input', 'two'), ('clock', 0)]), 1)
+            read.assert_called_once()
+            clock.return_value = 400
+            self.assertEqual(cache.problems_for(None, [('input', 'two'), ('clock', 0)]), 2)
+            clock.return_value = 701
+            self.assertEqual(cache.problems_for(None, [('input', 'two'), ('clock', 1)]), 2)
+            self.assertEqual(read.call_count, 2)
+
     def view_builds(self, root, during=None):
         """One cached ui_json_build, counting node views, integrity checks and due scans."""
         ui = self.m._owners['ui_state']
@@ -1223,7 +1239,7 @@ ui_json.ui_json_background(root, '[]')
                 during(n)
             return original(inst, n, *args, **kwargs)
         with mock.patch.object(ui, 'ui_node', side_effect=node), \
-                mock.patch.object(check, 'collect_problems', wraps=check.collect_problems) as problems, \
+                mock.patch.object(check, 'collect_node_problems', wraps=check.collect_node_problems) as problems, \
                 mock.patch.object(status, '_due_items', wraps=status._due_items) as due:
             record = module.ui_json_build(self.m.UIInstance(root), [], self.m.ui_code_version())
         return record, sorted(built), problems.call_count, {c.args[1]['id'] for c in due.call_args_list}
@@ -1231,7 +1247,7 @@ ui_json.ui_json_background(root, '[]')
     def test_unchanged_node_stamps_reuse_views_problems_and_due_items(self):
         root = self.first_paint_root()
         first, built, problems, due = self.view_builds(root)
-        self.assertEqual((built, problems), (['meadow', 'root'], 1))
+        self.assertEqual((built, problems), (['meadow', 'root'], 2))
         self.assertTrue(due)
         second, built, problems, due = self.view_builds(root)
         self.assertEqual((built, problems, due), ([], 0, set()))
@@ -1250,9 +1266,103 @@ ui_json.ui_json_background(root, '[]')
         record, built, problems, due = self.view_builds(root)
         self.assertEqual(built, ['meadow'])
         self.assertEqual(due, {'meadow'})
-        self.assertEqual(problems, 1)  # integrity reads every node
+        self.assertEqual(problems, 1)  # only this node's integrity result moves
         meadow = next(n for n in record['state']['nodes'] if n['id'] == 'meadow')
         self.assertEqual(meadow['status'], {'Now': 'Meadow moved on.'})
+
+    def test_inbox_churn_rechecks_only_its_node_and_shared_checks_stay_live(self):
+        root = self.first_paint_root()
+        self.view_builds(root)
+        (root / 'nodes/meadow/inbox.md').write_text('- A new question\n')
+        module = __import__(self.m._owners['ui_state'].__package__ + '.check', fromlist=['check'])
+        with mock.patch.object(module, 'collect_node_problems', wraps=module.collect_node_problems) as nodes, \
+                mock.patch.object(module, 'collect_global_problems', wraps=module.collect_global_problems) as shared:
+            record = self.view_builds(root)[0]
+        self.assertEqual([call.args[1]['id'] for call in nodes.call_args_list], ['meadow'])
+        shared.assert_called_once()
+        self.assertEqual(record['state']['problems'], len(self.m.collect_problems(self.m.UIInstance(root))[0]))
+
+    def test_installed_core_switch_invalidates_node_problem_keys(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        inst = self.m.UIInstance(root)
+        for name in ('one', 'two'):
+            (root / 'cores' / name).mkdir(parents=True)
+        pointer = root / '.brain/core-current'
+        pointer.symlink_to(root / 'cores/one')
+        before = {}
+        module.ui_json_stamps(inst, before)
+        pointer.unlink()
+        pointer.symlink_to(root / 'cores/two')
+        after = {}
+        module.ui_json_stamps(inst, after)
+        self.assertEqual(set(before), set(after))
+        self.assertTrue(all(before[nid] != after[nid] for nid in before))
+
+    def test_problem_counts_expire_and_reject_invalid_entries(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        check = __import__(module.__package__ + '.check', fromlist=['check'])
+        inst = self.m.UIInstance(root)
+        keys = {n['id']: n['id'] for n in inst.nodes()}
+        with mock.patch.object(module.time, 'time', return_value=1000):
+            total, entries, at = module.ui_json_problems(inst, keys, {})
+        with mock.patch.object(module.time, 'time', return_value=1299), \
+                mock.patch.object(check, 'collect_node_problems', wraps=check.collect_node_problems) as read:
+            self.assertEqual(module.ui_json_problems(inst, keys, entries)[0], total)
+            read.assert_not_called()
+        with mock.patch.object(module.time, 'time', return_value=1300), \
+                mock.patch.object(check, 'collect_node_problems', wraps=check.collect_node_problems) as read:
+            self.assertEqual(module.ui_json_problems(inst, keys, entries)[0], total)
+            self.assertEqual(read.call_count, 2)
+        entries['meadow']['count'] = True
+        with mock.patch.object(module.time, 'time', return_value=1299), \
+                mock.patch.object(check, 'collect_node_problems', wraps=check.collect_node_problems) as read:
+            module.ui_json_problems(inst, keys, entries)
+            self.assertEqual([call.args[1]['id'] for call in read.call_args_list], ['meadow'])
+        self.assertEqual(at, 1000)
+
+    def test_receipt_changes_invalidate_only_the_jobs_readiness_stamp(self):
+        import hashlib
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        inst = self.m.UIInstance(root)
+        n = inst.node('meadow')
+        n['local']['worktrees'] = {'job/a': {'path': str(root)}, 'job/b': {'path': str(root)}}
+        row = {'Job': 'job/a', 'Started': '2026-01-01 00:00 +00:00', 'Ended': ''}
+        other = {**row, 'Job': 'job/b'}
+        namespace = hashlib.sha256(b'meadow').hexdigest()
+        with mock.patch.object(module._m_jobs, 'read_jobs', return_value=[row, other]):
+            previous = module.ui_json_stamps(inst)[1]
+            other['Reviews'] = '1'
+            current = module.ui_json_stamps(inst)[1]
+            self.assertEqual(current[('meadow', 'job/a')], previous[('meadow', 'job/a')])
+            self.assertNotEqual(current[('meadow', 'job/b')], previous[('meadow', 'job/b')])
+            previous = current
+            for tree in ('review-receipts', 'review-findings', 'preview-receipts'):
+                folder = root / '.brain' / tree / namespace
+                key = module._m_jobs.job_key(row)
+                path = folder / (key + '.json') if tree == 'review-findings' else folder / key / 'head.json'
+                path.parent.mkdir(parents=True, exist_ok=True)
+                for action in ('create', 'edit', 'delete'):
+                    if action == 'delete':
+                        path.unlink()
+                    else:
+                        path.write_text(action)
+                    current = module.ui_json_stamps(inst)[1]
+                    self.assertNotEqual(current[('meadow', 'job/a')], previous[('meadow', 'job/a')], (tree, action))
+                    self.assertEqual(current[('meadow', 'job/b')], previous[('meadow', 'job/b')])
+                    previous = current
+            future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)
+            path.write_text(json.dumps({'checked_at': future.isoformat()}))
+            with mock.patch.object(inst, 'now_dt', return_value=future - datetime.timedelta(seconds=2)):
+                before = module.ui_json_stamps(inst)[1]
+            with mock.patch.object(inst, 'now_dt', return_value=future - datetime.timedelta(seconds=1)):
+                self.assertEqual(module.ui_json_stamps(inst)[1], before)
+            with mock.patch.object(inst, 'now_dt', return_value=future):
+                after = module.ui_json_stamps(inst)[1]
+            self.assertNotEqual(before[('meadow', 'job/a')], after[('meadow', 'job/a')])
+            self.assertEqual(before[('meadow', 'job/b')], after[('meadow', 'job/b')])
 
     def test_cross_node_tasks_and_private_questions_are_in_view_stamps(self):
         root = self.first_paint_root()
@@ -1263,7 +1373,9 @@ ui_json.ui_json_background(root, '[]')
         self.assertEqual(self.view_builds(root)[1], ['meadow'])
         (root / 'nodes/meadow/tasks').mkdir()
         (root / 'nodes/meadow/tasks/.pending').write_text('')  # any task-folder change
-        self.assertEqual(self.view_builds(root)[1], ['meadow', 'root'])  # another node's tasks may block
+        _, built, problems, _ = self.view_builds(root)
+        self.assertEqual(built, ['meadow', 'root'])  # another node's tasks may block
+        self.assertEqual(problems, 1)  # the other node's integrity does not depend on those blockers
 
     def test_stamp_changed_mid_build_delivers_but_never_caches_that_view(self):
         root = self.first_paint_root()
@@ -1279,7 +1391,7 @@ ui_json.ui_json_background(root, '[]')
         views = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('node-views')
         self.assertEqual(sorted(views['nodes']), ['root'])  # only views whose stamp held are cached
         self.assertNotIn('meadow', views['due'])
-        self.assertIsNone(views['problems'])
+        self.assertEqual(sorted(views['problems']), ['root'])
         self.assertEqual(self.view_builds(root)[1], ['meadow'])  # the moved view is re-read next time
         self.assertEqual(self.view_builds(root)[1], [])
 

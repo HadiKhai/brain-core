@@ -192,7 +192,24 @@ def ui_json_git_dirs(path):
     return own, common
 
 
-def ui_json_stamps(inst):
+def ui_json_future(inst, value, now):
+    when = inst.parse_time(value) if isinstance(value, str) else None
+    return bool(when and when > now)
+
+
+def ui_json_policy_stamp(inst, path, now):
+    """Policy clocks change only when a future receipt observation becomes current."""
+    from . import ui
+    stamp = ui.UIInputs.stamp(path)
+    try:
+        data = json.loads(path.read_text())
+        future = [ui_json_future(inst, data.get(field), now) for field in ('observed_at', 'checked_at')]
+    except (OSError, ValueError, AttributeError, UnicodeError):
+        future = None
+    return stamp, future
+
+
+def ui_json_stamps(inst, problem_keys=None):
     """Per-node metadata stamps: node files, ledger, bindings and branch tips; never home listings.
 
     One for-each-ref per repository gives every branch tip by SHA; each checkout's
@@ -200,6 +217,7 @@ def ui_json_stamps(inst):
     """
     from . import ui
     stamp = ui.UIInputs.stamp
+    now = inst.now_dt()
     root = inst.root
     try:
         runs = json.loads((root / '.brain/worker-runs.json').read_text()).get('runs', [])
@@ -292,12 +310,17 @@ def ui_json_stamps(inst):
                     *(stamp(own / name) for name in (('HEAD', 'index', 'packed-refs', 'config') if own else ())),
                     *(stamp(path) for pattern in patterns for path in sorted(home.glob(pattern))))
         git = [checkout(home) for home, _, _ in homes[n['id']]]
+        if problem_keys is not None:
+            # Integrity has no cross-node task blockers or worker/machine meters.
+            problem_keys[n['id']] = ui_json_fingerprint([
+                stamp(root / 'instance.md'), os.path.realpath(root / '.brain/core-current'), meta, files, git,
+                json.dumps(n['local'], sort_keys=True, default=str)])
         mine = [r for r in runs or [] if isinstance(r, dict) and r.get('node') == n['id']]
         out[n['id']] = ui_json_fingerprint([shared, json.dumps(n['local'], sort_keys=True, default=str),
                                             files, git, mine, tasks, hold])
         # A worktree row and its readiness depend on its own checkout, its job and
         # integration refs and the node's policy files, not on status or inbox edits.
-        policy = [meta, *(stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt', _m_jobs.JOBS_FILE))]
+        policy = [meta, *(stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt'))]
         parent = n['parent']
         while parent:
             policy.extend(stamp(parent['dir'] / name) for name in ('node.md', 'never-name.txt'))
@@ -307,17 +330,35 @@ def ui_json_stamps(inst):
             policy.extend(stamp(Path(directory) / name) for name in sorted(names))
         ready = [row for row in files if any(f'/{tree}/' in row[0] for tree in ('scratch/ready', 'scratch/rehearse'))]
         jobs = _m_jobs.read_jobs(n) or []
+        namespace = hashlib.sha256(n['id'].encode()).hexdigest()
+        # A post-build stamp must see moved thread bindings even inside command-read memoization.
+        active = getattr(_m_status.active_work, '__wrapped__', _m_status.active_work)(n, include_closed=True)
         node_home = n['home_path'] if n['external'] and n['home_path'] else None
         for branch, w in n['local'].get('worktrees', {}).items():
             if not w.get('path'):
                 continue
             refs = ['refs/heads/' + branch, 'refs/heads/main', 'refs/heads/master', 'refs/remotes/origin/HEAD',
                     'refs/remotes/origin/main', 'refs/remotes/origin/master']
-            handbacks = [(stamp(_m_jobs.handback_file(n, row)), stamp(_m_job_attempts.attempt_path(n, row)))
+            handbacks = [(stamp(_m_jobs.handback_file(n, row)), stamp(_m_job_attempts.attempt_path(n, row)),
+                          stamp(_m_jobs.contract_file(n, row)))
                          for row in jobs if row.get('Job') == branch]  # replacement attempts move readiness
+            receipts = []
+            for row in jobs:
+                if row.get('Job') != branch:
+                    continue
+                job_key = _m_jobs.job_key(row)
+                receipts.append(stamp(root / '.brain/review-findings' / namespace / (job_key + '.json')))
+                for tree in ('review-receipts', 'preview-receipts'):
+                    folder = root / '.brain' / tree / namespace / job_key
+                    receipts.append(stamp(folder))
+                    receipts.extend(ui_json_policy_stamp(inst, path, now) for path in sorted(folder.glob('*.json')))
             worktrees[(n['id'], branch)] = ui_json_fingerprint([
-                shared, policy, ready, handbacks,
-                json.dumps({k: n['local'].get(k) for k in ('home', 'workbench')}, sort_keys=True, default=str),
+                shared, policy, ready, handbacks, receipts, _m_jobs.bound_worker_threads(n, branch),
+                [row for row in jobs if row.get('Job') == branch],
+                ui_json_future(inst, w.get('created'), now),
+                [row for row in active if row and row[0].replace('`', '').split()[:1] == [branch]],
+                json.dumps({k: n['local'].get(k) for k in ('home', 'workbench', 'preview', 'review_urls')},
+                           sort_keys=True, default=str),
                 json.dumps(w, sort_keys=True, default=str), checkout(Path(w['path']), refs),
                 checkout(node_home, refs) if node_home else None])
     return out, worktrees
@@ -331,6 +372,7 @@ def ui_json_views(inst, model, privacy, keys, worktree_keys, cache):
     """Load persisted node views, worktree rows and readiness whose stamp still matches."""
     from . import verify
     cache.worktree_keys = worktree_keys
+    cache.policy_stamped = True
     record = model.read('node-views')
     if not isinstance(record, dict) or record.get('binding') != model.binding(privacy):
         return {}, set()
@@ -356,7 +398,7 @@ def ui_json_views(inst, model, privacy, keys, worktree_keys, cache):
         if (job and isinstance(entry, dict) and entry.get('key') == worktree_keys[job] and fresh(entry)
                 and job in cache.checked and entry['at'] == cache.checked[job]
                 and isinstance(entry.get('data'), dict) and isinstance(entry.get('policy'), list)):
-            # Policy validators re-run on every hit (verify.ready_state); Git/input facts are reused.
+            # The stamp includes receipt/policy inputs; the row's age bounds unstamped edits.
             cache.ready[job] = (worktree_keys[job], verify.ReadyStateResult(
                 entry['data'], entry['policy'], entry.get('head') or ''))
     return record, hits
@@ -384,13 +426,31 @@ def ui_json_clocked(entry, key):
             and 0 <= time.time() - entry['at'] < UI_JSON_CLOCKED_SECONDS)
 
 
+def ui_json_problems(inst, keys, entries):
+    """Keep only hit node counts; shared integrity rules and acting checks stay live."""
+    from . import check
+    counts, oldest = {}, time.time()
+    with _m_guard.term_scan_cache():
+        total = len(check.collect_global_problems(inst)[0])
+        for n in inst.nodes():
+            nid, key = n['id'], keys[n['id']]
+            entry = entries.get(nid)
+            if not (ui_json_clocked(entry, key) and type(entry.get('count')) is int and entry['count'] >= 0):
+                at = time.time()
+                entry = {'key': key, 'at': at, 'count': len(check.collect_node_problems(inst, n)[0])}
+            counts[nid] = entry
+            total += entry['count']
+            oldest = min(oldest, entry['at'])
+    return total, counts, oldest
+
+
 def ui_json_view_usage(inst, state, hits, views):
     """Refresh what a reused view shows outside its stamp: job usage (transcripts), round usage,
     lifecycle-filtered inbox, clock-derived fields and its bounded-age worktree rows."""
     from . import inbox_notices, ui, verify
     now = inst.now_dt()
     nodes = {n['id']: n for n in inst.nodes()}
-    with verify.display_cache(views.ready, views.worktree_keys), \
+    with verify.display_cache(views.ready, views.worktree_keys, views.policy_stamped), \
             _m_status.local_job_snapshot(views.local_jobs, views.worktree_keys):
         for index, row in enumerate(state['nodes']):
             n = nodes.get(row['id'])
@@ -538,12 +598,12 @@ def ui_json_build(inst, scan, code, cache=True):
     before = ui_json_privacy_key(inst, code)
     model = _m_ui_readmodel.ReadModel(inst, code)
     started = time.time()  # the snapshot is dated by when its oldest reading began
-    keys, worktree_keys = ui_json_stamps(inst)
+    problem_keys = {}
+    keys, worktree_keys = ui_json_stamps(inst, problem_keys)
     views = ui.UIStateCache()
     views.worktree_keys = worktree_keys
     record, hits = ui_json_views(inst, model, before, keys, worktree_keys, views) if cache else ({}, set())
-    everything = ui_json_fingerprint(sorted(keys.items()))  # integrity reads every node
-    problems_entry = record.get('problems')
+    problems_entries = record.get('problems') if isinstance(record.get('problems'), dict) else {}
     # Due items also depend on wake lifecycle receipts (answered questions, acknowledgements).
     lifecycle = ui.UIInputs.stamp(inst.root / '.brain/wake/lifecycle.json')
     due_keys = {nid: ui_json_fingerprint([key, lifecycle]) for nid, key in keys.items()}
@@ -554,11 +614,10 @@ def ui_json_build(inst, scan, code, cache=True):
     # The full guard/check and recorded readiness observations stay unchanged.
     # No exclusive instance lock surrounds this computation or cache publication.
     with _m_ui_readmodel.cache_writes(cache), status.due_memo(due_memo, due_seen):
-        if ui_json_clocked(problems_entry, everything) and type(problems_entry.get('count')) is int:
-            problems, problems_at = problems_entry['count'], problems_entry['at']
-        else:
-            problems, problems_at = len(check.collect_problems(inst)[0]), started
+        problems, problem_counts, problems_at = ui_json_problems(inst, problem_keys, problems_entries)
         state = ui.ui_state(inst, problems, scan, spend_budget=None, cache=views, node_keys=keys)
+        state['problems_checked_at'] = int(problems_at)
+        state['problems_checked_age_seconds'] = max(0, int(time.time() - problems_at))
         if hits:
             ui_json_view_usage(inst, state, hits, views)
     current = ui.UIInstance(inst.root)
@@ -566,7 +625,8 @@ def ui_json_build(inst, scan, code, cache=True):
         return None  # do not publish text observed under an obsolete visibility policy
     if cache:
         # A view enters the cache only if its stamp held across the pass; delivery never waits on it.
-        after, worktrees_after = ui_json_stamps(current)
+        problems_after = {}
+        after, worktrees_after = ui_json_stamps(current, problems_after)
         held = {nid for nid, key in keys.items() if after.get(nid) == key}
         jobs_held = {job for job, key in worktree_keys.items()
                      if worktrees_after.get(job) == key and job in views.checked}
@@ -587,7 +647,8 @@ def ui_json_build(inst, scan, code, cache=True):
             'due': {nid: {'key': due_keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else started,
                           'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
                     for nid in set(due_memo) | set(due_seen) if nid in held},
-            'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)}
+            'problems': {nid: entry for nid, entry in problem_counts.items()
+                         if problems_after.get(nid) == problem_keys[nid]}}
         try:
             with ui_json_publish_lock(current):  # a background revalidation may have published newer rows
                 model.write('node-views', ui_json_keep_newer(views_record, model.read('node-views')))
