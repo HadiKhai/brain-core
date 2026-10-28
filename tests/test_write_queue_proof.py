@@ -21,11 +21,14 @@ def load_tool(name):
     return module
 
 
-proof = load_tool('write_queue_proof')
-driver = load_tool('write_queue_driver')
-
-
 class WriteQueueProof(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Inventory fixtures import tests without copying the standalone tools.
+        # Execution still requires the real tool; collection requires only tests.
+        global proof
+        proof = load_tool('write_queue_proof')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -267,6 +270,11 @@ class WriteQueueProof(unittest.TestCase):
 
 
 class WriteQueueDriver(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        global driver
+        driver = load_tool('write_queue_driver')
+
     def test_execute_journals_only_its_n_submissions_and_refuses_existing_output(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
