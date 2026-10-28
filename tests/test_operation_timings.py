@@ -62,6 +62,10 @@ class OperationTimings(Scenario):
         missing = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'time', '--', 'missing-fixture-executable'],
                                  cwd=root, env=self.env, capture_output=True, text=True)
         self.assertEqual(missing.returncode, 127)
+        self.assertIn('requires --', self.b(root, 'time', sys.executable, '-c', 'raise SystemExit(0)', ok=False))
+        self.b(root, 'time', '--', sys.executable, '-c',
+               'import sys; assert sys.argv[1:] == ["-b", "fixture", "--brain=other"]',
+               '-b', 'fixture', '--brain=other')
 
     def test_slow_wrapper_samples_descendants(self):
         root = self.init('demo')
@@ -107,6 +111,13 @@ class OperationTimings(Scenario):
             self.hook(root, dict(payload, tool_use_id='unknown-call', tool_response={}, hook_event_name=phase))
         rows = json.loads(self.b(root, 'timings', '--command', 'Shell', '--json'))
         self.assertIsNone(rows[-1]['exit_code'])
+        self.hook(root, dict(payload, tool_use_id='stale-call', hook_event_name='PreToolUse'))
+        pending = next((root / '.brain/timings/pending').glob('*.json'))
+        start = json.loads(pending.read_text())
+        start['wall'] = 1
+        pending.write_text(json.dumps(start))
+        self.hook(root, dict(payload, tool_use_id='stale-call', hook_event_name='PostToolUse'))
+        self.assertFalse(pending.exists())
 
     def test_hook_does_nothing_outside_brain_and_refuses_linked_storage(self):
         root = self.init('demo')
@@ -121,6 +132,12 @@ class OperationTimings(Scenario):
         result = self.hook(root, payload)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(list(destination.iterdir()), [])
+        self.assertEqual(result.stderr, '')
+        broken = subprocess.run([sys.executable, '-B', '-c',
+                                'import runpy,sys; sys.modules["brain.operation_timings"]=None; runpy.run_path(sys.argv[1])',
+                                str(CORE / 'bin/brain-timing-hook')], cwd=root, env=self.env,
+                                capture_output=True, text=True)
+        self.assertEqual((broken.returncode, broken.stdout, broken.stderr), (0, '', ''))
 
     def test_existing_brain_timings_are_attributed_to_selected_node(self):
         root = self.init('demo')

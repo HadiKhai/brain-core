@@ -89,7 +89,9 @@ def sample_processes(pid, observed, elapsed):
 def cmd_time(a):
     timings.select_command('time', persist=False)  # one operation record, no wrapper profile
     inst, node = context(a.node)
-    argv = a.command[1:] if a.command[:1] == ['--'] else a.command
+    if a.command[:1] != ['--']:
+        common.die('time requires -- before the command')
+    argv = a.command[1:]
     if not argv or not math.isfinite(a.threshold) or a.threshold < 0:
         common.die('time needs a command and a finite nonnegative threshold')
     started, observed, code = time.perf_counter(), {}, 127
@@ -159,8 +161,10 @@ def hook_main():
             elapsed = time.time() - start['wall']
             # Backward clock jumps and stale pairs provide no useful duration.
             if not 0 <= elapsed <= 86400:
+                target.unlink_owned(path.name, (st.st_dev, st.st_ino))
                 return
             if start['node'] != events.node_ref(node['id']):
+                target.unlink_owned(path.name, (st.st_dev, st.st_ino))
                 return
             # Claim this pair before publishing: duplicate Post events are inert.
             if not target.unlink_owned(path.name, (st.st_dev, st.st_ino)):

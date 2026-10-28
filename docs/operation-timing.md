@@ -15,8 +15,10 @@ Time bounds are inclusive ISO timestamps with a timezone, or Unix seconds.
 any last-50 or slowest limit. Percentiles use the nearest-rank definition.
 Existing records attributed to root remain root records; history is not guessed.
 New Brain commands use their selected node, otherwise their calling folder.
+Command timestamps are local date strings; wrapper, hook and queue records use
+Unix seconds for precision. Time filters accept both existing journal formats.
 
-The wrapper requires a Brain folder or registered home/worktree. It inherits
+The wrapper requires `--` before the command and a Brain folder or registered home/worktree. It inherits
 stdio, environment and cwd, runs argv directly, and returns the command's exit
 status (128 + signal for signal termination; 127 missing, 126 other launch failure).
 Only a screened executable basename, duration, status and opaque node reference
@@ -54,7 +56,8 @@ The hook cannot retrospectively sample a subprocess tree or profile a remote MCP
 call. Use the wrapper for shell process details. Unknown runtime exit status stays
 null; a failure event supplies failure status. Hook execution on any particular
 host is unverified until the operator enables and tests it. Interrupted calls can
-leave private pending clock files; pairs older than a day are not used.
+leave private pending clock files, as can missing or malformed Post events.
+Pairs older than a day are not used and are removed when their Post arrives.
 Hook durations use wall time to support separate Python 3.9/macOS processes;
 backward clock jumps are refused, and forward clock adjustments affect duration.
 The command wrapper uses a monotonic clock within its own process.

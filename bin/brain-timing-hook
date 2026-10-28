@@ -7,7 +7,9 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
-from brain.operation_timings import hook_main
-
 with contextlib.redirect_stderr(io.StringIO()):
-    hook_main()
+    try:
+        from brain.operation_timings import hook_main
+        hook_main()
+    except (Exception, SystemExit):
+        pass
