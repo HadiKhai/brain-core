@@ -316,6 +316,13 @@ def cmd_handback(a):
     a._attempt_id = identity
     context_token = _m_attempts.ATTEMPT_CONTEXT.set((inst, n, row, identity))
     try:
+        intent = getattr(a, '_intent_request', None)
+        if intent and _m_queue.checked_handback(intent['payload']):
+            # Immutable request-scoped evidence survives replacement of the
+            # mutable current attempt. Publish before any verifier can start.
+            _m_queue.intent_store(inst, intent['id'] + '.dispatch',
+                dict(id=intent['id'], hash=intent['hash'], job_key=job_key(row),
+                     attempt_id=identity, binding=attempt['binding']), exclusive=True)
         return publish_handback(a)
     finally:
         # Terminal publication retires before returning (including a not-ready exit).
@@ -524,17 +531,33 @@ def publish_handback(a):
         pass  # accounting never blocks a hand-back
     checked = not study and a.state == "done" and (a.reviews is not None or getattr(a, "record", False))
     if checked:
-        state = _m_verify.ready_state(inst, n, a.branch)
-        why = reasons + state["reasons"]
         if intent:
-            # This is the native post-publication verdict, never inferred from
-            # transport success or replayed by running readiness again.
-            why = list(dict.fromkeys(_m_guard.redact(reason, _m_guard.never_terms(n)) for reason in why))
-            _m_queue.intent_store(inst, intent['id'] + '.verdict',
-                dict(id=intent['id'], hash=intent['hash'], attempt_id=a._attempt_id,
-                     binding=attempt['binding'], handback_hash=_m_queue.intent_hash(data),
-                     ready=not why, verdict='not-ready' if why else 'ready',
-                     reasons=why, exit_code=1 if why else 0), exclusive=True)
+            with _m_instance.brain_lock(inst):
+                inst = _m_instance.Instance(inst.root)
+                n = inst.node(a.id)
+                current = open_job(read_jobs(n) or [], a.branch)
+                live = _m_attempts.current_attempt(n, current) if current else None
+                if (not current or job_key(current) != job_key(row) or not live
+                        or live['id'] != a._attempt_id or live['state'] != 'terminal'
+                        or live['binding'] != attempt['binding'] or read_handback(n, current) != data):
+                    _m_common.die('checked handback replaced before verdict; retain request')
+                # Native readiness may do unlocked fingerprint/lane work. Fence
+                # its entire read against this exact handback and attempt, then
+                # persist while holding the retaken publication lock.
+                with _m_instance.released(inst, n, extra=lambda: [*_m_attempts.binding_paths(n, current), f]):
+                    state = _m_verify.ready_state(inst, n, a.branch)
+                why = reasons + state['reasons']
+                if isinstance(packet, dict) and type(packet.get('verify_result')) is int and packet['verify_result'] != 0:
+                    why.append('verify failed (exit ' + str(packet['verify_result']) + ')')
+                why = list(dict.fromkeys(_m_guard.redact(reason, _m_guard.never_terms(n)) for reason in why))
+                _m_queue.intent_store(inst, intent['id'] + '.verdict',
+                    dict(id=intent['id'], hash=intent['hash'], attempt_id=a._attempt_id,
+                         binding=attempt['binding'], handback_hash=_m_queue.intent_hash(data),
+                         ready=not why, verdict='not-ready' if why else 'ready',
+                         reasons=why, exit_code=1 if why else 0), exclusive=True)
+        else:
+            state = _m_verify.ready_state(inst, n, a.branch)
+            why = reasons + state['reasons']
         print(_m_verify.VerifyScrubber(_m_guard.never_terms(n)).feed(
             "ready" if not why else "not ready: " + "; ".join(dict.fromkeys(why)), final=True))
         if why:

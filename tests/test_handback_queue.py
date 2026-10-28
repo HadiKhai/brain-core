@@ -316,7 +316,7 @@ class HandbackLifecycle(Scenario):
                 request = self.checked_request(m, inst, row)
                 packet = dict(version=1, verify_result=0 if ready else 1, head='a', main='b',
                               verify_command='fixture', inputs='c')
-                why = [] if ready else ['native verifier failed']
+                why = [] if ready else ['native verifier failed', 'verify failed (exit 1)']
                 with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
                         mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}), \
                         mock.patch.object(m, 'record_ready', return_value=(packet, [])) as verify, \
@@ -343,7 +343,12 @@ class HandbackLifecycle(Scenario):
                         with self.assertRaises(SystemExit) as exit:
                             m.cmd_intent_queue(argparse.Namespace(action='wait', id=request['id'], timeout=0))
                         self.assertEqual(exit.exception.code, 1)
-                if not ready:
+                if ready:
+                    payload = {**request['payload'], 'args': {**request['payload']['args'], 'state': 'blocked'}}
+                    m.intent_store(inst, request['id'] + '.request', {**request, 'payload': payload})
+                    with self.assertRaisesRegex(ValueError, 'invalid receipt request'):
+                        m.intent_receipt(inst, request['id'])
+                else:
                     m.intent_store(inst, request['id'] + '.receipt',
                                    {**receipt, 'ready': True, 'verdict': 'ready', 'reasons': [], 'exit_code': 0})
                     with self.assertRaisesRegex(ValueError, 'native verdict'):
@@ -398,12 +403,37 @@ class HandbackLifecycle(Scenario):
         other = self.checked_request(m, inst, row)
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}):
-            m.begin_attempt(inst, n, row, write_request=other['id'])
+            interrupted = m.begin_attempt(inst, n, row, write_request=other['id'])
+            m.intent_store(inst, other['id'] + '.dispatch',
+                           dict(id=other['id'], hash=other['hash'], job_key=m.job_key(row),
+                                attempt_id=interrupted['id'], binding=interrupted['binding']), exclusive=True)
+            replacement = m.begin_attempt(inst, n, row)
+            self.assertNotEqual(interrupted['id'], replacement['id'])
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'record_ready') as verify, \
                 mock.patch.object(m.Instance, 'commit'), self.assertRaisesRegex(RuntimeError, 'interrupted checked'):
             m.drain_intents(inst)
         verify.assert_not_called()
         self.assertIsNone(m.intent_receipt(inst, other['id']))
+
+    def test_checked_verdict_refuses_replacement_during_native_readiness(self):
+        m, inst, n, row = self.fixture()
+        request = self.checked_request(m, inst, row)
+        packet = dict(version=1, integration_base='b', verify_result=1, head='a', main='b', inputs='c')
+        def replacement(*args):
+            published = m.read_handback(n, row)
+            published.update(attempt_id='f' * 32, ready={**packet, 'verify_result': 0})
+            m.handback_file(n, row).write_text(json.dumps(published))
+            return dict(reasons=[])
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}), \
+                mock.patch.object(m, 'record_ready', return_value=(packet, [])), \
+                mock.patch.object(m, 'ready_state', side_effect=replacement), \
+                mock.patch.object(m, 'actual_cost', return_value={}), mock.patch.object(m, 'job_size', return_value={}), \
+                mock.patch.object(m.Instance, 'commit'), contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(RuntimeError, 'prepared application'):
+            m.drain_intents(inst)
+        self.assertFalse(m.intent_path(inst, request['id'] + '.verdict').exists())
+        self.assertIsNone(m.intent_receipt(inst, request['id']))
 
     def test_checked_wait_timeout_preserves_pending_request(self):
         m, inst, n, row = self.fixture()

@@ -52,7 +52,9 @@ after preparation block the queue for inspection; no records are skipped.
 Inspect `.brain/write-queue/blocked` for the retained reason. Request, prepared
 effect and applied/rejected receipt files are private instance state. Do not edit,
 rotate or remove the spool while requests or producers exist.
-Checked requests also retain an atomic native `.verdict` record. Recovery never
+Checked requests also retain an immutable `.dispatch` record before verification
+starts, independently of the mutable current attempt, and an atomic native `.verdict`
+record. Recovery never
 reruns an interrupted verifier or infers ready from a saved packet. Missing verdicts,
 changed attempt/binding evidence and ambiguous verification retain a blocked request
 for reconciliation. An exact saved verdict may complete receipt publication without

@@ -69,7 +69,7 @@ def intent_store(inst, name, data, exclusive=False):
         if not exclusive:
             target.atomic_write(raw.decode())
             return
-        if name.endswith(('.receipt', '.prepared', '.verdict')):
+        if name.endswith(('.receipt', '.prepared', '.verdict', '.dispatch')):
             # These are published only by the single applier lease owner.
             # Stage + fsync + rename: no empty final receipt/preparation can be
             # exposed by death between create and write. Refuse an existing
@@ -175,7 +175,12 @@ def intent_receipt(inst, identity):
     except FileNotFoundError:
         return None
     request = intent_read(inst, identity + '.request')
-    if (not isinstance(result, dict) or not isinstance(request, dict)
+    if (not isinstance(request, dict) or set(request) != {'version', 'id', 'payload', 'hash'}
+            or type(request.get('version')) is not int or request['version'] != 2
+            or request.get('id') != identity or not isinstance(request.get('payload'), dict)
+            or request.get('hash') != intent_hash(request['payload'])):
+        raise ValueError('blocked write queue: invalid receipt request')
+    if (not isinstance(result, dict)
             or result.get('id') != identity or result.get('hash') != request.get('hash')
             or result.get('state') not in ('applied', 'rejected') or type(result.get('sequence')) is not int):
         raise ValueError('blocked write queue: invalid receipt')
@@ -215,6 +220,7 @@ def handback_verdict(inst, request, prepared):
     """Read a native verdict only; interrupted verification never implies ready."""
     try:
         saved = intent_read(inst, request['id'] + '.verdict')
+        dispatch = intent_read(inst, request['id'] + '.dispatch')
     except FileNotFoundError as error:
         raise RuntimeError('checked handback verdict missing; retain interrupted request') from error
     validate_handback_verdict(saved)
@@ -222,6 +228,10 @@ def handback_verdict(inst, request, prepared):
             or saved.get('hash') != request['hash'] or saved.get('id') != request['id']
             or saved.get('attempt_id') != prepared['after']['attempt_id']
             or saved.get('handback_hash') != intent_hash(prepared['after'])
+            or not isinstance(dispatch, dict) or dispatch.get('id') != request['id']
+            or dispatch.get('hash') != request['hash'] or dispatch.get('job_key') != prepared['job_key']
+            or dispatch.get('attempt_id') != saved.get('attempt_id')
+            or dispatch.get('binding') != saved.get('binding')
             or not isinstance(saved.get('binding'), dict)
             or any(not isinstance(saved['binding'].get(key), str) for key in ('head', 'base', 'inputs'))):
         raise RuntimeError('checked handback verdict binding changed')
@@ -493,7 +503,8 @@ def apply_handback_intent(inst, n, request):
         prepared = intent_read(inst, request['id'] + '.prepared')
     except FileNotFoundError:
         attempt = _m_attempts.current_attempt(n, row)
-        if checked and attempt and attempt.get('write_request') == request['id']:
+        if checked and (intent_path(inst, request['id'] + '.dispatch').exists()
+                        or attempt and attempt.get('write_request') == request['id']):
             raise RuntimeError('interrupted checked handback; retain verifier ownership evidence')
         args = argparse.Namespace(**payload['args'], enqueue=False, _intent_request=request)
         _m_jobs.validate_handback_options(args, row=row)

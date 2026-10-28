@@ -3819,3 +3819,8 @@ and exact handback. Receipts distinguish applied publication from readiness:
 An interrupted verifier or missing verdict remains blocked. Recovery may reuse
 an exact durable verdict but never recompute readiness or rerun an ambiguous
 verifier merely to complete a transport receipt.
+The request-scoped dispatch record is written before verification, so replacing
+the current attempt cannot erase an interrupted request's no-replay fence.
+Native verdict reads run inside an unlocked generation fence over the exact
+published handback, attempt, refs and inputs, and persist under the retaken lock.
+Receipts rehash their immutable request before choosing validation rules.
