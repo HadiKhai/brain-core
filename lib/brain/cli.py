@@ -845,6 +845,7 @@ def _main():
 
 
 REFRESH_TRIES = 5
+REFRESH_WRITER_WAIT = 120  # one deadline across all live-owner waits and admission races
 
 
 def refresh_with_retry(attempt, root):
@@ -863,5 +864,32 @@ def refresh_with_retry(attempt, root):
                 raise
         time.sleep(random.uniform(0.05, 0.25) * tries)
     print(f'brain: status refresh contended {REFRESH_TRIES} times; refreshing under the lock', file=sys.stderr)
-    with _m_instance.held(root):
-        return attempt()
+    deadline = None
+    while True:
+        before = _m_instance.settings(_m_instance.Instance(root))
+        try:
+            with _m_instance.held(root):
+                # Admission can race another released writer. Reconciliation
+                # re-reads the leases under the lock on every fresh attempt.
+                with _m_instance.brain_lock(root):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        _m_common.die('status refresh refused: refresh deadline expired; retry from fresh state')
+                    return attempt()
+        except _m_events.RefreshBlocked as error:
+            # Command.__exit__ has closed our operation and attempt has released
+            # the physical writer lock. Its live owners can now reacquire it.
+            if _m_instance.settings(_m_instance.Instance(root)) != before:
+                raise
+            if deadline is None:
+                deadline = time.monotonic() + REFRESH_WRITER_WAIT
+            current = _m_instance.Instance(root)
+            while any(_m_events.lease_live(current, ref) for ref in error.refs):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _m_common.die('status refresh refused: live writers did not finish before the refresh deadline; '
+                                  'generated view still needs reconciliation')
+                time.sleep(min(0.05, remaining))
+            if time.monotonic() >= deadline:
+                _m_common.die('status refresh refused: refresh deadline expired; retry from fresh state')
+            if _m_instance.settings(_m_instance.Instance(root)) != before:
+                _m_common.die('state changed during the unlocked step; retry from fresh state')

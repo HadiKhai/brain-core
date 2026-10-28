@@ -980,8 +980,11 @@ class EventViews(Scenario):
                         with mock.patch.object(events, '_CURRENT', []):
                             with self.assertRaisesRegex(SystemExit, 'another write is active'):
                                 events.reconcile(inst, node=inst.node('other'), snapshot=True)
-                            with instance.held(r), self.assertRaisesRegex(SystemExit, 'needs reconciliation'):
+                            with instance.held(r), self.assertRaisesRegex(SystemExit, 'needs reconciliation') as refused:
                                 events.reconcile(inst, node=inst.node('other'), snapshot=True)
+                            self.assertEqual(isinstance(refused.exception, events.RefreshBlocked), fault == 'invalid')
+                            if fault == 'invalid':
+                                self.assertEqual(refused.exception.refs, (op.ref,))
                             self.assertEqual((r / '.brain/events.jsonl').read_bytes(), before)
                             self.assertEqual(events.pending(events.read(inst)), pending)
                             self.assertTrue(events.lease_live(inst, op.ref))
@@ -1080,6 +1083,35 @@ class EventViews(Scenario):
         self.b(r, 'handback', 'app', '--branch', 'job-one', '--state', 'blocked', '--summary', 'PRIVATE-SUMMARY', '--lessons', 'none: PRIVATE-BODY')
         self.assertIn('| job-one | - | - | blocked |', st.read_text())
         self.assertNotIn('PRIVATE-BODY', (r / '.brain/events.jsonl').read_text())
+
+    def test_refresh_overflow_is_unpublished_until_preparation_succeeds(self):
+        from brain import status
+        for failure in ('contention', 'preparation'):
+            with self.subTest(failure=failure):
+                r = self.init('overflow-' + failure)
+                self.b(r, 'status', 'root', '--refresh')
+                path, archive = r / 'status.md', r / 'status-archive.md'
+                text = path.read_text()
+                start, end = text.index('## Now\n'), text.index('## Next')
+                path.write_text(text[:start] + '## Now\n\n' + ''.join('- note %d\n' % i for i in range(35)) + '\n' + text[end:])
+                archive.write_text('Existing archive\n')
+                before = path.read_bytes(), archive.read_bytes()
+                error = SystemExit('state changed during the unlocked step; retry from fresh state') if failure == 'contention' else ValueError('preparation failed')
+                with instance.brain_lock(r), mock.patch.object(status, 'refreshed_text', side_effect=error), \
+                        contextlib.redirect_stderr(io.StringIO()), \
+                        self.assertRaisesRegex(SystemExit, 'maintenance refused'):
+                    with events.Command(r, command='status'):
+                        pass
+                self.assertEqual((path.read_bytes(), archive.read_bytes()), before)
+                self.assertEqual(events.pending(events.read(instance.Instance(r))), {})
+                if failure == 'contention':
+                    self.assertEqual(events.read(instance.Instance(r))[-1]['kind'], 'abort')
+                self.b(r, 'status', 'root', '--refresh')
+                now = path.read_text().split('## Now\n', 1)[1].split('## Next', 1)[0]
+                self.assertEqual(sum(bool(line.strip()) for line in now.splitlines()), 30)
+                for i in range(30, 35):
+                    self.assertEqual(archive.read_text().count('- note %d\n' % i), 1)
+                self.assertTrue(archive.read_text().startswith('Existing archive\n'))
 
     def test_hook_fold_refreshes_its_node_even_when_next_command_targets_another(self):
         r = self.init('demo')

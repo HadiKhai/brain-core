@@ -3878,3 +3878,17 @@ configuration, home and worktree binding. A rebind before that snapshot refuses
 before executing an isolated test or reading a quarantine request, so a clean
 replacement checkout cannot validate execution from a stale, dirty checkout.
 The same fence applies to later context checks and both disposition commands.
+## 2026-10-28: Stage refresh overflow and wait outside writer ownership
+
+Explicit refresh prepares the capped Now section and archive bytes inside the
+same input fence as its refreshed document. It publishes that plan only after
+the complete preparation succeeds; refused preparation leaves both files alone.
+Archive inputs participate in the fence, and successful publication retains the
+existing generated-transformation ownership bookkeeping.
+
+A held refresh blocked by live foreign leases and invalid views closes its own
+attempt before waiting outside the writer lock. One 120-second deadline covers
+all owner waits and repeated admission races. Each retry reloads and reconciles
+under the lock, checking the current lease set. Expiry refuses without claiming
+a current view. Live leases are never adopted or closed; dead operations and
+stream damage keep their existing strict refusal and recovery behavior.

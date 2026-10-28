@@ -643,6 +643,14 @@ def dead_lease(inst, ref):
         yield target, fd
 
 
+class RefreshBlocked(SystemExit):
+    """Invalid views can be repaired only after these live owners finish."""
+    def __init__(self, refs):
+        self.refs = tuple(refs)
+        super().__init__('an interrupted write, stream damage or invalid view needs reconciliation, '
+                         'and another write is active; refresh again after it finishes')
+
+
 class Command:
     """One command operation; a crash or partial failure leaves its begin unresolved."""
     def __init__(self, root, args=None, command=None, node="root"):
@@ -819,7 +827,8 @@ class Command:
                 reason = f'; cause: {maintenance_error}' if maintenance_error is not None else ''
                 common.die('status refresh maintenance refused; generated view needs repair; retry from fresh state' + reason)
         elif not changed or (self.command == 'status' and isinstance(self.failure, SystemExit)
-                             and status_refresh.contended(self.failure) and not self.owned(changed)):
+                             and (isinstance(self.failure, RefreshBlocked) or status_refresh.contended(self.failure))
+                             and not self.owned(changed)):
             # A refresh body refused by contention publishes nothing before it.
             append(self.inst, self.node, "abort", self.ref, {"command": self.command})
         # Persisted partial changes require reconciliation, never a false commit.
@@ -1028,6 +1037,8 @@ def reconcile(inst, node=None, snapshot=False):
                 print('brain: another write is active; its reconciliation is left to a later refresh',
                       file=__import__('sys').stderr)
                 return
+            if not dead and not journal(inst).state['faults']:
+                raise RefreshBlocked(e['ref'] for e in foreign)
             common.die('an interrupted write, stream damage or invalid view needs reconciliation, '
                        'and another write is active; refresh again after it finishes')
         common.die("another write is active; cannot reconcile its snapshot")
@@ -1232,12 +1243,13 @@ def events_view_without_current(inst, n):
     return views[n['id']]
 
 
-def cap_now(inst, n):
+def cap_now(inst, n, *, prepare=False, text=None):
     path = n['dir'] / 'status.md'
     if not path.exists():
         return
-    with path.open(newline='') as stream:
-        text = stream.read()
+    if text is None:
+        with path.open(newline='') as stream:
+            text = stream.read()
     match = re.search(r'(?ms)^## Now[^\r\n]*\r?\n(.*?)(?=^## |\Z)', text)
     if not match:
         return
@@ -1252,11 +1264,15 @@ def cap_now(inst, n):
                 break
     if cut == len(lines):
         return
-    owned = ownership_before(inst, n)
     archive = n['dir'] / 'status-archive.md'
     previous = archive.read_text() if archive.exists() else ''
-    common.atomic_write(archive, previous + '\n## ' + inst.now() + ': Now overflow\n\n' + ''.join(lines[cut:]) + '\n')
-    common.atomic_write(path, text[:match.start(1)] + ''.join(lines[:cut]) + '\n' + text[match.end(1):])
+    plan = (text[:match.start(1)] + ''.join(lines[:cut]) + '\n' + text[match.end(1):],
+            previous + '\n## ' + inst.now() + ': Now overflow\n\n' + ''.join(lines[cut:]) + '\n')
+    if prepare:
+        return plan
+    owned = ownership_before(inst, n)
+    common.atomic_write(archive, plan[1])
+    common.atomic_write(path, plan[0])
     common.touch(path, archive)
     own_transformation(inst, n, owned)
 
@@ -1531,9 +1547,6 @@ def maintain(op, changed):
     refresh_node = getattr(op, 'refresh_node', None)
     if op.command == 'status' and selected:
         from . import status_refresh
-        for n in selected.values():
-            if materialize:
-                cap_now(op.inst, n)
         def prepare_views(current, _node):
             result = {}
             for nid in selected:
@@ -1548,12 +1561,15 @@ def maintain(op, changed):
                     view = snapshot_view(current, target, meta.get('merged', [])) if meta.get('merged', []) != meta.get('merged_before', []) else compared
                 else:
                     view = compared
-                result[nid] = (view, status.refreshed_text(current, target, view), compared)
+                text = status.refreshed_text(current, target, view)
+                overflow = cap_now(current, target, prepare=True, text=text) if materialize else None
+                result[nid] = (view, overflow[0] if overflow else text, compared, overflow)
             return result
         try:
             prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
-                                              targets=list(selected), extra=(op.inst.root / '.brain/events.jsonl',)
-                                              if any(source(op.inst, n) == 'events' for n in selected.values()) else ())
+                                              targets=list(selected), extra=[n['dir'] / 'status-archive.md' for n in selected.values()] +
+                                              ([op.inst.root / '.brain/events.jsonl']
+                                               if any(source(op.inst, n) == 'events' for n in selected.values()) else []))
         except SystemExit as error:
             # Nothing is published before this compute returns.
             op.unpublished_contention = status_refresh.contended(error)
@@ -1593,9 +1609,16 @@ def maintain(op, changed):
             view = events_view_without_current(op.inst, n)
         views[n['id']] = view
         if materialize:
+            overflow = prepared[n['id']][3] if op.command == 'status' else None
+            owned = ownership_before(op.inst, n) if overflow else None
+            if overflow:
+                common.atomic_write(n['dir'] / 'status-archive.md', overflow[1])
+                common.touch(n['dir'] / 'status-archive.md')
             status.refresh_status(op.inst, n, view,
                                   prepared_text=prepared[n['id']][1] if op.command == 'status' or released_projection else text)
             active_table(op.inst, n, view)
+            if overflow:
+                own_transformation(op.inst, n, owned)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
             force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)
             message = None

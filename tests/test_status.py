@@ -1178,6 +1178,98 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertIn('abort', [r['kind'] for r in ours])
         self.assertTrue(ours[-1]['data']['maintenance_ok'])
 
+    def released_refresh_writer(self, root):
+        script = '''
+import sys
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+from brain import events, instance
+root = Path(sys.argv[2])
+with instance.brain_lock(root), mock.patch.object(events, 'maintain', return_value={}):
+    with events.Command(root, command='fixture') as op:
+        (root / 'backlog.md').write_text('- owner finished item\\n')
+        instance.unlock()
+        print(op.ref, flush=True)
+        sys.stdin.readline()
+'''
+        writer = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(root)],
+                                  env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: writer.communicate('\n') if writer.poll() is None else None)
+        ref = writer.stdout.readline().strip()
+        self.assertRegex(ref, r'^[0-9a-f]{32}$')
+        return writer, ref
+
+    def test_refresh_waits_unlocked_for_a_released_owner_then_reconciles_fresh(self):
+        root = self.init('refresh-owner')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_owner_wait')
+        writer, ref = self.released_refresh_writer(root)
+        with instance.brain_lock(root):
+            events.append(m.Instance(root), 'root', 'commit', 'a' * 32,
+                          {'invalidate': [events.node_ref('root')]})
+        waits = []
+        sleep = time.sleep
+        def finish_owner(delay):
+            self.assertIsNone(instance._LOCK['fh'])
+            self.assertFalse(instance.holding())
+            if delay and not waits:
+                waits.append(True)
+                current = m.Instance(root)
+                self.assertEqual(set(events.replay(current)[2]), {ref})
+                self.assertTrue(events.lease_live(current, ref))
+                self.assertTrue(events.journal(current).state['invalid'])
+                self.assertEqual(events.read(current)[-1]['kind'], 'abort')
+                out, err = writer.communicate('\n', timeout=10)
+                self.assertEqual(writer.returncode, 0, err)
+            else:
+                sleep(delay)
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch('random.uniform', return_value=0), \
+                mock.patch('time.sleep', side_effect=finish_owner), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.main()
+        current = m.Instance(root)
+        self.assertEqual(waits, [True])
+        self.assertEqual(events.replay(current)[2], {})
+        self.assertEqual(events.journal(current).state['invalid'], {})
+        records = events.read(current)
+        terminal = next(i for i, row in enumerate(records) if row['ref'] == ref and row['kind'] == 'commit')
+        self.assertTrue(any(row['kind'] == 'reconcile' for row in records[terminal + 1:]))
+        self.assertTrue(records[-1]['data']['maintenance_ok'])
+        self.assertEqual(events.normalize(events.replay(current)[1]['root']),
+                         events.normalize(events.snapshot_view(current, current.node('root'))))
+
+    def test_refresh_owner_deadline_refuses_without_adopting_live_bytes(self):
+        root = self.init('refresh-deadline')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_owner_deadline')
+        writer, ref = self.released_refresh_writer(root)
+        with instance.brain_lock(root):
+            events.append(m.Instance(root), 'root', 'commit', 'b' * 32,
+                          {'invalidate': [events.node_ref('root')]})
+        before = (root / 'status.md').read_bytes()
+        start = len(events.read(m.Instance(root)))
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch('random.uniform', return_value=0), \
+                mock.patch.object(cli, 'REFRESH_WRITER_WAIT', 0.1), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaisesRegex(SystemExit, 'deadline'):
+            cli.main()
+        current = m.Instance(root)
+        self.assertIsNone(instance._LOCK['fh'])
+        self.assertIsNone(writer.poll())
+        self.assertTrue(events.lease_live(current, ref))
+        self.assertEqual(set(events.replay(current)[2]), {ref})
+        self.assertTrue(events.journal(current).state['invalid'])
+        self.assertEqual((root / 'status.md').read_bytes(), before)
+        self.assertTrue(all(row['kind'] in ('begin', 'abort') for row in events.read(current)[start:]))
+        out, err = writer.communicate('\n', timeout=10)
+        self.assertEqual(writer.returncode, 0, err)
+
     def test_explicit_inbox_seen_projects_unlocked_and_retries_source_drift(self):
         root = self.init('inbox-seen-projection')
         line = '- 2026-10-28 05:00 +00:00 from worker: Apply the export'
