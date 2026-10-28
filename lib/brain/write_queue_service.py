@@ -19,7 +19,7 @@ from . import timings as _m_timings
 
 def service_spec(inst):
     label = 'org.brain.write-queue.' + hashlib.sha256(str(inst.root).encode()).hexdigest()[:16]
-    args = [sys.executable, '-B', str(_m_common.CORE / 'bin/brain'), 'machine', 'queue-service', 'run']
+    args = [sys.executable, '-B', str(_m_common.STABLE_ENTRY_POINT), 'machine', 'queue-service', 'run']
     env = {'BRAIN_ROOT': str(inst.root), 'BRAIN_NO_REEXEC': '1',
            'BRAIN_CONFIG': str(_m_instance.brains_file())}
     if any('\n' in value or '\r' in value or '\x00' in value for value in args + list(env.values())):

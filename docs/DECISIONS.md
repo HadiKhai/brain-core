@@ -4056,7 +4056,7 @@ previous and whose pin it can lock exclusively. It deletes while holding that
 lock, and a launcher re-resolves when its release disappeared. A gate exports
 BRAIN_CORE_RELEASE and holds an inheritable pin through its exec, so the gate's
 command and nested `brain` calls keep the gate's release. Services (machine
-sampler, usage poller) register STABLE_ENTRY_POINT, the instance launcher
+sampler, usage poller, write-queue applier) register STABLE_ENTRY_POINT, the instance launcher
 `core/bin/brain`, never a release path that prune may remove.
 
 The idle guard refuses only on the own node's work: gate, train lock, ledger
