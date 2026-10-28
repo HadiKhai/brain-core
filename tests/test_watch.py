@@ -376,6 +376,86 @@ class Watcher(Scenario):
             (second / '.git/refs/heads/main').write_text('0' * 40 + '\n')
             self.assertNotEqual(m.watch_source_signature(inst, layout), before)
 
+    def test_watch_once_subprocesses_are_bounded_and_locate_each_home_once(self):
+        import subprocess
+        m = self.m
+        home = self.repo(self.tmp / 'code/app')
+        self.b(self.root, 'new', 'app', '--title', 'App', '--home', str(home))
+        inbox = self.root / 'inbox.md'
+        owner = m._owners['git_state_paths']
+        original = m.watch_scan
+        def once(questions, memo=True):
+            inbox.write_text(''.join(f'- 2026-10-28 07:0{i} from fixture: Host question: choose {i} '
+                                     f'<!-- host-question:q{i} -->\n' for i in range(questions)))
+            calls, scans, real = [], [], subprocess.run
+            def counted(args, *a, **k):
+                calls.append([str(x) for x in args])
+                return real(args, *a, **k)
+            def scan(*args):
+                scans.append(original(*args))
+                if len(scans) == 1:
+                    inbox.write_text(inbox.read_text())  # same bytes, new stamp: a stale first scan
+                return scans[-1]
+            published = []
+            settle = -10 ** 18 if memo else owner.GIT_LOCATION_SETTLE_NS
+            with mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', settle), \
+                    mock.patch.object(m, 'watch_scan', side_effect=scan), \
+                    mock.patch.object(m, 'wake_start'), \
+                    mock.patch.object(m, 'request_wake', side_effect=lambda *a, **k: published.append(k['items']) or False), \
+                    mock.patch.object(subprocess, 'run', side_effect=counted):
+                m.watch_once(m.Instance(self.root), quiet=True)
+            self.assertEqual(len(scans), 2, 'the fixture forces one serialized rescan')
+            items = sorted((i['kind'], i['node'], i['text']) for group in scans[1].values() for i in group['items'])
+            return calls, items, published
+        once(1)  # warm one-time caches
+        calls, one, published = once(1)
+        self.assertTrue(published, 'the open question is still delivered')
+        locate = [c for c in calls if '--absolute-git-dir' in c]
+        self.assertEqual(len(locate), 1, 'fences before/after both scans and publication locate the home once')
+        more, four, _ = once(4)
+        self.assertEqual(len(more), len(calls), 'subprocesses do not grow with episodes')
+        self.assertEqual(len([i for i in four if 'choose' in i[2]]), 4)
+        fresh, unmemoized, _ = once(4, memo=False)
+        self.assertEqual(unmemoized, four, 'memoized locations leave episodes unchanged')
+        self.assertEqual(len([c for c in fresh if '--absolute-git-dir' in c]), 5)
+
+    def test_memoized_git_location_still_sees_rewritten_markers_and_common_refs(self):
+        m, inst = self.m, self.inst
+        first = self.repo(self.tmp / 'fixture-first')
+        second = self.repo(self.tmp / 'fixture-second')
+        linked = self.tmp / 'fixture-linked'
+        self.git('worktree', 'add', '--detach', str(linked), cwd=first)
+        private = Path((linked / '.git').read_text().split(':', 1)[1].strip())
+        external = {**inst.node('root'), 'id': 'fixture-external', 'parent': None,
+                    'external': True, 'home_path': linked}
+        nodes = list(inst.nodes()) + [external]
+        owner = m._owners['git_state_paths']
+        locate = mock.patch.object(owner._m_common, 'git', wraps=owner._m_common.git)
+        with mock.patch.object(type(inst), 'nodes', return_value=nodes), \
+                mock.patch.object(owner, 'GIT_LOCATION_SETTLE_NS', -10 ** 18), locate as git:
+            layout = {}
+            asked = lambda: len([c for c in git.call_args_list if '--absolute-git-dir' in c.args])
+            before = m.watch_source_signature(inst, layout)
+            self.assertEqual(m.watch_source_signature(inst, layout), before)
+            self.assertEqual(asked(), 1, 'an unchanged location is reused')
+            # A rewritten commondir relocates the common refs: Git is asked again.
+            (private / 'commondir').write_text(str(second / '.git') + '\n')
+            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+            self.assertEqual(asked(), 2)
+            before = m.watch_source_signature(inst, layout)
+            (second / '.git/refs/heads/main').write_text('0' * 40 + '\n')
+            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+            # A retargeted marker file is also a changed location input.
+            before = m.watch_source_signature(inst, layout)
+            asked_before = asked()
+            (linked / '.git').write_text('gitdir: ' + str(second / '.git') + '\n')
+            self.assertNotEqual(m.watch_source_signature(inst, layout), before)
+            self.assertEqual(asked(), asked_before + 1)
+        # Recently changed inputs may postdate Git's read and are never memoized.
+        fresh = {}
+        owner.git_state_paths(linked, locations=fresh)
+        self.assertEqual(fresh, {})
+
     def test_command_snapshot_keeps_overdue_questions_repeatable_and_retains_pending_wake(self):
         m, inst = self.m, self.inst
         line = '- 2020-01-01 00:00 +00:00 from runtime: Host question: choose a color <!-- host-question:color -->'

@@ -179,7 +179,7 @@ def watch_source_signature(inst, layout=None):
     for n in nodes:
         if n.get('external') and n.get('home_path'):
             home = n['home_path']
-            paths.extend(_m_instance.git_state_paths(home))
+            paths.extend(_m_instance.git_state_paths(home, locations=layout.setdefault('git_locations', {})))
             # Fence the logical home and marker even when Git resolves both to
             # the same metadata directory. Never descend into the repository.
             homes.append([str(home), str(home.resolve()), str((home / '.git').resolve())])
@@ -301,7 +301,7 @@ def watch_receipt_observed(inst):
         return False
 
 
-def watch_due_episodes(inst, scan, serialized=False):
+def watch_due_episodes(inst, scan, serialized=False, layout=None):
     """Persist opaque receipts while ordinary due needs remain open.
 
     The source scan runs before the receipt lock; only reconciliation holds it.
@@ -310,7 +310,8 @@ def watch_due_episodes(inst, scan, serialized=False):
     is stale and cannot erase a newer receipt. A scan closes absent needs.
     `serialized` holds the lock across the scan, as before, for a caller whose
     optimistic scan was already overtaken. Machine and direct producer
-    episodes already have their own receipts.
+    episodes already have their own receipts. A caller's `layout` carries
+    stamp-validated source generations into its rescan and publication fence.
     """
     import fcntl
     path = inst.root / '.brain/wake/due-episodes.json'
@@ -329,7 +330,7 @@ def watch_due_episodes(inst, scan, serialized=False):
         if serialized:
             acquire()  # fallback: the whole-scan transaction, which no reconciliation can overtake
         observed = watch_receipt_observed(inst)
-        layout = {}
+        layout = {} if layout is None else layout
         generation = watch_source_signature(inst, layout)
         groups = scan()
         if watch_source_signature(inst, layout) != generation:
@@ -784,20 +785,20 @@ def watch_groups(inst, nodes=None):
         from . import tasks
         with command_reads.snapshot(), tasks.record_scan(inst):
             return watch_scan(inst, nodes)
+    layout = {}  # stamp-validated generations only; each scan still reads afresh
     try:
-        groups = watch_due_episodes(inst, scan)
+        groups = watch_due_episodes(inst, scan, layout=layout)
         if groups.stale and not command_reads.active():
             # Overtaken (or sources moved): rescan fresh inside the receipt lock,
             # which no reconciliation can overtake. Only this rare second scan
             # holds the lock long. Inside an enclosing read scope a rescan would
             # reuse old reads, so those callers keep stale as unknown.
-            groups = watch_due_episodes(inst, scan, serialized=True)
+            groups = watch_due_episodes(inst, scan, serialized=True, layout=layout)
         return groups
     except (OSError, ValueError):
         if _m_common.outward_links(inst.root):
             raise  # fail open for receipt I/O, never for unsafe links
         _m_status.due_once_forget()  # the fallback's due inventory follows its own generation
-        layout = {}
         generation = watch_source_signature(inst, layout)
         groups = scan()
         if watch_source_signature(inst, layout) != generation:

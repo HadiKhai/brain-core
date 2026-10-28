@@ -390,12 +390,49 @@ def state_signature(inst, node=None, extra=(), local_keys=()):
     return h.digest()
 
 
-def git_state_paths(home, *, task_proof=False, refs=None, include_head=True):
+GIT_LOCATION_SETTLE_NS = 2_000_000_000
+
+
+def git_location_inputs(home, values, settled=None):
+    """What Git consults to locate a home's metadata, or None when unknowable.
+
+    Directories are fenced by identity (their mtimes churn with every lock
+    file); the marker file, HEAD and commondir by full stamp. `settled`
+    rejects inputs changed so recently they may postdate Git's own read.
+    """
+    def stamp(path, full):
+        try:
+            info = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if full and settled is not None and info.st_ctime_ns >= settled:
+            raise ValueError('unsettled Git location input')
+        return ((info.st_dev, info.st_ino, info.st_mode, info.st_uid)
+                + ((info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns) if full else ()))
+    marker = Path(home) / '.git'
+    try:
+        found = stamp(marker, not marker.is_dir() or marker.is_symlink())
+        if found is None:
+            return None  # ancestor discovery depends on every parent directory
+        inputs = [os.path.realpath(home), os.path.realpath(marker), stamp(home, False), found,
+                  sorted((k, v) for k, v in os.environ.items() if k.startswith('GIT_'))]
+        for value in values[:2] if len(values) == 2 else []:
+            base = Path(home) / value.strip()
+            inputs.append([str(base.resolve()), stamp(base, False), stamp(base / 'HEAD', True),
+                           stamp(base / 'commondir', True)])
+    except (OSError, ValueError):
+        return None
+    return inputs
+
+
+def git_state_paths(home, *, task_proof=False, refs=None, include_head=True, locations=None):
     """Mutable ref/config generations, including linked-worktree common refs.
 
     Git objects are immutable; traversing them would turn a recheck into a scan.
     Keep both the logical metadata entry and its resolved target in the fence.
     Task completion reads main and replacement refs, never unrelated branches.
+    `locations` lets one caller's repeated fences reuse Git's location answer
+    while every input Git consulted for it is unchanged.
     """
     marker = Path(home) / '.git'
     paths = [marker] if not marker.is_dir() else []
@@ -403,10 +440,22 @@ def git_state_paths(home, *, task_proof=False, refs=None, include_head=True):
     # Ask Git which metadata it actually reads: internal child nodes can share
     # an ancestor repository, and linked worktrees/bare homes have other layouts.
     # Supplying the unchanged environment bypasses display-query memoization;
-    # this is a publication recheck, never a cached layout observation.
+    # this is a publication recheck, never a cached layout observation. Only a
+    # stamp-validated answer from the caller's own earlier recheck is reused.
     # One process answers both questions, in flag order, one line each.
-    result = _m_common.git('rev-parse', '--absolute-git-dir', '--git-common-dir', cwd=home, env=dict(os.environ))
-    values = result.stdout.splitlines() if result.returncode == 0 else []
+    cached = locations.get(str(home)) if locations is not None else None
+    if cached and git_location_inputs(home, cached[1]) == cached[0]:
+        values = cached[1]
+    else:
+        started = time.time_ns()
+        result = _m_common.git('rev-parse', '--absolute-git-dir', '--git-common-dir', cwd=home, env=dict(os.environ))
+        values = result.stdout.splitlines() if result.returncode == 0 else []
+        if locations is not None:
+            inputs = git_location_inputs(home, values, settled=started - GIT_LOCATION_SETTLE_NS)
+            if inputs is None or len(values) != 2:
+                locations.pop(str(home), None)
+            else:
+                locations[str(home)] = (inputs, values)
     for value in values[:2] if len(values) == 2 else []:
         value = value.strip()
         if value:
