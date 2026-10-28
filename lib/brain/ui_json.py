@@ -16,6 +16,7 @@ from . import common as _m_common
 
 _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_job_attempts = _m_common.LazyModule(__package__, 'job_attempts')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_reports = _m_common.LazyModule(__package__, 'reports')
 _m_spend = _m_common.LazyModule(__package__, 'spend')
@@ -225,13 +226,14 @@ def ui_json_stamps(inst):
     for common in repos:  # one tip listing per repository, shared by its worktrees
         # Never through the command's memoized Git snapshot: the post-build stamp must see moved refs.
         try:
-            result = subprocess.run(['git', 'for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads',
-                                     'refs/remotes'], cwd=common, capture_output=True, text=True,
+            result = subprocess.run(['git', 'for-each-ref', '--format=%(refname)%00%(objectname)%00%(symref)',
+                                     'refs/heads', 'refs/remotes', 'refs/tags'],  # commit views read tags too
+                                    cwd=common, capture_output=True, text=True,
                                     env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}, timeout=30)
         except (OSError, subprocess.SubprocessError):
             result = subprocess.CompletedProcess([], None, '', '')
-        repos[common] = (result.returncode, dict(line.split('\0', 1) for line in result.stdout.splitlines()
-                                                 if '\0' in line))
+        repos[common] = (result.returncode, {ref: rest for ref, *rest in (line.split('\0') for line in
+                                                                         result.stdout.splitlines() if '\0' in line)})
     out, worktrees = {}, {}
     # A node's tasks may depend on any node's tasks (task_flow.blockers): every view reads them.
     tasks = []
@@ -240,7 +242,13 @@ def ui_json_stamps(inst):
             dirs.sort()
             tasks.extend(stamp(Path(directory) / name) for name in sorted(names))
     for n in nodes:
-        files = []
+        # Parsed metadata, own and inherited: a stamp taken after a stale parse must not match it.
+        meta, parent = [], n
+        while parent:
+            meta.append(json.dumps({k: parent.get(k) for k in ('id', 'fm', 'external', 'home_path', 'archived')},
+                                   sort_keys=True, default=str))
+            parent = parent['parent']
+        files = [meta]
         for directory, dirs, names in os.walk(_m_status.hook_question_queue(n)):  # pending questions
             dirs.sort()
             files.extend(stamp(Path(directory) / name) for name in sorted(names))
@@ -270,7 +278,12 @@ def ui_json_stamps(inst):
         def checkout(home, refs=None):
             own, common = ui_json_git_dirs(home)
             code, tips = repos.get(str(common), (None, {}))
-            tips = tips if refs is None else {ref: tips.get(ref) for ref in refs}
+            if refs is not None:
+                # The integration branch is origin/HEAD's target, or its local counterpart (merge=local).
+                target = (tips.get('refs/remotes/origin/HEAD') or ['', ''])[-1]
+                if target:
+                    refs = [*refs, target, target.replace('refs/remotes/origin/', 'refs/heads/', 1)]
+                tips = {ref: tips.get(ref) for ref in refs}
             return (str(home), stamp(home), str(common), code, sorted(tips.items()),
                     *(stamp(own / name) for name in (('HEAD', 'index', 'packed-refs', 'config') if own else ())),
                     *(stamp(path) for pattern in patterns for path in sorted(home.glob(pattern))))
@@ -280,7 +293,7 @@ def ui_json_stamps(inst):
                                             files, git, mine, tasks])
         # A worktree row and its readiness depend on its own checkout, its job and
         # integration refs and the node's policy files, not on status or inbox edits.
-        policy = [stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt', _m_jobs.JOBS_FILE)]
+        policy = [meta, *(stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt', _m_jobs.JOBS_FILE))]
         parent = n['parent']
         while parent:
             policy.extend(stamp(parent['dir'] / name) for name in ('node.md', 'never-name.txt'))
@@ -296,7 +309,8 @@ def ui_json_stamps(inst):
                 continue
             refs = ['refs/heads/' + branch, 'refs/heads/main', 'refs/heads/master', 'refs/remotes/origin/HEAD',
                     'refs/remotes/origin/main', 'refs/remotes/origin/master']
-            handbacks = [stamp(_m_jobs.handback_file(n, row)) for row in jobs if row.get('Job') == branch]
+            handbacks = [(stamp(_m_jobs.handback_file(n, row)), stamp(_m_job_attempts.attempt_path(n, row)))
+                         for row in jobs if row.get('Job') == branch]  # replacement attempts move readiness
             worktrees[(n['id'], branch)] = ui_json_fingerprint([
                 shared, policy, ready, handbacks,
                 json.dumps({k: n['local'].get(k) for k in ('home', 'workbench')}, sort_keys=True, default=str),

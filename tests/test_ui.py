@@ -1308,6 +1308,15 @@ ui_json.ui_json_background(root, '[]')
         saved = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('json-snapshot')
         self.assertEqual(saved['generation'], record['generation'])
 
+    def test_view_stamp_covers_the_parse_it_was_built_from(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        stale = self.m.UIInstance(root)
+        stale.nodes()  # parsed before the edit, as the privacy key's parse is
+        (root / 'nodes/meadow/node.md').write_text('---\nid: meadow\ntitle: Renamed\nowners: alice\n---\n')
+        old, new = module.ui_json_stamps(stale)[0], module.ui_json_stamps(self.m.UIInstance(root))[0]
+        self.assertNotEqual(old['meadow'], new['meadow'])  # the old parse never caches under the new file
+
     def test_worktree_row_read_time_is_its_own(self):
         ui = self.m._owners['ui_state']
         package = ui.__package__
