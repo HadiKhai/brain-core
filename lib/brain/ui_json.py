@@ -202,7 +202,11 @@ def ui_json_stamps(inst):
         runs = runs if isinstance(runs, list) else []
     except (OSError, ValueError, AttributeError, UnicodeError):
         runs = None
-    shared = (stamp(root / 'instance.md'), stamp(root / '.brain/wake/lifecycle.json'),
+    # Wake lifecycle receipts change by the second; reused views re-read job and round
+    # usage from them (ui_json_view_usage) and lifecycle reconciliation always re-runs.
+    shared = (stamp(root / 'instance.md'), stamp(root / '.brain/communications.json'),
+              stamp(root / '.brain/inbox-seen.json'),
+              tuple(stamp(path) for path in sorted((root / '.brain/teaching').glob('*.json'))),
               json.dumps({k: v for k, v in inst.local.items() if k != 'nodes'}, sort_keys=True, default=str),
               os.path.realpath(root / '.brain/core-current'), runs is None)
     nodes, repos, homes = inst.nodes(), {}, {}
@@ -211,15 +215,22 @@ def ui_json_stamps(inst):
         paths += [Path(w['path']) for w in ui.ui_live_worktrees(n).values() if w.get('path')]
         homes[n['id']] = []
         for home in paths:
-            own, common = ui_json_git_dirs(home)
-            homes[n['id']].append((home, own, common))
+            homes[n['id']].append((home, *ui_json_git_dirs(home)))
+        for home in [*paths, *(Path(w['path']) for w in n['local'].get('worktrees', {}).values() if w.get('path'))]:
+            common = ui_json_git_dirs(home)[1]
             if common is not None:
                 repos.setdefault(str(common), None)
     for common in repos:  # one tip listing per repository, shared by its worktrees
-        result = _m_common.git('for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads', 'refs/remotes',
-                               cwd=common)
-        repos[common] = (result.returncode, result.stdout)
-    out = {}
+        # Never through the command's memoized Git snapshot: the post-build stamp must see moved refs.
+        try:
+            result = subprocess.run(['git', 'for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/heads',
+                                     'refs/remotes'], cwd=common, capture_output=True, text=True,
+                                    env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            result = subprocess.CompletedProcess([], None, '', '')
+        repos[common] = (result.returncode, dict(line.split('\0', 1) for line in result.stdout.splitlines()
+                                                 if '\0' in line))
+    out, worktrees = {}, {}
     for n in nodes:
         files = []
         for directory, dirs, names in os.walk(n['dir']):
@@ -245,19 +256,52 @@ def ui_json_stamps(inst):
         except SystemExit:
             files.append(('workbench', None))
         patterns = _m_common.lst(n['fm'].get('verify_inputs')) or _m_common.lst(_m_verify.VERIFY_INPUTS)
-        git = []
-        for home, own, common in homes[n['id']]:
-            git.append((str(home), stamp(home), str(common), repos.get(str(common)),
-                        *(stamp(own / name) for name in (('HEAD', 'index', 'packed-refs', 'config') if own else ())),
-                        *(stamp(path) for pattern in patterns for path in sorted(home.glob(pattern)))))
+        def checkout(home, refs=None):
+            own, common = ui_json_git_dirs(home)
+            code, tips = repos.get(str(common), (None, {}))
+            tips = tips if refs is None else {ref: tips.get(ref) for ref in refs}
+            return (str(home), stamp(home), str(common), code, sorted(tips.items()),
+                    *(stamp(own / name) for name in (('HEAD', 'index', 'packed-refs', 'config') if own else ())),
+                    *(stamp(path) for pattern in patterns for path in sorted(home.glob(pattern))))
+        git = [checkout(home) for home, _, _ in homes[n['id']]]
         mine = [r for r in runs or [] if isinstance(r, dict) and r.get('node') == n['id']]
         out[n['id']] = ui_json_fingerprint([shared, json.dumps(n['local'], sort_keys=True, default=str),
                                             files, git, mine])
-    return out
+        # A worktree row and its readiness depend on its own checkout, its job and
+        # integration refs and the node's policy files, not on status or inbox edits.
+        policy = [stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt', _m_jobs.JOBS_FILE)]
+        parent = n['parent']
+        while parent:
+            policy.extend(stamp(parent['dir'] / name) for name in ('node.md', 'never-name.txt'))
+            parent = parent['parent']
+        for directory, dirs, names in os.walk(n['dir'] / 'job-trains'):
+            dirs.sort()
+            policy.extend(stamp(Path(directory) / name) for name in sorted(names))
+        ready = [row for row in files if any(f'/{tree}/' in row[0] for tree in ('scratch/ready', 'scratch/rehearse'))]
+        jobs = _m_jobs.read_jobs(n) or []
+        node_home = n['home_path'] if n['external'] and n['home_path'] else None
+        for branch, w in n['local'].get('worktrees', {}).items():
+            if not w.get('path'):
+                continue
+            refs = ['refs/heads/' + branch, 'refs/heads/main', 'refs/heads/master', 'refs/remotes/origin/HEAD',
+                    'refs/remotes/origin/main', 'refs/remotes/origin/master']
+            handbacks = [stamp(_m_jobs.handback_file(n, row)) for row in jobs if row.get('Job') == branch]
+            worktrees[(n['id'], branch)] = ui_json_fingerprint([
+                shared, policy, ready, handbacks,
+                json.dumps({k: n['local'].get(k) for k in ('home', 'workbench')}, sort_keys=True, default=str),
+                json.dumps(w, sort_keys=True, default=str), checkout(Path(w['path']), refs),
+                checkout(node_home, refs) if node_home else None])
+    return out, worktrees
 
 
-def ui_json_views(inst, model, privacy, keys, cache):
-    """Load persisted node views whose stamp still matches; others rebuild."""
+def ui_json_job(job):
+    return json.dumps(list(job))
+
+
+def ui_json_views(inst, model, privacy, keys, worktree_keys, cache):
+    """Load persisted node views, worktree rows and readiness whose stamp still matches."""
+    from . import verify
+    cache.worktree_keys = worktree_keys
     record = model.read('node-views')
     if not isinstance(record, dict) or record.get('binding') != model.binding(privacy):
         return {}, set()
@@ -267,7 +311,27 @@ def ui_json_views(inst, model, privacy, keys, cache):
                 and isinstance(entry.get('row'), dict) and isinstance(entry.get('commits'), list)):
             cache.nodes[nid] = (keys[nid], entry['row'], entry['commits'])
             hits.add(nid)
+    jobs = {ui_json_job(job): job for job in worktree_keys}
+    for name, entry in (record.get('worktrees') or {}).items():
+        job = jobs.get(name)
+        if job and isinstance(entry, dict) and entry.get('key') == worktree_keys[job] and isinstance(entry.get('row'), dict):
+            cache.worktrees[job] = (worktree_keys[job], entry['row'])
+    for name, entry in (record.get('ready') or {}).items():
+        job = jobs.get(name)
+        if (job and isinstance(entry, dict) and entry.get('key') == worktree_keys[job]
+                and isinstance(entry.get('data'), dict) and isinstance(entry.get('policy'), list)):
+            # Policy validators re-run on every hit (verify.ready_state); Git/input facts are reused.
+            cache.ready[job] = (worktree_keys[job], verify.ReadyStateResult(
+                entry['data'], entry['policy'], entry.get('head') or ''))
     return record, hits
+
+
+def ui_json_plain(value):
+    try:
+        text = json.dumps(value, sort_keys=True)
+        return json.loads(text) == value
+    except (TypeError, ValueError):
+        return False
 
 
 # Due items and problems also compare against the clock (overdue thresholds, stale
@@ -305,13 +369,13 @@ def ui_json_view_usage(inst, state, hits):
 
 
 def ui_json_build(inst, scan, code, cache=True):
-    from . import check, status, ui
+    from . import check, status, ui, verify
     before = ui_json_privacy_key(inst, code)
     model = _m_ui_readmodel.ReadModel(inst, code)
     # Node views persist under their own node stamp; a changed stamp rebuilds that view only.
-    keys = ui_json_stamps(inst)
+    keys, worktree_keys = ui_json_stamps(inst)
     views = ui.UIStateCache()
-    record, hits = ui_json_views(inst, model, before, keys, views)
+    record, hits = ui_json_views(inst, model, before, keys, worktree_keys, views)
     # Integrity reads every node: its count reuses only an all-nodes stamp match.
     everything = ui_json_fingerprint(sorted(keys.items()))
     problems_entry = record.get('problems') if cache else None
@@ -335,8 +399,9 @@ def ui_json_build(inst, scan, code, cache=True):
         return None  # do not publish text observed under an obsolete visibility policy
     if cache:
         # Publish only what was observed under a stamp that still holds after the build.
-        after = ui_json_stamps(current)
+        after, worktrees_after = ui_json_stamps(current)
         held = {nid for nid, key in keys.items() if after.get(nid) == key}
+        jobs_held = {job for job, key in worktree_keys.items() if worktrees_after.get(job) == key}
         due = {nid: {'key': keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else time.time(),
                      'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
                for nid in set(due_memo) | set(due_seen) if nid in held}
@@ -344,6 +409,14 @@ def ui_json_build(inst, scan, code, cache=True):
             'binding': model.binding(before),
             'nodes': {nid: {'key': key, 'row': row, 'commits': commits}
                       for nid, (key, row, commits) in views.nodes.items() if nid in held and key == keys[nid]},
+            'worktrees': {ui_json_job(job): {'key': key, 'row': row} for job, (key, row) in views.worktrees.items()
+                          if job in jobs_held and key == worktree_keys[job] and ui_json_plain(row)},
+            'ready': {ui_json_job(job): {'key': key, 'data': dict(result),
+                                         'policy': list(getattr(result, 'policy_reasons', ())),
+                                         'head': getattr(result, 'policy_head', '')}
+                      for job, (key, result) in views.ready.items()
+                      if job in jobs_held and key == worktree_keys[job] and isinstance(result, verify.ReadyStateResult)
+                      and not (result.get('packet') or {}).get('full_disposition') and ui_json_plain(dict(result))},
             'due': due,
             'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)})
     state['brain'].pop('filling_in', None)
