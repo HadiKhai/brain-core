@@ -1,8 +1,11 @@
 """Recorded coordinator backlog and active-run advisories; never query a host."""
+import contextlib
 import datetime
+import fcntl
 import hashlib
 import json
 import math
+import os
 import re
 import stat
 
@@ -137,7 +140,57 @@ def coordinator_queue_severity(count, age):
     return [max(0, count.bit_length() - 3), age >= 1800]
 
 
+def coordinator_condition_valid(record):
+    severity = record.get('severity') if isinstance(record, dict) else None
+    return (isinstance(record, dict) and isinstance(record.get('thread'), str)
+            and type(record.get('start')) in (int, float) and math.isfinite(record['start'])
+            and (severity is None or isinstance(severity, list) and len(severity) == 2
+                 and type(severity[0]) is int and severity[0] >= 0 and type(severity[1]) is bool))
+
+
+@contextlib.contextmanager
+def coordinator_conditions(inst):
+    """Each continuing backlog's start and highest notified severity, under one lock.
+
+    Yields (recorded, kept): the caller fills kept, which replaces the record when it
+    differs. Unavailable state yields None, and episodes fall back to the observation.
+    """
+    path = inst.root / '.brain/coordinator-queue.json'
+    try:
+        _m_common.safe_target(path)
+        fd = os.open(path.with_suffix('.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except (OSError, ValueError):
+        yield None, {}
+        return
+    with os.fdopen(fd, 'a+') as stream:
+        recorded = {}
+        try:
+            if os.fstat(stream.fileno()).st_nlink != 1:
+                raise ValueError('linked coordinator queue lock')
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            if path.exists():
+                data, _ = coordinator_read(path)
+                if data.get('version') == 1 and isinstance(data.get('conditions'), dict):
+                    recorded = {k: v for k, v in data['conditions'].items() if coordinator_condition_valid(v)}
+        except (OSError, ValueError, TypeError, AttributeError):
+            yield None, {}
+            return
+        kept = {}
+        yield recorded, kept
+        if kept != recorded and (kept or path.exists()):
+            try:
+                _m_common.atomic_write(path, json.dumps({'version': 1, 'conditions': kept}, sort_keys=True) + '\n',
+                                       private=True)
+            except OSError:
+                pass  # the next scan re-derives the condition from its observation
+
+
 def coordinator_advisories(inst):
+    with coordinator_conditions(inst) as (recorded, kept):
+        return coordinator_advisory_items(inst, recorded or {}, kept)
+
+
+def coordinator_advisory_items(inst, recorded, kept):
     now = inst.now_dt().timestamp()
     host = coordinator_host_runs(inst, now)
     from . import host_observations
@@ -150,17 +203,28 @@ def coordinator_advisories(inst):
         rec = host.get(n['id'])
         rec = rec if rec and rec['thread'] == thread else None
         queue = coordinator_queue_view(inst, n, now, rec)
-        if not queue['count'] and not queue.get('transport'):
+        condition = recorded.get(n['id'])
+        condition = condition if condition and condition['thread'] == thread else None
+        if queue['count'] is None and condition:
+            kept[n['id']] = condition  # unknown evidence neither ends nor asserts the backlog
+        if not queue['count']:
             continue
-        oldest_at = queue['oldest_at']
+        # A backlog continues through delivery and new arrivals; its start never moves.
+        condition = condition or {'thread': thread, 'start': queue['oldest_at'], 'severity': None}
+        age = now - min(condition['start'], queue['oldest_at'])
         def add(kind, identity, text):
             episode = hashlib.sha256(json.dumps([n['id'], thread, kind, identity], sort_keys=True).encode()).hexdigest()
             items.append({'node': 'root', 'kind': kind, 'subject_node': n['id'],
                           'episode': episode, 'text': text})
-        if queue['count'] and (queue['count'] > 3 or now - oldest_at > 600):
-            add('coordinator-queue', [queue['episode'], coordinator_queue_severity(queue['count'], now - oldest_at)],
+        if condition['severity'] is not None or queue['count'] > 3 or age > 600:
+            # Once raised, the advisory stays until the backlog clears, at its highest severity.
+            level, aged = coordinator_queue_severity(queue['count'], age)
+            previous = condition['severity'] or [0, False]
+            condition = {**condition, 'severity': [max(level, previous[0]), aged or previous[1]]}
+            add('coordinator-queue', [condition['start'], condition['severity']],
                 f"{n['id']}: coordinator has {queue['count']} queued item(s); oldest waiting "
-                f"{int((now - oldest_at) / 60)} min. Drain all queued work in one turn.")
+                f"{int(age / 60)} min. Drain all queued work in one turn.")
+        kept[n['id']] = condition
         try:
             busy_minutes = float(n['fm'].get('coordinator_stall_minutes', 20))
             if not math.isfinite(busy_minutes) or busy_minutes < 1:

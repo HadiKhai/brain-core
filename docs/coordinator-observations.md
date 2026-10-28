@@ -37,11 +37,15 @@ Only a matching active run with queued wakes produces `coordinator-busy` after
 or busy. No host exporter is installed by this feature. A host inventory without
 actual start times and queued wakes cannot produce this snapshot.
 
-A queue episode is the condition's start (its oldest enqueue time) plus a
-severity band, independent of new arrivals and changing display ages. Root is
-woken once per condition, and again only when it materially worsens: each
-doubling past four items, and once when the oldest passes 30 minutes. A busy
-episode is the active run. Ordinary watcher receipts deliver an episode once;
+A queue episode is the backlog condition's start plus the highest severity
+already raised, independent of new arrivals and changing display ages. Brain
+records each continuing condition in `.brain/coordinator-queue.json` (start,
+thread, highest severity), so the start survives a coalesced delivery and a
+shrinking queue never re-fires. Root is woken once per condition, and again only
+when it materially worsens: each doubling past four items, and once when the
+oldest passes 30 minutes. Once raised, the advisory stays until the queue is
+empty; unknown evidence neither ends nor asserts it. Transport-only doorbells
+raise no busy advisory either. A busy episode is the active run. Ordinary watcher receipts deliver an episode once;
 queue progress or a new run can establish a new episode. A fresh host snapshot's
 queue count overrides brain's own transport. These are advisories,
 not cancellation, rotation or permission to change host state.

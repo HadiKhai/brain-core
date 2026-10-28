@@ -204,6 +204,39 @@ class CoordinatorAdvisories(unittest.TestCase):
         aged = self.m.coordinator_advisories(self.inst)
         self.assertNotIn(aged[0]['episode'], (first[0]['episode'], doubled[0]['episode']))
 
+    def test_backlog_episode_survives_coalesced_delivery_and_never_refires_on_improvement(self):
+        hosts = self.m.coordinator_advisories.__globals__['_m_hosts']
+        stuck = {'known':True,'item_count':4,'oldest_at':self.now.timestamp()-300,'unconsumed_wake':False}
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=stuck,create=True):
+            first = self.m.coordinator_advisories(self.inst)
+        delivered = {**stuck, 'oldest_at': self.now.timestamp()-5, 'unconsumed_wake': True}
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=delivered,create=True):
+            items = self.m.coordinator_advisories(self.inst)
+        self.assertEqual([i['episode'] for i in items], [first[0]['episode']])
+        self.assertIn('oldest waiting 5 min', items[0]['text'])
+        def snapshot(count, at='11:55'):
+            self.host(status='completed', queued_wakes=[{'id':'wake-'+str(i),'queued_at':'2026-01-01T'+at+':00+00:00'}
+                                                        for i in range(count)])
+            return [i['episode'] for i in self.m.coordinator_advisories(self.inst)]
+        (worse,) = snapshot(8)
+        self.assertNotEqual(worse, first[0]['episode'])
+        self.assertEqual([snapshot(7), snapshot(2), snapshot(8)], [[worse]] * 3)
+        self.assertNotIn(worse, snapshot(16))
+        snapshot(0)
+        self.assertNotIn(worse, snapshot(8, at='11:58'))
+
+    def test_transport_only_doorbells_raise_no_busy_advisory(self):
+        import importlib
+        observations = importlib.import_module(self.m.coordinator_advisories.__globals__['__package__'] + '.host_observations')
+        active = {'app': {'node':'app','thread':'fixture-thread','run':'fixture-run','status':'active',
+                          'started':self.now.timestamp()-1500,'queued':None}}
+        self.doorbell('a', 0, 5, 10)
+        with mock.patch.object(observations,'host_coordinator_runs',return_value=active):
+            self.assertEqual(self.m.coordinator_advisories(self.inst), [])
+            self.doorbell('a', 0, 5, 900)
+            self.assertEqual(sorted(i['kind'] for i in self.m.coordinator_advisories(self.inst)),
+                             ['coordinator-busy', 'coordinator-queue'])
+
     def test_fresh_host_snapshot_count_overrides_native_doorbells(self):
         self.doorbell('a', 0, 6, 900)
         self.assertEqual(len(self.m.coordinator_advisories(self.inst)), 1)
