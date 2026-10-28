@@ -1940,15 +1940,16 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
         # latched advice stays visible; final usage is a cached observation.
         u = _m_spend.live_usage(inst, n, r)
         budget = _m_spend.job_budget(n, r)
-        context = _m_reminders.job_advice_context(inst, n, r) if structured else None
-        observations.append((r, u, budget, context))
+        observations.append((r, u, budget))
     if not observations:
         return []
     # Parse once per observation, and publish all advice with one transaction.
-    # Transcript discovery and job Git observations never hold the lifecycle lock.
+    # Transcript discovery and budget reads never hold the lifecycle lock.
+    # Job contexts retain the existing lazy read, only when advice needs them.
     with ExitStack() as stack:
         try:
-            data = stack.enter_context(_m_reminders.lifecycle_store(inst, readonly=readonly or not structured))
+            data = stack.enter_context(_m_reminders.lifecycle_store(
+                inst, readonly=readonly or not structured, usage_only=not structured))
         except (OSError, ValueError):
             if structured:
                 raise
@@ -1958,7 +1959,7 @@ def runaway_jobs(inst, n, structured=False, readonly=False):
 
 def _runaway_jobs_observed(inst, n, j, observations, structured, readonly, lifecycle_data):
     out = []
-    for r, u, b, context in observations:
+    for r, u, b in observations:
         why = {}
         if j["median_hours"] is not None and r["age_h"] > 2 * j["median_hours"]:
             why['median-age'] = f"open {r['age_h']} h, over twice the median of {j['median_hours']} h"
@@ -1981,7 +1982,7 @@ def _runaway_jobs_observed(inst, n, j, observations, structured, readonly, lifec
             why['subagent-share'] = f"sub-agents spent {round(100 * u['sub_share'])}% of its tokens"
         if structured:
             out.extend(_m_reminders.latch_job_advice(inst, n, r, why, readonly=readonly,
-                                                    lifecycle_data=lifecycle_data, context=context))
+                                                    lifecycle_data=lifecycle_data))
         elif why:
             out.append(_m_guard.redact(f"job {r['Job']}: " + "; ".join(why.values()), _m_guard.never_terms(n)))
     return out

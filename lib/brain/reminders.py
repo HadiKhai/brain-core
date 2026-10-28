@@ -58,12 +58,15 @@ def lifecycle_read(inst):
 
 
 @contextlib.contextmanager
-def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None):
+def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None, usage_only=False):
     """Serialize scans with updates; publishing pins the actual private directory."""
     from . import ui_readmodel
     view = ui_readmodel.projection(inst.root)
+    if usage_only and not readonly:
+        raise ValueError('usage-only lifecycle reads must be read-only')
     if readonly or view is not None:
-        data = (view.store(inst.root / '.brain/wake/lifecycle.json', lambda: lifecycle_read(inst))
+        select = (lambda data: {'usage': data['usage']}) if usage_only else None
+        data = (view.store(inst.root / '.brain/wake/lifecycle.json', lambda: lifecycle_read(inst), select=select)
                 if view else lifecycle_read(inst))
         yield data
         return
@@ -362,12 +365,12 @@ def job_advice_context(inst, n, row):
             'merged_tip': local.get('tip') if local.get('merged') else None}
 
 
-def latch_job_advice(inst, n, row, conditions, readonly=False, *, lifecycle_data=None, context=None):
+def latch_job_advice(inst, n, row, conditions, readonly=False, *, lifecycle_data=None):
     """Keep each first crossing open until a successful rebrief, even if medians move."""
     if lifecycle_data is None:
         with lifecycle_store(inst, readonly=readonly) as data:
             return latch_job_advice(inst, n, row, conditions, readonly=readonly,
-                                    lifecycle_data=data, context=context)
+                                    lifecycle_data=data)
     key = _m_jobs.digest([n['id'], _m_jobs.job_key(row)])
     data = lifecycle_data
     advice = data.setdefault('advice', {})
@@ -386,8 +389,7 @@ def latch_job_advice(inst, n, row, conditions, readonly=False, *, lifecycle_data
     for code, text in conditions.items():
         record['conditions'].setdefault(code, text)
     advice[key] = record
-    if context is None:
-        context = job_advice_context(inst, n, row)
+    context = job_advice_context(inst, n, row)
     previous = record.get('context_episode')
     if previous is not None and not re.fullmatch(r'[0-9a-f]{24}', str(previous)):
         raise ValueError('invalid job advice context episode')

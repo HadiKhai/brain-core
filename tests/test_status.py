@@ -2654,11 +2654,11 @@ class RunawayLifecycleBatch(Scenario):
 
     def test_source_observations_precede_lock_and_next_call_reads_new_baseline(self):
         original = self.m.lifecycle_store
-        inside = [False]
+        inside, entered = [False], [False]
         @contextlib.contextmanager
         def observed_store(*args, **kwargs):
             with original(*args, **kwargs) as data:
-                inside[0] = True
+                inside[0] = entered[0] = True
                 try:
                     yield data
                 finally:
@@ -2666,14 +2666,15 @@ class RunawayLifecycleBatch(Scenario):
         def usage(*args):
             self.assertFalse(inside[0], 'transcript discovery holds lifecycle lock')
             return dict(self.usage)
-        def context(*args):
-            self.assertFalse(inside[0], 'job Git observation holds lifecycle lock')
-            return dict(self.context)
+        def budget(*args):
+            self.assertFalse(inside[0], 'budget read holds lifecycle lock')
+            return {'tokens': 100, 'hours': None}
         with mock.patch.object(self.m, 'lifecycle_store', side_effect=observed_store), \
                 mock.patch.object(self.m, 'live_usage', side_effect=usage), \
-                mock.patch.object(self.m, 'job_advice_context', side_effect=context):
+                mock.patch.object(self.m, 'job_budget', side_effect=budget):
             first = self.m.runaway_jobs(self.inst, self.node, structured=True)
             self.assertEqual(len(first), 6)
+            self.assertTrue(entered[0])
         # A delivered rebrief resets advice and establishes fresh round counters.
         with original(self.inst) as data:
             data['advice'] = {}
@@ -2697,6 +2698,25 @@ class RunawayLifecycleBatch(Scenario):
         self.assertEqual(reads.call_count, 1)
         publishes.assert_not_called()
         self.assertEqual(path.read_bytes() if path.exists() else None, before)
+
+    def test_jobs_without_conditions_or_advice_do_not_read_context(self):
+        self.usage.update(processed=50, compactions=0)
+        with mock.patch.object(self.m, 'job_advice_context', side_effect=AssertionError('unused job context')):
+            self.assertEqual(self.m.runaway_jobs(self.inst, self.node, structured=True), [])
+
+    def test_projected_attention_selects_only_usage_without_mutating_snapshot(self):
+        view_module = importlib.import_module('.ui_readmodel', self.m._owners['job_round_usage'].__package__)
+        with self.m.lifecycle_store(self.inst) as data:
+            data['advice'] = {'unrelated': {'payload': 'retained'}}
+        with view_module.observe(self.inst) as view:
+            with mock.patch.object(view, 'store', wraps=view.store) as stores:
+                warnings = self.m.runaway_jobs(self.inst, self.node)
+            self.assertEqual(len(warnings), 3)
+            self.assertEqual(stores.call_count, 1)
+            select = stores.call_args.kwargs['select']
+            self.assertEqual(select({'usage': {}, 'advice': {'unrelated': {}}}), {'usage': {}})
+            held = view.store(self.root / '.brain/wake/lifecycle.json', lambda: self.m.lifecycle_read(self.inst))
+            self.assertEqual(held['advice'], {'unrelated': {'payload': 'retained'}})
 
     def test_corrupt_ledger_keeps_usage_unavailable_and_is_not_overwritten(self):
         path = self.root / '.brain/wake/lifecycle.json'
