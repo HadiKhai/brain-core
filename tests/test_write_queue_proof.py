@@ -247,6 +247,24 @@ class WriteQueueProof(unittest.TestCase):
         self.assertEqual(report['refresh']['gate'], 'FAIL')
         self.assertEqual(report['refresh']['causes'], {'refresh failed': 1})
 
+    def test_successful_caller_refresh_never_hides_unmatched_internal_failure(self):
+        failed = self.event('status --refresh', call_id='failed', cause='refresh failed')
+        failed['data']['success'] = False
+        passed = self.event('status --refresh', kind='proof_call', call_id='passed', exit_code=0)
+        report = self.analyze([failed, passed])['refresh']
+        self.assertEqual((report['count'], report['nonzero_exits'], report['gate']), (2, 1, 'FAIL'))
+
+    def test_matched_refresh_is_counted_once_and_preserves_worst_outcome(self):
+        internal = self.event('status --refresh', call_id='same')
+        caller = self.event('status --refresh', kind='proof_call', call_id='same', exit_code=0)
+        report = self.analyze([internal, caller])['refresh']
+        self.assertEqual((report['count'], report['gate']), (1, 'PASS'))
+        internal['data']['success'] = False
+        report = self.analyze([internal, caller])['refresh']
+        self.assertEqual((report['count'], report['nonzero_exits'], report['gate']), (1, 1, 'FAIL'))
+        internal['data']['success'] = None
+        self.assertEqual(self.analyze([internal, caller])['refresh']['gate'], 'UNKNOWN')
+
 
 class WriteQueueDriver(unittest.TestCase):
     def test_execute_journals_only_its_n_submissions_and_refuses_existing_output(self):

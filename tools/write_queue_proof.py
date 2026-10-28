@@ -120,7 +120,7 @@ def queue_snapshot(folder, selected, attempted=None):
                                ('PASS' if selected and not blocked else 'UNKNOWN'))
 
 
-def global_failures(internal, calls):
+def observation_groups(internal, calls):
     """Join only unambiguous call identities; retries are distinct invocations."""
     groups = [[row] for row in internal]
     internal_ids = Counter(r.get('request_id') for r in internal)
@@ -147,6 +147,11 @@ def global_failures(internal, calls):
         else:
             groups[match].append(row)
             used.add(match)
+    return groups
+
+
+def global_failures(internal, calls):
+    groups = observation_groups(internal, calls)
     confirmed, unknown, with_wait = 0, 0, 0
     incomplete = False
     for group in groups:
@@ -231,12 +236,18 @@ def analyze(paths, queue, start, end, now=None):
                                              and r.get('success') is True and r.get('exit_code') == 0
                                              for r in whole) else 'UNKNOWN'))
         families[name] = stats
-    # Whole-process outcomes supersede internal refresh samples in this series.
-    refresh = [r for r in calls if family(r) == 'status --refresh']
-    refresh_source = 'launch_to_exit'
-    if not refresh:
-        refresh = [r for r in internal if family(r) == 'status --refresh']
-        refresh_source = 'internal'
+    refresh_internal = [r for r in internal if family(r) == 'status --refresh']
+    refresh_calls = [r for r in calls if family(r) == 'status --refresh']
+    refresh = []
+    for group in observation_groups(refresh_internal, refresh_calls):
+        # Use caller duration when matched, but preserve every failure/unknown
+        # outcome. An unrelated caller never replaces an internal invocation.
+        merged = dict(group[-1])
+        failed = [r for r in group if r.get('success') is False or r.get('exit_code') not in (None, 0)]
+        merged['success'] = False if failed else (True if all(r.get('success') is True for r in group) else None)
+        if failed:
+            merged['cause'] = next((r['cause'] for r in failed if r.get('cause')), 'unknown')
+        refresh.append(merged)
     q = queue_snapshot(queue, accepted, attempted)
     completed = Counter(r.get('call_id') for r in calls)
     unfinished = [r.get('call_id') for r in starts if completed[r.get('call_id')] != 1]
@@ -249,7 +260,8 @@ def analyze(paths, queue, start, end, now=None):
                          else 'COLLECTED', unfinished_calls=unfinished, unbound_acceptances=unbound,
                 families=families, observed_commands={k: summary(v) for k, v in sorted(observed.items())},
                 global_lock_failures=global_failures(internal, calls),
-                refresh=dict(**summary(refresh), source=refresh_source,
+                refresh=dict(**summary(refresh), source='merged_internal_and_caller',
+                             internal_count=len(refresh_internal), caller_count=len(refresh_calls),
                              gate='FAIL' if summary(refresh)['nonzero_exits'] else
                              ('PASS' if refresh and all(r.get('success') is True for r in refresh) else 'UNKNOWN')),
                 queue=q, errors=errors,

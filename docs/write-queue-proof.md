@@ -80,6 +80,8 @@ call IDs (or unique request IDs and matching family) count once; ambiguous retry
 matches remain separate. The adapter allows these field names to change in one
 place when the producer instrumentation is committed. Failed calls with positive
 wait are reported as suspected, never invented as confirmed lock failures.
+Refresh outcomes use the same identity join and retain every unmatched invocation;
+matched observations count once and preserve any failure or unknown outcome.
 
 UNKNOWN is not a pass. This phase-one harness does not establish contention
 overlap, application effects, five-minute drain capacity or restart recovery.
