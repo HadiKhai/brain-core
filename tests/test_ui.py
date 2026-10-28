@@ -1254,7 +1254,6 @@ ui_json.ui_json_background(root, '[]')
         box.update(error='', request=2, checked=1)
         self.assertTrue(self.m.ui_loading(box, now=140)['refreshing'])
 
-    @unittest.skip('quarantined: UI subprocess-entry 0.5s event wait failed in n16 full; unchanged isolated rerun passed')
     def test_server_publishes_real_partial_state_then_the_unchanged_full_state(self):
         import http.server
         import urllib.request
@@ -1267,13 +1266,17 @@ ui_json.ui_json_background(root, '[]')
         def server(*args, **kwargs):
             value = real_server(*args, **kwargs)
             servers.append(value)
-            ready.set()
+            serve = value.serve_forever
+            def serve_ready():
+                # The server record and initialization worker exist at this point.
+                ready.set()
+                serve()
+            value.serve_forever = serve_ready
             return value
         def slowed(args, *a, **kw):
             if args[0] == "git":
                 entered.set()
-                if not release.wait(2):
-                    raise RuntimeError("subprocess fixture was not released")
+                release.wait()
             return real_run(args, *a, **kw)
         def run():
             try:
@@ -1290,18 +1293,22 @@ ui_json.ui_json_background(root, '[]')
                  mock.patch.object(http.server, "ThreadingHTTPServer", side_effect=server), \
                  mock.patch.object(subprocess, "run", side_effect=slowed), \
                  contextlib.redirect_stdout(io.StringIO()):
-                start = time.monotonic()
+                deadline = time.monotonic() + 5
                 thread = threading.Thread(target=run, daemon=True)
                 thread.start()
                 stream = None
                 try:
-                    self.assertTrue(ready.wait(0.5), "server waited for the slow subprocess layer")
-                    self.assertTrue(entered.wait(0.5))
+                    self.assertTrue(ready.wait(max(0, deadline - time.monotonic())),
+                                    "server waited for the slow subprocess layer")
+                    self.assertTrue(entered.wait(max(0, deadline - time.monotonic())),
+                                    "initialization did not reach the subprocess layer")
+                    self.assertFalse(release.is_set())
                     port = servers[0].server_address[1]
                     record = json.loads((root / '.brain/ui-servers' / (str(port) + '.json')).read_text())
                     base = 'http://127.0.0.1:' + str(port)
                     def get(path):
                         return urllib.request.urlopen(base + path + '?k=' + record['key'], timeout=2)
+                    start = time.monotonic()
                     with get('/api/state') as response:
                         self.assertEqual(response.headers['X-Brain-UI-Version'], '1')
                         first = json.load(response)

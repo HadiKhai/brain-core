@@ -3941,3 +3941,18 @@ view is receipted current.
 while the view is pending. Its output stays exactly the native receipt JSON; an
 invalid view is reported by that receipt's `view: invalid`, not by an extra line.
 Old receipts without a view field were maintained synchronously.
+
+## 2026-10-28: Synchronize concurrent test fixtures at publication boundaries
+
+The runner fixture publishes its daemon PID by atomic rename after writing the
+contents, so observing the final path also guarantees a complete PID. Admission
+policy repair uses the injected pause callback after queue publication rather
+than replacing the shared time module's sleep function, which subprocess polling
+can call while the queue lock is held.
+
+The UI fixture signals readiness when the server enters its serving loop, after
+its discovery record and initialization worker exist. A bounded startup deadline
+allows worker scheduling, while an explicit release event keeps subprocess work
+blocked until the partial state and event stream have been checked. The existing
+one-second partial-response assertion measures the ready server's response; full
+state equality and all runner/admission assertions remain required.

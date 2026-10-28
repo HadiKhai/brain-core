@@ -567,7 +567,6 @@ raise SystemExit(result)
                 with m.machine_queue() as q:
                     self.assertEqual(q.rows, [])
 
-    @unittest.skip('quarantined: PID file creation can precede its contents; unchanged isolated rerun passed')
     def test_runner_publication_barrier_and_daemon_reclamation(self):
         m = self.m
         root, home, wt = _test_verify.WorkerReadyPackets.job(self)
@@ -617,7 +616,9 @@ raise SystemExit(result)
                 "'gate':os.environ['BRAIN_GATE_FD'], 'node':os.environ['BRAIN_GATE_NODE']}))\n"
                 "pid=os.fork()\n"
                 "if pid == 0:\n os.close(0); os.close(1); os.close(2); time.sleep(30); os._exit(0)\n"
-                "Path(" + repr(str(daemon_file)) + ").write_text(str(pid))\n"
+                "published=Path(" + repr(str(daemon_file)) + ")\n"
+                "pending=published.with_suffix('.pending')\n"
+                "pending.write_text(str(pid)); os.replace(pending,published)\n"
                 "while not Path(" + repr(str(finish)) + ").exists(): time.sleep(.01)\n")
         command = "exec " + shlex.quote(sys.executable) + " -c " + shlex.quote(code)
         proc = subprocess.Popen([sys.executable, str(script), str(CORE / "bin/brain"), str(root), str(wt),
@@ -913,7 +914,6 @@ raise SystemExit(result)
                 self.assertEqual([r['state'] for r in json.loads(state.read_text())['transitions']], ['open'])
                 self.assertEqual((root / "inbox.md").read_bytes(), before_inbox)
 
-    @unittest.skip('quarantined: global sleep mock can re-enter fixture machine lock during subprocess polling; unchanged isolated rerun passed')
     def test_invalid_policy_preserves_diagnostics_and_fails_closed_for_admission(self):
         m = self.m
         root = self.init("oak")
@@ -933,11 +933,11 @@ raise SystemExit(result)
                 self.assertEqual(q.rows[0]["state"], "queued")
                 seen.append(q.rows[0]["token"])
             (m.machine_dir() / "machine-care.json").write_text("{}")
-        # The global sleep mock can also intercept subprocess.run's ps polling before
-        # machine_wait publishes its row. This test owns policy repair, not OS identity.
+        # Repair only at admission's pause point, after its queue lock is released.
+        # Patching the shared time module also intercepts subprocess polling.
         with mock.patch.object(m, 'process_stamp', return_value='fixture-policy-owner'), \
-                mock.patch.object(m.time, "sleep", side_effect=repair), contextlib.redirect_stdout(io.StringIO()) as out:
-            token = m.machine_wait("verify")
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            token = m.machine_wait("verify", pause=repair)
         self.assertEqual(seen, [token])
         self.assertIn("policy invalid", out.getvalue())
         m.machine_release(token)
