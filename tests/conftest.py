@@ -172,7 +172,10 @@ class CompletedResults:
             self.stream.flush()
         terminal = self.config.pluginmanager.getplugin('terminalreporter')
         if terminal is not None:
-            terminal.write_line('test-result: ' + line)
+            # Pytest's progress writer can leave a percentage or status letter
+            # on the current line without setting currentfspath. Force a real
+            # newline so every native event has an unambiguous record boundary.
+            terminal.write_line('\ntest-result: ' + line)
             terminal.flush()
 
     def pytest_sessionstart(self, session):
@@ -183,7 +186,7 @@ class CompletedResults:
 
     def pytest_runtest_logreport(self, report):
         phase = dict(event='phase', nodeid=report.nodeid, when=report.when,
-                     outcome=report.outcome, duration=report.duration)
+                     outcome=report.outcome, duration=report.duration, source_path=report.location[0])
         if report.failed:
             phase['longrepr'] = str(report.longrepr)
         self.emit(phase)
@@ -193,7 +196,7 @@ class CompletedResults:
             outcome = ('failed' if any(p['outcome'] == 'failed' for p in phases) else
                        'skipped' if any(p['outcome'] == 'skipped' for p in phases) else 'passed')
             self.emit(dict(event='completed', nodeid=report.nodeid, outcome=outcome,
-                           duration=sum(p['duration'] for p in phases)))
+                           duration=sum(p['duration'] for p in phases), source_path=report.location[0]))
             del self.pending[report.nodeid]
 
     def pytest_sessionfinish(self, session, exitstatus):

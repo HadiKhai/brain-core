@@ -157,7 +157,7 @@ def writes(a):
         return a.action in ("add", "set", "backfill", "sync", "event", "requirement-add")
     if name == 'cmd_proposals':
         return bool(getattr(a, 'approve_all', False))
-    if name in ('cmd_full_run', 'cmd_spec_run', 'cmd_gate'):
+    if name in ('cmd_full_run', 'cmd_spec_run', 'cmd_gate', 'cmd_full_isolate', 'cmd_full_quarantine'):
         return False  # native execution owns short locks and machine admission
     if name == 'cmd_land_check':
         return False  # the explicit runner takes short owned locks around execution
@@ -653,6 +653,12 @@ def _main():
         opt("--jobs", nargs="+", help="explicit job order (space or comma separated); all must be ready"))
     cmd("full-run", _Command("full_gate", "cmd_full_run"), "run the native full gate and retain exact-candidate evidence without publishing completion", "id",
         opt("--branch", required=True), opt("--reviews", required=True, type=int))
+    cmd("full-isolate", _Command("full_disposition", "cmd_full_isolate"),
+        "rerun exactly one failed native test on its unchanged red-gate head", "id",
+        opt("--branch", required=True), opt("--full-receipt", required=True), opt("--test", required=True))
+    cmd("full-quarantine", _Command("full_disposition", "cmd_full_quarantine"),
+        "record skip-only quarantine landing evidence while preserving the original red full result", "id",
+        opt("--branch", required=True), opt("--file", required=True, help="JSON with full_receipt and quarantines"))
     gate = cmd("gate", _Command("full_gate", "cmd_gate"), "run the per-change readiness gate; --train or --nightly forces complete verification", "id",
         opt("--branch", required=True), opt("--reviews", required=True, type=int))
     gate_mode = gate.add_mutually_exclusive_group()

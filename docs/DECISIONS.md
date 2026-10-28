@@ -3832,3 +3832,26 @@ replaced the first fixture's ownership map while its host-identity mock cleanup
 was still registered, so the ready/not-ready subcases restored the wrong module.
 The fixture correction preserves every verdict assertion and changes no runtime
 queue behavior.
+
+## 2026-10-28: Preserve red full gates through explicit quarantine dispositions
+
+A native full-run receipt retains nonzero results and independent private log
+snapshots; it does not publish readiness. A separate disposition can authorize
+landing only its exact quarantine head while preserving the original full exit
+status and verified head. Receipt adoption and every readiness read validate the
+hash-bound original red receipt, each isolated receipt and log, the current job,
+configuration, integration base, input and port contexts, and tracking tasks.
+This evidence never emits a successful full-verification fact or becomes a green
+packet reusable for later commits.
+
+The initial supported quarantine format is one direct child commit containing
+only reasoned `unittest.skip` decorators on precisely the failed methods, plus a
+plain `unittest` import if needed. Git file modes and paths must remain ordinary
+modified test files; an AST comparison retains every assertion and other code.
+Native pytest completion events carry their source paths so compatibility
+collectors can identify the actual method definitions. Unsupported selectors,
+commands or incomplete inventories refuse disposition. Isolated runs preserve
+supported pytest gate options while removing parallelism and replacing the
+collection target with exactly one failure; their complete native inventory must
+contain that one passing test. Each quarantine opens an idempotent repair task
+before a disposition can be published.

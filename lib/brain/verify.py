@@ -214,7 +214,8 @@ def ready_state(inst, n, branch, train=False, display=False):
     if key is None:
         return _ready_state(inst, n, branch, train, display)
     previous = values.get(job)
-    if previous is None or previous[0] != key:
+    disposition = previous and (previous[1].get('packet') or {}).get('full_disposition')
+    if previous is None or previous[0] != key or disposition:
         result = _ready_state(inst, n, branch, train, display)
         values[job] = (key, result)
     else:
@@ -319,8 +320,10 @@ def _ready_state(inst, n, branch, train=False, display=False, advisory=False):
             if packet.get("inputs") != verify_inputs(n, w, files):  # every readiness reader comes through here
                 reasons.append(verify_input_reason(n, read_verify_input_files(n, packet), files))
         verify = n["fm"].get("verify", "").strip()
+        from . import full_gate as _m_full_gate
+        disposed = _m_full_gate.disposition_packet_valid(inst, n, branch, packet, head, main)
         if not verify or packet.get("verify_command") != verify or type(packet.get("verify_result")) is not int \
-                or packet["verify_result"] != 0:
+                or (packet["verify_result"] != 0 and not disposed) or (packet.get('full_disposition') and not disposed):
             reasons.append("node verify missing, changed or failed")
         if not verification_config_valid(n, packet):
             reasons.append('per-change/full verification configuration changed; hand back again')
@@ -1010,7 +1013,7 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
         try:
             packet = _m_full_gate.adopt_full_receipt(inst, n, branch, full_receipt, head, main,
                                                    inputs, port_context, snap, reviews)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, StopIteration, SyntaxError):
             return None, ['full receipt missing, changed, failed or stale; run full-run on this exact candidate']
         preview_reasons = _m_preview.validate_ready_preview(inst, n, branch, head, packet)
         if preview_reasons:

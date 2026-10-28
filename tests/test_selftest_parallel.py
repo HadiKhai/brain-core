@@ -238,6 +238,11 @@ class ParallelSelftest(Scenario):
         result = subprocess.run(command, cwd=folder, env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         rows = [json.loads(line) for line in (folder / 'results.jsonl').read_text().splitlines()]
+        native_stdout = [json.loads(line[len('test-result: '):]) for line in result.stdout.splitlines()
+                         if line.startswith('test-result: ')]
+        self.assertEqual(native_stdout, rows)
+        self.assertTrue(all(row['source_path'] == 'test_sample.py' for row in rows
+                            if row['event'] in ('phase', 'completed')))
         outcomes = {row['nodeid']: row['outcome'] for row in rows if row['event'] == 'completed'}
         self.assertEqual(outcomes, {'test_sample.py::test_setup': 'failed',
                                     'test_sample.py::test_teardown': 'failed',
