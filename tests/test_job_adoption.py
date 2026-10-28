@@ -45,6 +45,7 @@ class JobAdoption(Scenario):
         self.assertIn('already', self.adopt())
 
     def test_coordinator_thread_and_rebinding_are_refused(self):
+        self.assertIn('exactly one --thread', self.adopt('--thread', 'another-worker', ok=False))
         self.b(self.root, 'set', 'app', 'coordinator=fixture-worker')
         self.adopt(ok=False)
         self.assertNotIn('job/palette', (self.root / '.brain/local.json').read_text())

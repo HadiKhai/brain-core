@@ -45,6 +45,8 @@ def settlement_export(test, root, node, branch=None, key=None, all_closed=False)
             workers = n['local'].get('workers', {})
             if workers.get(module.job_key(row)):
                 identities.update(module.thread_reference_ids(workers[module.job_key(row)]))
+            for reference in n['local'].get('retired_workers', {}).get(module.job_key(row), []):
+                identities.update(module.thread_reference_ids(reference))
             for work in module.active_work(n, include_closed=True):
                 name = work[0].replace('`','').split()
                 if name and name[0] == row['Job'] and work[1] not in ('', '-', '—'):
@@ -1032,6 +1034,70 @@ class Measures(Scenario):
 
 
 class ThreadSettlement(AutonomyProject):
+    def bound_job(self):
+        r, home, wt = self.project()
+        row = self.row()
+        ledger = self.ledger(r, [row])
+        module = core_loader.SourceFileLoader('settle_safety', str(CORE / 'bin/brain')).load_module()
+        key = module.job_key(row)
+        self.b(r, 'set', 'app', 'worker:' + key + '=fixture-replacement')
+        local = r / '.brain/local.json'
+        data = json.loads(local.read_text())
+        data['nodes']['app']['retired_workers'] = {key: ['fixture-worker']}
+        local.write_text(json.dumps(data))
+        return r, ledger, key
+
+    def test_settle_prints_exact_bound_calls_without_writing(self):
+        r, ledger, key = self.bound_job()
+        before = {p: p.read_bytes() for p in r.rglob('*') if p.is_file() and '.git' not in p.parts}
+        out = self.b(r, 'settle', 'app', '--job', key)
+        calls = [json.loads(line.removeprefix('t3_thread_organize ')) for line in out.splitlines()
+                 if line.startswith('t3_thread_organize ')]
+        self.assertEqual(calls, [{'action': 'settle', 'threadId': 'fixture-replacement'},
+                                 {'action': 'settle', 'threadId': 'fixture-worker'}])
+        self.assertIn('settlesWhenTurnEnds', out)
+        self.assertIn('settled=true', out)
+        self.assertEqual(before, {p: p.read_bytes() for p in r.rglob('*') if p.is_file() and '.git' not in p.parts})
+
+    def test_settle_refuses_coordinators_open_jobs_and_ambiguous_ownership(self):
+        r, ledger, key = self.bound_job()
+        self.b(r, 'set', 'root', 'coordinator=fixture-worker')
+        out = self.b(r, 'settle', 'app', '--job', key, ok=False)
+        self.assertNotIn('t3_thread_organize {', out)
+        self.b(r, 'set', 'root', 'coordinator=fixture-coordinator')
+        self.ledger(r, [self.row(), self.row('job-open', ended='')])
+        module = core_loader.SourceFileLoader('settle_open', str(CORE / 'bin/brain')).load_module()
+        self.b(r, 'set', 'app', 'worker:' + module.job_key(self.row('job-open', ended='')) + '=fixture-worker')
+        self.b(r, 'settle', 'app', '--job', key, ok=False)
+        self.b(r, 'settle', 'app', '--job', module.job_key(self.row('job-open', ended='')), ok=False)
+        self.b(r, 'settle', 'app', '--job', 'missing-key', ok=False)
+        self.ledger(r, [self.row(), {**self.row(), 'Started': '2026-01-02T10:00+00:00'}])
+        status = r / 'nodes/app/status.md'
+        status.write_text(status.read_text() + '\n## Active work\n\n| branch | thread | PR | state |\n'
+                          '| --- | --- | --- | --- |\n| job-old | legacy-worker | - | merged |\n')
+        self.b(r, 'settle', 'app', '--job', key, ok=False)
+
+    def test_settled_requires_each_thread_before_any_write(self):
+        r, ledger, key = self.bound_job()
+        path = settlement_export(self, r, 'app', branch='job-old')
+        before = ledger.read_bytes()
+        flags = ('--branch', 'job-old', '--settled', '--attestation-file', path)
+        for threads in ((), ('fixture-worker',), ('fixture-worker', 'fixture-replacement', 'extra'),
+                        ('fixture-worker', 'fixture-worker', 'fixture-replacement')):
+            with self.subTest(threads=threads):
+                self.b(r, 'jobs', 'app', *flags, *[p for t in threads for p in ('--thread', t)], ok=False)
+                self.assertEqual(ledger.read_bytes(), before)
+                self.assertFalse((r / 'nodes/app/job-settlements').exists())
+        evidence = json.loads(Path(path).read_text())
+        missing = json.loads(json.dumps(evidence))
+        missing['jobs'][0]['threads'] = [t for t in missing['jobs'][0]['threads'] if t['threadId'] != 'fixture-worker']
+        Path(path).write_text(json.dumps(missing))
+        self.b(r, 'jobs', 'app', *flags, '--thread', 'fixture-replacement', ok=False)
+        self.assertEqual(ledger.read_bytes(), before)
+        Path(path).write_text(json.dumps(evidence))
+        self.b(r, 'jobs', 'app', *flags, '--thread', 'fixture-worker', '--thread', 'fixture-replacement')
+        self.assertNotEqual(ledger.read_bytes(), before)
+
     def ledger(self, r, rows, node="app", version="v3"):
         cols = ["Job", "Started", "Ended", "Outcome", "Reviews", "Hours", "Settled", "Future field"]
         path = r / "nodes" / node / "job-ledger.md"
@@ -1188,7 +1254,7 @@ class ThreadSettlement(AutonomyProject):
 
     def assert_checklist(self, out):
         for expected in ("Threads to settle", "brain-job:", "parentThreadId", "running or waiting",
-                         "pending requests", "Never settle coordinators", "open jobs", "--settled"):
+                         "pending requests", "Never settle coordinators", "open jobs", "--settled", "--thread", "brain settle"):
             self.assertIn(expected, out)
 
     def test_rm_and_prune_print_checklist_and_closed_worker_reference(self):
@@ -1212,7 +1278,7 @@ class ThreadSettlement(AutonomyProject):
                 self.assert_checklist(out)
                 self.assertIn("fixture-worker", out)
                 self.assertEqual(next(i for i in self.due(r) if i["kind"] == "unsettled-threads")["count"], 1)
-                self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-a"), "--branch", "job-a", "--settled")
+                self.b(r, "jobs", "app", "--attestation-file", settlement_export(self, r, 'app', branch="job-a"), "--branch", "job-a", "--settled", "--thread", "fixture-worker")
                 self.assertNotIn("unsettled-threads", [i["kind"] for i in self.due(r)])
                 # New job on the same branch must start unsettled and cannot be attested while open.
                 self.b(r, "wt", "add", "app", "job-a")

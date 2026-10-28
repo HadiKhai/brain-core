@@ -1289,7 +1289,8 @@ class EventViews(Scenario):
         self.b(r, 'jobs', 'app', '--branch', 'job-one', '--close', '--reason', 'fixture complete')
         self.assertIn('| job-one | fixture-thread | #12 | closed |', st.read_text())
         self.assertIn('fixture-thread', self.b(r, 'jobs', 'app', '--branch', 'job-one'))
-        self.b(r, 'jobs', 'app', '--branch', 'job-one', '--settled', '--attestation-file', settlement_export(self, r, 'app', branch='job-one'))
+        self.b(r, 'jobs', 'app', '--branch', 'job-one', '--settled', '--thread', 'fixture-thread',
+               '--attestation-file', settlement_export(self, r, 'app', branch='job-one'))
         self.assertNotIn('| job-one |', st.read_text())
 
     def test_projection_preserves_bound_source_states_over_completed_ledger(self):

@@ -625,6 +625,8 @@ class SettlementDocsHelp(unittest.TestCase):
             for command in commands:
                 with self.subTest(document=name, command=command):
                     self.assertIn('--attestation-file', command)
+                    if name != 'CHANGES.md':  # Historical release entries keep their original contract.
+                        self.assertIn('--thread', command)
         for name in ('roles/coordinator.md', 'skills/home-job/SKILL.md'):
             text = (CORE / name).read_text()
             self.assertIn('version 1', text)
@@ -633,13 +635,21 @@ class SettlementDocsHelp(unittest.TestCase):
 
     def test_jobs_help_describes_settlement_export_and_selection(self):
         result = subprocess.run([sys.executable, str(CORE / 'bin/brain'), 'jobs', '--help'],
-                                cwd=CORE, capture_output=True, text=True)
+                                cwd=CORE, env={**os.environ, 'BRAIN_NO_REEXEC': '1'}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         help_text = ' '.join(result.stdout.split())
         for clause in ('--settled', '--all-closed', '--attestation-file',
                        'fresh version 1 coordinator export',
-                       'exhaustive per-job/thread/project coverage', '--job-key'):
+                       'exhaustive per-job/thread/project coverage', '--job-key',
+                       '--thread', 'repeat for every confirmed settled thread'):
             self.assertIn(clause, help_text)
+
+    def test_t3_settlement_guide_has_explicit_target_and_self_recovery(self):
+        text = (CORE / 'adapters/hosts/t3.md').read_text()
+        for clause in ('Never omit', '`threadIds` field', '`settlesWhenTurnEnds`',
+                       'action="unsettle" threadId="<your exact ID>"', 'settled=true',
+                       'brain settle <node> --job <key>', 'one `--thread <id>`'):
+            self.assertIn(clause, text)
 
 
 class EntryPoints(Scenario):

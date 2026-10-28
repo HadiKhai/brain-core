@@ -184,7 +184,8 @@ minutes, `project_ids` covering bound host/home projects, exhaustive
 `coverage: {"project": true, "nested": true, "complete": true}`, and exactly the selected
 `jobs`. Each job has `job_key` and `threads`; every thread has singular `threadId`, matching
 `job_key`, terminal `state`, `settled: true`, and `pending_requests: []`. See the host adapter
-for terminal states and nested coverage. Pass it with `jobs --settled --attestation-file F`;
+for terminal states and nested coverage. Pass it with `jobs --settled --attestation-file F --thread T`,
+repeating `--thread T` for every exported thread;
 `--all-closed` requires the same exhaustive evidence. This records coordinator-supplied
 observations rather than independent live host verification, and core never settles host threads.
 
@@ -605,7 +606,7 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain queue run <id> --once [--request-id ID]` | run one request through the native verifier; `--request-id ID --recover` explicitly reconciles proven local ownership |
 | `brain jobs <id> --live` | read-only JSON joining ledger, hand-back, active attempt, recorded queue position/owner and next action; host activity unknown |
 | `brain jobs <id> --branch B --close [--reason "..."]` | close a manual landing with main SHA, or explicitly close parked work with a reason; retain resources |
-| `brain jobs <id> --branch B --settled --attestation-file F` | validate fresh exhaustive per-thread coordinator evidence before recording settlement; no host call |
+| `brain jobs <id> --branch B --settled --attestation-file F --thread T` | repeat `--thread T` for every exported thread; validate fresh exhaustive per-thread coordinator evidence before recording settlement; no host call |
 | `brain dispatch [--limit 50] [--node-limit 200]` | read-only bounded plan of explicit asks and their node targets; empty scan is silent |
 | `brain ready <id> --branch B` | compare the worker’s packet with branch and current local main before merge |
 | `brain jobs <id> --branch B --contract-file F` | a job's contract: outcome, what the worker may do without asking, stop conditions, consent, done; optionally a budget |

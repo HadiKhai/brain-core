@@ -15,6 +15,17 @@ After upgrading: legacy token-only restart episodes clear when a known
 compaction count is below three. Unknown legacy evidence stays pending until
 it can be classified or the job is relaunched or closed. Existing compaction
 episodes keep their identity; no worker is stopped by reading due.
+## 2026-10-28: Explicit thread settlement targets and attestations
+
+`brain settle <node> --job <key>` prints one exact `t3_thread_organize` call per
+bound thread and refuses coordinator or open-job thread IDs; it never calls the host.
+Never omit `threadId` or send `threadIds`. A `settlesWhenTurnEnds` reply means you
+settled yourself: unsettle at once. Confirm `settled=true` per target in a fresh host list.
+After upgrading, record settlement with `brain jobs <node> --branch <branch> --settled --attestation-file <export.json> --thread <id>`,
+repeating `--thread <id>` for every exported thread, including bound workers,
+reviewers and descendants. The same per-thread flags are required for `--all-closed`.
+Fresh exhaustive export validation remains required; missing bound threads refuse
+before evidence or ledger writes. See the host adapter for discovery and safety checks.
 
 ## 2026-10-28: Pinned core releases and own-node upgrades
 

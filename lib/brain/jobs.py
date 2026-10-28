@@ -1044,7 +1044,9 @@ def print_thread_checklist(n, row):
             "no thread is running or waiting, and no pending requests remain. "
             "Never settle coordinators or threads belonging to open jobs. "
             "Check every candidate through the host; unknown state means leave unsettled.\n"
-            + f"  After every job thread is safely settled: brain jobs {n['id']} --branch {row['Job']} --job-key {job_key(row)} --settled --attestation-file <fresh-export.json>")
+            + f"  Print bound per-thread host calls: brain settle {n['id']} --job {job_key(row)}\n"
+            + f"  After every job thread is safely settled: brain jobs {n['id']} --branch {row['Job']} --job-key {job_key(row)} --settled --attestation-file <fresh-export.json> --thread <id>\n"
+            + "  Repeat --thread <id> for every exported thread, including reviewers and descendants.")
     print(_m_guard.redact(text, _m_guard.never_terms(n)))
 
 
@@ -1800,13 +1802,16 @@ def cmd_jobs(a):
             _m_common.die('--rebind needs a node and a branch, without other job updates')
         from . import worktrees
         return worktrees.rebind_job(_m_nodes.load(), a.id, a.rebind)
-    if getattr(a, 'thread', None) is not None:
+    if getattr(a, 'thread', None) is not None and not a.settled:
         if (not (a.id and a.branch and a.start) or any((a.close, a.settled, a.all_closed,
                 getattr(a, 'live', False), a.lessons is not None, a.switch is not None,
                 a.contract_file, a.usage_file, a.job_key, getattr(a, 'reason', None),
                 getattr(a, 'attestation_file', None)))):
             _m_common.die('adoption refused: --thread requires --start, a node and --branch, without other updates')
         from . import job_adoption as _m_adoption
+        if len(a.thread) != 1:
+            _m_common.die('adoption refused: --start requires exactly one --thread')
+        a.thread = a.thread[0]
         return _m_adoption.cmd_adopt_job(a)
     inst = _m_nodes.load()
     if getattr(a, 'attestation_file', None) and not a.settled:
@@ -1858,6 +1863,9 @@ def cmd_jobs(a):
                 _m_common.die('unreadable settlement attestation; no ledger rows changed')
             try:
                 identities = _m_settlement.validate_settlement_attestation(inst, n, targets, evidence)
+                attested = getattr(a, 'thread', None) or []
+                if len(set(attested)) != len(attested) or set(attested) != set(identities):
+                    _m_common.die('--settled requires one --thread <id> for every exported thread; no ledger rows changed')
             except ValueError as error:
                 _m_common.die(str(error))
             # Preserve the supplied observations separately from the coordinator ledger.

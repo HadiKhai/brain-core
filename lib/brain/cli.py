@@ -117,7 +117,7 @@ def reexec_into_instance_core():
 
 
 # Commands that change nothing in the instance: they never wait for the lock.
-READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_stale", "cmd_ui", "cmd_guard",
+READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_settle", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_due", "cmd_inbox", "cmd_timings", "cmd_time", "cmd_index", "cmd_scorecard", "cmd_introspect",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
@@ -435,7 +435,7 @@ def _main():
         opt("id", nargs="?"), opt("--branch"), opt("--job-key", help="select one ledger job when a branch was reused"), opt("--lessons", help="learned item ids, or none: <reason>"),
         opt("--switch", help="record provider switch: old -> new: reason"),
         opt("--start", action="store_true", help="coordinator: start an import study or adopt an existing --thread"),
-        opt("--thread", help="with --start/--branch: adopt an existing worker and its linked Git checkout"),
+        opt("--thread", action="append", help="with --start: adopt one worker; with --settled: repeat for every confirmed settled thread"),
         opt("--rebind", metavar="BRANCH", help="restore a missing ledger row for a registered existing worktree branch"),
         opt("--close", action="store_true", help="coordinator: close a processed study, manually landed job, or parked job with --reason"),
         opt("--reason", help="one-line reason to explicitly close parked work"),
@@ -447,6 +447,8 @@ def _main():
             ", ".join(f"## {f}" for f in _m_common.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
+    cmd("settle", _Command("settlement", "cmd_settle"), "print exact host calls for a closed job; never calls the host", "id",
+        opt("--job", required=True, help="exact ledger job key printed by brain jobs"))
     cmd("lifecycle", _Command("host_lifecycle", "cmd_lifecycle"), "execute a native host lifecycle action with fresh ownership checks",
         opt("action", choices=("settle", "launch", "restart", "maintain", "rotate", "accept-rotation")), "id",
         opt("--job-key", help="restart only this exact open ledger job"),

@@ -203,6 +203,7 @@ class BatchLand(Scenario):
         out = self.b(root, 'land', 'a', '--jobs', 'one', 'two')
         self.assertIn('merged 2 job(s); 1 full verify run(s)', out)
         self.assertIn('settlement pending', out)
+        self.assertIn('repeat --thread for every exported thread', out)
         m, inst, n = self.module(root)
         rows = m.read_jobs(n)
         self.assertEqual([r['Outcome'] for r in rows], ['merged', 'merged'])
@@ -221,7 +222,11 @@ class BatchLand(Scenario):
             self.assertEqual(self.ledger(), before)
         with open(path, 'w') as f:
             json.dump(evidence, f)
-        out = self.b(root, 'jobs', 'a', '--settled', '--all-closed', '--attestation-file', path)
+        self.b(root, 'jobs', 'a', '--settled', '--all-closed', '--attestation-file', path,
+               '--thread', 'worker-one', ok=False)
+        self.assertEqual(self.ledger(), before)
+        out = self.b(root, 'jobs', 'a', '--settled', '--all-closed', '--attestation-file', path,
+                     '--thread', 'worker-one', '--thread', 'worker-two')
         self.assertIn('coordinator-supplied evidence; no independent live host verification', out)
         self.assertTrue(all(r['Settled'] for r in m.read_jobs(n)))
 

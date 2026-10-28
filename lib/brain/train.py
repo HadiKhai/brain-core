@@ -244,7 +244,8 @@ def finish(inst, n, path, data):
     if data['accepted']:
         print('train: settlement pending; inspect and settle through the host, then record '
               'fresh evidence with brain jobs ' + n['id'] +
-              ' --settled --all-closed --attestation-file <fresh-export.json>. '
+              ' --settled --all-closed --attestation-file <fresh-export.json> --thread <id> '
+              '(repeat --thread for every exported thread). '
               'Printed instructions perform no host settlement.')
 
 

@@ -234,7 +234,8 @@ class ReviewRegressions(Scenario):
         self.assertIn(link, path.read_text())
         self.b(root, 'jobs', 'app', '--branch', 'job-one', '--close', '--reason', 'fixture complete')
         self.assertIn(link, path.read_text())
-        self.b(root, 'jobs', 'app', '--branch', 'job-one', '--settled', '--attestation-file', settlement_export(self, root, 'app', branch='job-one'))
+        self.b(root, 'jobs', 'app', '--branch', 'job-one', '--settled', '--thread', 'fixture-1',
+               '--attestation-file', settlement_export(self, root, 'app', branch='job-one'))
         self.assertNotIn('| job-one |', path.read_text())
 
     def test_m8_first_indexed_write_does_not_rewrite_unrelated_nodes(self):
