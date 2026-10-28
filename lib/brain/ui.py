@@ -92,15 +92,8 @@ def ui_meters(inst, state, cache):
     nodes = []
     now = inst.now_dt()
     for n in state['nodes']:
-        worktrees = [{**w, 'listening': ui_listening(w) if w.get('live', True) else []} for w in n['worktrees']]
-        jobs = {**n['jobs'], 'open': [{**r, 'age_h': round(_m_status.elapsed(inst.parse_time(r['Started']), now) / 3600, 1)}
-                                    for r in n['jobs']['open']]}
-        def age(row):
-            since = inst.parse_time(row.get('since'))
-            return {**row, 'age_hours': round(max(0, _m_status.elapsed(since, now) / 3600), 2)} if since else row
-        refreshed = {**n, 'worktrees': worktrees, 'jobs': jobs, 'work': [age(r) for r in n['work']],
-                     'blocked_metadata': [age(r) for r in n.get('blocked_metadata', [])],
-                     'updated_ago': _m_status.ago(inst, inst.parse_time(n['updated']))}
+        refreshed = ui_row_meters(inst, n, now)
+        worktrees = refreshed['worktrees']
         nodes.append(refreshed)
         if n['id'] in cache.nodes:
             key, _, commits = cache.nodes[n['id']]
@@ -112,6 +105,19 @@ def ui_meters(inst, state, cache):
                 cache.worktrees[job] = (key, {**old, 'listening': w['listening']})
     return {**state, 'nodes': nodes, 'brain': {**state['brain'], 'now': now.isoformat(timespec='seconds')},
             'machine': _m_machine.machine_state(inst), **_m_usage.usage_ui_state(inst)}
+
+
+def ui_row_meters(inst, n, now):
+    """One node row's clock and socket readings; its fingerprinted inputs stay as observed."""
+    worktrees = [{**w, 'listening': ui_listening(w) if w.get('live', True) else []} for w in n['worktrees']]
+    jobs = {**n['jobs'], 'open': [{**r, 'age_h': round(_m_status.elapsed(inst.parse_time(r['Started']), now) / 3600, 1)}
+                                for r in n['jobs']['open']]}
+    def age(row):
+        since = inst.parse_time(row.get('since'))
+        return {**row, 'age_hours': round(max(0, _m_status.elapsed(since, now) / 3600), 2)} if since else row
+    return {**n, 'worktrees': worktrees, 'jobs': jobs, 'work': [age(r) for r in n['work']],
+            'blocked_metadata': [age(r) for r in n.get('blocked_metadata', [])],
+            'updated_ago': _m_status.ago(inst, inst.parse_time(n['updated']))}
 
 
 def ui_worktree(inst, home, branch, w, n=None):
@@ -328,7 +334,9 @@ class UIInstance(_m_instance.Instance):
 @_m_ui_readmodel.read_view
 def ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=None, cache=None, node_keys=None):
     readiness = _m_verify.display_cache(cache.ready, cache.worktree_keys) if cache is not None else contextlib.nullcontext()
-    usage = _m_spend.live_usage_snapshot(cache.usage, cache.usage_revision) if cache is not None else contextlib.nullcontext()
+    # Only the live server's revisioned usage aggregate selects snapshot usage reads.
+    usage = (_m_spend.live_usage_snapshot(cache.usage, cache.usage_revision)
+             if cache is not None and cache.usage_revision is not None else contextlib.nullcontext())
     jobs = _m_status.local_job_snapshot(cache.local_jobs, cache.worktree_keys) if cache is not None else _m_status.local_job_snapshot()
     with _m_common.git_read_snapshot(), _m_spend.spend_read_only(), readiness, usage, jobs:
         return _ui_observation(_ui_state(inst, problems, scan, spend_budget, machine_spend, cache, node_keys))
@@ -336,9 +344,7 @@ def ui_state(inst, problems=None, scan=None, spend_budget=None, machine_spend=No
 
 def _ui_observation(state, partial=False):
     """Captured view metadata; active transport progress belongs to /api/loading."""
-    return {**state,
-            'loading': {'filling_in': partial, 'age_seconds': 0, 'refreshing': False,
-                        'failed': False, 'version': 1},
+    return {**{k: v for k, v in state.items() if k != 'loading'},
             'source': {'kind': 'live', 'built_at': state['brain']['now'],
                        'age_seconds': 0, 'observation_only': True},
             'readiness': ('unknown' if partial else
@@ -1297,7 +1303,8 @@ def cmd_ui(a):
                 cond.wait_for(lambda: not box['partial'] and box['checked'] >= requested, timeout=4)
 
     def publish(st, complete=False, privacy=None):
-        st = {**st, "review": {"enabled": reviews.enabled}}
+        # The snapshot carries its own metadata (source, readiness); progress is /api/loading's.
+        st = {**{k: v for k, v in st.items() if k != 'loading'}, "review": {"enabled": reviews.enabled}}
         with cond:
             if complete:
                 box['metadata_ready'] = True

@@ -15,6 +15,7 @@ import time
 from . import common as _m_common
 
 _m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_spend = _m_common.LazyModule(__package__, 'spend')
 _m_ui_readmodel = _m_common.LazyModule(__package__, 'ui_readmodel')
@@ -36,7 +37,7 @@ def ui_json_complete(record):
     return (isinstance(state, dict) and isinstance(state.get('brain'), dict)
             and isinstance(state.get('nodes'), list) and type(state.get('problems')) is int
             and not state['brain'].get('filling_in') and ui_fill.complete(state)
-            and isinstance(state.get('loading'), dict) and not state['loading'].get('filling_in')
+            and 'loading' not in state
             and (state.get('spend') is None or isinstance(state.get('spend'), dict))
             and type(record.get('built_at')) in (int, float)
             and math.isfinite(record['built_at']) and record['built_at'] >= 0)
@@ -151,17 +152,85 @@ def ui_json_request_fill(inst, scan):
         return False
 
 
+def ui_json_fingerprint(value):
+    """A stable digest of metadata stamps; sets are ordered, never str()-ed."""
+    def canonical(item):
+        if isinstance(item, (set, frozenset)):
+            return sorted((canonical(v) for v in item), key=lambda v: json.dumps(v, sort_keys=True))
+        if isinstance(item, (list, tuple)):
+            return [canonical(v) for v in item]
+        if isinstance(item, dict):
+            return {str(k): canonical(v) for k, v in item.items()}
+        return item if item is None or isinstance(item, (str, int, float, bool)) else str(item)
+    return hashlib.sha256(json.dumps(canonical(value), sort_keys=True).encode()).hexdigest()
+
+
+def ui_json_views(inst, model, privacy, inputs, signature, cache):
+    """Load persisted node views whose input fingerprint still matches; others rebuild."""
+    keys = {nid: ui_json_fingerprint(key) for nid, key in inputs.node_keys(inst, signature).items()}
+    record = model.read('node-views')
+    if not isinstance(record, dict) or record.get('binding') != model.binding(privacy):
+        return keys, set()
+    hits = set()
+    for nid, entry in (record.get('nodes') or {}).items():
+        if (isinstance(entry, dict) and nid in keys and entry.get('key') == keys[nid]
+                and isinstance(entry.get('row'), dict) and isinstance(entry.get('commits'), list)):
+            cache.nodes[nid] = (keys[nid], entry['row'], entry['commits'])
+            hits.add(nid)
+    return keys, hits
+
+
+def ui_json_view_usage(inst, state, hits):
+    """Job usage reads transcripts, outside node fingerprints: re-read it for reused views."""
+    from . import ui
+    now = inst.now_dt()
+    nodes = {n['id']: n for n in inst.nodes()}
+    for index, row in enumerate(state['nodes']):
+        n = nodes.get(row['id'])
+        if row['id'] not in hits or n is None:
+            continue
+        terms = _m_guard.never_terms(n)
+        hide = lambda t: _m_guard.redact(t, terms) if terms and isinstance(t, str) else t  # noqa: E731
+        ledger = [r for r in (_m_jobs.read_jobs(n) or []) if not r.get('Ended')]
+        opened = []
+        for shown in row['jobs']['open']:
+            match = [r for r in ledger if all(hide(r.get(k, '')) == shown.get(k, '') for k in _m_jobs.JOB_COLS)]
+            if len(match) != 1:
+                return False  # the ledger moved under its fingerprint: rebuild, never guess
+            used = _m_spend.live_usage(inst, n, match[0])
+            opened.append({**shown, 'usage': _m_spend.spend_summary(used, terms) if used and used['sessions'] else None,
+                           'round_usage': ui.ui_round_usage(inst, n, match[0], used)})
+        state['nodes'][index] = ui.ui_row_meters(inst, {**row, 'jobs': {**row['jobs'], 'open': opened}}, now)
+    return True
+
+
 def ui_json_build(inst, scan, code, cache=True):
     from . import check, ui
     before = ui_json_privacy_key(inst, code)
+    model = _m_ui_readmodel.ReadModel(inst, code)
+    # Node views persist under their input fingerprint; a mismatch rebuilds that view only.
+    inputs = ui.UIInputs(inst)
+    signature = inputs.signature()
+    views = ui.UIStateCache()
+    views.worktree_keys = inputs.worktree_keys(inst, signature)
+    keys, hits = ui_json_views(inst, model, before, inputs, signature, views)
     # The full guard/check and recorded readiness observations stay unchanged.
     # No exclusive instance lock surrounds this computation or cache publication.
     with _m_ui_readmodel.cache_writes(cache):
-        state = ui.ui_state(inst, len(check.collect_problems(inst)[0]), scan, spend_budget=None)
+        problems = len(check.collect_problems(inst)[0])
+        state = ui.ui_state(inst, problems, scan, spend_budget=None, cache=views, node_keys=keys)
+        if hits and not ui_json_view_usage(inst, state, hits):
+            views.nodes.clear()
+            state = ui.ui_state(inst, problems, scan, spend_budget=None, cache=views, node_keys=keys)
     current = ui.UIInstance(inst.root)
     if before != ui_json_privacy_key(current, code):
         return None  # do not publish text observed under an obsolete visibility policy
+    unclocked = lambda rows: tuple(row for row in rows if row[0] != 'clock')  # noqa: E731
+    if cache and unclocked(inputs.signature()) == unclocked(signature):  # unchanged while observed
+        model.write('node-views', {'binding': model.binding(before), 'nodes': {
+            nid: {'key': key, 'row': row, 'commits': commits} for nid, (key, row, commits) in views.nodes.items()}})
     state['brain'].pop('filling_in', None)
+    state.pop('loading', None)  # snapshot metadata only; progress belongs to /api/loading
     record = {'version': 1, 'privacy': before, 'built_at': time.time(), 'state': state,
               'generation': secrets.token_hex(16),
               'selection': hashlib.sha256(json.dumps(scan, sort_keys=True).encode()).hexdigest()}
