@@ -3650,6 +3650,7 @@ while the flock is held: a surviving child still keeps the gate busy, and a
 dead owner with a held descriptor is still reported. The mark is best-effort
 and takes no instance lock, so unwinding never waits on or fails over it.
 Gate phase writes take the instance lock by root, as gate paths do.
+
 ## 2026-10-27: Reuse ledger parsing and batch terminal handback display reads
 
 Ledger observations still read the current file on every call. A bounded cache
@@ -3776,3 +3777,20 @@ unchanged tasks; the batch cannot invalidate its own completion evidence.
 A process ID in even a partial process inventory is sufficient to retain the
 checkout as busy. A nonzero inventory exit cannot discard that positive evidence;
 an empty unsuccessful inventory still retains the checkout as unavailable.
+
+## 2026-10-28: Supervise one write applier per instance
+
+`brain machine queue-service install|uninstall` prints the service definition by
+default; `--yes` changes launchd on macOS or the systemd user manager on Linux.
+The service keeps the existing independent applier lease while idle, invokes the
+queue's established application/recovery protocol, and stands down if another
+applier owns that lease. Both supervisors restart it after exit, including when
+a fallback drainer temporarily owns the lease. Producers retain their existing
+self-starting fallback; no service installation is required for queue admission.
+
+`brain machine queue-service status` returns JSON; ordinary machine/status views
+show service health, pending count, oldest request age and the latest applied
+receipt. Process birth identity and the held lease distinguish a running service
+from retained metadata. Corrupt or unreadable evidence stays unknown. Queue
+timings separate enqueue, apply, backlog age and receipt wait without recording
+request payloads or acquiring the instance writer lock for telemetry.

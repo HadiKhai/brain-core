@@ -1688,6 +1688,8 @@ def cmd_status(a):
                     view = events.events_view_without_current(inst, n) if events.source(inst, n) == "events" else None
                     refresh_status(inst, n, view)
         print(f"{n['id']:<28} {status_line(n)}")
+    from . import write_queue_service
+    print(write_queue_service.queue_summary(inst))
 
 
 def cmd_show(a):

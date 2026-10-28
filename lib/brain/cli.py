@@ -176,7 +176,7 @@ def writes(a):
     if name == 'cmd_gate_queue' and a.action in ('wait', 'drain'):
         return False  # receipt reads / applier-owned per-record transactions
     if name == "cmd_machine":
-        return a.action == "sample" or a.yes
+        return a.action != "queue-service" and (a.action == "sample" or a.yes)
     if name == "cmd_status":
         return a.refresh or getattr(a, "project", False)
     if name == "cmd_inbox":
@@ -221,10 +221,16 @@ def main():
         if root:
             from . import handback_queue
             try:
-                if handback_queue.fast_intent(candidate, root):
-                    return
+                with _m_timings.queue_phase(root, 'enqueue'):
+                    if handback_queue.fast_intent(candidate, root):
+                        return
             except (OSError, ValueError) as error:
                 _m_common.die(str(error))
+    # A long-lived applier must not retain command profiler/accounting caches.
+    if sys.argv[1:] == ['machine', 'queue-service', 'run']:
+        from . import write_queue_service
+        write_queue_service.run_service(_m_instance.Instance(_m_nodes.find_root()))
+        return
     with _m_timings.command(persist=False), _m_timings.phase('dispatch'):
         _main()
 
@@ -722,7 +728,7 @@ def _main():
     cmd("heavy", _Command("machine", "cmd_heavy"), "wait until the machine admits new heavy work",
         opt("--node", help="coordinator whose work is waiting (default root)"))
     cmd("machine", _Command("machine", "cmd_machine"), "machine state, sampler and bindings",
-        opt("action", nargs="?", choices=["sample", "install", "uninstall", 'wake-setup']), opt('id', nargs='?'),
+        opt("action", nargs="?", choices=["sample", "install", "uninstall", 'wake-setup', 'queue-service']), opt('id', nargs='?'),
         opt("--yes", action="store_true", help="install/remove the sampler with operator consent"),
         opt("--missing-homes", action="store_true", dest="missing_homes"))
     cmd("brains", _Command("hosts", "cmd_brains"), "the brains on this machine: brain brains [forget <name>]",
@@ -780,6 +786,11 @@ def _main():
         return
     if a.f.__name__ == "cmd_machine" and a.action == "sample":
         a.f(a)  # sampler and watcher each take a short nonblocking instance lock
+        return
+    if a.f.__name__ == 'cmd_gate_queue' and a.action in ('drain', 'wait'):
+        phase = 'apply' if a.action == 'drain' else 'wait'
+        with _m_timings.queue_phase(_m_nodes.find_root(), phase):
+            a.f(a)
         return
     if command_read(a):
         handler = a.f

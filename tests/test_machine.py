@@ -2191,3 +2191,184 @@ class ResourceLeases(unittest.TestCase):
         self.assertEqual(sorted(kind for kind, value in outcomes), ['busy', 'owned'])
         receipt = next(value for kind, value in outcomes if kind == 'owned')
         self.assertTrue(self.m.resource_release(receipt))
+
+
+class WriteQueueService(Scenario):
+    """Service lifecycle checks use private instances and mocked OS installation."""
+    fixture_init_in_process = True
+
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('queue_service_fixture', str(CORE / 'bin/brain')).load_module()
+        self.patch = mock.patch.dict(os.environ, self.env, clear=True)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.root = self.init('fixture')
+        self.inst = self.m.Instance(self.root)
+        self.inst.commit = mock.Mock()
+        self.service = self.m._owners['run_service']
+        self.queue = self.m._owners['submit_intent']
+
+    def submit(self, text):
+        return self.queue.submit_intent(self.inst, dict(kind='inbox', node='root', text=text,
+                                                       at=self.inst.now()), start=False)
+
+    def test_install_is_dry_and_supervision_restarts_without_a_producer(self):
+        for platform in ('darwin', 'linux'):
+            with self.subTest(platform=platform), mock.patch.object(sys, 'platform', platform), \
+                    mock.patch.object(subprocess, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+                self.service.service_control(self.inst, 'install')
+                run.assert_not_called()
+                label, path, payload = self.service.service_spec(self.inst)
+                if platform == 'darwin':
+                    import plistlib
+                    data = plistlib.loads(payload.encode())
+                    self.assertTrue(data['RunAtLoad'])
+                    self.assertTrue(data['KeepAlive'])
+                    self.assertEqual(data['WorkingDirectory'], str(self.root))
+                    self.assertEqual(data['ProgramArguments'][-3:], ['machine', 'queue-service', 'run'])
+                else:
+                    self.assertIn('Restart=always', payload)
+                    self.assertIn('queue-service', payload)
+                    self.assertIn('BRAIN_ROOT=', payload)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()), \
+                contextlib.redirect_stdout(io.StringIO()), mock.patch.object(subprocess, 'run') as run:
+            self.service.service_control(self.inst, 'install', True)
+        run.assert_not_called()
+
+    def test_install_uninstall_and_status_use_an_instance_specific_definition(self):
+        import plistlib
+        with mock.patch.object(sys, 'platform', 'darwin'), \
+                mock.patch.dict(os.environ, {'BRAIN_MACHINE_TESTING': '0'}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            label, path, payload = self.service.service_spec(self.inst)
+            def manager(args, **kwargs):
+                return subprocess.CompletedProcess(args, 113 if args[1] == 'print' and not path.exists() else 0, '', '')
+            with mock.patch.object(subprocess, 'run', side_effect=manager) as run:
+                self.service.service_control(self.inst, 'install', True)
+                self.assertEqual(plistlib.loads(path.read_bytes())['Label'], label)
+                health = self.service.queue_health(self.inst)
+                self.assertTrue(health['installed'])
+                self.assertEqual(health['state'], 'installed')
+                self.service.service_control(self.inst, 'install', True)
+                self.service.service_control(self.inst, 'uninstall', True)
+                self.assertFalse(path.exists())
+                self.assertEqual([c.args[0][1] for c in run.call_args_list],
+                                 ['print', 'bootstrap', 'print', 'bootout', 'bootstrap', 'print', 'bootout'])
+            path.write_text('foreign definition')
+            with self.assertRaisesRegex(ValueError, 'differs'), mock.patch.object(subprocess, 'run') as run:
+                self.service.service_control(self.inst, 'uninstall', True)
+            run.assert_not_called()
+            self.assertEqual(path.read_text(), 'foreign definition')
+
+    def test_double_start_stands_down_and_fallback_keeps_its_lease_protocol(self):
+        fd = self.queue.intent_lease(self.inst)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertFalse(self.service.run_service(self.inst))
+            self.assertIn('standing down', output.getvalue())
+            with mock.patch.object(subprocess, 'Popen') as start:
+                self.queue.start_intent_drainer(self.inst)
+            start.assert_not_called()
+        finally:
+            os.close(fd)
+        with mock.patch.object(subprocess, 'Popen') as start:
+            def child(args, **kwargs):
+                self.assertIn('--lease-fd', args)
+                self.assertIsNone(self.queue.intent_lease(self.inst))
+                self.assertEqual(kwargs['pass_fds'], (int(args[-1]),))
+            start.side_effect = child
+            self.queue.start_intent_drainer(self.inst)
+            start.assert_called_once()
+        fd = self.queue.intent_lease(self.inst)
+        self.assertIsNotNone(fd)
+        os.close(fd)
+
+    def test_service_holds_idle_lease_reloads_and_applies_without_producer_drainer(self):
+        first = self.submit('First service write')
+        stop = threading.Event()
+        waits, roots = [], []
+        construct = self.service._m_instance.Instance
+        def fresh(root):
+            current = construct(root)
+            current.commit = mock.Mock()
+            roots.append(current)
+            return current
+        second = []
+        def idle(interval):
+            health = self.service.queue_health(self.inst)
+            self.assertEqual(health['state'], 'running')
+            self.assertTrue(health['applier_running'])
+            self.assertIsNone(self.queue.intent_lease(self.inst))
+            waits.append(interval)
+            if len(waits) == 1:
+                second.append(self.submit('Arrived while idle'))
+            else:
+                stop.set()
+        with mock.patch.object(stop, 'wait', side_effect=idle), \
+                mock.patch.object(self.service._m_instance, 'Instance', side_effect=fresh), \
+                mock.patch.object(subprocess, 'Popen') as start:
+            self.assertTrue(self.service.run_service(self.inst, stop))
+        start.assert_not_called()
+        self.assertIsNot(roots[0], roots[1])
+        self.assertEqual(self.queue.intent_receipt(self.inst, first['id'])['state'], 'applied')
+        self.assertEqual(self.queue.intent_receipt(self.inst, second[0]['id'])['state'], 'applied')
+        health = self.service.queue_health(self.inst)
+        self.assertEqual(health['pending'], 0)
+        self.assertEqual(health['last_applied']['id'], second[0]['id'])
+        self.assertFalse(health['running'])
+
+    def test_restart_after_failure_retains_request_and_releases_lease(self):
+        request = self.submit('Restarted service write')
+        def failed_drain(inst, fd):
+            os.close(fd)
+            raise RuntimeError('owned failure')
+        with mock.patch.object(self.queue, 'drain_intents', side_effect=failed_drain), \
+                self.assertRaisesRegex(RuntimeError, 'owned failure'):
+            self.service.run_service(self.inst)
+        self.assertEqual(self.queue.intent_read(self.inst, 'service.json')['state'], 'failed')
+        self.assertIsNone(self.queue.intent_receipt(self.inst, request['id']))
+        stop = threading.Event()
+        with mock.patch.object(stop, 'wait', side_effect=lambda _: stop.set()), \
+                mock.patch.object(self.service._m_instance.Instance, 'commit'):
+            self.service.run_service(self.inst, stop)
+        self.assertEqual(self.queue.intent_receipt(self.inst, request['id'])['state'], 'applied')
+        self.assertFalse(self.service.queue_health(self.inst)['failed'])
+
+    def test_health_backlog_and_corruption_are_visible_in_both_views(self):
+        request = self.submit('Backlog health')
+        os.utime(self.queue.intent_path(self.inst, request['id'] + '.request'), (100, 100))
+        with mock.patch.object(time, 'time', return_value=160):
+            health = self.service.queue_health(self.inst)
+        self.assertEqual(health['pending'], 1)
+        self.assertEqual(health['oldest_age_s'], 60)
+        self.assertIsNone(health['last_applied'])
+        args = argparse.Namespace(action=None, missing_homes=False, yes=False)
+        with mock.patch.object(self.service._m_machine._m_nodes, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_machine(args)
+        self.assertIn('write queue: not installed; pending 1', output.getvalue())
+        args = argparse.Namespace(id=None, refresh=False, from_events=False, project=False)
+        with mock.patch.object(self.service._m_machine._m_nodes, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_status(args)
+        self.assertIn('write queue: not installed; pending 1', output.getvalue())
+        self.queue.intent_store(self.inst, 'blocked', dict(state='blocked'))
+        self.assertEqual(self.service.queue_health(self.inst)['state'], 'failed')
+        self.queue.intent_store(self.inst, 'index', {'broken': True})
+        self.assertEqual(self.service.queue_health(self.inst)['state'], 'unknown')
+
+    def test_queue_timings_separate_phases_and_never_expose_payloads(self):
+        timings = self.service._m_timings
+        for phase in ('enqueue', 'apply', 'wait'):
+            with timings.queue_phase(self.root, phase, backlog_s=12 if phase == 'apply' else None):
+                pass
+        records = [json.loads(line) for line in (self.root / '.brain/timings/events.jsonl').read_text().splitlines()]
+        records = [r['data'] for r in records if r['data'].get('command') == 'queue'][-3:]
+        self.assertEqual([set(r['phases']) for r in records],
+                         [{'queue_enqueue'}, {'queue_apply', 'queue_backlog'}, {'queue_wait'}])
+        self.assertEqual(records[1]['phases']['queue_backlog'], 12)
+        with mock.patch.object(timings, 'queue_phase', wraps=timings.queue_phase), \
+                mock.patch.object(self.queue._m_common, 'directory_target', side_effect=OSError('disk unavailable')):
+            with timings.queue_phase(self.root, 'enqueue'):
+                pass  # telemetry errors cannot change the caller's result

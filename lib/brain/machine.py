@@ -1426,6 +1426,18 @@ def cmd_heavy(a):
 # ---------- machine subscriptions ----------
 def cmd_machine(a):
     inst = _m_nodes.load()
+    if a.action == 'queue-service':
+        from . import write_queue_service
+        action = getattr(a, 'id', None) or 'status'
+        if action in ('install', 'uninstall'):
+            write_queue_service.service_control(inst, action, a.yes)
+        elif action == 'status':
+            print(json.dumps(write_queue_service.queue_health(inst), sort_keys=True))
+        elif action == 'run':
+            write_queue_service.run_service(inst)
+        else:
+            _m_common.die('machine queue-service requires install, uninstall, status or run')
+        return
     if a.action == 'wake-setup':
         if not getattr(a, 'id', None):
             _m_common.die('machine wake-setup requires a target node')
@@ -1479,6 +1491,8 @@ def cmd_machine(a):
                 print(f"{n['id']}\t{n['fm'].get('home_url', 'none')}")
         return
     print(machine_summary(machine_state(inst)))
+    from . import write_queue_service
+    print(write_queue_service.queue_summary(inst))
     print(f"machine: {inst.local['machine']}   bindings: {_m_common.tilde(inst.local_path)} (not in git)")
     print("fallback: " + json.dumps(inst.local.get("fallback", [])))
     name, others = _m_nodes.register(inst.root), [k for k, r in _m_instance.brains_here() if r.resolve() != inst.root.resolve()]
