@@ -19,6 +19,8 @@ _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_reports = _m_common.LazyModule(__package__, 'reports')
 _m_spend = _m_common.LazyModule(__package__, 'spend')
+_m_status = _m_common.LazyModule(__package__, 'status')
+_m_ui_status = _m_common.LazyModule(__package__, 'ui_status')
 _m_ui_readmodel = _m_common.LazyModule(__package__, 'ui_readmodel')
 _m_usage = _m_common.LazyModule(__package__, 'usage')
 _m_verify = _m_common.LazyModule(__package__, 'verify')
@@ -231,8 +233,17 @@ def ui_json_stamps(inst):
         repos[common] = (result.returncode, dict(line.split('\0', 1) for line in result.stdout.splitlines()
                                                  if '\0' in line))
     out, worktrees = {}, {}
+    # A node's tasks may depend on any node's tasks (task_flow.blockers): every view reads them.
+    tasks = []
+    for n in nodes:
+        for directory, dirs, names in os.walk(n['dir'] / 'tasks'):
+            dirs.sort()
+            tasks.extend(stamp(Path(directory) / name) for name in sorted(names))
     for n in nodes:
         files = []
+        for directory, dirs, names in os.walk(root / '.brain/host-questions' / n['id']):  # pending questions
+            dirs.sort()
+            files.extend(stamp(Path(directory) / name) for name in sorted(names))
         for directory, dirs, names in os.walk(n['dir']):
             if Path(directory) == n['dir']:  # a child node has its own views
                 dirs[:] = [d for d in dirs if d != 'nodes' and not (n['dir'] == root and (
@@ -266,7 +277,7 @@ def ui_json_stamps(inst):
         git = [checkout(home) for home, _, _ in homes[n['id']]]
         mine = [r for r in runs or [] if isinstance(r, dict) and r.get('node') == n['id']]
         out[n['id']] = ui_json_fingerprint([shared, json.dumps(n['local'], sort_keys=True, default=str),
-                                            files, git, mine])
+                                            files, git, mine, tasks])
         # A worktree row and its readiness depend on its own checkout, its job and
         # integration refs and the node's policy files, not on status or inbox edits.
         policy = [stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt', _m_jobs.JOBS_FILE)]
@@ -364,7 +375,11 @@ def ui_json_view_usage(inst, state, hits):
             used = _m_spend.live_usage(inst, n, match[0])
             opened.append({**shown, 'usage': _m_spend.spend_summary(used, terms) if used and used['sessions'] else None,
                            'round_usage': ui.ui_round_usage(inst, n, match[0], used)})
-        state['nodes'][index] = ui.ui_row_meters(inst, {**row, 'jobs': {**row['jobs'], 'open': opened}}, now)
+        # Clock-derived fields are recomputed: daily buckets and blocked escalation move with time.
+        jobs = {**row['jobs'], 'open': opened, 'throughput': _m_jobs.daily_throughput(
+            inst, n, [r for r in (_m_jobs.read_jobs(n) or []) if r.get('Outcome') != 'external'])}
+        blocked = [_m_ui_status.ui_blocked_metadata(inst, n, t) for t in _m_status.status_section(n, 'blocked')]
+        state['nodes'][index] = ui.ui_row_meters(inst, {**row, 'jobs': jobs, 'blocked_metadata': blocked}, now)
     return True
 
 
@@ -372,39 +387,59 @@ def ui_json_build(inst, scan, code, cache=True):
     from . import check, status, ui, verify
     before = ui_json_privacy_key(inst, code)
     model = _m_ui_readmodel.ReadModel(inst, code)
+    started = time.time()  # the snapshot is dated by when its oldest reading began
     # Node views persist under their own node stamp; a changed stamp rebuilds that view only.
     keys, worktree_keys = ui_json_stamps(inst)
     views = ui.UIStateCache()
-    record, hits = ui_json_views(inst, model, before, keys, worktree_keys, views)
-    # Integrity reads every node: its count reuses only an all-nodes stamp match.
-    everything = ui_json_fingerprint(sorted(keys.items()))
-    problems_entry = record.get('problems') if cache else None
-    due_entries = record.get('due') if cache and isinstance(record.get('due'), dict) else {}
+    views.worktree_keys = worktree_keys
+    record, hits = ui_json_views(inst, model, before, keys, worktree_keys, views) if cache else ({}, set())
+    problems_entry = record.get('problems')
+    due_entries = record.get('due') if isinstance(record.get('due'), dict) else {}
     due_memo = {nid: entry['items'] for nid, entry in due_entries.items()
                 if nid in keys and ui_json_clocked(entry, keys[nid]) and isinstance(entry.get('items'), dict)}
-    due_seen = {}
+    due_at = {nid: due_entries[nid]['at'] for nid in due_memo}
+    problems = problems_key = None
     # The full guard/check and recorded readiness observations stay unchanged.
     # No exclusive instance lock surrounds this computation or cache publication.
-    with _m_ui_readmodel.cache_writes(cache), status.due_memo(due_memo, due_seen):
-        if ui_json_clocked(problems_entry, everything) and type(problems_entry.get('count')) is int:
-            problems, problems_at = problems_entry['count'], problems_entry['at']
-        else:
-            problems, problems_at = len(check.collect_problems(inst)[0]), time.time()
-        state = ui.ui_state(inst, problems, scan, spend_budget=None, cache=views, node_keys=keys)
-        if hits and not ui_json_view_usage(inst, state, hits):
-            views.nodes.clear()
+    for attempt in range(2):
+        # Integrity reads every node: its count reuses only an all-nodes stamp match.
+        everything = ui_json_fingerprint(sorted(keys.items()))
+        due_seen = {}
+        with _m_ui_readmodel.cache_writes(cache), status.due_memo(due_memo, due_seen):
+            if ui_json_clocked(problems_entry, everything) and type(problems_entry.get('count')) is int:
+                problems, problems_at, problems_key = problems_entry['count'], problems_entry['at'], everything
+            elif problems is None:  # a second pass reuses this build's count but never publishes it
+                problems, problems_at, problems_key = len(check.collect_problems(inst)[0]), time.time(), everything
             state = ui.ui_state(inst, problems, scan, spend_budget=None, cache=views, node_keys=keys)
-    current = ui.UIInstance(inst.root)
-    if before != ui_json_privacy_key(current, code):
-        return None  # do not publish text observed under an obsolete visibility policy
-    if cache:
-        # Publish only what was observed under a stamp that still holds after the build.
+            if hits and not ui_json_view_usage(inst, state, hits):
+                views.nodes.clear()
+                state = ui.ui_state(inst, problems, scan, spend_budget=None, cache=views, node_keys=keys)
+        current = ui.UIInstance(inst.root)
+        if before != ui_json_privacy_key(current, code):
+            return None  # do not publish text observed under an obsolete visibility policy
         after, worktrees_after = ui_json_stamps(current)
         held = {nid for nid, key in keys.items() if after.get(nid) == key}
         jobs_held = {job for job, key in worktree_keys.items() if worktrees_after.get(job) == key}
-        due = {nid: {'key': keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else time.time(),
-                     'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
-               for nid in set(due_memo) | set(due_seen) if nid in held}
+        for nid in held:
+            if nid in due_seen:
+                due_memo[nid] = {**due_memo.get(nid, {}), **due_seen[nid]}
+                due_at.setdefault(nid, time.time())
+        if held == set(keys) and jobs_held == set(worktree_keys):
+            break
+        # Something moved while observed: rebuild only the moved views under their new stamps,
+        # once. Held views, worktree rows and readiness are reused from this build.
+        moved = set(keys) - held
+        due_memo = {nid: items for nid, items in due_memo.items() if nid in held}
+        due_at = {nid: at for nid, at in due_at.items() if nid in held}
+        keys, worktree_keys = {**keys, **{nid: after[nid] for nid in after}}, worktrees_after
+        views.worktree_keys = worktree_keys
+        hits = {nid for nid in hits if nid in held}
+        for nid in moved:
+            views.nodes.pop(nid, None)
+    if cache:
+        # Publish only what was observed under a stamp that still held after its pass.
+        due = {nid: {'key': keys[nid], 'at': due_at.get(nid, time.time()), 'items': due_memo[nid]}
+               for nid in due_memo if nid in held}
         model.write('node-views', {
             'binding': model.binding(before),
             'nodes': {nid: {'key': key, 'row': row, 'commits': commits}
@@ -418,10 +453,11 @@ def ui_json_build(inst, scan, code, cache=True):
                       if job in jobs_held and key == worktree_keys[job] and isinstance(result, verify.ReadyStateResult)
                       and not (result.get('packet') or {}).get('full_disposition') and ui_json_plain(dict(result))},
             'due': due,
-            'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)})
+            'problems': ({'key': everything, 'at': problems_at, 'count': problems}
+                         if held == set(keys) and problems_key == everything else None)})
     state['brain'].pop('filling_in', None)
     state.pop('loading', None)  # snapshot metadata only; progress belongs to /api/loading
-    record = {'version': 1, 'privacy': before, 'built_at': time.time(), 'state': state,
+    record = {'version': 1, 'privacy': before, 'built_at': started, 'state': state,
               'generation': secrets.token_hex(16),
               'selection': hashlib.sha256(json.dumps(scan, sort_keys=True).encode()).hexdigest()}
     if cache:

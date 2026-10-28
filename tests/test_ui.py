@@ -164,7 +164,9 @@ class LiveView(Scenario):
             with self.assertRaises(urllib.error.HTTPError) as e:
                 urllib.request.urlopen(url + "api/search?offset=x&k=" + key, timeout=5)
             self.assertEqual(e.exception.code, 400)
-            self.assertEqual(set(state), set(port))  # --json contract and live snapshot agree
+            # --json contract and live snapshot agree; only --json delivery carries its transport
+            # progress, which the live server serves from /api/loading.
+            self.assertEqual(set(state), set(port) - {'loading'})
             first_snapshot = state
 
             req = urllib.request.Request(url + "api/state?k=" + key, headers={"Host": "evil.example"})
@@ -1233,9 +1235,12 @@ ui_json.ui_json_background(root, '[]')
         self.assertTrue(due)
         second, built, problems, due = self.view_builds(root)
         self.assertEqual((built, problems, due), ([], 0, set()))
-        for key in ('nodes', 'due', 'problems'):
+        for key in ('due', 'problems'):
             self.assertEqual(json.dumps(second['state'][key], sort_keys=True),
                              json.dumps(first['state'][key], sort_keys=True))
+        stable = lambda state: [{k: n[k] for k in ('id', 'status', 'inbox', 'tasks', 'reports', 'worktrees')}  # noqa: E731
+                                for n in state['nodes']]  # clock-derived meters are recomputed on reuse
+        self.assertEqual(stable(second['state']), stable(first['state']))
         self.assertNotIn('loading', second['state'])
 
     def test_changed_node_stamp_rebuilds_only_that_nodes_views(self):
@@ -1249,6 +1254,17 @@ ui_json.ui_json_background(root, '[]')
         meadow = next(n for n in record['state']['nodes'] if n['id'] == 'meadow')
         self.assertEqual(meadow['status'], {'Now': 'Meadow moved on.'})
 
+    def test_cross_node_tasks_and_private_questions_are_in_view_stamps(self):
+        root = self.first_paint_root()
+        self.view_builds(root)
+        questions = root / '.brain/host-questions/meadow'
+        questions.mkdir(parents=True)
+        (questions / 'q.json').write_text('{}')
+        self.assertEqual(self.view_builds(root)[1], ['meadow'])
+        (root / 'nodes/meadow/tasks').mkdir()
+        (root / 'nodes/meadow/tasks/.pending').write_text('')  # any task-folder change
+        self.assertEqual(self.view_builds(root)[1], ['meadow', 'root'])  # another node's tasks may block
+
     def test_stamp_changed_mid_build_never_publishes_that_view(self):
         root = self.first_paint_root()
         self.view_builds(root)
@@ -1256,7 +1272,9 @@ ui_json.ui_json_background(root, '[]')
         def edit(n):  # the node moves after its view began reading
             if n['id'] == 'meadow':
                 (root / 'nodes/meadow/status.md').write_text('## Now\nSecond edit, mid-build.\n')
-        self.view_builds(root, during=edit)
+        moved, _, _, _ = self.view_builds(root, during=edit)
+        meadow = next(n for n in moved['state']['nodes'] if n['id'] == 'meadow')
+        self.assertEqual(meadow['status'], {'Now': 'Second edit, mid-build.'})  # the moved view was re-read
         views = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('node-views')
         self.assertEqual(sorted(views['nodes']), ['root'])  # only views whose stamp held are published
         self.assertNotIn('meadow', views['due'])
