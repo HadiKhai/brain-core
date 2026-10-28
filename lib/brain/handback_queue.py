@@ -787,9 +787,7 @@ def cmd_intent_queue(a):
             print(json.dumps(receipt, sort_keys=True))
             if receipt['state'] != 'applied' or receipt.get('exit_code', 0) != 0:
                 raise SystemExit(1)
-            if receipt.get('view') == 'invalid':
-                print('brain: state saved; generated status maintenance needs repair', file=sys.stderr)
-            return
+            return  # an invalid view is reported only by the receipt's own view field
         if receipt and time.monotonic() >= deadline:
             _m_common.die('write applied; generated view pending; retain its ID and wait again')
         if intent_path(inst, 'blocked').exists():

@@ -309,8 +309,8 @@ class HandbackLifecycle(Scenario):
             self.assertFalse(events.read(inst)[-1]['data']['maintenance_ok'])
             self.assertEqual(self.views(queue, inst, requests), ['invalid'] * 2)
             receipt, err = self.wait(m, inst, requests[0])
-            self.assertEqual((receipt['state'], receipt['view']), ('applied', 'invalid'))
-            self.assertIn('needs repair', err)
+            # The native JSON receipt alone reports the invalid view; nothing follows it.
+            self.assertEqual((receipt['state'], receipt['view'], err), ('applied', 'invalid', ''))
             m.drain_intents(inst)  # the next drain retries the refused views
         self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
         self.assertEqual(self.views(queue, inst, requests), ['current'] * 2)

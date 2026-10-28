@@ -3938,5 +3938,6 @@ invalidation without rewriting status files. A pending or invalid receipt
 without that node evidence blocks the queue. A write that invalidated no live
 view is receipted current.
 `queue wait` returns only for a current or invalid view. It refuses at its deadline
-while the view is pending. An invalid view is reported as saved state needing repair.
+while the view is pending. Its output stays exactly the native receipt JSON; an
+invalid view is reported by that receipt's `view: invalid`, not by an extra line.
 Old receipts without a view field were maintained synchronously.
