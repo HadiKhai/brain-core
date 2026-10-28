@@ -5,7 +5,15 @@ import hashlib
 import json
 from pathlib import Path
 
-from . import common, events, guard, instance, jobs, nodes, status, tasks
+from . import common
+
+events = common.LazyModule(__package__, 'events')
+guard = common.LazyModule(__package__, 'guard')
+instance = common.LazyModule(__package__, 'instance')
+jobs = common.LazyModule(__package__, 'jobs')
+nodes = common.LazyModule(__package__, 'nodes')
+status = common.LazyModule(__package__, 'status')
+tasks = common.LazyModule(__package__, 'tasks')
 
 
 def digest(value):

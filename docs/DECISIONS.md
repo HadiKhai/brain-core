@@ -3765,6 +3765,9 @@ paths before inspecting removal candidates. Existing cleanup checks remain in
 force, with a bounded process inventory retaining checkouts used by running
 processes or when that inventory is unavailable.
 
+The plan parser registers without loading execution dependencies. Native helpers
+load lazily when the command runs, preserving lightweight help and startup paths.
+
 A process ID in even a partial process inventory is sufficient to retain the
 checkout as busy. A nonzero inventory exit cannot discard that positive evidence;
 an empty unsuccessful inventory still retains the checkout as unavailable.
