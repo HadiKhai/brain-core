@@ -1280,6 +1280,15 @@ ui_json.ui_json_background(root, '[]')
         self.assertEqual(meadow['status'], {'Now': 'Second edit, mid-build.'})
         self.assertEqual(self.view_builds(root)[1], [])
 
+    def test_wake_lifecycle_change_refreshes_memoized_due_items(self):
+        root = self.first_paint_root()
+        self.view_builds(root)
+        (root / '.brain/wake').mkdir(parents=True, exist_ok=True)
+        (root / '.brain/wake/lifecycle.json').write_text('{}')
+        record, built, _, due = self.view_builds(root)
+        self.assertEqual(built, [])  # node views hold; only due items re-read their lifecycle
+        self.assertEqual(due, {'meadow', 'root'})
+
     def test_inputs_that_keep_moving_deliver_and_save_nothing(self):
         root = self.first_paint_root()
         first = self.view_builds(root)[0]

@@ -488,9 +488,12 @@ def ui_json_attempt(inst, scan, code, cache, before):
     record, hits = ui_json_views(inst, model, before, keys, worktree_keys, views) if cache else ({}, set())
     everything = ui_json_fingerprint(sorted(keys.items()))  # integrity reads every node
     problems_entry = record.get('problems')
+    # Due items also depend on wake lifecycle receipts (answered questions, acknowledgements).
+    lifecycle = ui.UIInputs.stamp(inst.root / '.brain/wake/lifecycle.json')
+    due_keys = {nid: ui_json_fingerprint([key, lifecycle]) for nid, key in keys.items()}
     due_entries = record.get('due') if isinstance(record.get('due'), dict) else {}
     due_memo = {nid: entry['items'] for nid, entry in due_entries.items()
-                if nid in keys and ui_json_clocked(entry, keys[nid]) and isinstance(entry.get('items'), dict)}
+                if nid in keys and ui_json_clocked(entry, due_keys[nid]) and isinstance(entry.get('items'), dict)}
     due_seen = {}
     # The full guard/check and recorded readiness observations stay unchanged.
     # No exclusive instance lock surrounds this computation or cache publication.
@@ -526,7 +529,7 @@ def ui_json_attempt(inst, scan, code, cache, before):
                       if job in jobs_held and key == worktree_keys[job] and job in views.worktrees
                       and isinstance(result, verify.ReadyStateResult)
                       and not (result.get('packet') or {}).get('full_disposition') and ui_json_plain(dict(result))},
-            'due': {nid: {'key': keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else started,
+            'due': {nid: {'key': due_keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else started,
                           'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
                     for nid in set(due_memo) | set(due_seen) if nid in held},
             'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)})
@@ -534,6 +537,8 @@ def ui_json_attempt(inst, scan, code, cache, before):
             ui_json_request_revalidate(current)
     if held != set(keys) or jobs_held != set(worktree_keys):
         return 'moved', None  # never deliver or save an observation whose inputs moved under it
+    if any(time.time() - at >= UI_JSON_WORKTREE_SECONDS for at in views.checked.values()):
+        return 'moved', None  # a reused worktree row aged past its bound: the retry re-reads it
     for row in state['nodes']:  # the dashboard shows how old each bounded worktree reading is
         for w in row.get('worktrees', []):
             if w.get('live', True):
