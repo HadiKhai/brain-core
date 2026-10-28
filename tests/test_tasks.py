@@ -846,6 +846,15 @@ class Tasks(Scenario):
         self.assertEqual(task['status'], 'parked')
         self.assertTrue(task['resume'])
 
+    def test_unvalidated_disposition_marker_does_not_hide_a_failed_handback(self):
+        from brain import jobs
+        self.train_fixture()
+        row = jobs.read_jobs(self.n)[0]
+        tasks.handback_event(self.inst, self.n, row, {
+            'state': 'done', 'at': self.inst.now(), 'ready_reasons': [], 'attempt_id': 'invalid-disposition',
+            'ready': {'verify_result': 1, 'full_disposition': True, 'verify_scope': 'full'}})
+        self.assertEqual(tasks.read_records(self.n)['APP-1']['strikes'], 1)
+
     def test_verified_landed_job_records_main_commit_and_changed_paths(self):
         from brain import jobs, sync
         self.repo(self.root)

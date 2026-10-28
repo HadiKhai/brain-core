@@ -1,9 +1,12 @@
 """Red full gates stay red; narrowly qualified quarantines are separate landing evidence."""
 import ast
 import hashlib
+import io
 import json
 import re
 import shlex
+import subprocess
+import tokenize
 from pathlib import Path
 
 from . import common as _m_common
@@ -174,13 +177,43 @@ def cmd_full_isolate(a):
         data = dict(version=1, scope='isolated', job_key=key, head=head, node=n['id'], branch=a.branch,
                     full_receipt=a.full_receipt, full_receipt_sha256=red_hash, test=a.test,
                     source_test=failures[a.test]['source_test'], command=command, result=result,
-                    inputs=inputs, verify_port_context=port, checked_at=_m_jobs.stamp(inst))
+                    inputs=inputs, verify_port_context=port, verify_lane_env=_m_lanes.lane_environment(env),
+                    checked_at=_m_jobs.stamp(inst))
         identity = _m_full.publish_receipt(n, data, log=log)
     except (OSError, ValueError, KeyError, TypeError, StopIteration) as error:
         _m_common.die('full-isolate refused: ' + str(error))
     print('full-isolate: exit ' + str(result) + '; isolated receipt ' + identity)
     if result:
         raise _m_common.VerdictExit(result)
+
+
+def quarantine_source(raw, filename):
+    """Validate the actual source bytes, including encoding and compiler rules."""
+    try:
+        compile(raw, filename, 'exec', dont_inherit=True)
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(raw).readline)
+        text = raw.decode(encoding)
+        return ast.parse(text, filename=filename), text
+    except (SyntaxError, UnicodeError, LookupError) as error:
+        raise ValueError('quarantine source is not valid Python') from error
+
+
+def without_added_markers(raw, text, markers):
+    """Remove only complete decorator/import lines; preserve every other byte."""
+    lines = re.findall(r'.*?(?:\r\n|\r|\n|$)', text, re.DOTALL)
+    removed = set()
+    for node, decorator in markers:
+        prefix = lines[node.lineno - 1].encode('utf-8')[:node.col_offset]
+        suffix = lines[node.end_lineno - 1].encode('utf-8')[node.end_col_offset:]
+        if ((decorator and (not prefix.endswith(b'@') or prefix[:-1].strip(b' \t')))
+                or (not decorator and prefix.strip()) or suffix.strip()):
+            raise ValueError('quarantine marker must occupy its own lines')
+        span = set(range(node.lineno - 1, node.end_lineno))
+        if removed & span:
+            raise ValueError('quarantine marker lines overlap')
+        removed.update(span)
+    raw_lines = re.findall(rb'.*?(?:\r\n|\r|\n|$)', raw, re.DOTALL)
+    return b''.join(line for index, line in enumerate(raw_lines) if index not in removed)
 
 
 def skip_only(n, red_head, head, quarantines, failures):
@@ -209,8 +242,19 @@ def skip_only(n, red_head, head, quarantines, failures):
     if paths != set(files):
         raise ValueError('quarantine changes more than the failed test source files')
     for filename, methods in files.items():
-        before = ast.parse(git('show', red_head + ':' + filename))
-        after = ast.parse(git('show', head + ':' + filename))
+        def blob(commit):
+            try:
+                result = subprocess.run(['git', '--no-optional-locks', '--no-replace-objects', 'cat-file', 'blob',
+                                         commit + ':' + filename], cwd=home, capture_output=True, timeout=30)
+            except subprocess.TimeoutExpired as error:
+                raise ValueError('quarantine source read timed out') from error
+            if result.returncode:
+                raise ValueError('quarantine source bytes unavailable')
+            return result.stdout
+        original, candidate = blob(red_head), blob(head)
+        before, _ = quarantine_source(original, filename)
+        after, text = quarantine_source(candidate, filename)
+        markers = []
         for cls, method, reason in methods:
             owners = [item for item in after.body if isinstance(item, ast.ClassDef) and item.name == cls]
             functions = [item for owner in owners for item in owner.body
@@ -238,6 +282,7 @@ def skip_only(n, red_head, head, quarantines, failures):
                         and len(d.args) == 1 and isinstance(d.args[0], ast.Constant) and d.args[0].value == reason]
             if len(matching) != 1:
                 raise ValueError('missing native unittest.skip with the recorded reason')
+            markers.append((matching[0], True))
             function.decorator_list.remove(matching[0])
         # A plain unittest import may accompany the newly added decorators.
         had_import = any(isinstance(item, ast.Import) and any(a.name == 'unittest' and a.asname is None
@@ -247,10 +292,13 @@ def skip_only(n, red_head, head, quarantines, failures):
                        and item.names[0].name == 'unittest' and item.names[0].asname is None]
             if len(imports) != 1:
                 raise ValueError('quarantine needs one plain unittest import')
+            markers.append((imports[0], False))
             after.body = [item for item in after.body if not (isinstance(item, ast.Import) and len(item.names) == 1
                           and item.names[0].name == 'unittest' and item.names[0].asname is None)]
         if ast.dump(before, include_attributes=False) != ast.dump(after, include_attributes=False):
             raise ValueError('quarantine changed assertions or other code')
+        if without_added_markers(candidate, text, markers) != original:
+            raise ValueError('quarantine changed non-skip text or source bytes')
 
 
 def validate_disposition(inst, n, branch, data, head, main, inputs, port, require_tasks=True):
@@ -262,6 +310,11 @@ def validate_disposition(inst, n, branch, data, head, main, inputs, port, requir
     red = read_native(n, red_id, 'full', red_hash)
     red_head = red['packet']['head']
     red, failures = red_receipt(inst, n, branch, red_id, red_head, main, inputs, port, red_hash)
+    current_env = _m_lanes.lane_environment(_m_verify.verify_env(n, branch, n['local']['worktrees'][branch]))
+    recorded_env = red['packet'].get('verify_lane_env')
+    _m_lanes.recorded_lane_environment({}, recorded_env)
+    if recorded_env != current_env or data.get('verify_lane_env') != recorded_env:
+        raise ValueError('disposition execution environment changed')
     if data.get('full_receipt_sha256') != red_hash or data.get('job_key') != red['job_key']:
         raise ValueError('original red receipt changed')
     rows = data.get('quarantines')
@@ -282,6 +335,7 @@ def validate_disposition(inst, n, branch, data, head, main, inputs, port, requir
                 or isolated.get('source_test') != failures[row['test']]['source_test']
                 or type(isolated.get('result')) is not int or isolated['result'] != 0
                 or isolated.get('inputs') != inputs or isolated.get('verify_port_context') != port
+                or isolated.get('verify_lane_env') != recorded_env
                 or isolated.get('command') != isolated_command(red['packet']['verify_command'], row['test'])
                 or not inst.parse_time(isolated.get('checked_at'))
                 or isolated.get('log_sha256') != _m_full.log_digest(isolated['log'])):
@@ -312,6 +366,7 @@ def cmd_full_quarantine(a):
         red_id = request['full_receipt']
         data = dict(version=1, scope='disposition', node=n['id'], branch=a.branch, job_key=key,
                     head=head, full_receipt=red_id,
+                    verify_lane_env=_m_lanes.lane_environment(before[-1]),
                     full_receipt_sha256=_m_full.log_digest(_m_full.full_receipt_path(n, red_id)),
                     quarantines=request['quarantines'], checked_at=_m_jobs.stamp(inst))
         for row in data['quarantines']:

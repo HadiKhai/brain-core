@@ -3855,3 +3855,14 @@ supported pytest gate options while removing parallelism and replacing the
 collection target with exactly one failure; their complete native inventory must
 contain that one passing test. Each quarantine opens an idempotent repair task
 before a disposition can be published.
+
+Quarantine validation compiles the original Git blob bytes and candidate bytes,
+then removes only standalone added skip-decorator/import lines and requires all
+remaining bytes to match the original. AST preservation remains an additional
+check. This refuses encoding-cookie changes, unrelated comments, whitespace
+changes and semicolon statements that an AST-only comparison could hide.
+Disposition publication, adoption and readiness also compare the full recorded
+lane environment, including unset values, with the current execution context;
+isolated receipts record that same environment. A validated landing disposition
+moves its linked build task to testing with truthful original-exit-1 evidence,
+without adding a failed-handback strike. Unvalidated markers retain failures.

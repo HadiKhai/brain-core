@@ -45,7 +45,7 @@ class IsolatedDisposition(Scenario):
     fixture_init_in_process = True
     project = test_train.MergeTrain.project
 
-    def prepare(self, isolate=True, compatibility=False, persistent=False):
+    def prepare(self, isolate=True, compatibility=False, persistent=False, linked=False):
         from scenario import CORE
         collector = 'tests/test_brain.py' if compatibility else 'tests/test_sample.py'
         root, home = self.project('python3 -B -m pytest -q -p no:cacheprovider ' + collector)
@@ -61,7 +61,9 @@ class IsolatedDisposition(Scenario):
             (home / 'tests/test_brain.py').write_text('from test_sample import Flakes\n')
         self.git('add', 'tests', cwd=home)
         self.git('commit', '-qm', 'native test fixture', cwd=home)
-        self.b(root, 'wt', 'add', 'a', 'one')
+        if linked:
+            self.b(root, 'task', 'add', 'a', 'TASK-BUILD', '--title', 'Native build fixture', '--status', 'ready')
+        self.b(root, 'wt', 'add', 'a', 'one', *(['--task-id', 'TASK-BUILD'] if linked else []))
         self.wt = self.tmp / 'app-work/worktrees/one'
         self.folder = root / 'nodes/a/full-gates'
         self.b(root, 'full-run', 'a', '--branch', 'one', '--reviews', '1', ok=False)
@@ -100,13 +102,18 @@ class IsolatedDisposition(Scenario):
         return out
 
     def test_red_receipt_and_isolated_passes_adopt_only_the_quarantine_head(self):
-        root, home = self.prepare(compatibility=True)
+        root, home = self.prepare(compatibility=True, linked=True)
         red = json.loads(self.red_bytes)
         self.assertEqual(red['packet']['verify_result'], 1)
         self.b(root, 'handback', 'a', '--branch', 'one', '--state', 'done', '--reviews', '1',
                '--summary', 'Red alone refuses', '--full-receipt', self.red.stem, ok=False)
         self.quarantine()
         disposition = self.disposition()
+        repairs = sorted(p for p in (root / 'nodes/a/tasks').glob('*.md') if p.stem != 'TASK-BUILD')
+        self.b(root, 'task', 'set', 'a', repairs[0].stem, '--status', 'ready')
+        tracking = {p.name: p.read_bytes() for p in repairs}
+        self.disposition()
+        self.assertEqual({p.name: p.read_bytes() for p in repairs}, tracking)
         before = len(list((root / 'nodes/a/job-handbacks').glob('*-verify-*.log')))
         self.b(root, 'handback', 'a', '--branch', 'one', '--state', 'done', '--reviews', '1',
                '--summary', 'Quarantined landing evidence', '--full-receipt', disposition.stem)
@@ -119,8 +126,13 @@ class IsolatedDisposition(Scenario):
         self.assertTrue(packet['full_disposition'])
         self.assertEqual(self.red.read_bytes(), self.red_bytes)
         self.assertEqual(len(list((root / 'nodes/a/job-handbacks').glob('*-verify-*.log'))), before)
-        self.assertEqual(len(list((root / 'nodes/a/tasks').glob('*.md'))), 2)
-        self.assertTrue(all('isolated pass' in p.read_text() for p in (root / 'nodes/a/tasks').glob('*.md')))
+        self.assertEqual(len(list((root / 'nodes/a/tasks').glob('*.md'))), 3)
+        self.assertEqual(len(repairs), 2)
+        self.assertTrue(all('isolated pass' in p.read_text() for p in repairs))
+        build, = json.loads(self.b(root, 'task', 'show', 'a', 'TASK-BUILD', '--json'))
+        self.assertEqual(build['status'], 'testing')
+        self.assertEqual(build['strikes'], 0)
+        self.assertTrue(any('original full verification exit 1' in item for item in build['evidence']))
         # Later source movement cannot reuse the disposition, even through ordinary readiness.
         (self.wt / 'later').write_text('later')
         self.git('add', 'later', cwd=self.wt)
@@ -152,7 +164,7 @@ class IsolatedDisposition(Scenario):
         isolated = self.folder / (self.rows[0]['isolated_receipt'] + '.json')
         original = isolated.read_bytes()
         for mutation in (dict(result=1), dict(head='0' * 40), dict(test=self.tests[1]),
-                         dict(inputs='different'), dict(job_key='different')):
+                         dict(inputs='different'), dict(job_key='different'), dict(verify_lane_env={})):
             with self.subTest(mutation=mutation):
                 data = json.loads(original)
                 data.update(mutation)
@@ -202,6 +214,34 @@ class IsolatedDisposition(Scenario):
         task = next((root / 'nodes/a/tasks').glob('*.md'))
         task.unlink()
         self.b(root, 'ready', 'a', '--branch', 'one', ok=False)
+
+    def test_execution_environment_drift_refuses_publication_adoption_and_readiness(self):
+        root, _ = self.prepare()
+        self.quarantine()
+        original = self.env.get('CFLAGS')
+        self.env['CFLAGS'] = 'quarantine-fixture-context-drift'
+        self.assertIn('execution environment changed', self.disposition(ok=False))
+        if original is None:
+            self.env.pop('CFLAGS')
+        else:
+            self.env['CFLAGS'] = original
+        receipt = self.disposition()
+        self.env['CFLAGS'] = 'quarantine-fixture-context-drift'
+        self.b(root, 'handback', 'a', '--branch', 'one', '--state', 'done', '--reviews', '1',
+               '--summary', 'Changed execution context', '--full-receipt', receipt.stem, ok=False)
+        if original is None:
+            self.env.pop('CFLAGS')
+        else:
+            self.env['CFLAGS'] = original
+        self.b(root, 'handback', 'a', '--branch', 'one', '--state', 'done', '--reviews', '1',
+               '--summary', 'Original execution context', '--full-receipt', receipt.stem)
+        self.env['CFLAGS'] = 'quarantine-fixture-context-drift'
+        self.b(root, 'ready', 'a', '--branch', 'one', ok=False)
+        if original is None:
+            self.env.pop('CFLAGS')
+        else:
+            self.env['CFLAGS'] = original
+        self.assertEqual('ready', self.b(root, 'ready', 'a', '--branch', 'one').strip())
 
     def test_isolated_selector_and_head_refuse_before_execution(self):
         root, _ = self.prepare(isolate=False)
@@ -317,6 +357,9 @@ class DispositionIntegrity(Scenario):
         rows = [dict(test=test, reason='repair timing')]
         valid = original.replace(' def test_one', ' @unittest.skip("repair timing")\n def test_one')
         for text, mode, reason in ((valid, 0o755, 'mode'),
+                                    ('# coding: review_invalid_codec\n' + valid, 0o644, 'encoding'),
+                                    ('# unrelated comment\n' + valid, 0o644, 'comment'),
+                                    (valid.replace('assert True', 'assert  True'), 0o644, 'whitespace'),
                                     (valid.replace('repair timing', ''), 0o644, 'reason'),
                                     (original.replace(' def test_two', ' @unittest.skip("repair timing")\n def test_two'),
                                      0o644, 'method')):

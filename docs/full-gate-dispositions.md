@@ -54,3 +54,11 @@ failed or missing isolated runs, altered assertions, other source changes,
 changed configuration or inputs, and other heads all refuse reuse. Existing
 independent review and preview requirements continue to apply to the quarantine
 head. This path authorizes landing evidence; it never claims a green full run.
+
+The source-byte check permits only standalone added skip-decorator and import
+lines: all other bytes, including encoding headers, comments and whitespace,
+must remain identical. Both source blobs must compile. The recorded execution
+environment must also match at disposition publication, adoption and readiness;
+changing a fingerprinted toolchain variable such as `CFLAGS` refuses reuse.
+A linked build task records accepted landing evidence and retains the red full
+exit status without accumulating a failed-handback strike.

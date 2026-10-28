@@ -587,15 +587,25 @@ def handback_event(inst, n, row, data):
     if not ident:
         return
     packet = data.get('ready') or {}
-    failed = data.get('state') == 'failed' or type(packet.get('verify_result')) is int and packet['verify_result'] != 0
+    disposed = False
+    if (data.get('state') == 'done' and data.get('ready_reasons') == []
+            and packet.get('full_disposition') is True and type(packet.get('verify_result')) is int
+            and packet['verify_result'] == 1):
+        from . import full_gate, verify
+        head, main = verify.ready_refs(n, row['Job'])
+        disposed = full_gate.disposition_packet_valid(inst, n, row['Job'], packet, head, main)
+    failed = data.get('state') == 'failed' or (type(packet.get('verify_result')) is int
+                                             and packet['verify_result'] != 0 and not disposed)
     if failed:
         event_id = 'handback:' + str(data.get('attempt_id') or data.get('at'))
         event(inst, n, ident, event_id, data.get('summary') or 'Verification failed')
-    elif data.get('state') == 'done' and packet.get('verify_result') == 0:
+    elif data.get('state') == 'done' and (packet.get('verify_result') == 0 or disposed):
         existing = read_records(n)[ident]
         if existing['status'] != 'parked':
+            evidence = ('Quarantine landing disposition accepted; original full verification exit 1 at '
+                        if disposed else 'Verification exit 0 at ')
             mutate(inst, n, ident, {'status': 'testing', 'evidence': existing['evidence'] + [
-                'Verification exit 0 at ' + data['at']]}, provider=True)
+                evidence + data['at']]}, provider=True)
 
 
 def prepare_job_closed(inst, n, row, records=None):
