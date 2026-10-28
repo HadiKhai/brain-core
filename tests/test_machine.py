@@ -2439,3 +2439,40 @@ class WriteQueueService(Scenario):
         self.assertTrue(owner_matches(second))
         self.assertEqual(self.queue.intent_receipt(self.inst, request['id'])['state'], 'applied')
         self.assertEqual((self.root / 'inbox.md').read_text().count(request['id']), 1)
+
+    def test_idle_native_service_keeps_one_core_version_after_source_replacement(self):
+        child = subprocess.Popen([sys.executable, '-B', str(self.root / 'core/bin/brain'),
+                                  'machine', 'queue-service', 'run'], cwd=self.root,
+                                 env={**self.env, 'BRAIN_ROOT': str(self.root)},
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        def cleanup():
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=3)
+        self.addCleanup(cleanup)
+        def until(predicate):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                self.assertIsNone(child.poll(), 'owned service exited before applying its request')
+                if predicate():
+                    return
+                time.sleep(0.01)
+            self.fail('owned service did not reach its expected durable state')
+        def running():
+            try:
+                return self.queue.intent_read(self.inst, 'service.json')['owner'][0] == child.pid
+            except FileNotFoundError:
+                return False
+        until(running)
+        # Only the private installed copy changes. A late import would now fail.
+        module = self.root / 'core/lib/brain/transitions.py'
+        module.write_text("raise RuntimeError('mixed queue service source versions')\n" + module.read_text())
+        request = self.submit('Applied by the source version loaded before replacement')
+        until(lambda: self.queue.intent_receipt(self.inst, request['id']) is not None)
+        self.assertEqual(self.queue.intent_receipt(self.inst, request['id'])['state'], 'applied')
+        self.assertEqual((self.root / 'inbox.md').read_text().count(request['id']), 1)

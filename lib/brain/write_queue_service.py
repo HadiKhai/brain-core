@@ -179,6 +179,7 @@ def queue_summary(inst):
 
 def run_service(inst, stop=None, interval=0.25):
     """Keep the existing applier lease across idle periods and fresh transactions."""
+    _m_common.import_whole_core(__package__)  # keep lazy application imports on this source version
     stop = stop if stop is not None else threading.Event()
     fd = _m_queue.intent_lease(inst)
     if fd is None:

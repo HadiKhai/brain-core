@@ -3795,3 +3795,7 @@ service from retained metadata. Health readers never flock the applier lease: ev
 a brief observer lock could suppress a producer wake. Corrupt or unreadable evidence stays unknown. Queue
 timings separate enqueue, apply, backlog age and receipt wait without recording
 request payloads or acquiring the instance writer lock for telemetry.
+
+The long-lived applier imports the complete core before publishing its running
+state. An in-place core replacement cannot mix old queue code with later imports
+of new application modules; the next service restart loads the replacement code.
