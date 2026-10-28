@@ -293,9 +293,12 @@ def preview_requirement(inst, n, branch, head, packet=None):
         if not row or not n.get('external') or not n.get('home_path'):
             return evidence
         repo = n['home_path']
-        env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
         from . import verify as _m_verify
         object_query = _m_verify.immutable_git_query(repo)
+        # The readiness preflight's ref fence: inside a display snapshot these
+        # exact ref reads reuse that preflight's observations while the ref
+        # generation is unchanged; otherwise they stay native reads.
+        ref_env = object_query.ref_environment()
 
         def query(*args):
             result = object_query(*args)
@@ -303,16 +306,22 @@ def preview_requirement(inst, n, branch, head, packet=None):
                 raise ValueError('unreadable preview diff')
             return result.stdout
 
+        def commit(ref):
+            result = _m_common.git('rev-parse', '--verify', '--quiet', ref + '^{commit}', cwd=repo, env=ref_env)
+            if result.returncode or '\ufffd' in result.stdout:
+                raise ValueError('unreadable preview diff')
+            return result.stdout.strip()
+
         if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', head):
             return evidence
-        if query('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}').strip() != head:
+        if commit('refs/heads/' + branch) != head:
             return evidence
-        ref = _m_verify.integration_ref(repo, env=env)
+        ref = _m_verify.integration_ref(repo, env=ref_env)
         if not ref:
             return evidence
         if n['fm'].get('merge', 'local') != 'pr':
             ref = ref.replace('refs/remotes/origin/', 'refs/heads/', 1)
-        current_base = query('rev-parse', '--verify', ref + '^{commit}').strip()
+        current_base = commit(ref)
         # A train may retain an older integration base. It must be an ancestor
         # of today's base, never a caller-selected newer/narrower diff.
         base = (packet or {}).get('integration_base', current_base)

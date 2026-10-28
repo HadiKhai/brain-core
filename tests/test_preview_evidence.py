@@ -36,6 +36,30 @@ class PreviewImmutableQueries(Scenario):
         with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot():
             self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'required')
 
+    def test_readiness_ref_reads_serve_the_preview_scope_until_refs_move(self):
+        m, inst, n, data = self.context()
+        self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
+        original, spawned = subprocess.run, []
+        def counted(command, *args, **kwargs):
+            spawned.append(tuple(command))
+            return original(command, *args, **kwargs)
+        def ref_reads():
+            return [c for c in spawned if 'remote' in c or 'symbolic-ref' in c or 'for-each-ref' in c
+                    or 'rev-parse' in c and '--verify' in c]
+        with mock.patch.dict(os.environ, self.env, clear=True), m.git_read_snapshot(), \
+                mock.patch.object(subprocess, 'run', side_effect=counted):
+            m.ready_preflight(n, 'job')
+            spawned.clear()
+            self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'not_applicable')
+            # Only the post-classification drift check stays a live read.
+            self.assertEqual([c[3:] for c in ref_reads()],
+                             [('rev-parse', '--verify', 'refs/heads/job^{commit}'),
+                              ('rev-parse', '--verify', 'refs/heads/main^{commit}')])
+            self.git('update-ref', 'refs/heads/job', 'main', cwd=n['home_path'])
+            spawned.clear()
+            self.assertEqual(m.preview_requirement(inst, n, 'job', data['head'])['status'], 'required')
+            self.assertTrue(ref_reads())
+
     def test_new_head_and_base_get_new_diffs_and_existing_receipts_still_refuse(self):
         m, inst, n, data = self.context()
         self.change(m, inst, n, data, {'server/api.py': 'backend\n'})
