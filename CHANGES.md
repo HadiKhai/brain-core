@@ -40,7 +40,10 @@ same slots as verify. Child bytes and exit status pass through without admission
 notices. A private-session supervisor and the caller cover each other's loss;
 cancellation includes owned processes in additional groups. Darwin uses audit-token
 signals and Linux uses pidfds, preventing PID reuse from redirecting a signal.
-Worktree setup uses this runner. Plain `brain heavy` remains admission only.
+Worktree setup uses this runner and waits for background descendants left in its
+session; setup scripts must not leave background services in that session. Unsupported ownership
+platforms report a setup failure and retain the worktree. Plain `brain heavy`
+remains admission only.
 A native ownership-observer failure returns 125 and retains uncertain capacity
 for inspection; only proven cleanup or a known reboot frees that reservation.
 Detached services that escape the session before observation are outside this

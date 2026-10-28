@@ -917,6 +917,25 @@ class WorktreeSetupDiagnostics(Scenario):
         lease = next((self.tmp / '.local/state/brain/resource-leases').glob('*.json'))
         self.assertEqual(json.loads(lease.read_text())['state'], 'released')
 
+    def test_setup_unsupported_ownership_reports_failure_and_retains_worktree(self):
+        root = self.init('oak')
+        home = self.repo(self.tmp / 'app')
+        self.b(root, 'new', 'a', '--title', 'A', '--home', str(home))
+        (root / 'nodes/a/worktree-setup.sh').write_text('touch must-not-run\n')
+        source = root / 'core/lib/brain/machine.py'
+        text = source.read_text()
+        marker = "if sys.platform == 'darwin':\n            import ctypes"
+        self.assertIn(marker, text)
+        source.write_text(text.replace(marker, 'if False:\n            import ctypes', 1))
+        result = subprocess.run([sys.executable, str(root / 'core/bin/brain'), 'wt', 'add', 'a', 'job'],
+                                cwd=root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 125, result.stdout + result.stderr)
+        self.assertIn('setup: FAILED (exit 125)', result.stdout)
+        self.assertNotIn('Traceback', result.stdout + result.stderr)
+        worktree = self.tmp / 'app-work/worktrees/job'
+        self.assertTrue(worktree.exists())
+        self.assertFalse((worktree / 'must-not-run').exists())
+
     def test_setup_failure_reports_duration_masks_words_and_returns_failure(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'app')

@@ -415,6 +415,87 @@ class MachineCare(Scenario):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(b'heavy work allowed (admission only)', result.stdout)
 
+    def test_heavy_run_linux_foreign_proc_read_race_does_not_signal_owned_work(self):
+        observer = object.__new__(self.m.MachineProcesses)
+        observer.pidfds, observer.references, observer.dead = {}, {}, {}
+        phase = [0]
+        fields = ['0'] * 20
+        fields[0], fields[3], fields[19] = 'S', '999', '123'
+        def read(path, *args, **kwargs):
+            if str(path).endswith('/1/stat'):
+                raise ProcessLookupError('foreign process reaped after open')
+            return '2 (fixture) ' + ' '.join(fields)
+        try:
+            with mock.patch.object(sys, 'platform', 'linux'), \
+                    mock.patch.object(Path, 'read_text', read), \
+                    mock.patch.object(observer, 'pids', side_effect=lambda: {1, 2} if phase[0] == 0 else set()), \
+                    mock.patch.object(observer, 'identity', side_effect=lambda *a, **kw: (1, 99) if phase[0] == 0 else None), \
+                    mock.patch.object(observer, 'send') as send:
+                self.assertTrue(self.m.machine_heavy_monitor(observer, 999, lambda: True, lambda: 0,
+                                lambda: phase.__setitem__(0, 1), known={2: (1, 99)}))
+                send.assert_not_called()
+        finally:
+            observer.references.clear()
+
+    def test_heavy_run_transient_observer_failure_does_not_arm_cancellation(self):
+        import signal
+        observer = mock.Mock()
+        owned = {123: (456, 789)}
+        observer.members.side_effect = [OSError('transient'), owned, owned, {}]
+        phase, clock = [0], [0]
+        escalation = self.m.MachineEscalation
+        def advance():
+            phase[0] += 1
+            clock[0] = (0, 10, 20, 20.5)[phase[0]]
+        with mock.patch.object(self.m, 'MachineEscalation', side_effect=lambda: escalation(clock=lambda: clock[0])), \
+                mock.patch.object(self.m.time, 'monotonic', side_effect=lambda: clock[0]):
+            self.assertTrue(self.m.machine_heavy_monitor(observer, 999, lambda: True,
+                        lambda: signal.SIGTERM if phase[0] >= 2 else 0, advance, known=owned.copy()))
+        self.assertEqual(observer.send.call_args_list, [mock.call(123, (456, 789), signal.SIGTERM)])
+
+    def test_heavy_run_uncertain_reservation_reclaims_after_proven_cleanup(self):
+        owner = [123, 'fixture']
+        row = dict(token='1' * 32, owner=owner, child=owner, kind='verify', state='running',
+                   session=123, uncertain=True)
+        observer = mock.Mock()
+        with mock.patch.object(self.m, 'process_stamp', return_value=None), \
+                mock.patch.object(self.m, 'MachineProcesses', return_value=observer):
+            observer.members.return_value = {}
+            self.assertFalse(self.m.machine_queue.alive(row))
+            for reading in (None, {456: (789, 1)}):
+                observer.members.return_value = reading
+                self.assertTrue(self.m.machine_queue.alive(row))
+
+    def test_heavy_run_foreign_zombies_do_not_invalidate_empty_session(self):
+        observer = object.__new__(self.m.MachineProcesses)
+        observer.pidfds, observer.references, observer.dead = {}, {}, {}
+        observer.owned_births = set()
+        parent = [10]
+        def identity(pid, zombies=False, **options):
+            if pid == 999:
+                return (50, 1, 0) if options.get("parent") else (50, 1)
+            if zombies:
+                return (1000, 1, parent[0]) if options.get("parent") else (1000, 1)
+            return None
+        try:
+            with mock.patch.object(sys, 'platform', 'darwin'), \
+                    mock.patch.object(observer, 'pids', return_value={100}), \
+                    mock.patch.object(observer, 'identity', side_effect=identity):
+                self.assertEqual(observer.capture(999, (999,)), ({}, False))
+                parent[0] = 50
+                self.assertEqual(observer.capture(999, (999,)), ({}, True))
+                self.assertEqual(observer.capture(999, (999,)), ({}, False))
+            with mock.patch.object(observer, 'pids', return_value={100}), \
+                    mock.patch.object(observer, 'linux_observation', return_value=(1, True, 123)):
+                self.assertEqual(observer.capture_linux(999, (999,)), ({}, False))
+            observer.dead = {}
+            with mock.patch.object(observer, 'pids', return_value={100}), \
+                    mock.patch.object(observer, 'linux_observation', return_value=(1, True, 999)):
+                self.assertEqual(observer.capture_linux(999, (999,)), ({}, True))
+                self.assertEqual(observer.capture_linux(999, (999,)), ({}, False))
+        finally:
+            observer.references.clear()
+
     def samples(self, count, reading=None):
         now = time.time()
         return [{"at": now - (count - i - 1) * 60, "reading": dict(reading or self.good)} for i in range(count)]

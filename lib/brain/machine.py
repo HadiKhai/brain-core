@@ -1093,8 +1093,6 @@ class machine_queue:
             current_boot = machine_boot_id()
             if current_boot is not None and current_boot != row["boot"]:
                 return False
-        if row.get('uncertain'):
-            return True
         for key in ("owner", "child"):
             who = row.get(key)
             if who:
@@ -1106,7 +1104,7 @@ class machine_queue:
                 return MachineProcesses().members(row['session'], {}) != {}
             except (OSError, ValueError):
                 return True
-        return False
+        return bool(row.get('uncertain'))  # no session authority to re-prove
 
     def __exit__(self, typ, value, tb):
         name = "machine-care-" + os.urandom(12).hex() + ".tmp"
@@ -1436,6 +1434,7 @@ class MachineProcesses:
         self.errno = errno
         self.pidfds, self.references, self.dead = {}, {}, {}
         self.next_reference = 0
+        self.owned_births = set()
         if sys.platform == 'darwin':
             import ctypes
             self.ctypes = ctypes
@@ -1449,7 +1448,7 @@ class MachineProcesses:
                   and hasattr(signal, 'pidfd_send_signal')):
             raise OSError('heavy run requires Darwin audit-token signals or Linux pidfds')
 
-    def identity(self, pid, zombies=False):
+    def identity(self, pid, zombies=False, parent=False):
         if sys.platform == 'darwin':
             # XNU proc_info_private.h: PROC_PIDUNIQIDENTIFIERINFO=17,
             # struct proc_uniqidentifierinfo (56 bytes), uniqueid at 16,
@@ -1462,12 +1461,13 @@ class MachineProcesses:
                 if error == self.errno.ESRCH:
                     return None
                 raise OSError(error, 'heavy run: process identity unavailable')
-            return struct.unpack_from('Q', data.raw, 16)[0], struct.unpack_from('I', data.raw, 32)[0]
+            birth = (struct.unpack_from('Q', data.raw, 16)[0], struct.unpack_from('I', data.raw, 32)[0])
+            return birth + (struct.unpack_from('Q', data.raw, 24)[0],) if parent else birth
         if zombies:
             try:
                 fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
                 return (int(fields[19]),) if fields[0] == 'Z' else None
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 return None
         import select
         previous = self.pidfds.get(pid)
@@ -1519,19 +1519,19 @@ class MachineProcesses:
         try:
             fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
             return int(fields[19]), fields[0] == 'Z', int(fields[3])
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return None
 
     def capture_linux(self, session, exclude):
         owned, dead, changed = {}, {}, False
         for pid in self.pids() - set(exclude):
             row = self.linux_observation(pid)
-            if row is None:
-                changed = True
-            elif row[1]:
+            if row is None or row[2] != session:
+                continue  # gone or foreign, including zombies with a known SID
+            if row[1]:
                 dead[pid] = row[0]
                 changed |= self.dead.get(pid) != row[0]
-            elif row[2] == session:
+            else:
                 reference = self.identity(pid)
                 after = self.linux_observation(pid)
                 if reference is None or after is None or after[1] or after[2] != session or self.identity(pid) != reference:
@@ -1544,33 +1544,50 @@ class MachineProcesses:
     def capture(self, session, exclude):
         if sys.platform.startswith('linux'):
             return self.capture_linux(session, exclude)
-        owned, dead, changed = {}, {}, False
+        owned, dead, ancestry, racing = {}, {}, {}, set()
+        leader = self.identity(session, zombies=True)
+        if leader is not None:
+            self.owned_births.add(leader[0])
         for pid in self.pids() - set(exclude):
-            before = self.identity(pid)
-            if before is None:
-                birth = self.identity(pid, zombies=True)
-                if birth is not None:
-                    dead[pid] = birth
-                # A zombie already known before this inventory cannot fork.
-                # A newly dead or vanished candidate may have forked since the
-                # inventory was taken; it cannot certify emptiness this time.
-                if birth is None or self.dead.get(pid) != birth:
-                    changed = True
+            info = self.identity(pid, zombies=True, parent=True)
+            if info is None:
+                continue  # already reaped; the second inventory finds survivors
+            before = info[:2]
+            ancestry[before[0]] = info[2]
+            current = self.identity(pid)
+            if current is None:
+                dead[pid] = before
                 continue
             try:
                 sid = os.getsid(pid)
             except ProcessLookupError:
-                changed = True
+                racing.add(before[0])
                 continue
             after = self.identity(pid)
-            if before != after:
-                changed = True
-            elif sid == session and after is not None:
+            if before != current or current != after:
+                racing.add(before[0])
+            elif sid == session:
                 owned[pid] = after
+                self.owned_births.add(after[0])
+        # Darwin getsid cannot classify zombies. Kernel parent unique IDs bind
+        # their ancestry without stale numeric parent links. Only an owned fork
+        # can invalidate emptiness; foreign exits never require host quiescence.
+        pending = dict(ancestry)
+        while pending:
+            found = {birth for birth, parent in pending.items() if parent in self.owned_births}
+            if not found:
+                break
+            self.owned_births.update(found)
+            for birth in found:
+                del pending[birth]
+        dead = {pid: birth for pid, birth in dead.items() if birth[0] in self.owned_births}
+        changed = bool(racing & self.owned_births) or any(self.dead.get(pid) != birth for pid, birth in dead.items())
         self.dead = dead
         return owned, changed
 
     def members(self, session, known, exclude=()):
+        if sys.platform == 'darwin':
+            self.owned_births.update(birth[0] for birth in known.values())
         owned, changed = self.capture(session, exclude)
         # Already observed identities remain ours if they later leave the session.
         for pid, birth in known.items():
@@ -1578,10 +1595,8 @@ class MachineProcesses:
             if current is not None and current[0] == birth[0]:
                 owned[pid] = current
         if not owned:
-            # An empty pass must classify every candidate as foreign or as a
-            # zombie already dead before this inventory. This catches a private
-            # parent forking and exiting during enumeration, without demanding
-            # quiescence from unrelated processes elsewhere on the machine.
+            # Retry an owned fork/exit seen during enumeration. Ordinary foreign
+            # churn is not an observer failure and never delays session cleanup.
             again, moved = self.capture(session, exclude)
             if moved:
                 return None
@@ -1613,14 +1628,16 @@ def machine_heavy_publish(token, pid):
         row['session'] = pid
 
 
-def machine_heavy_uncertain(token):
+def machine_heavy_uncertain(token, session=None):
     # A bounded observer failure is an explicit retained reservation, never an
-    # endless supervisor or evidence that remaining work has stopped. Only a
-    # known reboot automatically clears this condition.
+    # endless supervisor or evidence that remaining work has stopped. Once both
+    # helpers exit, admission re-proves session cleanup (or a known reboot).
     with machine_queue() as queue:
         for row in queue.rows:
             if row['token'] == token:
                 row['uncertain'] = True
+                if session is not None:
+                    row.setdefault('session', session)
 
 
 class MachineEscalation:
@@ -1644,27 +1661,32 @@ def machine_heavy_monitor(observer, session, done, cancellation, pause, known=No
     escalation = MachineEscalation()
     failed_at = None
     while True:
-        failed = False
+        failed, members = False, None
         try:
             members = observer.members(session, known, exclude)
             if members is None:
                 failed = True
             elif done() and not members:
                 return True
-            number = signal.SIGTERM if failed else cancellation()
-            if number:
-                escalation.apply(observer, known if failed else members, number)
         except (OSError, ValueError):
             failed = True
-            # Stop known identities even when discovery is unavailable. Unknown
-            # work is protected by retained capacity, never a broad signal.
+        number = cancellation()
+        if number:
             try:
-                escalation.apply(observer, known, signal.SIGTERM)
+                escalation.apply(observer, known if members is None else members, number)
             except OSError:
-                pass
+                failed = True
         if failed:
             failed_at = time.monotonic() if failed_at is None else failed_at
             if time.monotonic() - failed_at >= 2:
+                # A single observer error never cancels work or arms a future
+                # cancellation's grace period. Only persistent failure stops
+                # known identities; unknown work retains its reservation.
+                if not number:
+                    try:
+                        escalation.apply(observer, known, signal.SIGTERM)
+                    except OSError:
+                        pass
                 return False
         else:
             failed_at = None
@@ -1704,7 +1726,7 @@ def machine_supervise(control, token, command, inherited=()):
         clean = machine_heavy_monitor(observer, os.getpid(), lambda: proc.poll() is not None,
                                        lambda: stopped[0], pause, exclude=(os.getpid(),))
         if not clean:
-            machine_heavy_uncertain(token)
+            machine_heavy_uncertain(token, os.getpid())
             return 125
         machine_release(token)
         code = proc.wait()
@@ -1771,7 +1793,7 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
                         lambda: signal.SIGTERM, lambda: threading.Event().wait(0.02), exclude=(proc.pid,))
                 code = proc.wait()
                 if not clean:
-                    machine_heavy_uncertain(token)
+                    machine_heavy_uncertain(token, proc.pid)
                     token.result = 125
                 else:
                     token.retain = False
@@ -1802,7 +1824,7 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
                         token.retain = False
                         machine_release(token)
                     else:
-                        machine_heavy_uncertain(token)
+                        machine_heavy_uncertain(token, proc.pid)
                 for number, handler in previous.items():
                     signal.signal(number, handler)
     except MachineSignal as error:
@@ -1813,7 +1835,11 @@ def cmd_heavy_run(a):
     command = a.command[1:] if a.command[:1] == ['--'] else a.command
     inst = _m_nodes.load()
     node = inst.node(a.node or 'root')
-    sys.exit(machine_execute(command, inst, node['id'], a.label))
+    try:
+        code = machine_execute(command, inst, node['id'], a.label)
+    except OSError as error:
+        _m_common.die('heavy run: ' + str(error))
+    sys.exit(code)
 
 
 def cmd_heavy(a):

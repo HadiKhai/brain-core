@@ -328,8 +328,12 @@ def cmd_wt_add(a):
         print("  setup: running; waiting for completion", flush=True)
         with _m_verify.verification_resources(inst, n) as resources, tempfile.TemporaryFile() as output:
             started = time.monotonic()
-            code = _m_machine.machine_execute(["sh", str(setup)], inst, n['id'], a.branch,
-                                              cwd=path, env=env, stdout=output, stderr=output)
+            try:
+                code = _m_machine.machine_execute(["sh", str(setup)], inst, n['id'], a.branch,
+                                                  cwd=path, env=env, stdout=output, stderr=output)
+            except OSError as error:
+                code = 125
+                output.write(('heavy run: ' + str(error) + '\n').encode())
             duration = time.monotonic() - started
             resources['failed'] = bool(code)
             output.seek(0)
