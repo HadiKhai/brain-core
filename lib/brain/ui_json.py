@@ -212,9 +212,10 @@ def ui_json_stamps(inst):
     shared = (stamp(root / 'instance.md'), stamp(root / '.brain/communications.json'),
               tuple(stamp(path) for path in sorted((root / '.brain/teaching').glob('*.json'))),
               json.dumps({k: v for k, v in inst.local.items() if k != 'nodes'}, sort_keys=True, default=str),
-              os.path.realpath(root / '.brain/core-current'), runs is None,
-              # Task readiness shows the native machine hold: its state, never the sampler's churn.
-              bool((_m_machine.machine_samples(inst) or {}).get('episode')))
+              os.path.realpath(root / '.brain/core-current'), runs is None)
+    # Task readiness in node views shows the native machine hold: its state, never the sampler's
+    # churn. Worktree readiness never reads it, so heat episodes leave worktree rows cached.
+    hold = bool((_m_machine.machine_samples(inst) or {}).get('episode'))
     nodes, repos, homes = inst.nodes(), {}, {}
     for n in nodes:
         paths = [n['home_path']] if n['external'] and n['home_path'] else []
@@ -293,7 +294,7 @@ def ui_json_stamps(inst):
         git = [checkout(home) for home, _, _ in homes[n['id']]]
         mine = [r for r in runs or [] if isinstance(r, dict) and r.get('node') == n['id']]
         out[n['id']] = ui_json_fingerprint([shared, json.dumps(n['local'], sort_keys=True, default=str),
-                                            files, git, mine, tasks])
+                                            files, git, mine, tasks, hold])
         # A worktree row and its readiness depend on its own checkout, its job and
         # integration refs and the node's policy files, not on status or inbox edits.
         policy = [meta, *(stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt', _m_jobs.JOBS_FILE))]
