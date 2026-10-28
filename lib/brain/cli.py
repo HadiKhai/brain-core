@@ -110,7 +110,8 @@ def reexec_into_instance_core():
     if not root:
         return
     other = root / "core" / "bin" / "brain"
-    if other.exists() and other.resolve() != _m_common.ENTRY_POINT.resolve():
+    # A staged core's launcher already runs that instance's pinned release (core_releases.py).
+    if other.exists() and other.resolve() not in (_m_common.ENTRY_POINT.resolve(), Path(sys.argv[0]).resolve()):
         os.environ["BRAIN_NO_REEXEC"] = "1"
         os.execv(sys.executable, [sys.executable, str(other), *sys.argv[1:]])
 
@@ -752,7 +753,9 @@ def _main():
     cmd("version", _Command("upgrade", "cmd_version"), "installed core SHA/date and cached origin ancestry; never fetches",
         opt("--ref", help="cached origin ref (default origin/HEAD or refs/remotes/origin/main)"),
         opt("--json", action="store_true"))
-    cmd("upgrade", _Command("upgrade", "cmd_upgrade"), "update core/ to the latest version, then link and check")
+    cmd("upgrade", _Command("upgrade", "cmd_upgrade"), "update core/ to the latest version, then link and check",
+        opt("--node", help="node whose in-flight gate refuses (default: the node whose home ships this core)"),
+        opt("--rollback", action="store_true", help="swap back to the previous installed core release"))
     cmd("changes", _Command("upgrade", "cmd_changes"), "what changed in core for agents: unread entries (default), --all, --seen",
         opt("id", nargs="?"), opt("--seen", action="store_true", help="mark every entry read on this machine"),
         opt("--all", action="store_true"), opt("--json", action="store_true"))

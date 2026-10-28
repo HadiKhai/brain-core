@@ -93,13 +93,36 @@ class InstallAndUpgrade(Scenario):
         self.b(bob, "new", "code", "--title", "Code", "--owners", "team", "--home", str(code))
 
         # upgrade: a new core commit reaches the instance
+        first = self.git("rev-parse", "HEAD", cwd=bob / "core").strip()
+        self.assertFalse((bob / ".brain/core-current").exists())  # a plain core before its first upgrade
         (src / "README.md").write_text((src / "README.md").read_text() + "\nUPGRADED\n")
         self.git("commit", "-qam", "Improve the README", cwd=src)
         out = self.b(bob, "upgrade")
         self.assertIn("Improve the README", out)
         self.assertIn("UPGRADED", (bob / "core" / "README.md").read_text())
         self.assertIn("Upgrade core", self.git("log", "-1", "--format=%s", cwd=bob))
+        # first-install migration: both the plain core's release and the new one are pinned releases
+        second = self.git("rev-parse", "HEAD", cwd=bob / "core").strip()
+        self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", second))
+        self.assertEqual(os.readlink(bob / ".brain/core-previous"), os.path.join("cores", first))
+        self.assertIn("UPGRADED", (bob / ".brain/cores" / second / "README.md").read_text())
+        self.assertNotIn("UPGRADED", (bob / ".brain/cores" / first / "README.md").read_text())
+        self.assertNotIn("core", self.git("status", "--porcelain", cwd=bob))
+        probe = "import sys; print(sys.modules['brain'].__file__)"
+        t = subprocess.run([sys.executable, "-c", f"import runpy; runpy.run_path({str(cmd)!r}, run_name='p'); {probe}"],
+                           cwd=self.tmp, env=env, capture_output=True, text=True)
+        self.assertTrue(t.stdout.strip().startswith(str((bob / ".brain/cores" / second).resolve())), t.stderr)
+        t = subprocess.run([str(cmd), "tree"], cwd=self.tmp, env=env, capture_output=True, text=True)
+        self.assertIn("root: Bob", t.stdout, t.stderr)
         self.assertIn("up to date", self.b(bob, "upgrade"))
+        # rollback swaps back and points the staged core and gitlink at the previous release
+        self.assertIn("rolled back", self.b(bob, "upgrade", "--rollback"))
+        self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", first))
+        self.assertEqual(os.readlink(bob / ".brain/core-previous"), os.path.join("cores", second))
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=bob / "core").strip(), first)
+        self.assertIn("Roll back core", self.git("log", "-1", "--format=%s", cwd=bob))
+        self.assertIn("Improve the README", self.b(bob, "upgrade"))
+        self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", second))
 
         # second machine: same Brain, its own bindings
         bob2 = self.tmp / "Brain2"
@@ -218,7 +241,7 @@ class R2VersionAndUpgrade(Scenario):
         inst.commit = mock.Mock()
         return inst, n
 
-    def upgrade_attempt(self, m, inst, refused=False):
+    def upgrade_attempt(self, m, inst, refused=False, **args):
         mutations = []
         real_run = subprocess.run
 
@@ -234,13 +257,13 @@ class R2VersionAndUpgrade(Scenario):
                 mock.patch.object(m.subprocess, "run", side_effect=run), contextlib.redirect_stdout(output):
             if refused:
                 with self.assertRaises(SystemExit) as error:
-                    m.cmd_upgrade(argparse.Namespace())
+                    m.cmd_upgrade(argparse.Namespace(**args))
                 self.assertIn("requires an idle brain", str(error.exception))
                 self.assertIn("Retry brain upgrade when idle", str(error.exception))
                 self.assertEqual(mutations, [])
                 inst.commit.assert_not_called()
                 return str(error.exception)
-            m.cmd_upgrade(argparse.Namespace())
+            m.cmd_upgrade(argparse.Namespace(**args))
         self.assertEqual(len(mutations), 1)
         self.assertIn("core is up to date", output.getvalue())
         return output.getvalue()
@@ -298,6 +321,55 @@ class R2VersionAndUpgrade(Scenario):
             self.assertEqual(path.read_bytes(), before)
         self.upgrade_attempt(m, inst)
         self.assertEqual(path.read_bytes(), before)
+
+    def pin_fixture_core(self, m, inst):
+        """Mark the fixture's staged core as an installed, current release (dirs only, no install)."""
+        sha = self.git("rev-parse", "HEAD", cwd=inst.root / "core").strip()
+        (inst.root / ".brain/cores" / sha).mkdir(parents=True)
+        (inst.root / ".brain/cores" / (sha + ".pin")).touch()
+        os.symlink(os.path.join("cores", sha), inst.root / ".brain/core-current")
+
+    def test_pinned_guard_ignores_foreign_node_gate_but_refuses_its_own(self):
+        import fcntl
+        m = self.module()
+        inst, n = self.upgrade_fixture(m)
+        other = {**n, "id": "other", "home_path": self.repo(self.tmp / "other-home"), "local": {}}
+        other["dir"] = self.tmp / "other-node"
+        other["dir"].mkdir()
+        inst.nodes = lambda: [n, other]
+        url = "https://example.invalid/core.git"
+        self.git("remote", "add", "origin", url, cwd=inst.root / "core")
+        self.git("remote", "add", "origin", "git@example.invalid:core", cwd=n["home_path"])
+
+        def held(node):
+            path = m.gate_path(inst.root, node)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = path.open("w+")
+            self.addCleanup(handle.close)
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+
+        foreign = held("other")
+        # A plain core keeps the whole-brain guard: every process runs from the directory it rewrites.
+        self.assertIn("other: in-flight node gate", self.upgrade_attempt(m, inst, refused=True))
+        self.pin_fixture_core(m, inst)
+        self.assertEqual(m.own_node(inst), "root")  # the node whose home ships this core
+        output = self.upgrade_attempt(m, inst)
+        self.assertIn("open jobs/worktrees idle; not affected", output)
+        own = held("root")
+        message = self.upgrade_attempt(m, inst, refused=True)
+        self.assertIn("root: in-flight node gate", message)
+        self.assertNotIn("other:", message)
+        own.close()
+        self.upgrade_attempt(m, inst)
+        # An explicit --node names the own node; the other gate then refuses alone.
+        self.assertIn("other: in-flight node gate", self.upgrade_attempt(m, inst, refused=True, node="other"))
+        foreign.close()
+        # No node can be named as the core's owner: keep the whole-brain guard.
+        self.git("remote", "set-url", "origin", "https://example.invalid/elsewhere.git", cwd=n["home_path"])
+        self.assertIsNone(m.own_node(inst))
+        held("other")
+        self.assertIn("other: in-flight node gate", self.upgrade_attempt(m, inst, refused=True))
 
     def test_unknown_node_gate_inventory_refuses_before_upgrade(self):
         m = self.module()
@@ -593,3 +665,117 @@ class R2VersionAndUpgrade(Scenario):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PinnedCoreReleases(Scenario):
+    """Versioned releases on owned copies: install, swap, pinned imports, prune and rollback."""
+    core_repo = InstallAndUpgrade.core_repo
+
+    def staged(self, value):
+        src = self.core_repo()
+        (src / "lib/brain/_pin_probe.py").write_text(f"VALUE = {value!r}\n")
+        self.git("add", "-A", cwd=src)
+        self.git("commit", "-qm", value, cwd=src)
+        root = self.tmp / "Brain"
+        (root / ".brain").mkdir(parents=True)
+        self.git("clone", "-q", str(src), str(root / "core"), cwd=self.tmp)
+        return src, root
+
+    def advance(self, src, root, value):
+        (src / "lib/brain/_pin_probe.py").write_text(f"VALUE = {value!r}\n")
+        self.git("commit", "-qam", value, cwd=src)
+        self.git("pull", "-q", "--ff-only", cwd=root / "core")
+        return self.git("rev-parse", "HEAD", cwd=root / "core").strip()
+
+    def test_install_versioned_release_with_checked_hash_bytecode_and_atomic_swap(self):
+        m = core_loader.SourceFileLoader("pinned_install", str(CORE / "bin/brain")).load_module()
+        releases = m._owners["cmd_upgrade"]._m_core_releases
+        src, root = self.staged("A")
+        sha = self.git("rev-parse", "HEAD", cwd=root / "core").strip()
+        self.assertIsNone(releases.current(root))
+        release = releases.install(root, sha)
+        self.assertEqual(release, root / ".brain/cores" / sha)
+        self.assertTrue(releases.pin_path(release).is_file())
+        self.assertFalse((release / ".git").exists())
+        # Ask the launcher's interpreter where it reads bytecode (Apple's build has its own prefix).
+        where = subprocess.run([sys.executable, "-c", "import importlib.util, sys; "
+                                "print(importlib.util.cache_from_source(sys.argv[1]))", str(release / "lib/brain/cli.py")],
+                               capture_output=True, text=True, check=True,
+                               env={k: v for k, v in os.environ.items() if k not in releases.BYTECODE_ENV})
+        pyc = Path(where.stdout.strip())
+        self.assertEqual(int.from_bytes(pyc.read_bytes()[4:8], "little"), 0b11)  # checked hash, not mtime
+        self.assertEqual(releases.install(root, sha), release)  # an installed release is reused, not rewritten
+        self.assertIsNone(releases.swap(root, sha))
+        self.assertEqual(os.readlink(root / ".brain/core-current"), os.path.join("cores", sha))
+        second = self.advance(src, root, "B")
+        releases.install(root, second)
+        with mock.patch.object(releases.os, "replace", wraps=os.replace) as rename:
+            self.assertEqual(releases.swap(root, second), sha)
+        self.assertEqual([Path(c.args[1]).name for c in rename.call_args_list], ["core-previous", "core-current"])
+        self.assertEqual((releases.current(root), releases.previous(root)), (second, sha))
+        self.assertEqual(list((root / ".brain").glob(".core-*")), [])
+        self.assertEqual(list((root / ".brain/cores").glob(".partial-*")), [])
+        broken = self.advance(src, root, "C")
+        (root / "core/lib/brain/cli.py").write_text("raise SystemExit('broken release')\n")
+        with self.assertRaises(ValueError):
+            releases.install(root, broken)
+        self.assertFalse((root / ".brain/cores" / broken).exists())
+        self.assertEqual(releases.current(root), second)  # a failed install never swaps
+
+    def test_process_started_before_swap_keeps_its_release_and_blocks_prune(self):
+        m = core_loader.SourceFileLoader("pinned_process", str(CORE / "bin/brain")).load_module()
+        releases = m._owners["cmd_upgrade"]._m_core_releases
+        src, root = self.staged("A")
+        first = self.git("rev-parse", "HEAD", cwd=root / "core").strip()
+        releases.install(root, first)
+        releases.swap(root, first)
+        probe = ("import runpy, sys\n"
+                 "runpy.run_path(sys.argv[1], run_name='probe')\n"
+                 "print('ready', flush=True)\n"
+                 "sys.stdin.readline()\n"
+                 "lazy = sys.modules['brain.common'].LazyModule('brain', '_pin_probe')\n"
+                 "print(lazy.VALUE, sys.modules['brain._pin_probe'].__file__, flush=True)\n")
+        env = {k: v for k, v in self.env.items() if k != "BRAIN_NO_REEXEC"}
+        child = subprocess.Popen([sys.executable, "-c", probe, str(root / "core/bin/brain")], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, cwd=self.tmp)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), "ready", child.stderr.read() if child.poll() else "")
+            for value in ("B", "C"):
+                sha = self.advance(src, root, value)
+                releases.install(root, sha)
+                releases.swap(root, sha)
+            # first is neither current nor previous now, but the running process still pins it
+            self.assertEqual(releases.prune(root), ([], [first]))
+            self.assertTrue((root / ".brain/cores" / first / "lib/brain").is_dir())
+            out, err = child.communicate("go\n", timeout=60)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+        value, path = out.split()
+        self.assertEqual(value, "A", err)
+        self.assertTrue(path.startswith(str((root / ".brain/cores" / first).resolve())), path)
+        self.assertEqual(releases.prune(root), ([first], []))
+        self.assertFalse((root / ".brain/cores" / first).exists())
+        self.assertFalse(releases.pin_path(root / ".brain/cores" / first).exists())
+        self.assertEqual(sorted(p.name for p in (root / ".brain/cores").iterdir() if p.is_dir()),
+                         sorted([releases.current(root), releases.previous(root)]))
+
+    def test_rollback_swaps_back_and_refuses_without_previous(self):
+        m = core_loader.SourceFileLoader("pinned_rollback", str(CORE / "bin/brain")).load_module()
+        releases = m._owners["cmd_upgrade"]._m_core_releases
+        src, root = self.staged("A")
+        first = self.git("rev-parse", "HEAD", cwd=root / "core").strip()
+        with self.assertRaises(ValueError):
+            releases.rollback(root)  # a plain core has nothing to roll back to
+        releases.install(root, first)
+        releases.swap(root, first)
+        with self.assertRaises(ValueError):
+            releases.rollback(root)
+        second = self.advance(src, root, "B")
+        releases.install(root, second)
+        releases.swap(root, second)
+        self.assertEqual(releases.rollback(root), (second, first))
+        self.assertEqual((releases.current(root), releases.previous(root)), (first, second))
+        self.assertEqual(releases.rollback(root), (first, second))  # rolling forward again is the same swap
+        self.assertEqual((releases.current(root), releases.previous(root)), (second, first))

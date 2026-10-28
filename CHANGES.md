@@ -5,6 +5,16 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-10-28: Pinned core releases and own-node upgrades
+
+`brain upgrade` installs each core release into `.brain/cores/<sha>` with
+checked-hash bytecode and swaps the `.brain/core-current` symlink. `core/bin/brain`
+runs that release, so running commands and gates keep the core they started on.
+After the first pinned upgrade, only the node that ships core (or `--node`) blocks
+an upgrade with its in-flight gate; other nodes finish on their old core. Use
+`brain upgrade --rollback` to swap back. The first upgrade from a plain core still
+needs an idle brain. See core/docs/DECISIONS.md.
+
 ## 2026-10-28: Queued inbox additions and task metadata
 
 `inbox --add`, metadata-only `task set`, and unchecked `handback --enqueue`

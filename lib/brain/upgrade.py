@@ -18,6 +18,7 @@ _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_machine = _m_common.LazyModule(__package__, 'machine')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_usage = _m_common.LazyModule(__package__, 'usage')
+_m_core_releases = _m_common.LazyModule(__package__, 'core_releases')
 
 
 def _version_git(*args, cwd):
@@ -106,6 +107,46 @@ def upgrade_busy_message(root, busy):
     return "\n".join(lines)
 
 
+def _remote_key(url):
+    url = (url or "").strip().rstrip("/")
+    url = re.sub(r"^git@([^:]+):", r"https://\1/", url)
+    url = re.sub(r"^ssh://git@", "https://", url)
+    return url[:-4] if url.endswith(".git") else url
+
+
+def own_node(inst, name=None):
+    """The node whose gate an upgrade must wait for: --node, else the one whose home ships this core."""
+    if name:
+        return inst.node(name)["id"]
+    core = _version_git("remote", "get-url", "origin", cwd=inst.root / "core").stdout
+    owners = []
+    for n in inst.nodes():
+        home = n.get("home_path")
+        if home and core.strip() and _remote_key(
+                _version_git("remote", "get-url", "origin", cwd=home).stdout) == _remote_key(core):
+            owners.append(n["id"])
+    return owners[0] if len(owners) == 1 else None
+
+
+def upgrade_busy(inst, idle, node=None):
+    """Pinned releases keep foreign gates on their own core: only the own node's work refuses.
+    A plain (unmigrated) core runs every process from the directory an upgrade rewrites, so it
+    keeps the whole-brain idle guard, as does an own node nobody can name."""
+    try:
+        layout = _m_core_releases.pinned(inst.root)
+    except (OSError, ValueError):
+        return [("inventory", "unreadable core release links")]
+    own = own_node(inst, node) if layout else None
+    if own is None:
+        return open_jobs_anywhere(inst, idle=idle)
+    return open_jobs_anywhere(inst, idle=idle, own=own)
+
+
+def _commit_core(root, message):
+    inst = _m_instance.Instance(root)
+    inst.commit(["core", ".gitmodules"], message)
+
+
 def cmd_upgrade(a):
     root = _m_nodes.find_root()
     gm = root / ".gitmodules"
@@ -114,14 +155,21 @@ def cmd_upgrade(a):
     idle = []
     try:
         inst = _m_instance.Instance(root)
-        busy = open_jobs_anywhere(inst, idle=idle)
+        busy = upgrade_busy(inst, idle, getattr(a, "node", None))
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         busy = [("inventory", "unreadable job/worktree inventory")]
     if busy:
         _m_common.die(upgrade_busy_message(root, busy))
     if idle:
         print(f"{len(idle)} open jobs/worktrees idle; not affected", flush=True)
-    old = _m_common.git("rev-parse", "HEAD", cwd=root / "core").stdout.strip()
+    if getattr(a, "rollback", False):
+        return core_rollback(root)
+    staged = _m_common.git("rev-parse", "HEAD", cwd=root / "core").stdout.strip()
+    try:
+        running = _m_core_releases.current(root)
+    except (OSError, ValueError) as error:
+        _m_common.die(f"couldn't read the installed core release: {error}")
+    old = running or staged
     r = subprocess.run(["git", "-C", str(root), "-c", "protocol.file.allow=always", "submodule", "update",
                         "--remote", "core"], capture_output=True, text=True)
     if r.returncode:
@@ -130,6 +178,17 @@ def cmd_upgrade(a):
     if old == new:
         print(f"core is up to date ({new[:7]})")
         return
+    try:
+        if running is None:
+            # First install from a plain core: the release it ran becomes the rollback target.
+            _m_core_releases.install(root, old)
+        _m_core_releases.install(root, new)
+        if running is None:
+            _m_core_releases.swap(root, old)
+        _m_core_releases.swap(root, new)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        _m_common.die(f"couldn't install core {new[:7]} ({error}); running processes keep core {old[:7]}; "
+                      f"retry brain upgrade")
     print(f"core {old[:7]} -> {new[:7]}")
     print(_m_common.git("log", "--oneline", f"{old}..{new}", cwd=root / "core").stdout.rstrip(), flush=True)
     before = {e["id"] for e in changes_entries(_m_common.git("show", f"{old}:CHANGES.md", cwd=root / "core").stdout)}
@@ -140,15 +199,41 @@ def cmd_upgrade(a):
         print("\n".join(f"- {e['id']}" for e in fresh), flush=True)
     newbin = str(root / "core" / "bin" / "brain")
     env = {**os.environ, "BRAIN_ROOT": str(root)}
-    inst = _m_instance.Instance(root)
-    inst.commit(["core", ".gitmodules"], f"Upgrade core {old[:7]} -> {new[:7]}")
+    _commit_core(root, f"Upgrade core {old[:7]} -> {new[:7]}")
     # the new core's own link and check --fix commit whatever they change
     subprocess.run([sys.executable, newbin, "link"], env=env)
     subprocess.run([sys.executable, newbin, "check", "--fix"], env=env)
     migration = subprocess.run([sys.executable, newbin, "task", "migrate", "--all"], env=env)
     if migration.returncode:
         print("! task migration needs repair; see core/docs/tasks.md before starting jobs")
+    _prune_releases(root)
     _m_usage.usage_restart(root)
+
+
+def _prune_releases(root):
+    try:
+        removed, referenced = _m_core_releases.prune(root)
+    except (OSError, ValueError) as error:
+        print(f"! old core releases kept: {error}")
+        return
+    if removed:
+        print(f"pruned {len(removed)} unreferenced core release(s)")
+    if referenced:
+        print(f"kept {len(referenced)} core release(s) still pinned by running processes")
+
+
+def core_rollback(root):
+    """Swap back to the previous release, then point the staged core and the gitlink at it."""
+    try:
+        old, back = _m_core_releases.rollback(root)
+    except (OSError, ValueError) as error:
+        _m_common.die(f"rollback: {error}")
+    print(f"core {old[:7]} -> {back[:7]} (rolled back; running processes keep their core)", flush=True)
+    r = _m_common.git("checkout", "-q", "--detach", back, cwd=root / "core")
+    if r.returncode:
+        print(f"! staged core still at {old[:7]}: {r.stderr.strip()}; the running release is {back[:7]}")
+        return
+    _commit_core(root, f"Roll back core {old[:7]} -> {back[:7]}")
 
 
 # ---------- what changed in core, for the agents ----------
@@ -350,51 +435,66 @@ def _upgrade_node_gate_busy(inst, n):
         return [(n["id"], "unreadable node gate inventory")]
 
 
-def open_jobs_anywhere(inst, idle=None):
+def open_jobs_anywhere(inst, idle=None, own=None):
     """In-flight work and unknown inventory refuse; retained idle jobs are only a notice.
 
     Use the admission queue's existing PID/start-time liveness and repository flock,
     never lease age or the mere presence of a job/worktree. Reading changes no state.
+    With `own` (pinned releases only), another node's in-flight work is a notice: it
+    finishes on the release it started on.
     """
     try:
-        return _upgrade_work_inventory(inst, idle)
+        busy = _upgrade_work_inventory(inst, idle, own)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return [("inventory", "unreadable job/worktree inventory")]
+    return busy
 
 
-def _upgrade_work_inventory(inst, idle):
-    out = _upgrade_admission_busy()
+def _upgrade_work_inventory(inst, idle, own=None):
     idle = [] if idle is None else idle
+    out = _upgrade_admission_busy()
+    if own is not None:  # admission rows name no node; their processes are pinned
+        idle += [(node, f"{reason} keeps its pinned core") for node, reason in out]
+        out = []
     for n in inst.nodes():
-        try:
-            if not _ledger_inventory_readable(n):
-                raise ValueError("unreadable job ledger")
-            rows = _m_jobs.read_jobs(n)
-            if rows is None:
-                raise ValueError("unreadable job ledger")
-        except (OSError, ValueError, TypeError, KeyError):
-            out.append((n["id"], "unreadable job ledger"))
-            rows = []
-        idle += [(n["id"], r["Job"]) for r in rows if not r["Ended"]]
-        out += _upgrade_train_busy(n)
-        out += _upgrade_node_gate_busy(inst, n)
-        worktrees = n["local"].get("worktrees", {})
-        if not isinstance(worktrees, dict):
-            out.append((n["id"], "unreadable worktree inventory"))
-            continue
-        for branch, worktree in worktrees.items():
-            if not isinstance(worktree, dict) or not isinstance(worktree.get("path"), str) or not worktree["path"]:
-                out.append((n["id"], f"unreadable worktree {branch}"))
-                continue
-            try:
-                Path(worktree["path"]).stat()
-            except FileNotFoundError:
-                continue
-            except (OSError, ValueError):
-                out.append((n["id"], f"unreadable worktree {branch}"))
-            else:
-                idle.append((n["id"], f"worktree {branch}"))
+        if own is not None and n["id"] != own:
+            foreign = []
+            _upgrade_node_inventory(inst, n, foreign, idle)
+            idle += [(node, f"{reason} keeps its pinned core") for node, reason in foreign]
+        else:
+            _upgrade_node_inventory(inst, n, out, idle)
     return out
+
+
+def _upgrade_node_inventory(inst, n, out, idle):
+    try:
+        if not _ledger_inventory_readable(n):
+            raise ValueError("unreadable job ledger")
+        rows = _m_jobs.read_jobs(n)
+        if rows is None:
+            raise ValueError("unreadable job ledger")
+    except (OSError, ValueError, TypeError, KeyError):
+        out.append((n["id"], "unreadable job ledger"))
+        rows = []
+    idle += [(n["id"], r["Job"]) for r in rows if not r["Ended"]]
+    out += _upgrade_train_busy(n)
+    out += _upgrade_node_gate_busy(inst, n)
+    worktrees = n["local"].get("worktrees", {})
+    if not isinstance(worktrees, dict):
+        out.append((n["id"], "unreadable worktree inventory"))
+        return
+    for branch, worktree in worktrees.items():
+        if not isinstance(worktree, dict) or not isinstance(worktree.get("path"), str) or not worktree["path"]:
+            out.append((n["id"], f"unreadable worktree {branch}"))
+            continue
+        try:
+            Path(worktree["path"]).stat()
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            out.append((n["id"], f"unreadable worktree {branch}"))
+        else:
+            idle.append((n["id"], f"worktree {branch}"))
 
 
 def auto_upgrade(inst):
@@ -408,7 +508,8 @@ def auto_upgrade(inst):
     # Re-read inventory after taking the instance lock, then keep that lock for the
     # child upgrade (BRAIN_LOCK_HELD). Machine admission has its own ownership rules.
     with _m_instance.brain_lock(inst):
-        if open_jobs_anywhere(_m_instance.Instance(inst.root)):
+        fresh = _m_instance.Instance(inst.root)
+        if upgrade_busy(fresh, []):
             return None  # retried on a later tick, once in-flight work stops
         r = subprocess.run([sys.executable, str(_m_common.CORE / "bin" / "brain"), "upgrade"], capture_output=True, text=True,
                            env={**os.environ, "BRAIN_ROOT": str(inst.root), "BRAIN_NO_REEXEC": "1"})
