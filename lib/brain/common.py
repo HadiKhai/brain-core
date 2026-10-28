@@ -786,12 +786,13 @@ def worktree_head(cwd, env=None):
         text = (admin / 'HEAD').read_text()
         if re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\n?', text):
             return ''
-        match = re.fullmatch(r'ref: (refs/[^\n\0]+)\n?', text)
-        if not match or match.group(1).endswith('/') or '..' in match.group(1):
+        # Only a canonical branch name is read directly; per-worktree namespaces,
+        # padding and anything Git would normalize or refuse go to Git.
+        match = re.fullmatch(r'ref: (refs/heads/[A-Za-z0-9_+=,-][A-Za-z0-9._+=,/-]*)\n', text)
+        ref = match.group(1) if match else ''
+        if (not ref or ref.endswith(('/', '.', '.lock')) or '..' in ref or '//' in ref
+                or '/.' in ref or '.lock/' in ref):
             return None
-        ref = match.group(1)
-        if not ref.startswith('refs/heads/'):
-            return None  # per-worktree namespaces and other targets: ask Git
         target = common / ref
         if target.is_symlink():
             return None

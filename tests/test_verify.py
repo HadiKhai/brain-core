@@ -68,6 +68,12 @@ class ReadinessDirectGitReads(Scenario):
             (repo / '.git/commondir').write_text('.\n')
             self.assertIsNone(m.worktree_head(repo))  # a directory .git with commondir
             (repo / '.git/commondir').unlink()
+            head = linked.parent / 'repo/.git/worktrees/linked/HEAD'
+            for padded in ('ref: refs/heads/job \n', 'ref: refs/heads/job', 'ref:  refs/heads/job\n'):
+                head.write_text(padded)
+                self.assertIsNone(m.worktree_head(linked), padded)
+            head.write_text('ref: refs/heads/job\n')
+            self.assertEqual(m.worktree_head(linked), 'refs/heads/job')
             # A loose symbolic target recurses in Git; ask Git rather than guess.
             (repo / '.git/refs/heads/alias').write_text('ref: refs/heads/third\n')
             self.git('symbolic-ref', 'HEAD', 'refs/heads/alias', cwd=packed)
