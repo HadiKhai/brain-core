@@ -277,12 +277,13 @@ def watch_untracked(groups, generation=None):
 
 
 class WatchGroups(dict):
-    def __init__(self, values, revision, generation=None, stale=False, layout=None):
+    def __init__(self, values, revision, generation=None, stale=False, layout=None, retained=()):
         super().__init__(values)
         self.receipt_revision = revision
         self.source_generation = generation
         self.stale = stale
         self.source_layout = layout
+        self.retained_ids = set(retained)
 
 
 def watch_receipt_revision(inst):
@@ -299,6 +300,34 @@ def watch_receipt_observed(inst):
         return None
     except (OSError, ValueError, SystemExit):
         return False
+
+
+def watch_queue_unknown(inst, entries):
+    """Find recorded queue episodes omitted while their projection is unknown."""
+    from . import coordinator_advisories as advisories
+    path = inst.root / '.brain/coordinator-queue.json'
+    try:
+        _m_common.safe_target(path)
+        recorded = advisories.coordinator_conditions_read(path)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+    if not recorded:
+        return set()
+    present = {i['id'] for i in entries}
+    now = inst.now_dt().timestamp()
+    host = advisories.coordinator_host_runs(inst, now)
+    unknown = set()
+    for n in inst.nodes():
+        condition = recorded.get(n['id'])
+        if (n['archived'] or not condition or condition['severity'] is None
+                or condition['thread'] != n['local'].get('coordinator')):
+            continue
+        episode = watch_digest([n['id'], condition['thread'], 'coordinator-queue',
+                                [condition['start'], condition['severity']]])
+        key = watch_digest(['root', 'coordinator-queue', episode])
+        if key not in present and advisories.coordinator_queue_view(inst, n, now, host.get(n['id']))['count'] is None:
+            unknown.add(key)
+    return unknown
 
 
 def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None):
@@ -340,11 +369,12 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
         layout = {} if layout is None else layout
         generation = watch_source_signature(inst, layout)
         groups = scan()
-        if watch_source_signature(inst, layout) != generation:
-            return WatchGroups({}, None, generation, stale=True, layout=layout)
         entries = [i for group in groups.values() for i in group['items']
                    if ('reason' not in i or i['kind'] == 'overdue-question') and i['kind'] not in
                    ('machine-hold', 'machine-alert', 'machine-repair', 'job-ready', 'job-landed', 'rotate')]
+        queue_unknown = watch_queue_unknown(inst, entries)
+        if watch_source_signature(inst, layout) != generation:
+            return WatchGroups({}, None, generation, stale=True, layout=layout)
         if not serialized:
             acquire()
         _m_common.safe_target(path)
@@ -352,6 +382,9 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
             data = watch_read(path, {'version': 1, 'open': {}})
             if (data.get('version') != 1 or not isinstance(data.get('open'), dict)
                     or type(data.get('overdue_episodes', False)) is not bool
+                    or not isinstance(data.get('queue_unknown', {}), dict)
+                    or any(k not in data['open'] or type(v) is not int or not 1 <= v <= 3
+                           for k, v in data.get('queue_unknown', {}).items())
                     or any(not re.fullmatch(r'[0-9a-f]{64}', k)
                            or not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
                            for k, v in data['open'].items())):
@@ -379,15 +412,19 @@ def watch_due_episodes(inst, scan, serialized=False, blocking=True, layout=None)
             if item['kind'] == 'overdue-question':
                 item['legacy_reason'] = item['reason']
                 item['reason'] = 'overdue:' + item['id']
+        misses = {key: data.get('queue_unknown', {}).get(key, 0) + 1
+                  for key in queue_unknown & data['open'].keys()}
+        misses = {key: count for key, count in misses.items() if count <= 3}
+        retained = {key: data['open'][key] for key in misses}
+        current.update(retained)
         try:
-            # Atomic replacement supplies a new generation even for an unchanged
-            # scan, without extending the existing receipt schema.
+            # Atomic replacement supplies a new generation even for an unchanged scan.
             _m_machine.machine_publish(inst, path, json.dumps(
-                {'version': 1, 'open': current, 'overdue_episodes': True}, sort_keys=True) + '\n')
+                {'version': 1, 'open': current, 'overdue_episodes': True, 'queue_unknown': misses}, sort_keys=True) + '\n')
             revision = watch_receipt_revision(inst)
         except OSError:
             return watch_untracked(groups, generation)  # unpublished identities cannot prove resolution
-    return WatchGroups(groups, revision, generation, layout=layout)
+    return WatchGroups(groups, revision, generation, layout=layout, retained=retained.values())
 
 
 def watch_items(inst, n):
@@ -975,6 +1012,7 @@ def watch_publish(inst, kinds=None, quiet=False, sources=None, groups=None):
         watch_failures(inst, nodes, failures, warnings)
     groups = watch_groups(inst, nodes) if groups is None else groups
     current_ids = {i['id'] for group in groups.values() for i in group['items']}
+    current_ids.update(getattr(groups, 'retained_ids', ()))
     for group in groups.values():
         if group.get('episodes_known', True):
             for pending in _m_hosts.wake_directory(inst, group['node']).glob('*.pending'):

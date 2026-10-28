@@ -195,6 +195,64 @@ class Watcher(Scenario):
         with contextlib.redirect_stdout(io.StringIO()):
             self.m.watch_once(self.inst, kinds=kinds)
 
+    def test_queue_receipt_survives_three_unknown_scans_but_fourth_retires_it(self):
+        self.b(self.root, 'new', 'app', '--title', 'App')
+        self.b(self.root, 'set', 'app', 'coordinator=fixture-app', 'wake=fixture-send')
+        self.inst = self.m.Instance(self.root)
+        advisories = self.m.coordinator_advisories.__globals__
+        known = {'known': True, 'item_count': 4,
+                 'oldest_at': self.inst.now_dt().timestamp() - 300, 'unconsumed_wake': True}
+        projection = dict(known)
+        empty = {'known': True, 'item_count': 0, 'oldest_at': None}
+        def queue(inst, n):
+            return projection if n['id'] == 'app' else empty
+        receipt = self.root / '.brain/wake/due-episodes.json'
+        seen = self.root / '.brain/wake/due-seen.json'
+        with mock.patch.object(advisories['_m_hosts'], 'wake_turn_queue', side_effect=queue, create=True), \
+                mock.patch.object(self.m, 'wake_start'), \
+                mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            for reads in (1, 2, 3, 4):
+                with self.subTest(unknown_reads=reads):
+                    projection.clear()
+                    projection.update(known)
+                    self.watch(kinds={'coordinator-queue'})
+                    self.assertEqual(wake.call_count, 1)
+                    self.assertEqual(wake.call_args.args[1]['id'], 'root')
+                    original = json.loads(receipt.read_text())['open']
+                    self.assertEqual(len(original), 1)
+                    identity = next(iter(original.values()))
+                    wake.reset_mock()
+                    projection.clear()
+                    projection['known'] = False
+                    for read in range(1, reads + 1):
+                        self.watch(kinds={'coordinator-queue'})
+                        stored = json.loads(receipt.read_text())
+                        self.assertEqual(stored['open'], original if read <= 3 else {})
+                        self.assertEqual(stored['queue_unknown'],
+                                         dict.fromkeys(original, read) if read <= 3 else {})
+                        self.assertEqual(identity in json.loads(seen.read_text())['seen'], read <= 3)
+                        wake.assert_not_called()
+                    projection.clear()
+                    projection.update(known)
+                    self.watch(kinds={'coordinator-queue'})
+                    self.assertEqual(wake.call_count, int(reads == 4))
+                    recovered = json.loads(receipt.read_text())
+                    self.assertEqual(recovered['queue_unknown'], {})
+                    if reads <= 3:
+                        self.assertEqual(recovered['open'], original)
+                    else:
+                        self.assertNotEqual(recovered['open'], original)
+                    # A known empty read closes immediately, even after an unknown.
+                    projection.clear()
+                    projection['known'] = False
+                    self.watch(kinds={'coordinator-queue'})
+                    projection.clear()
+                    projection.update(empty)
+                    self.watch(kinds={'coordinator-queue'})
+                    self.assertEqual(json.loads(receipt.read_text())['open'], {})
+                    self.assertNotIn(identity, json.loads(seen.read_text())['seen'])
+                    wake.reset_mock()
+
     def test_stale_precomputed_scan_cannot_retire_new_pending_or_restore_closed_episode(self):
         m, inst = self.m, self.inst
         root = inst.node('root')
