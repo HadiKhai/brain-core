@@ -419,6 +419,7 @@ UI_JSON_REVALIDATE_SECONDS = 30  # background re-reads begin well before rows re
 # Due items and problems also compare against the clock (overdue thresholds, stale
 # status): their stamp hit is reusable for at most this long.
 UI_JSON_CLOCKED_SECONDS = 300
+UI_JSON_PROBLEM_CHANGED_SECONDS = 60  # dated dashboard counts may survive stamp churn
 
 
 def ui_json_clocked(entry, key):
@@ -435,7 +436,15 @@ def ui_json_problems(inst, keys, entries):
         for n in inst.nodes():
             nid, key = n['id'], keys[n['id']]
             entry = entries.get(nid)
-            if not (ui_json_clocked(entry, key) and type(entry.get('count')) is int and entry['count'] >= 0):
+            # Integrity scans cover every home/worktree; node publications and branch
+            # movement otherwise discard their count on almost every live build.
+            # Reuse that existing observation briefly even when its stamp moved.
+            # The enclosing views binding still fences code, instance and privacy.
+            dated = (isinstance(entry, dict) and isinstance(entry.get('key'), str)
+                     and type(entry.get('at')) in (int, float)
+                     and 0 <= time.time() - entry['at'] < UI_JSON_PROBLEM_CHANGED_SECONDS)
+            if not ((ui_json_clocked(entry, key) or dated)
+                    and type(entry.get('count')) is int and entry['count'] >= 0):
                 at = time.time()
                 entry = {'key': key, 'at': at, 'count': len(check.collect_node_problems(inst, n)[0])}
             counts[nid] = entry
@@ -625,8 +634,7 @@ def ui_json_build(inst, scan, code, cache=True):
         return None  # do not publish text observed under an obsolete visibility policy
     if cache:
         # A view enters the cache only if its stamp held across the pass; delivery never waits on it.
-        problems_after = {}
-        after, worktrees_after = ui_json_stamps(current, problems_after)
+        after, worktrees_after = ui_json_stamps(current)
         held = {nid for nid, key in keys.items() if after.get(nid) == key}
         jobs_held = {job for job, key in worktree_keys.items()
                      if worktrees_after.get(job) == key and job in views.checked}
@@ -647,8 +655,9 @@ def ui_json_build(inst, scan, code, cache=True):
             'due': {nid: {'key': due_keys[nid], 'at': due_entries[nid]['at'] if nid in due_memo else started,
                           'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
                     for nid in set(due_memo) | set(due_seen) if nid in held},
-            'problems': {nid: entry for nid, entry in problem_counts.items()
-                         if problems_after.get(nid) == problem_keys[nid]}}
+            # A moved stamp must not throw away a usable, explicitly dated count.
+            # Preserve its original key/time so repeated builds cannot renew it.
+            'problems': problem_counts}
         try:
             with ui_json_publish_lock(current):  # a background revalidation may have published newer rows
                 model.write('node-views', ui_json_keep_newer(views_record, model.read('node-views')))

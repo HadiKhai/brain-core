@@ -1266,21 +1266,27 @@ ui_json.ui_json_background(root, '[]')
         record, built, problems, due = self.view_builds(root)
         self.assertEqual(built, ['meadow'])
         self.assertEqual(due, {'meadow'})
-        self.assertEqual(problems, 1)  # only this node's integrity result moves
+        self.assertEqual(problems, 0)  # dated count survives brief node stamp churn
         meadow = next(n for n in record['state']['nodes'] if n['id'] == 'meadow')
         self.assertEqual(meadow['status'], {'Now': 'Meadow moved on.'})
 
-    def test_inbox_churn_rechecks_only_its_node_and_shared_checks_stay_live(self):
+    def test_inbox_churn_keeps_dated_counts_and_shared_checks_stay_live(self):
         root = self.first_paint_root()
-        self.view_builds(root)
+        first = self.view_builds(root)[0]
         (root / 'nodes/meadow/inbox.md').write_text('- A new question\n')
         module = __import__(self.m._owners['ui_state'].__package__ + '.check', fromlist=['check'])
         with mock.patch.object(module, 'collect_node_problems', wraps=module.collect_node_problems) as nodes, \
                 mock.patch.object(module, 'collect_global_problems', wraps=module.collect_global_problems) as shared:
             record = self.view_builds(root)[0]
-        self.assertEqual([call.args[1]['id'] for call in nodes.call_args_list], ['meadow'])
+        nodes.assert_not_called()
         shared.assert_called_once()
-        self.assertEqual(record['state']['problems'], len(self.m.collect_problems(self.m.UIInstance(root))[0]))
+        self.assertEqual(record['state']['problems'], first['state']['problems'])
+        live = len(self.m.collect_problems(self.m.UIInstance(root))[0])
+        self.assertNotEqual(record['state']['problems'], live)  # creating the missing file repairs one problem
+        ui_json = __import__(module.__package__ + '.ui_json', fromlist=['snapshot'])
+        with mock.patch.object(ui_json.time, 'time', return_value=first['built_at'] + 61):
+            refreshed = self.view_builds(root)[0]
+        self.assertEqual(refreshed['state']['problems'], live)
 
     def test_installed_core_switch_invalidates_node_problem_keys(self):
         root = self.first_paint_root()
@@ -1321,6 +1327,32 @@ ui_json.ui_json_background(root, '[]')
             module.ui_json_problems(inst, keys, entries)
             self.assertEqual([call.args[1]['id'] for call in read.call_args_list], ['meadow'])
         self.assertEqual(at, 1000)
+
+    def test_changed_problem_count_stamp_has_a_fixed_sixty_second_bound(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        check = __import__(module.__package__ + '.check', fromlist=['check'])
+        inst = self.m.UIInstance(root)
+        keys = {n['id']: n['id'] for n in inst.nodes()}
+        with mock.patch.object(module.time, 'time', return_value=1000):
+            _, entries, _ = module.ui_json_problems(inst, keys, {})
+        keys['meadow'] = 'changed'
+        for now in (1001, 1059):
+            with mock.patch.object(module.time, 'time', return_value=now), \
+                    mock.patch.object(check, 'collect_node_problems') as read:
+                _, again, at = module.ui_json_problems(inst, keys, entries)
+            read.assert_not_called()
+            self.assertEqual(again, entries)  # neither key nor timestamp slides on a hit
+            self.assertEqual(at, 1000)
+        with mock.patch.object(module.time, 'time', return_value=1060), \
+                mock.patch.object(check, 'collect_node_problems', wraps=check.collect_node_problems) as read:
+            _, again, _ = module.ui_json_problems(inst, keys, entries)
+        self.assertEqual([call.args[1]['id'] for call in read.call_args_list], ['meadow'])
+        self.assertEqual(again['meadow']['key'], 'changed')
+        self.assertEqual(again['meadow']['at'], 1060)
+        # Acting integrity checks still read the changed source immediately.
+        (root / 'nodes/meadow/status.md').write_text('## Now\nMissing facts.\n')
+        self.assertTrue(any('facts block' in p for p in check.collect_node_problems(inst, inst.node('meadow'))[0]))
 
     def test_receipt_changes_invalidate_only_the_jobs_readiness_stamp(self):
         import hashlib
@@ -1375,7 +1407,7 @@ ui_json.ui_json_background(root, '[]')
         (root / 'nodes/meadow/tasks/.pending').write_text('')  # any task-folder change
         _, built, problems, _ = self.view_builds(root)
         self.assertEqual(built, ['meadow', 'root'])  # another node's tasks may block
-        self.assertEqual(problems, 1)  # the other node's integrity does not depend on those blockers
+        self.assertEqual(problems, 0)  # only view stamps move inside the count's age bound
 
     def test_stamp_changed_mid_build_delivers_but_never_caches_that_view(self):
         root = self.first_paint_root()
@@ -1391,7 +1423,7 @@ ui_json.ui_json_background(root, '[]')
         views = self.m.ReadModel(self.m.UIInstance(root), self.m.ui_code_version()).read('node-views')
         self.assertEqual(sorted(views['nodes']), ['root'])  # only views whose stamp held are cached
         self.assertNotIn('meadow', views['due'])
-        self.assertEqual(sorted(views['problems']), ['root'])
+        self.assertEqual(sorted(views['problems']), ['meadow', 'root'])  # retain the dated observation
         self.assertEqual(self.view_builds(root)[1], ['meadow'])  # the moved view is re-read next time
         self.assertEqual(self.view_builds(root)[1], [])
 
