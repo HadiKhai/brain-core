@@ -695,6 +695,14 @@ def runnable_work(n, rows):
 
 @_m_command_reads.memo
 def _due_source_items(inst, n, state, include_ready):
+    # Finished jobs' live worktree status reads start together for their preflights.
+    finished = [row["Job"] for row in state["jobs"] or [] if include_ready and not row["Ended"]
+                and (state["handbacks"].get(_m_jobs.job_key(row)) or {}).get("state") == "done"]
+    with _m_verify.worktree_status_batch(n, finished):
+        return _due_source_items_unbatched(inst, n, state, include_ready)
+
+
+def _due_source_items_unbatched(inst, n, state, include_ready):
     """Source observations only; lifecycle and display options belong to each caller."""
     items = []
     def add(kind, text, **extra):

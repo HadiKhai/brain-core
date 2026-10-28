@@ -726,6 +726,142 @@ def branch_refs(cwd):
     return refs
 
 
+_GIT_LAYOUT_ENV = ('GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
+                   'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM')
+
+
+def worktree_git_dir(cwd, env=None):
+    """A checkout root's own Git directory read from its files, or None.
+
+    Only the plain layouts Git itself writes are interpreted: a `.git` directory,
+    or a `.git` file naming a linked worktree's administration directory with its
+    commondir. Environment overrides, foreign ownership, reftable and every other
+    shape return None so the caller asks Git.
+    """
+    env = os.environ if env is None else env
+    if any(name in env for name in _GIT_LAYOUT_ENV):
+        return None
+    try:
+        root = Path(cwd).absolute()
+        marker = root / '.git'
+        st = marker.lstat()
+        if stat.S_ISDIR(st.st_mode):
+            admin = common = marker
+        elif stat.S_ISREG(st.st_mode):
+            text = marker.read_text()
+            if not text.startswith('gitdir: ') or text.count('\n') > 1:
+                return None
+            admin = root / text[len('gitdir: '):].rstrip('\n')
+            if not admin.is_dir() or admin.is_symlink():
+                return None
+            relative = (admin / 'commondir').read_text().rstrip('\n')
+            common = admin / relative
+        else:
+            return None
+        for path in (root, admin, common):
+            if path.stat().st_uid != os.getuid():
+                return None  # safe.directory policy belongs to Git
+        if ((common / 'reftable').exists() or not (common / 'objects').is_dir()
+                or (admin / 'HEAD').is_symlink() or not (admin / 'HEAD').is_file()):
+            return None
+        return admin.resolve(strict=True), common.resolve(strict=True)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def worktree_head(cwd, env=None):
+    """`git symbolic-ref -q HEAD` for a checkout root from its files.
+
+    Returns the full ref name, '' for a detached HEAD, or None when Git must be
+    asked (any layout or ref shape worktree_git_dir does not interpret, or a
+    loose target that is itself symbolic and would recurse).
+    """
+    dirs = worktree_git_dir(cwd, env)
+    if dirs is None:
+        return None
+    admin, common = dirs
+    try:
+        text = (admin / 'HEAD').read_text()
+        if re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\n?', text):
+            return ''
+        match = re.fullmatch(r'ref: (refs/[^\n\0]+)\n?', text)
+        if not match or match.group(1).endswith('/') or '..' in match.group(1):
+            return None
+        ref = match.group(1)
+        target = common / ref
+        if target.is_symlink():
+            return None
+        try:
+            with target.open('rb') as stream:
+                if stream.read(4) == b'ref:':
+                    return None
+        except (FileNotFoundError, NotADirectoryError):
+            pass  # packed or unborn: symbolic-ref still names it
+        return ref
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def index_has_split_link(contents):
+    """Whether index bytes carry a split-index `link` extension.
+
+    Entries are walked by the index format (versions 2-4, SHA-1 or SHA-256),
+    so a path containing "link" is not mistaken for the extension. Anything that
+    does not parse exactly to the trailing checksum answers True (copy it).
+    """
+    if len(contents) < 12 or contents[:4] != b'DIRC':
+        return True
+    version, count = int.from_bytes(contents[4:8], 'big'), int.from_bytes(contents[8:12], 'big')
+    if version not in (2, 3, 4):
+        return True
+    for size in (20, 32):
+        end, pos, ok = len(contents) - size, 12, True
+        for _ in range(count):
+            fixed = pos + 40 + size + 2
+            if fixed > end:
+                ok = False
+                break
+            flags = int.from_bytes(contents[fixed - 2:fixed], 'big')
+            if flags & 0x4000:
+                if version < 3:
+                    ok = False
+                    break
+                fixed += 2
+            name = fixed
+            if version == 4:
+                while name < end and contents[name] & 0x80:
+                    name += 1
+                name += 1  # last byte of the prefix-strip varint
+            nul = contents.find(b'\0', name, end)
+            if nul < 0:
+                ok = False
+                break
+            pos = nul + 1 if version == 4 else pos + ((nul - pos + 8) & ~7)
+        if not ok or pos > end:
+            continue
+        signatures = []
+        while pos + 8 <= end:
+            signatures.append(contents[pos:pos + 4])
+            pos += 8 + int.from_bytes(contents[pos + 4:pos + 8], 'big')
+        if pos == end:
+            return b'link' in signatures
+    return True
+
+
+_INDEX_SPLIT = {}
+
+
+def _index_split(source, original, contents):
+    # Shared across one process: the same index bytes always parse alike.
+    key = (str(source), original.st_dev, original.st_ino, original.st_size,
+           original.st_mtime_ns, original.st_ctime_ns)
+    if key not in _INDEX_SPLIT:
+        if len(_INDEX_SPLIT) > 4096:
+            _INDEX_SPLIT.clear()
+        _INDEX_SPLIT[key] = index_has_split_link(contents)
+    return _INDEX_SPLIT[key]
+
+
 @contextlib.contextmanager
 def git_read_index(cwd, env, *, diff=False):
     """Isolate index refreshes while preserving Git's normal read output.
@@ -735,15 +871,19 @@ def git_read_index(cwd, env, *, diff=False):
     refresh a disposable copy instead of the caller's index. Split indexes are
     flattened privately so reads cannot freshen their original backing files.
     """
-    location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
-    source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
+    dirs = worktree_git_dir(cwd or Path.cwd(), env)
+    if dirs is not None:
+        source = dirs[0] / 'index'  # what --git-path index names for this layout
+    else:
+        location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
+        source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
     if source is None or not source.is_file():
         yield env  # no repository/index to refresh; preserve Git's own verdict
         return
     with source.open('rb') as stream:
         original = os.fstat(stream.fileno())
         contents = stream.read()
-    split = b'link' in contents  # conservative: a filename may also contain it
+    split = _index_split(source, original, contents)
     if not diff and not split:
         yield env
         return
@@ -756,8 +896,11 @@ def git_read_index(cwd, env, *, diff=False):
         os.utime(private, ns=(original.st_atime_ns, original.st_mtime_ns))
         child = {**env, 'GIT_INDEX_FILE': str(private)}
         if split:
-            own = git('rev-parse', '--absolute-git-dir', cwd=cwd, env=env, check=True)
-            own = Path(own.stdout.removesuffix('\n'))
+            if dirs is not None:
+                own = dirs[0]
+            else:
+                own = git('rev-parse', '--absolute-git-dir', cwd=cwd, env=env, check=True)
+                own = Path(own.stdout.removesuffix('\n'))
             shared = [path for path in own.glob('sharedindex.*') if path.is_file()]
             if shared:
                 # Flatten the copied split index before the actual read. Moving

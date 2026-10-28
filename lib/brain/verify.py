@@ -292,6 +292,51 @@ def immutable_git_query(repo):
     return query
 
 
+def _worktree_status(path, env):
+    return _m_common.git("-c", "diff.ignoreSubmodules=none", "-c", "status.showUntrackedFiles=all", "status", "--porcelain",
+                         "--ignore-submodules=none", "--untracked-files=all", cwd=path, env=env)
+
+
+_STATUS_BATCH = contextvars.ContextVar('brain_status_batch', default=None)
+
+
+@contextlib.contextmanager
+def worktree_status_batch(n, branches):
+    """Start the job worktrees' live status reads together for one pass of preflights.
+
+    Each answer is consumed once, by the next preflight of that worktree in this
+    scope, and is never kept for a later read; exceptions surface at that same
+    preflight. Unconsumed reads are discarded. Observed Git reads stay serial.
+    """
+    worktrees = n.get("local", {}).get("worktrees", {})
+    paths = [str(worktrees[b]["path"]) for b in dict.fromkeys(branches)
+             if isinstance(worktrees.get(b), dict) and worktrees[b].get("path")
+             and Path(worktrees[b]["path"]).exists()]
+    paths = list(dict.fromkeys(paths))
+    if (len(paths) < 2 or _STATUS_BATCH.get() is not None
+            or _m_common._GIT_OBSERVER.get() is not None):
+        yield
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0'}
+    pool = ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1, len(paths)))
+    try:
+        futures = {path: pool.submit(_worktree_status, path, env) for path in paths}
+        token = _STATUS_BATCH.set((env, futures))
+        try:
+            yield
+        finally:
+            _STATUS_BATCH.reset(token)
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _batched_status(path, env):
+    batch = _STATUS_BATCH.get()
+    future = batch[1].pop(str(path), None) if batch is not None and batch[0] == env else None
+    return future.result() if future is not None else _worktree_status(path, env)
+
+
 def ready_preflight(n, branch, base=None):
     """Test the proposed integration against the cached remote default (local main without origin)."""
     reasons = []
@@ -350,10 +395,12 @@ def ready_preflight(n, branch, base=None):
         reasons.append("job worktree is missing")
     else:
         path = w["path"]
-        if _m_common.git("symbolic-ref", "--short", "HEAD", cwd=path, env=env).stdout.strip() != branch:
+        selected = _m_common.worktree_head(path, env)
+        if selected is None:
+            selected = _m_common.git("symbolic-ref", "--quiet", "HEAD", cwd=path, env=env).stdout.strip()
+        if selected != "refs/heads/" + branch:
             reasons.append("job worktree is on a different branch")
-        status = _m_common.git("-c", "diff.ignoreSubmodules=none", "-c", "status.showUntrackedFiles=all", "status", "--porcelain",
-                     "--ignore-submodules=none", "--untracked-files=all", cwd=path, env=env)
+        status = _batched_status(path, env)
         if status.returncode or status.stdout.strip():
             reasons.append("job worktree is dirty or unreadable")
     return reasons, head, main
