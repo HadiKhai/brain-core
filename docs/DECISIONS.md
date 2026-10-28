@@ -3866,3 +3866,9 @@ lane environment, including unset values, with the current execution context;
 isolated receipts record that same environment. A validated landing disposition
 moves its linked build task to testing with truthful original-exit-1 evidence,
 without adding a failed-handback strike. Unvalidated markers retain failures.
+
+The native disposition fixture launches nested pytest with the test runner's
+interpreter, quoted as a command argument. Its isolated HOME must not make
+receipt coverage depend on an unrelated shell `python3` or user-site packages.
+The fixture therefore uses the same installed pytest and timeout plugin as the
+authorized parent run, without relaxing inventory or receipt validation.

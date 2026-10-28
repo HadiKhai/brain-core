@@ -1,5 +1,7 @@
 """Native direct-full receipts can satisfy readiness once, without rerunning."""
 import json
+import shlex
+import sys
 from pathlib import Path
 
 import test_train
@@ -48,7 +50,8 @@ class IsolatedDisposition(Scenario):
     def prepare(self, isolate=True, compatibility=False, persistent=False, linked=False):
         from scenario import CORE
         collector = 'tests/test_brain.py' if compatibility else 'tests/test_sample.py'
-        root, home = self.project('python3 -B -m pytest -q -p no:cacheprovider ' + collector)
+        root, home = self.project(shlex.join([
+            sys.executable, '-B', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', collector]))
         (home / 'tests').mkdir()
         (home / 'tests/conftest.py').write_text((CORE / 'tests/conftest.py').read_text())
         self.source = ('import sys\nimport unittest\n\nclass Flakes(unittest.TestCase):\n'
