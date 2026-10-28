@@ -207,6 +207,57 @@ class UnifiedHandbacks(Scenario):
     def due(self, r):
         return json.loads(self.b(r, "due", "a", "--json"))
 
+    def test_queued_checked_native_verifier_runs_unlocked_and_wait_returns_verdict(self):
+        r, home, wt = self.job()
+        # A real child must acquire the physical lock during native verification.
+        # A marker also proves that transport acceptance did not run verification.
+        marker = self.tmp / 'native-verification'
+        code = ("import fcntl,os,pathlib\n"
+                "with open(pathlib.Path(os.environ['BRAIN_ROOT']) / '.brain/lock', 'a') as lock:\n"
+                " fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "pathlib.Path(" + repr(str(marker)) + ").write_text('ran')\n")
+        (wt / 'verify.py').write_text(code)
+        self.git('commit', '-qam', 'Verify physical lock release', cwd=wt)
+        m = core_loader.SourceFileLoader('checked_native_queue', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(r)
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(r)}, clear=True):
+            fd = m.intent_lease(inst)
+            self.assertIsNotNone(fd)
+            try:
+                with m.brain_lock(inst):
+                    request_id = self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done',
+                                        '--reviews', '1', '--summary', 'Native queued fixture', '--enqueue').strip()
+                self.assertRegex(request_id, '^[0-9a-f]{32}$')
+                self.assertFalse(marker.exists())
+                self.assertIsNone(m.current_attempt(inst.node('a'), m.open_job(m.read_jobs(inst.node('a')), 'job')))
+            finally:
+                os.close(fd)
+            self.git('commit', '--allow-empty', '-qm', 'Advance before application', cwd=wt)
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.drain_intents(inst)
+        self.assertEqual(marker.read_text(), 'ran')
+        receipt = json.loads(self.b(r, 'queue', 'wait', request_id, '--timeout', '0'))
+        self.assertEqual((receipt['state'], receipt['ready'], receipt['exit_code']), ('applied', True, 0))
+        self.assertEqual(receipt['binding']['head'], self.git('rev-parse', 'HEAD', cwd=wt).strip())
+        # The compatibility --record alias uses the same queued native failure.
+        (wt / 'verify.py').write_text('raise SystemExit(7)\n')
+        self.git('commit', '-qam', 'Fail native fixture', cwd=wt)
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(r)}, clear=True):
+            fd = m.intent_lease(inst)
+            try:
+                failed = self.b(r, 'ready', 'a', '--branch', 'job', '--record', '--reviews', '1',
+                                '--summary', 'Native queued failure', '--enqueue').strip()
+            finally:
+                os.close(fd)
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.drain_intents(inst)
+        result = subprocess.run([sys.executable, str(r / 'core/bin/brain'), 'queue', 'wait', failed, '--timeout', '0'],
+                                cwd=r, env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        rejected = json.loads(result.stdout)
+        self.assertEqual((rejected['state'], rejected['ready'], rejected['exit_code']), ('applied', False, 1))
+        self.assertIn('verify failed (exit 7)', rejected['reason'])
+
     def test_question_and_blocked_handbacks_request_wake(self):
         r, home, wt = self.job()
         module = core_loader.SourceFileLoader("brain_handback_wake", str(CORE / "bin/brain")).load_module()

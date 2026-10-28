@@ -332,6 +332,7 @@ def cmd_handback(a):
 
 def publish_handback(a):
     """Worker-owned completion, proposed lessons and readiness live in one job-scoped file."""
+    from . import handback_queue as _m_queue
     inst = _m_nodes.load()
     n = inst.node(a.id)
     row = open_job(read_jobs(n) or [], a.branch)
@@ -421,7 +422,8 @@ def publish_handback(a):
         intent = getattr(a, '_intent_request', None)
         if intent:
             data['write_request'] = intent['id']
-            data['ready'], data['ready_reasons'] = None, []
+            if not _m_queue.checked_handback(intent['payload']):
+                data['ready'], data['ready_reasons'] = None, []
         if duration is not None:
             data["verify_duration"] = duration
             prior_wait = forecast_number(previous.get("admission_wait_seconds_total"))
@@ -524,6 +526,15 @@ def publish_handback(a):
     if checked:
         state = _m_verify.ready_state(inst, n, a.branch)
         why = reasons + state["reasons"]
+        if intent:
+            # This is the native post-publication verdict, never inferred from
+            # transport success or replayed by running readiness again.
+            why = list(dict.fromkeys(_m_guard.redact(reason, _m_guard.never_terms(n)) for reason in why))
+            _m_queue.intent_store(inst, intent['id'] + '.verdict',
+                dict(id=intent['id'], hash=intent['hash'], attempt_id=a._attempt_id,
+                     binding=attempt['binding'], handback_hash=_m_queue.intent_hash(data),
+                     ready=not why, verdict='not-ready' if why else 'ready',
+                     reasons=why, exit_code=1 if why else 0), exclusive=True)
         print(_m_verify.VerifyScrubber(_m_guard.never_terms(n)).feed(
             "ready" if not why else "not ready: " + "; ".join(dict.fromkeys(why)), final=True))
         if why:

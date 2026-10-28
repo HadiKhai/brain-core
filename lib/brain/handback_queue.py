@@ -29,11 +29,11 @@ _m_lifecycle_identity = _m_common.LazyModule(__package__, 'lifecycle_identity')
 
 
 QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report', 'reviews',
-              'need_human', 'restart', 'reverify', 'full_receipt')
+              'need_human', 'restart', 'reverify', 'full_receipt', 'record')
 QUEUE_LEASE = contextvars.ContextVar('brain_queue_lease', default=None)
 
-# v2 transport is instance-scoped. The v1 checked-handback runner below keeps
-# its ownership/binding protocol; unchecked intents never enter that runner.
+# v2 transport binds handback verification at application. Existing v1 requests
+# keep their submission-time binding and foreground ownership protocol.
 PATCH_FIELDS = frozenset(('title', 'description', 'kind', 'priority', 'order',
                           'estimate', 'spent', 'external_url', 'next_action'))
 MAX_INTENT = 65536
@@ -69,7 +69,7 @@ def intent_store(inst, name, data, exclusive=False):
         if not exclusive:
             target.atomic_write(raw.decode())
             return
-        if name.endswith(('.receipt', '.prepared')):
+        if name.endswith(('.receipt', '.prepared', '.verdict')):
             # These are published only by the single applier lease owner.
             # Stage + fsync + rename: no empty final receipt/preparation can be
             # exposed by death between create and write. Refuse an existing
@@ -179,7 +179,53 @@ def intent_receipt(inst, identity):
             or result.get('id') != identity or result.get('hash') != request.get('hash')
             or result.get('state') not in ('applied', 'rejected') or type(result.get('sequence')) is not int):
         raise ValueError('blocked write queue: invalid receipt')
+    if checked_handback(request['payload']):
+        validate_handback_verdict(result)
+        if result['state'] == 'rejected' and result['ready']:
+            raise ValueError('blocked write queue: rejected readiness')
+        if result['state'] == 'applied':
+            prepared = intent_read(inst, identity + '.prepared')
+            native = handback_verdict(inst, request, prepared)
+            if any(result.get(key) != native.get(key) for key in (
+                    'ready', 'verdict', 'reasons', 'exit_code', 'attempt_id', 'binding')):
+                raise ValueError('blocked write queue: receipt differs from native verdict')
     return result
+
+
+def checked_handback(payload):
+    from . import briefs
+    args = payload.get('args', {})
+    return (payload.get('kind') == 'handback' and args.get('state') == 'done'
+            and not briefs.import_job(args.get('branch', ''))
+            and (args.get('reviews') is not None or args.get('record', False)))
+
+
+def validate_handback_verdict(result):
+    if not isinstance(result, dict):
+        raise ValueError('blocked write queue: invalid handback verdict')
+    ready, reasons = result.get('ready'), result.get('reasons')
+    if (type(ready) is not bool or not isinstance(reasons, list)
+            or any(not isinstance(reason, str) or not reason for reason in reasons)
+            or ready != (not reasons) or result.get('verdict') != ('ready' if ready else 'not-ready')
+            or type(result.get('exit_code')) is not int or result['exit_code'] != (0 if ready else 1)):
+        raise ValueError('blocked write queue: invalid handback verdict')
+
+
+def handback_verdict(inst, request, prepared):
+    """Read a native verdict only; interrupted verification never implies ready."""
+    try:
+        saved = intent_read(inst, request['id'] + '.verdict')
+    except FileNotFoundError as error:
+        raise RuntimeError('checked handback verdict missing; retain interrupted request') from error
+    validate_handback_verdict(saved)
+    if (prepared.get('hash') != request['hash']
+            or saved.get('hash') != request['hash'] or saved.get('id') != request['id']
+            or saved.get('attempt_id') != prepared['after']['attempt_id']
+            or saved.get('handback_hash') != intent_hash(prepared['after'])
+            or not isinstance(saved.get('binding'), dict)
+            or any(not isinstance(saved['binding'].get(key), str) for key in ('head', 'base', 'inputs'))):
+        raise RuntimeError('checked handback verdict binding changed')
+    return saved
 
 
 def pending_intents(inst):
@@ -244,19 +290,17 @@ def fast_intent(a, root):
                 return False  # effective completion proof retains synchronous refusal
             guard.no_terms_in(n, json.dumps(changes), 'task patch')
             payload = dict(kind='task', node=n['id'], task=a.task_id, changes=changes)
-    elif name == 'cmd_handback' and getattr(a, 'enqueue', False):
+    elif (name == 'cmd_handback' or name == 'cmd_ready' and getattr(a, 'record', False)) and getattr(a, 'enqueue', False):
+        if name == 'cmd_ready':
+            a.state = 'done'
         n = inst.node(a.id)
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch)
         if not row:
             raise ValueError('no open job for handback')
         _m_jobs.validate_handback_options(a, row=row)
-        from . import briefs
-        checked = a.state == 'done' and not briefs.import_job(row['Job']) and (
-            a.reviews is not None or getattr(a, 'record', False))
-        if not checked:
-            args = {key: getattr(a, key, None) for key in QUEUE_ARGS}
-            guard.no_terms_in(n, json.dumps(args), 'handback request')
-            payload = dict(kind='handback', node=n['id'], job_key=_m_jobs.job_key(row), args=args)
+        args = {key: getattr(a, key, None) for key in QUEUE_ARGS}
+        guard.no_terms_in(n, json.dumps(args), 'handback request')
+        payload = dict(kind='handback', node=n['id'], job_key=_m_jobs.job_key(row), args=args)
     if payload is None:
         return False
     if payload['kind'] == 'inbox' and getattr(a, 'request_id', None):
@@ -327,7 +371,7 @@ def apply_intent(inst, data):
             raise RuntimeError('task drift after preparation; retain blocked request')
         inst.commit([], n['id'] + ': task ' + payload['task'])
     elif payload['kind'] == 'handback':
-        apply_handback_intent(inst, n, data)
+        return apply_handback_intent(inst, n, data)
     else:
         raise ValueError('unsupported write request kind')
 
@@ -438,32 +482,55 @@ def intent_recovery_resources(inst, request, actual):
 
 
 def apply_handback_intent(inst, n, request):
-    """Unchecked native publication, with durable effects retained for replay."""
+    """Native publication and checked verdicts; verification binds here."""
     from . import tasks, transitions, events, hosts
     payload = request['payload']
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], payload['args']['branch'])
     if not row or _m_jobs.job_key(row) != payload['job_key']:
         raise ValueError('job changed before queued message application')
-    from . import briefs
-    if (payload['args']['state'] == 'done' and not briefs.import_job(row['Job'])
-            and payload['args'].get('reviews') is not None):
-        raise ValueError('checked handback cannot use the write-intent applier')
+    checked = checked_handback(payload)
     try:
         prepared = intent_read(inst, request['id'] + '.prepared')
     except FileNotFoundError:
+        attempt = _m_attempts.current_attempt(n, row)
+        if checked and attempt and attempt.get('write_request') == request['id']:
+            raise RuntimeError('interrupted checked handback; retain verifier ownership evidence')
         args = argparse.Namespace(**payload['args'], enqueue=False, _intent_request=request)
         _m_jobs.validate_handback_options(args, row=row)
         # The immutable intent is deliberately bound at application time, never
         # represented as a v1 submission-time verifier binding.
-        _m_jobs.cmd_handback(args)
-        return
+        try:
+            _m_jobs.cmd_handback(args)
+        except _m_common.VerdictExit:
+            if not checked:
+                raise
+        except SystemExit as error:
+            # A native refusal may have created and retired an attempt. Close
+            # that journal operation as a completed negative verdict, rather
+            # than leaving its known interruption as an unrelated source gap.
+            attempt = _m_attempts.current_attempt(n, row)
+            published = _m_jobs.read_handback(n, row) or {}
+            if (checked and not intent_path(inst, request['id'] + '.prepared').exists()
+                    and attempt and attempt.get('write_request') == request['id']
+                    and attempt['state'] == 'interrupted' and published.get('write_request') != request['id']):
+                print(str(error), file=sys.stderr)
+                raise _m_common.VerdictExit(1) from error
+            raise
+        if checked:
+            prepared = intent_read(inst, request['id'] + '.prepared')
+            return handback_verdict(inst, request, prepared)
+        return None
     if prepared.get('hash') != request['hash'] or prepared.get('job_key') != payload['job_key']:
         raise RuntimeError('handback preparation identity changed')
     data = prepared['after']
+    verdict = handback_verdict(inst, request, prepared) if checked else None
     with _m_instance.brain_lock(inst):
         attempt = _m_attempts.current_attempt(n, row)
         if not attempt or attempt['id'] != data['attempt_id']:
             raise RuntimeError('handback attempt changed after preparation')
+        if checked and (attempt['binding'] != verdict.get('binding')
+                        or not _m_attempts.attempt_matches(n, row, attempt)):
+            raise RuntimeError('checked handback binding changed after verdict')
         current = _m_jobs.read_handback(n, row)
         if current == prepared['before']:
             if not _m_attempts.attempt_matches(n, row, attempt):
@@ -487,6 +554,7 @@ def apply_handback_intent(inst, n, request):
     _m_instance.unlock()
     if prepared['inbox_question'] or data['state'] == 'blocked' and not prepared['need']:
         hosts.request_wake(inst, n, 'wake:' + data['wake_id'])
+    return verdict
 
 
 def drain_intents(inst, lease_fd=None):
@@ -505,6 +573,7 @@ def drain_intents(inst, lease_fd=None):
                 break
             sequence, data = pending[0]
             state, reason = 'applied', ''
+            verdict = None
             diagnostic = io.StringIO()
             with intent_touched(), _m_instance.brain_lock(inst):
                 current = _m_instance.Instance(inst.root)
@@ -516,16 +585,23 @@ def drain_intents(inst, lease_fd=None):
                         operation = events.Command(inst.root, args)
                         operation.write_request = data
                         with operation:
-                            apply_intent(current, data)
+                            verdict = apply_intent(current, data)
                 except (ValueError, SystemExit) as error:
                     # Rejection is terminal only when no prepared primary effect
                     # exists. Partial application always remains blocked/replayable.
                     if intent_path(inst, data['id'] + '.prepared').exists():
                         raise RuntimeError('prepared application needs recovery') from error
                     state, reason = 'rejected', diagnostic.getvalue().strip() or str(error)
+                    if checked_handback(data['payload']):
+                        verdict = dict(ready=False, verdict='not-ready', reasons=[reason], exit_code=1)
                 with _m_instance.brain_lock(inst):
+                    if checked_handback(data['payload']):
+                        validate_handback_verdict(verdict)
+                    result = ({key: verdict[key] for key in ('ready', 'verdict', 'reasons', 'exit_code',
+                               'attempt_id', 'binding') if key in verdict} if verdict else {})
                     intent_store(inst, data['id'] + '.receipt', dict(id=data['id'], hash=data['hash'],
-                                 sequence=sequence, state=state, reason=reason), exclusive=True)
+                                 sequence=sequence, state=state,
+                                 reason=reason or '; '.join(result.get('reasons', [])), **result), exclusive=True)
         path = intent_path(inst, 'blocked')
         with _m_common.directory_target(path, private=True) as target:
             info = target.stat()
@@ -566,7 +642,7 @@ def cmd_intent_queue(a):
         receipt = intent_receipt(inst, identity)
         if receipt:
             print(json.dumps(receipt, sort_keys=True))
-            if receipt['state'] != 'applied':
+            if receipt['state'] != 'applied' or receipt.get('exit_code', 0) != 0:
                 raise SystemExit(1)
             return
         if intent_path(inst, 'blocked').exists():

@@ -294,10 +294,126 @@ class HandbackLifecycle(Scenario):
                 self.assertFalse(m.fast_intent(args, inst.root), fields)
             handback = argparse.Namespace(f=m.cmd_handback, id='root', branch=row['Job'], state='done',
                          summary='Checked result', question=None, lessons=None, report=None, reviews=1, enqueue=True)
-            self.assertFalse(m.fast_intent(handback, inst.root))
+            self.assertTrue(m.fast_intent(handback, inst.root))
             handback.reviews, handback.state = None, 'blocked'
             self.assertTrue(m.fast_intent(handback, inst.root))
         self.assertIsNone(m.current_attempt(n, row))
+
+    def checked_request(self, m, inst, row):
+        args = dict(id='root', branch=row['Job'], state='done', summary='Checked fixture', question=None,
+                    lessons='none: fixture', report=None, reviews=1, need_human=None,
+                    restart=None, reverify=False, full_receipt=None, record=True)
+        return m.submit_intent(inst, dict(kind='handback', node='root', job_key=m.job_key(row), args=args), start=False)
+
+    def test_checked_receipts_preserve_native_verdict_and_wait_exit(self):
+        for ready in (True, False):
+            with self.subTest(ready=ready):
+                # Each case owns an independent spool and attempt history.
+                if (self.tmp / 'instance').exists():
+                    import shutil
+                    shutil.rmtree(self.tmp / 'instance')
+                m, inst, n, row = self.fixture()
+                request = self.checked_request(m, inst, row)
+                packet = dict(version=1, verify_result=0 if ready else 1, head='a', main='b',
+                              verify_command='fixture', inputs='c')
+                why = [] if ready else ['native verifier failed']
+                with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
+                        mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}), \
+                        mock.patch.object(m, 'record_ready', return_value=(packet, [])) as verify, \
+                        mock.patch.object(m, 'ready_state', return_value=dict(reasons=why)), \
+                        mock.patch.object(m, 'actual_cost', return_value={}), \
+                        mock.patch.object(m, 'job_size', return_value={}), mock.patch.object(m.Instance, 'commit'), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    m.drain_intents(inst)
+                    m.drain_intents(inst)
+                verify.assert_called_once()
+                receipt = m.intent_receipt(inst, request['id'])
+                self.assertEqual(receipt['state'], 'applied')
+                self.assertEqual((receipt['ready'], receipt['verdict'], receipt['exit_code']),
+                                 (ready, 'ready' if ready else 'not-ready', 0 if ready else 1))
+                self.assertEqual(receipt['reasons'], why)
+                self.assertEqual(m.read_handback(n, row)['ready'], packet)
+                self.assertEqual(receipt['attempt_id'], m.current_attempt(n, row)['id'])
+                with mock.patch.object(m, 'find_root', return_value=inst.root), \
+                        mock.patch.object(m, 'brain_lock', side_effect=AssertionError('wait acquired lock')), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    if ready:
+                        m.cmd_intent_queue(argparse.Namespace(action='wait', id=request['id'], timeout=0))
+                    else:
+                        with self.assertRaises(SystemExit) as exit:
+                            m.cmd_intent_queue(argparse.Namespace(action='wait', id=request['id'], timeout=0))
+                        self.assertEqual(exit.exception.code, 1)
+                if not ready:
+                    m.intent_store(inst, request['id'] + '.receipt',
+                                   {**receipt, 'ready': True, 'verdict': 'ready', 'reasons': [], 'exit_code': 0})
+                    with self.assertRaisesRegex(ValueError, 'native verdict'):
+                        m.intent_receipt(inst, request['id'])
+
+    def test_checked_receipt_recovery_reuses_exact_verdict_and_missing_verdict_blocks(self):
+        m, inst, n, row = self.fixture()
+        request = self.checked_request(m, inst, row)
+        packet = dict(version=1, integration_base='b', verify_result=0, head='a', main='b', inputs='c')
+        store = m.intent_store
+        def no_receipt(current, name, data, **kwargs):
+            if name.endswith('.receipt'):
+                raise RuntimeError('owned kill before receipt')
+            return store(current, name, data, **kwargs)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}), \
+                mock.patch.object(m, 'record_ready', return_value=(packet, [])) as verify, \
+                mock.patch.object(m, 'ready_state', return_value=dict(reasons=[])), \
+                mock.patch.object(m, 'actual_cost', return_value={}), mock.patch.object(m, 'job_size', return_value={}), \
+                mock.patch.object(m.Instance, 'commit'), contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(m, 'intent_store', side_effect=no_receipt), \
+                    self.assertRaisesRegex(RuntimeError, 'owned kill'):
+                m.drain_intents(inst)
+            self.assertIsNone(m.intent_receipt(inst, request['id']))
+            self.assertTrue(m.intent_path(inst, request['id'] + '.verdict').exists())
+            m.drain_intents(inst)
+            self.assertTrue(m.intent_receipt(inst, request['id'])['ready'])
+            # Model a different crash boundary: primary publication, no native
+            # verdict or receipt. A saved packet alone cannot finish the request.
+            m.intent_path(inst, request['id'] + '.receipt').unlink()
+            m.intent_path(inst, request['id'] + '.verdict').unlink()
+            with self.assertRaisesRegex(RuntimeError, 'verdict missing'):
+                m.drain_intents(inst)
+        verify.assert_called_once()
+        self.assertIsNone(m.intent_receipt(inst, request['id']))
+
+    def test_checked_binding_drift_is_refused_and_interruption_never_reruns_verify(self):
+        m, inst, n, row = self.fixture()
+        request = self.checked_request(m, inst, row)
+        bindings = iter([{'head': 'a', 'base': 'b', 'inputs': 'c'},
+                         {'head': 'changed', 'base': 'b', 'inputs': 'c'}])
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'load', return_value=inst), \
+                mock.patch.object(m, 'attempt_binding', side_effect=lambda *a: next(bindings)), \
+                mock.patch.object(m, 'record_ready', return_value=({'version': 1, 'integration_base': 'b'}, [])), \
+                mock.patch.object(m, 'actual_cost', return_value={}), mock.patch.object(m, 'job_size', return_value={}), \
+                mock.patch.object(m.Instance, 'commit'), contextlib.redirect_stdout(io.StringIO()):
+            m.drain_intents(inst)
+        receipt = m.intent_receipt(inst, request['id'])
+        self.assertEqual((receipt['state'], receipt['ready'], receipt['exit_code']), ('rejected', False, 1))
+        self.assertIn('changed', receipt['reason'])
+        self.assertIsNone(m.read_handback(n, row))
+        other = self.checked_request(m, inst, row)
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(m, 'attempt_binding', return_value={'head': 'a', 'base': 'b', 'inputs': 'c'}):
+            m.begin_attempt(inst, n, row, write_request=other['id'])
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'record_ready') as verify, \
+                mock.patch.object(m.Instance, 'commit'), self.assertRaisesRegex(RuntimeError, 'interrupted checked'):
+            m.drain_intents(inst)
+        verify.assert_not_called()
+        self.assertIsNone(m.intent_receipt(inst, other['id']))
+
+    def test_checked_wait_timeout_preserves_pending_request(self):
+        m, inst, n, row = self.fixture()
+        request = self.checked_request(m, inst, row)
+        with mock.patch.object(m, 'find_root', return_value=inst.root), \
+                mock.patch.object(m, 'brain_lock', side_effect=AssertionError('wait acquired lock')), \
+                self.assertRaisesRegex(SystemExit, 'pending'):
+            m.cmd_intent_queue(argparse.Namespace(action='wait', id=request['id'], timeout=0))
+        self.assertIsNone(m.intent_receipt(inst, request['id']))
+        self.assertEqual(m.pending_intents(inst)[0][1], request)
 
     def test_write_applier_lease_is_exclusive_and_submission_starts_detached(self):
         m, inst, n, row = self.fixture()

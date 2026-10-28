@@ -8,12 +8,14 @@ and multiline text without a runtime dependency beyond Python 3.9.
 
 `task set` patches containing only `title`, `description`, `kind`, `priority`,
 `order`, `estimate`, `spent`, `external_url` and `next_action` return a durable
-request ID immediately. `inbox NODE --add TEXT` and unchecked
+request ID immediately. `inbox NODE --add TEXT` and
 `handback NODE --enqueue ...` use the same instance queue. The return means
 **queued**. Fresh-state validation and publication happen in a detached applier.
 Task status, owner/claim, dependencies, holds, authority, contracts and other gate
 fields keep their synchronous path. Checked `handback --state done --reviews N`
-retains the existing verifier/foreground-queue behavior. Item writes stay synchronous.
+stays synchronous unless `--enqueue` is supplied. The compatibility
+`ready --record --reviews N --enqueue` form uses the same checked queue.
+Item writes stay synchronous.
 Metadata edits on already completed tasks also stay synchronous because their
 effective row requires fresh completion proof.
 
@@ -31,6 +33,17 @@ rather than submitting under a new identity. `--request-id ID` on these producer
 forms retries the same immutable payload; different payloads with that ID refuse.
 Two identical inbox messages with different IDs remain two intentional messages.
 
+Checked handback receipts include `verdict` (`ready` or `not-ready`), `ready`,
+`reasons`, `exit_code`, and the native attempt/binding identity. `queue wait`
+exits 0 only for a ready checked receipt, and 1 for a not-ready or rejected one.
+An applied handback may be not ready: its native result was published but refused
+readiness. A timeout reports pending, exits nonzero and retains the request.
+Verification binds to branch, base, inputs and policy **at application time**;
+enqueue creates no attempt and promises no submission-time verification binding.
+Readiness is the native verdict at that application, not a guarantee that refs
+or policy remain unchanged after the receipt. Landing still checks current readiness.
+Existing v1 foreground requests retain their original submission-time fences.
+
 The producer starts an applier only when its independent lease is free. It drains
 in append-index order, locks the instance for each record, and exits when empty.
 After an interrupted applier, the next producer starts recovery; `brain queue
@@ -39,6 +52,11 @@ after preparation block the queue for inspection; no records are skipped.
 Inspect `.brain/write-queue/blocked` for the retained reason. Request, prepared
 effect and applied/rejected receipt files are private instance state. Do not edit,
 rotate or remove the spool while requests or producers exist.
+Checked requests also retain an atomic native `.verdict` record. Recovery never
+reruns an interrupted verifier or infers ready from a saved packet. Missing verdicts,
+changed attempt/binding evidence and ambiguous verification retain a blocked request
+for reconciliation. An exact saved verdict may complete receipt publication without
+executing verification again.
 Interrupted event operations are bound to their immutable request and resumed
 under the original operation lease. Only prepared primary effects may account
 for new source differences; unrelated gaps keep the queue blocked for inspection.

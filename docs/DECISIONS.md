@@ -3805,3 +3805,17 @@ and waking the fallback, covering producers that saw the final idle lease held.
 Uninstall repeats that handoff from the invoking CLI after supervisor teardown,
 outside the stopped unit's process group/cgroup. Retained blocked application
 evidence suppresses automatic retry on either handoff.
+
+## 2026-10-28: Carry native checked-handback verdicts through the write queue
+
+Explicitly queued checked handbacks use the immutable write-intent transport.
+Submission creates no attempt and performs no verification; the native applier
+binds branch, base, policy and input identity at application. Synchronous callers
+and existing v1 foreground requests keep their existing contracts.
+Checked publication preserves its native ready packet and saves the native
+post-publication verdict atomically, bound to the request, attempt, input binding
+and exact handback. Receipts distinguish applied publication from readiness:
+`queue wait` returns 0 for ready and 1 for not-ready, with native refusal reasons.
+An interrupted verifier or missing verdict remains blocked. Recovery may reuse
+an exact durable verdict but never recompute readiness or rerun an ambiguous
+verifier merely to complete a transport receipt.

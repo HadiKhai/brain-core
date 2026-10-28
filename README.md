@@ -159,8 +159,10 @@ inbox; a blocked human need adds `--need-human "<need>"`.
 Hand-back schema v3 stores summary and question explicitly. Older records remain readable
 and are labelled when these fields are missing; report contents never supply a guessed summary.
 An active replacement attempt makes the previous hand-back historical until an exact-bound
-terminal publication replaces it. `--enqueue` returns a durable request ID and requires an
-explicit `brain queue run website --once`. Recovery requires an exact request:
+terminal publication replaces it. `--enqueue` returns a durable request ID and starts
+the write applier. `brain queue wait ID` returns its native checked verdict (0 ready,
+1 not ready); verification binds at application. Older v1 foreground requests
+still use `brain queue run website --once`. Their recovery requires an exact request:
 `brain queue run website --once --request-id ID --recover`. For recorded local
 verifier processes, it writes intent and checks owner/start times and the original
 lease. Every recorded process must already be gone and the inherited lease free
@@ -595,7 +597,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain brief <id> [--branch B] --task-file F` | task, limits, routing, resume state and ranked usable lessons |
 | `brain brief <id> --small --task "..."` | a minutes-long, low-risk task without job ceremony |
 | `brain handback <id> --branch B --state done --summary "..." --reviews N --report P --lessons "..."` | one worker finishing step; every publication needs a one-line summary, question state also needs `--question` |
-| `brain handback <id> ... --enqueue` | durably enqueue a hand-back and print its request ID; explicit foreground runner required |
+| `brain handback <id> ... --enqueue` | enqueue a hand-back; print a request ID without waiting for verification |
+| `brain queue wait <request-id> [--timeout SECONDS]` | read a durable result; checked handbacks exit 0 ready, 1 not ready; timeout stays pending |
 | `brain queue run <id> --once [--request-id ID]` | run one request through the native verifier; `--request-id ID --recover` explicitly reconciles proven local ownership |
 | `brain jobs <id> --live` | read-only JSON joining ledger, hand-back, active attempt, recorded queue position/owner and next action; host activity unknown |
 | `brain jobs <id> --branch B --close [--reason "..."]` | close a manual landing with main SHA, or explicitly close parked work with a reason; retain resources |
