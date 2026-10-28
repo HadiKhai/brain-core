@@ -16,7 +16,7 @@ import core_loader
 from scenario import CORE, Scenario
 
 
-# Process start/wait budget, not a behaviour bound: fixed 3 s/5 s limits passed 12/20 at -n8 under load.
+# Per-call process liveness bound; fixed 3 s/5 s waits passed 12/20 at -n8 under load.
 PROCESS_BUDGET = 30
 
 class HandbackLifecycle(Scenario):

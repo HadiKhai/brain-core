@@ -3715,13 +3715,15 @@ archived-node refreshes retain their existing immediate path. No preparation or
 read observation survives the operation, and event-source views still come from
 committed replay.
 
-## 2026-10-28: Keep handback timeout evidence separate from enqueue race repair
+## 2026-10-28: Bound process liveness independently of handback outcomes
 
-The inherited HandbackLifecycle WIP uses a 30-second process budget and a
-pipe-bound foreign helper. Rechecking the saved 12/20 baseline found seven
-subprocess timeouts and one child-readiness timeout, with no unlocked-state
-fencing failure. The concurrent-attempt creation repair is already in main
-(`572f305e`); the WIP does not constitute another queue-race repair. Preserve
-the outcome assertions and treat the timeout change as provisional until the
-rebased candidate passes the required admitted runs and independent review.
-Old-head run counts do not establish the result on the rebased candidate.
+HandbackLifecycle uses a named 30-second per-call process liveness bound below
+its existing 120-second per-test hang guard. The saved concurrent-run baseline
+passed 12/20: seven failures exhausted 3-second CLI or 5-second process waits,
+and one exhausted a 5-second child-readiness wait. None reported an unlocked
+state-fence refusal. Concurrent attempt creation already excludes the replaced
+attempt from its binding fence (`572f305e`); publication still fences its owner.
+The test change addresses scheduling and startup tolerance, not another enqueue
+race. Outcome assertions remain intact. The unrelated-process helper blocks on
+its own stdin pipe so its lifetime does not expire while a slow test is still
+checking that takeover leaves it alive; EOF also releases it if the test exits.
