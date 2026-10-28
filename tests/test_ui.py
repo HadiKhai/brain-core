@@ -1330,6 +1330,14 @@ ui_json.ui_json_background(root, '[]')
         other = {'binding': 'other', 'worktrees': {'a': row(99)}}
         self.assertEqual(module.ui_json_keep_newer(merged, other)['worktrees']['a']['at'], 20)
 
+    def test_unwritable_view_cache_still_delivers(self):
+        root = self.first_paint_root()
+        module = __import__(self.m._owners['ui_state'].__package__ + '.ui_json', fromlist=['snapshot'])
+        with mock.patch.object(module, 'ui_json_publish_lock', side_effect=PermissionError('read-only')):
+            record = self.view_builds(root)[0]
+        self.assertIsNotNone(record)
+        self.assertEqual(self.view_builds(root)[1], ['meadow', 'root'])  # nothing was cached
+
     def test_worktree_row_read_time_is_its_own(self):
         ui = self.m._owners['ui_state']
         package = ui.__package__

@@ -587,8 +587,11 @@ def ui_json_build(inst, scan, code, cache=True):
                           'items': {**due_memo.get(nid, {}), **due_seen.get(nid, {})}}
                     for nid in set(due_memo) | set(due_seen) if nid in held},
             'problems': ({'key': everything, 'at': problems_at, 'count': problems} if held == set(keys) else None)}
-        with ui_json_publish_lock(current):  # a background revalidation may have published newer rows
-            model.write('node-views', ui_json_keep_newer(views_record, model.read('node-views')))
+        try:
+            with ui_json_publish_lock(current):  # a background revalidation may have published newer rows
+                model.write('node-views', ui_json_keep_newer(views_record, model.read('node-views')))
+        except OSError:
+            pass  # an optional cache; the observation is still delivered
         if any(time.time() - at >= UI_JSON_REVALIDATE_SECONDS for at in views.checked.values()):
             ui_json_request_revalidate(current)
     for row in state['nodes']:  # each live worktree row carries its own read time and age
