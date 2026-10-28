@@ -2387,7 +2387,8 @@ class WriteQueueService(Scenario):
         self.assertIsNone(self.queue.intent_receipt(self.inst, request['id']))
 
     def test_health_treats_malformed_existing_owner_as_unknown(self):
-        for owner in ({}, {'state': 'garbage'}, {'version': 1, 'state': 'running', 'owner': [True, 'birth']}):
+        for owner in (None, [], True, {}, {'state': 'garbage'},
+                      {'version': 1, 'state': 'running', 'owner': [True, 'birth']}):
             self.queue.intent_store(self.inst, 'service.json', owner)
             health = self.service.queue_health(self.inst)
             self.assertEqual(health['state'], 'unknown')

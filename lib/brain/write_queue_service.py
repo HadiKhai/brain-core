@@ -125,10 +125,10 @@ def queue_health(inst):
         try:
             owner = _m_queue.intent_read(inst, 'service.json')
         except FileNotFoundError:
-            owner = None
-        if owner is not None and not valid_service_owner(owner):
-            raise ValueError('invalid service owner')
-        owner = owner or {}
+            owner = {}
+        else:
+            if not valid_service_owner(owner):
+                raise ValueError('invalid service owner')
         running = False
         if owner.get('state') == 'running' and lease is not None and owner.get('lease') == lease:
             host = _m_identity.lifecycle_host_identity()
