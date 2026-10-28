@@ -770,10 +770,14 @@ def refresh_with_retry(attempt, root):
     import random
     import time
     for tries in range(1, REFRESH_TRIES + 1):
+        before = _m_instance.settings(_m_instance.Instance(root))
         try:
             return attempt()
         except SystemExit as error:
-            if not _m_status_refresh.contended(error):
+            # Only ordinary concurrent writes are retried. A settings or
+            # binding edit (instance, local, node policy) refuses as before.
+            if (not _m_status_refresh.contended(error) or
+                    _m_instance.settings(_m_instance.Instance(root)) != before):
                 raise
         time.sleep(random.uniform(0.05, 0.25) * tries)
     print(f'brain: status refresh contended {REFRESH_TRIES} times; refreshing under the lock', file=sys.stderr)

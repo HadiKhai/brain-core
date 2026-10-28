@@ -902,9 +902,9 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             builds.append(True)
             return len(builds)
         with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
-            with self.assertRaisesRegex(SystemExit, 'settings changed during the locked refresh'):
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
                 refresh.compute(inst, inst.node('root'), changed)
-        self.assertEqual(len(builds), 2)
+        self.assertEqual(len(builds), 1)  # a settings edit is never rebuilt or retried
 
     def test_held_refresh_refuses_a_node_policy_change(self):
         root = self.init('alice')
@@ -920,9 +920,9 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             return len(builds)
         with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
             inst = m.Instance(root)
-            with self.assertRaisesRegex(SystemExit, 'settings changed during the locked refresh'):
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
                 refresh.compute(inst, inst.node('app'), changed)
-        self.assertEqual(len(builds), 2)
+        self.assertEqual(len(builds), 1)  # a settings edit is never rebuilt or retried
 
     def test_refresh_fences_complete_ref_names(self):
         root, home, wt = self.project()
@@ -1177,6 +1177,31 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         ours = [r for r in records if r['ref'] != ref]
         self.assertIn('abort', [r['kind'] for r in ours])
         self.assertTrue(ours[-1]['data']['maintenance_ok'])
+
+    def test_refresh_does_not_retry_a_settings_edit(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_settings')
+        policy, edited = root / 'instance.md', []
+        facts = status.status_facts
+        def edit(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            if not edited and instance._LOCK['fh'] is None:
+                edited.append(True)  # an editor changes instance settings during the compute
+                policy.write_text(policy.read_text().replace('---\n', '---\nnote: edited\n', 1))
+            return result
+        err, start = io.StringIO(), len(events.read(m.Instance(root)))
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(status, 'status_facts', side_effect=edit), \
+                mock.patch('random.uniform', return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
+                cli.main()
+        self.assertTrue(edited)
+        self.assertNotIn('under the lock', err.getvalue())
+        records = events.read(m.Instance(root))[start:]
+        self.assertEqual(len([r for r in records if r['kind'] == 'begin' and r['data'].get('command') == 'status']), 1)
 
     def test_refresh_does_not_retry_a_real_repair_refusal(self):
         root = self.init('alice')

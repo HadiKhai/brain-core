@@ -334,10 +334,10 @@ def membership_paths(inst, selected):
 
 
 GIT_DRIFT = ('status refresh inputs changed during computation',
-             'status refresh Git inputs kept changing during validation',
-             'status refresh Git dependency bindings changed')
+             'status refresh Git inputs kept changing during validation')
 # Plain contention: another writer moved inputs or held a lease during this
-# refresh. Any other refusal, including a repair's own cause, stays final.
+# refresh. Any other refusal stays final: a repair's own cause, and a settings
+# or binding edit (see cli.refresh_with_retry), which refuses as before.
 CONTENTION = ('another write is active; cannot reconcile its snapshot',
               'state changed during the unlocked step', *GIT_DRIFT)
 HELD_BUILDS = 3
@@ -348,6 +348,11 @@ def contended(error):
     if 'status refresh maintenance refused' in message:
         message = message.partition('; cause: ')[2]
     return any(text in message for text in CONTENTION)
+
+
+def settings_changed():
+    # The caller publishes with settings loaded during this held attempt.
+    return instance.settings(instance.Instance(instance._LOCK['held_root'])) != instance._LOCK['held_settings']
 
 
 def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
@@ -368,13 +373,12 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=()):
             try:
                 result = fenced(inst, n, build, all_nodes, targets, extra)
             except SystemExit as error:
-                if not contended(error):
+                # A settings or binding edit is not retried: it refuses as before.
+                if not contended(error) or settings_changed():
                     raise
                 continue
-            # The caller publishes with settings loaded during this attempt: a
-            # rebuild may not carry settings that changed since it began.
-            if instance.settings(instance.Instance(inst.root)) != instance._LOCK['held_settings']:
-                common.die('instance or node settings changed during the locked refresh; refresh again')
+            if settings_changed():
+                common.die('state changed during the unlocked step; retry from fresh state')
             return result
         common.die(f'status refresh inputs kept changing through {HELD_BUILDS} locked builds; '
                    'worktree files and Git are outside the Brain lock')

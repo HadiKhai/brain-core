@@ -328,13 +328,13 @@ def held(root):
     """Keep the instance lock through every released step: a contended last attempt.
 
     Settings are frozen before the attempt loads any: an editor outside the
-    lock may change them, and a held refresh must then refuse, not mix them.
+    lock may change them, and a held refresh then refuses as before.
     """
-    _LOCK["hold"], _LOCK["held_settings"] = True, settings(Instance(root))
+    _LOCK["hold"], _LOCK["held_root"], _LOCK["held_settings"] = True, root, settings(Instance(root))
     try:
         yield
     finally:
-        _LOCK["hold"], _LOCK["held_settings"] = False, None
+        _LOCK["hold"], _LOCK["held_root"], _LOCK["held_settings"] = False, None, None
 
 
 def unlock():
