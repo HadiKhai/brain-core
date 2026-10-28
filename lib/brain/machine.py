@@ -752,7 +752,7 @@ def machine_run(kind, inst, node, job=None, clock=None, close_success=True, rele
             # Retry a transient private publication failure once. Never mask the
             # original error with a queue-release failure or invent a successful run.
             machine_finish_intent(inst, token, error)
-            machine_cleanup(token, [lambda: machine_release(token)], primary=error)
+            machine_cleanup(token, [] if getattr(token, 'retain', False) else [lambda: machine_release(token)], primary=error)
             if inst is not None and node is not None:
                 for attempt in range(2):
                     try:
@@ -1082,6 +1082,8 @@ class machine_queue:
                 and all(key not in row or queue_number(row[key]) for key in ("queued_at", "started_at"))
                 and (row.get("expected_seconds") is None or queue_number(row["expected_seconds"]))
                 and ("child" not in row or identity(row["child"]))
+                and ("session" not in row or (type(row['session']) is int and row['session'] > 0))
+                and ("uncertain" not in row or type(row['uncertain']) is bool)
                 and ("boot" not in row or (isinstance(row["boot"], str)
                      and re.fullmatch(r"(?:linux|darwin):[a-zA-Z0-9:-]+", row["boot"]) is not None)))
 
@@ -1091,12 +1093,19 @@ class machine_queue:
             current_boot = machine_boot_id()
             if current_boot is not None and current_boot != row["boot"]:
                 return False
+        if row.get('uncertain'):
+            return True
         for key in ("owner", "child"):
             who = row.get(key)
             if who:
                 stamp = process_stamp(who[0])
                 if stamp == "unknown" or (stamp is not None and stamp == who[1]):
                     return True
+        if row.get('session'):
+            try:
+                return MachineProcesses().members(row['session'], {}) != {}
+            except (OSError, ValueError):
+                return True
         return False
 
     def __exit__(self, typ, value, tb):
@@ -1228,14 +1237,14 @@ def job_queue_projection(inst, node, owner):
 
 
 def machine_wait(kind="heavy", inst=None, node=None, job=None, clock=None, read=None, pause=None,
-                 reduction_ready=False, token=None, gate_phase='running'):
+                 reduction_ready=False, token=None, gate_phase='running', reporter=print, cancelled=None):
     clock = clock or (token.clock if token is not None else time)
     with (_m_gate_lock.gate_admission(inst, node, gate_phase) if inst is not None and node is not None
           else contextlib.nullcontext()):
         if token is not None:
-            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
+            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled)
         with machine_run(kind, inst, node, job, clock, close_success=False) as token:
-            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready)
+            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled)
 
 
 def machine_release(token):
@@ -1415,6 +1424,386 @@ def machine_summary(reading):
             ("held: " + "; ".join(reading["held"]) if reading["held"] else "heavy work allowed") + detail)
 
 
+class MachineProcesses:
+    """Kernel identities for private foreground sessions; never signal a bare PID.
+
+    Darwin's audit-token signal validates pidversion in the kernel. Linux pidfds
+    bind signal delivery to an opened process. Neither uses ps or a check/kill gap.
+    An incomplete scan cannot certify an empty session.
+    """
+    def __init__(self):
+        import errno
+        self.errno = errno
+        self.pidfds, self.references, self.dead = {}, {}, {}
+        if sys.platform == 'darwin':
+            import ctypes
+            self.ctypes = ctypes
+            self.lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+            self.lib.proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                              ctypes.c_void_p, ctypes.c_int]
+            self.lib.proc_listpids.argtypes = [ctypes.c_uint32, ctypes.c_uint32,
+                                               ctypes.c_void_p, ctypes.c_int]
+            self.lib.proc_signal_with_audittoken.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        elif not (sys.platform.startswith('linux') and hasattr(os, 'pidfd_open')
+                  and hasattr(signal, 'pidfd_send_signal')):
+            raise OSError('heavy run requires Darwin audit-token signals or Linux pidfds')
+
+    def identity(self, pid, zombies=False):
+        if sys.platform == 'darwin':
+            # XNU proc_info_private.h: PROC_PIDUNIQIDENTIFIERINFO=17,
+            # struct proc_uniqidentifierinfo (56 bytes), uniqueid at 16,
+            # pidversion at 32. Fail closed if the kernel ABI is unavailable.
+            import struct
+            data = self.ctypes.create_string_buffer(56)
+            count = self.lib.proc_pidinfo(pid, 17, int(zombies), data, len(data))
+            if count != len(data):
+                error = self.ctypes.get_errno()
+                if error == self.errno.ESRCH:
+                    return None
+                raise OSError(error, 'heavy run: process identity unavailable')
+            return struct.unpack_from('Q', data.raw, 16)[0], struct.unpack_from('I', data.raw, 32)[0]
+        if zombies:
+            try:
+                fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+                return (int(fields[19]),) if fields[0] == 'Z' else None
+            except FileNotFoundError:
+                return None
+        import select
+        previous = self.pidfds.get(pid)
+        if previous is not None:
+            if select.select([previous[1]], [], [], 0)[0]:
+                del self.pidfds[pid]
+                return None
+            return previous
+        try:
+            fd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return None
+        # Keep the descriptor open for this observer's lifetime. A dead reference
+        # cannot be recycled into another process even after numeric PID reuse.
+        identity = (len(self.references) + 1, fd)
+        self.references[identity[0]] = fd
+        if select.select([fd], [], [], 0)[0]:
+            return None
+        self.pidfds[pid] = identity
+        return identity
+
+    def close(self):
+        for fd in self.references.values():
+            os.close(fd)
+        self.references.clear()
+        self.pidfds.clear()
+
+    def __del__(self):
+        self.close()
+
+    def pids(self):
+        if sys.platform == 'darwin':
+            count = self.lib.proc_listpids(1, 0, None, 0)
+            if count <= 0:
+                raise OSError('heavy run: process inventory unavailable')
+            # Extra room handles ordinary forks; a full buffer is never complete.
+            data = (self.ctypes.c_int * (count // 4 + 256))()
+            size = self.lib.proc_listpids(1, 0, data, self.ctypes.sizeof(data))
+            if size <= 0 or size >= self.ctypes.sizeof(data) or size % 4:
+                raise OSError('heavy run: incomplete process inventory')
+            return {pid for pid in data[:size // 4] if pid > 0}
+        return {int(path.name) for path in Path('/proc').iterdir() if path.name.isdigit()}
+
+    def linux_observation(self, pid):
+        try:
+            fields = (Path('/proc') / str(pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+            return int(fields[19]), fields[0] == 'Z', int(fields[3])
+        except FileNotFoundError:
+            return None
+
+    def capture_linux(self, session, exclude):
+        owned, dead, changed = {}, {}, False
+        for pid in self.pids() - set(exclude):
+            row = self.linux_observation(pid)
+            if row is None:
+                changed = True
+            elif row[1]:
+                dead[pid] = row[0]
+                changed |= self.dead.get(pid) != row[0]
+            elif row[2] == session:
+                reference = self.identity(pid)
+                after = self.linux_observation(pid)
+                if reference is None or after is None or after[1] or after[2] != session or self.identity(pid) != reference:
+                    changed = True
+                else:
+                    owned[pid] = reference
+        self.dead = dead
+        return owned, changed
+
+    def capture(self, session, exclude):
+        if sys.platform.startswith('linux'):
+            return self.capture_linux(session, exclude)
+        owned, dead, changed = {}, {}, False
+        for pid in self.pids() - set(exclude):
+            before = self.identity(pid)
+            if before is None:
+                birth = self.identity(pid, zombies=True)
+                if birth is not None:
+                    dead[pid] = birth
+                # A zombie already known before this inventory cannot fork.
+                # A newly dead or vanished candidate may have forked since the
+                # inventory was taken; it cannot certify emptiness this time.
+                if birth is None or self.dead.get(pid) != birth:
+                    changed = True
+                continue
+            try:
+                sid = os.getsid(pid)
+            except ProcessLookupError:
+                changed = True
+                continue
+            after = self.identity(pid)
+            if before != after:
+                changed = True
+            elif sid == session and after is not None:
+                owned[pid] = after
+        self.dead = dead
+        return owned, changed
+
+    def members(self, session, known, exclude=()):
+        owned, changed = self.capture(session, exclude)
+        # Already observed identities remain ours if they later leave the session.
+        for pid, birth in known.items():
+            current = self.identity(pid)
+            if current is not None and current[0] == birth[0]:
+                owned[pid] = current
+        if not owned:
+            # An empty pass must classify every candidate as foreign or as a
+            # zombie already dead before this inventory. This catches a private
+            # parent forking and exiting during enumeration, without demanding
+            # quiescence from unrelated processes elsewhere on the machine.
+            again, moved = self.capture(session, exclude)
+            if moved:
+                return None
+            owned.update(again)
+        known.clear()
+        known.update(owned)
+        return owned
+
+    def send(self, pid, identity, number):
+        if sys.platform == 'darwin':
+            token = (self.ctypes.c_uint32 * 8)()
+            token[5], token[7] = pid, identity[1]
+            error = self.lib.proc_signal_with_audittoken(token, number)
+            if error and error != self.errno.ESRCH:
+                raise OSError(error, 'heavy run: owned process signal rejected')
+        else:
+            fd = self.references.get(identity[0])
+            if fd is not None and identity == (identity[0], fd):
+                try:
+                    signal.pidfd_send_signal(fd, number)
+                except ProcessLookupError:
+                    pass
+
+
+def machine_heavy_publish(token, pid):
+    machine_child(token, pid)
+    with machine_queue() as queue:
+        row = next(r for r in queue.rows if r['token'] == token)
+        row['session'] = pid
+
+
+def machine_heavy_uncertain(token):
+    # A bounded observer failure is an explicit retained reservation, never an
+    # endless supervisor or evidence that remaining work has stopped. Only a
+    # known reboot automatically clears this condition.
+    with machine_queue() as queue:
+        for row in queue.rows:
+            if row['token'] == token:
+                row['uncertain'] = True
+
+
+class MachineEscalation:
+    def __init__(self, clock=time.monotonic, grace=1):
+        self.clock, self.grace, self.deadline = clock, grace, None
+        self.notified = set()
+
+    def apply(self, observer, members, number):
+        if self.deadline is None:
+            self.deadline = self.clock() + self.grace
+        forced = self.clock() >= self.deadline
+        for pid, identity in list(members.items()):
+            if forced or (pid, identity) not in self.notified:
+                observer.send(pid, identity, signal.SIGKILL if forced else number)
+                self.notified.add((pid, identity))
+
+
+def machine_heavy_monitor(observer, session, done, cancellation, pause, known=None, exclude=()):
+    """Both owners use the same cleanup proof, including after peer death."""
+    known = {} if known is None else known
+    escalation = MachineEscalation()
+    failed_at = None
+    while True:
+        failed = False
+        try:
+            members = observer.members(session, known, exclude)
+            if members is None:
+                failed = True
+            elif done() and not members:
+                return True
+            number = signal.SIGTERM if failed else cancellation()
+            if number:
+                escalation.apply(observer, known if failed else members, number)
+        except (OSError, ValueError):
+            failed = True
+            # Stop known identities even when discovery is unavailable. Unknown
+            # work is protected by retained capacity, never a broad signal.
+            try:
+                escalation.apply(observer, known, signal.SIGTERM)
+            except OSError:
+                pass
+        if failed:
+            failed_at = time.monotonic() if failed_at is None else failed_at
+            if time.monotonic() - failed_at >= 2:
+                return False
+        else:
+            failed_at = None
+        pause()
+
+
+def machine_supervise(control, token, command):
+    """A published session leader cleans up on wrapper EOF; the wrapper is backup."""
+    import select
+    stopped = [0]
+    def stop(number, frame):
+        stopped[0] = stopped[0] or number
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, stop)
+    proc = None
+    try:
+        observer = MachineProcesses()
+        if os.read(control, 1) != b'1':
+            machine_release(token)
+            return 125
+        try:
+            proc = subprocess.Popen(command)
+        except OSError:
+            machine_release(token)
+            return 127
+        def pause():
+            nonlocal control
+            if control is not None:
+                if select.select([control], [], [], 0.02)[0]:
+                    data = os.read(control, 1)
+                    stopped[0] = stopped[0] or (data[0] if data else signal.SIGTERM)
+                    if not data:
+                        os.close(control)
+                        control = None
+            else:
+                threading.Event().wait(0.02)
+        clean = machine_heavy_monitor(observer, os.getpid(), lambda: proc.poll() is not None,
+                                       lambda: stopped[0], pause, exclude=(os.getpid(),))
+        if not clean:
+            machine_heavy_uncertain(token)
+            return 125
+        machine_release(token)
+        code = proc.wait()
+        return 128 + stopped[0] if stopped[0] else (code if code >= 0 else 128 - code)
+    finally:
+        if control is not None:
+            os.close(control)
+
+
+def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=None, stdout=None, stderr=None):
+    """Run argv once in a verify slot without adding bytes to child streams."""
+    if not command:
+        _m_common.die('heavy run: provide a command after --')
+    observer = MachineProcesses()  # refuse unsupported ownership before admission/spawn
+    stopped = [0]
+    def stop(number, frame):
+        stopped[0] = stopped[0] or number
+    try:
+        with machine_run('verify', inst, node, label, release=False) as token:
+            previous = {number: signal.signal(number, stop)
+                        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+            proc, control_read, control_write = None, None, None
+            try:
+                machine_wait('verify', inst, node, job=label, token=token, reporter=None,
+                             cancelled=lambda: stopped[0])
+                if stopped[0]:
+                    raise MachineSignal(stopped[0])
+                control_read, control_write = os.pipe()
+                bootstrap = ("import sys; sys.dont_write_bytecode=True; sys.path.insert(0,sys.argv.pop(1)); "
+                             "from brain.machine import machine_supervise; "
+                             "sys.exit(machine_supervise(int(sys.argv[1]),sys.argv[2],sys.argv[3:]))")
+                proc = subprocess.Popen([sys.executable, '-I', '-S', '-c', bootstrap,
+                                         str(Path(__file__).resolve().parent.parent), str(control_read), str(token), *command],
+                                        cwd=cwd, env=env, stdout=stdout, stderr=stderr,
+                                        pass_fds=(control_read,), start_new_session=True)
+                token.retain = True
+                os.close(control_read)
+                control_read = None
+                machine_heavy_publish(token, proc.pid)
+                if not stopped[0]:
+                    os.write(control_write, b'1')
+                else:
+                    os.close(control_write)
+                    control_write = None
+                while observer.identity(proc.pid) is not None:
+                    if stopped[0] and control_write is not None:
+                        try:
+                            os.write(control_write, bytes([stopped[0]]))
+                        except BrokenPipeError:
+                            pass
+                        os.close(control_write)
+                        control_write = None
+                    threading.Event().wait(0.02)
+                # Do not reap the leader before cleanup: its unreaped PID anchors
+                # session identity against reuse while the backup inspects it.
+                clean = machine_heavy_monitor(observer, proc.pid, lambda: True,
+                        lambda: signal.SIGTERM, lambda: threading.Event().wait(0.02), exclude=(proc.pid,))
+                code = proc.wait()
+                if not clean:
+                    machine_heavy_uncertain(token)
+                    token.result = 125
+                else:
+                    token.retain = False
+                    machine_release(token)
+                    token.result = code if code >= 0 else 128 - code
+                if stopped[0]:
+                    raise MachineSignal(stopped[0])
+                return token.result
+            except OSError:
+                if proc is None:
+                    raise
+                token.result = 125
+                return token.result
+            finally:
+                for fd in (control_read, control_write):
+                    if fd is not None:
+                        os.close(fd)
+                if proc is None:
+                    machine_release(token)
+                elif proc.returncode is None:
+                    # Publication or wrapper error: EOF asks the supervisor to
+                    # stop. Also cover its crash through our own session proof.
+                    clean = machine_heavy_monitor(observer, proc.pid,
+                            lambda: observer.identity(proc.pid) is None,
+                            lambda: signal.SIGTERM, lambda: threading.Event().wait(0.02), exclude=(proc.pid,))
+                    if clean:
+                        proc.wait()
+                        token.retain = False
+                        machine_release(token)
+                    else:
+                        machine_heavy_uncertain(token)
+                for number, handler in previous.items():
+                    signal.signal(number, handler)
+    except MachineSignal as error:
+        return 128 + error.number
+
+
+def cmd_heavy_run(a):
+    command = a.command[1:] if a.command[:1] == ['--'] else a.command
+    inst = _m_nodes.load()
+    node = inst.node(a.node or 'root')
+    sys.exit(machine_execute(command, inst, node['id'], a.label))
+
+
 def cmd_heavy(a):
     inst = _m_nodes.load()
     node = inst.node(getattr(a, "node", None) or os.environ.get('BRAIN_GATE_NODE') or "root")
@@ -1538,7 +1927,7 @@ def machine_thermal_recovered(samples):
 
 
 
-def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready):
+def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled):
     """A live queued process owns its continuation; no replay of arbitrary commands."""
     clock = clock or time
     token.clock = clock
@@ -1556,6 +1945,8 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
     if priority not in ('normal', 'landing'):
         _m_common.die('verify_priority must be normal or landing; no work started')
     while True:
+        if cancelled and cancelled():
+            raise MachineSignal(cancelled())
         policy = machine_policy(strict=False)
         reading = read()
         reasons = list(machine_reasons(reading, policy))
@@ -1609,8 +2000,8 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
             timing = ADMISSION_TIMING.get()
             if timing is not None:
                 timing.append(max(0, clock.monotonic() - started))
-            if 'since' in snapshot:
-                print(f"machine care: {kind} resumed after {elapsed:.0f}s" +
+            if 'since' in snapshot and reporter is not None:
+                reporter(f"machine care: {kind} resumed after {elapsed:.0f}s" +
                       ('; reduced parallelism (1)' if reduced else ''), flush=True)
             return token
         status = (re.sub(r"\d+(?:\.\d+)?", "#", detail), position, running, limit)
@@ -1618,7 +2009,8 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
         if status != previous or now - last_report >= 60:
             wait = estimate['wait_seconds']
             wait_text = f'approx. capacity wait {wait:.0f}s' if wait is not None else 'wait estimate unknown'
-            print(f"machine care: {kind} held {elapsed:.0f}s; {detail}; {wait_text}; retry in {MACHINE_RETRY}s", flush=True)
+            if reporter is not None:
+                reporter(f"machine care: {kind} held {elapsed:.0f}s; {detail}; {wait_text}; retry in {MACHINE_RETRY}s", flush=True)
             previous, last_report = status, now
         pause(MACHINE_RETRY)
 

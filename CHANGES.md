@@ -33,6 +33,18 @@ then use `brain spec-run <node> --head <full-sha> -- <spec ids>` from a clean
 registered job worktree. It reuses native heavy admission, cleanup and scrubbed
 logs, supplies an owned temporary directory and records focused receipts only.
 The explicit `--branch ... --command ...` form remains supported.
+## 2026-10-28: Run heavy commands under owned machine slots
+
+Use `brain heavy run --node <node> -- <command...>` for FIFO execution in the
+same slots as verify. Child bytes and exit status pass through without admission
+notices. A private-session supervisor and the caller cover each other's loss;
+cancellation includes owned processes in additional groups. Darwin uses audit-token
+signals and Linux uses pidfds, preventing PID reuse from redirecting a signal.
+Worktree setup uses this runner. Plain `brain heavy` remains admission only.
+A native ownership-observer failure returns 125 and retains uncertain capacity
+for inspection; only proven cleanup or a known reboot frees that reservation.
+Detached services that escape the session before observation are outside this
+foreground runner's ownership.
 
 ## 2026-10-28: Pinned core releases and own-node upgrades
 

@@ -128,7 +128,7 @@ READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_s
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton", "cmd_task_apply_plan"}
+             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_heavy_run", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton", "cmd_task_apply_plan"}
 
 
 def writes(a):
@@ -766,8 +766,13 @@ def _main():
     cmd("gate-lock", _Command("gate_lock", "cmd_gate_lock"), "serialize a command for one node",
         opt("--node", help="node id (default: unambiguous current folder)"),
         opt("--label"), opt("command", nargs=argparse.REMAINDER))
-    cmd("heavy", _Command("machine", "cmd_heavy"), "wait until the machine admits new heavy work",
+    heavy = cmd("heavy", _Command("machine", "cmd_heavy"), "admit heavy work or run a command in a slot",
         opt("--node", help="coordinator whose work is waiting (default root)"))
+    run = heavy.add_subparsers(dest="heavy_action").add_parser("run", help="run a command in a machine slot")
+    run.add_argument("--node", help="coordinator whose work is waiting (default root)")
+    run.add_argument("--label", help="optional description, private to this instance")
+    run.add_argument("command", nargs=argparse.REMAINDER, help="-- command and arguments")
+    run.set_defaults(f=_Command("machine", "cmd_heavy_run"))
     cmd("machine", _Command("machine", "cmd_machine"), "machine state, sampler and bindings",
         opt("action", nargs="?", choices=["sample", "install", "uninstall", 'wake-setup', 'queue-service']), opt('id', nargs='?'),
         opt("--yes", action="store_true", help="install/remove the sampler with operator consent"),

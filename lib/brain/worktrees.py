@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 from . import common as _m_common
@@ -325,21 +326,21 @@ def cmd_wt_add(a):
         env = _m_verify.verify_env(n, a.branch, {"path": str(path), "port": port, "ports": count})
         env["WORKBENCH"] = str(wb)
         print("  setup: running; waiting for completion", flush=True)
-        with _m_verify.verification_resources(inst, n) as resources, \
-                _m_verify.command_reservation(inst, n, a.branch, kind='heavy') as token:
+        with _m_verify.verification_resources(inst, n) as resources, tempfile.TemporaryFile() as output:
             started = time.monotonic()
-            r = subprocess.run(["sh", str(setup)], cwd=path, env=env, capture_output=True, text=True)
+            code = _m_machine.machine_execute(["sh", str(setup)], inst, n['id'], a.branch,
+                                              cwd=path, env=env, stdout=output, stderr=output)
             duration = time.monotonic() - started
-            token.result = r.returncode
-            resources['failed'] = bool(r.returncode)
-        out = (r.stdout + r.stderr).strip()
-        message = f"  setup: {'ok' if r.returncode == 0 else 'FAILED (exit ' + str(r.returncode) + ')'} in {duration:.2f}s"
+            resources['failed'] = bool(code)
+            output.seek(0)
+            out = output.read().decode('utf-8', errors='replace').strip()
+        message = f"  setup: {'ok' if code == 0 else 'FAILED (exit ' + str(code) + ')'} in {duration:.2f}s"
         if out:
             message += "\n" + "\n".join("    " + l for l in out.splitlines()[-15:])
         print(_m_verify.VerifyScrubber(_m_guard.never_terms(n)).feed(message, final=True), flush=True)
-        if r.returncode:
+        if code:
             print("  worktree retained with its setup output; resolve the setup failure before starting a worker")
-            sys.exit(r.returncode if r.returncode > 0 else 1)
+            sys.exit(code if code > 0 else 1)
     elif not setup.exists():
         print(f"  no {SETUP_FILE} in the node folder: nothing copied in (env files, installs)")
     print(f"  launch a worker there (host adapter: an existing worktree at this path, branch {a.branch})")

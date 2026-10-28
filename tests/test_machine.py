@@ -40,6 +40,349 @@ class MachineCare(Scenario):
         self.m.MACHINE_RETRY = 0.01
         self.good = json.loads(self.env["BRAIN_MACHINE_READING"])
 
+    def heavy_readline(self, proc):
+        import select
+        self.assertTrue(select.select([proc.stdout], [], [], 10)[0], 'command did not become ready')
+        return proc.stdout.readline()
+
+    def test_heavy_run_passes_bytes_arguments_and_exit_status(self):
+        root = self.init("oak")
+        code = "import os,sys; os.write(1,b'out\\x00'); os.write(2,b'err\\xff'); assert sys.argv[1:]==['--brain','child','-b','value']; sys.exit(7)"
+        r = subprocess.run([sys.executable, str(root / 'core/bin/brain'), 'heavy', 'run',
+                            '--node', 'root', '--label', 'fixture', '--', sys.executable, '-c', code,
+                            '--brain', 'child', '-b', 'value'], cwd=root, env=self.env, capture_output=True)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (7, b'out\x00', b'err\xff'))
+        with self.m.machine_queue() as queue:
+            self.assertEqual(queue.rows, [])
+
+    def test_heavy_run_shares_fifo_verify_slots_without_changing_admit_only(self):
+        m = self.m
+        from types import SimpleNamespace
+        occupied, older = '1' * 32, '2' * 32
+        owner = [os.getpid(), m.process_stamp(os.getpid())]
+        with m.machine_queue() as queue:
+            queue.rows = [dict(token=occupied, owner=owner, kind='verify', state='running'),
+                          dict(token=older, owner=owner, kind='verify', state='queued')]
+        # Legacy admission does not consume or wait for verify slots.
+        admitted = m.machine_wait()
+        m.machine_release(admitted)
+        steps = []
+        def advance(_):
+            with m.machine_queue() as queue:
+                own = queue.rows[-1]
+                self.assertEqual(own['state'], 'queued')
+                self.assertEqual(own['kind'], 'verify')
+                steps.append(own['token'])
+                if len(steps) == 1:
+                    queue.rows = [row for row in queue.rows if row['token'] != occupied]
+                elif len(steps) == 2:
+                    queue.rows[0]['state'] = 'running'
+                else:
+                    self.assertEqual(len(steps), 3)
+                    queue.rows = [own]
+        clock = SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=advance)
+        machine = m._owners['machine_wait']
+        with mock.patch.object(machine, 'time', clock), mock.patch.object(m, 'machine_limit', return_value=1), \
+                contextlib.redirect_stdout(io.StringIO()) as notices, contextlib.redirect_stderr(io.StringIO()) as errors, \
+                tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+            command = "import os,sys; os.write(1,b'out\\x00'); os.write(2,b'err\\xff'); sys.exit(7)"
+            self.assertEqual(m.machine_execute([sys.executable, '-c', command], stdout=out, stderr=err), 7)
+            out.seek(0); err.seek(0)
+            self.assertEqual((out.read(), err.read()), (b'out\x00', b'err\xff'))
+            self.assertEqual((notices.getvalue(), errors.getvalue()), ('', ''))
+        self.assertEqual(len(set(steps)), 1)
+        with m.machine_queue() as queue:
+            self.assertEqual(queue.rows, [])
+
+    def test_heavy_run_waits_for_descendants_after_leader_exits(self):
+        root = self.init('oak')
+        child = "import sys; print('descendant',flush=True); sys.stdin.buffer.read(1)"
+        code = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[1]])"
+        proc = subprocess.Popen([sys.executable, str(root / 'core/bin/brain'), 'heavy', 'run', '--',
+                                 sys.executable, '-c', code, child], cwd=root, env=self.env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            self.assertEqual(self.heavy_readline(proc), b'descendant\n')
+            self.assertIsNone(proc.poll())
+            with self.m.machine_queue() as queue:
+                self.assertEqual(len(queue.rows), 1)
+                self.assertEqual(queue.rows[0]['state'], 'running')
+            proc.stdin.write(b'x'); proc.stdin.flush()
+            self.assertEqual(proc.wait(timeout=10), 0)
+            with self.m.machine_queue() as queue:
+                self.assertEqual(queue.rows, [])
+        finally:
+            if proc.poll() is None:
+                proc.terminate(); proc.wait(timeout=10)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+
+    def test_heavy_run_signals_stop_only_owned_group_and_release_slot(self):
+        import signal
+        root = self.init('oak')
+        code = ("import os,signal,subprocess,sys; "
+                "signal.signal(signal.SIGINT,lambda *a: sys.exit(0)); signal.signal(signal.SIGTERM,lambda *a: sys.exit(0)); "
+                "child=subprocess.Popen([sys.executable,'-c','import sys; sys.stdin.buffer.read(1)']); "
+                "print(os.getpid(),child.pid,flush=True); sys.stdin.buffer.read(1)")
+        outsider = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.read(1)'], stdin=subprocess.PIPE)
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                with self.subTest(signal=sig):
+                    proc = subprocess.Popen([sys.executable, str(root / 'core/bin/brain'), 'heavy', 'run', '--',
+                                             sys.executable, '-c', code], cwd=root, env=self.env,
+                                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    try:
+                        pids = [int(pid) for pid in self.heavy_readline(proc).split()]
+                        self.assertEqual(len(pids), 2)
+                        os.kill(proc.pid, sig)
+                        self.assertEqual(proc.wait(timeout=10), 128 + sig)
+                        for pid in pids:
+                            self.assertIsNone(self.m.process_stamp(pid))
+                        self.assertIsNone(outsider.poll())
+                        with self.m.machine_queue() as queue:
+                            self.assertEqual(queue.rows, [])
+                    finally:
+                        if proc.poll() is None:
+                            proc.terminate(); proc.wait(timeout=10)
+                        for stream in (proc.stdin, proc.stdout, proc.stderr):
+                            stream.close()
+        finally:
+            outsider.stdin.close(); outsider.wait(timeout=10)
+
+    def test_heavy_run_cancelled_while_queued_never_starts_command(self):
+        import signal
+        from types import SimpleNamespace
+        m = self.m
+        owner = [os.getpid(), m.process_stamp(os.getpid())]
+        with m.machine_queue() as queue:
+            queue.rows = [dict(token='1' * 32, owner=owner, kind='verify', state='running')]
+        marker = self.tmp / 'must-not-run'
+        def cancel(_):
+            os.kill(os.getpid(), signal.SIGTERM)
+        clock = SimpleNamespace(time=time.time, monotonic=time.monotonic, sleep=cancel)
+        old = signal.getsignal(signal.SIGTERM)
+        with mock.patch.object(m._owners['machine_wait'], 'time', clock), \
+                mock.patch.object(m, 'machine_limit', return_value=1), contextlib.redirect_stderr(io.StringIO()):
+            result = m.machine_execute([sys.executable, '-c', 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()'])
+        self.assertEqual(result, 128 + signal.SIGTERM)
+        self.assertIs(signal.getsignal(signal.SIGTERM), old)
+        self.assertFalse(marker.exists())
+        with m.machine_queue() as queue:
+            self.assertEqual([row['token'] for row in queue.rows], ['1' * 32])
+        m.machine_release('1' * 32)
+
+    def test_heavy_run_cancellation_stops_owned_child_in_new_group(self):
+        import signal
+        root = self.init('oak')
+        child = "import os,sys; os.setpgrp(); print(os.getpid(),flush=True); sys.stdin.buffer.read(1)"
+        code = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[1]]).wait()"
+        proc = subprocess.Popen([sys.executable, str(root / 'core/bin/brain'), 'heavy', 'run', '--',
+                                 sys.executable, '-c', code, child], cwd=root, env=self.env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        outsider = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.buffer.read(1)'], stdin=subprocess.PIPE)
+        pid = stamp = None
+        try:
+            pid = int(self.heavy_readline(proc))
+            stamp = self.m.process_stamp(pid)
+            self.assertEqual(os.getpgid(pid), pid)
+            proc.send_signal(signal.SIGTERM)
+            self.assertEqual(proc.wait(timeout=10), 143)
+            self.assertIsNone(self.m.process_stamp(pid), 'owned child in another group survived cancellation')
+            self.assertIsNone(outsider.poll())
+            with self.m.machine_queue() as queue:
+                self.assertEqual(queue.rows, [])
+        finally:
+            if proc.poll() is None:
+                proc.terminate(); proc.wait(timeout=10)
+            # Failure cleanup is limited to the exact child this test observed.
+            if pid and stamp and self.m.process_stamp(pid) == stamp:
+                os.kill(pid, signal.SIGKILL)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+            outsider.stdin.close(); outsider.wait(timeout=10)
+
+    def test_heavy_run_wrapper_crash_preserves_capacity_until_owned_cleanup(self):
+        import signal
+        root = self.init('oak')
+        child = "import os,sys; print(os.getpid(),flush=True); sys.stdin.buffer.read(1)"
+        # The command leader exits; the reservation must name a durable supervisor.
+        code = "import os,subprocess,sys; print(os.getpid(),flush=True); subprocess.Popen([sys.executable,'-c',sys.argv[1]])"
+        proc = subprocess.Popen([sys.executable, str(root / 'core/bin/brain'), 'heavy', 'run', '--',
+                                 sys.executable, '-c', code, child], cwd=root, env=self.env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        leader = child_pid = child_stamp = supervisor = supervisor_stamp = None
+        paused = False
+        try:
+            leader = int(self.heavy_readline(proc))
+            child_pid = int(self.heavy_readline(proc))
+            child_stamp = self.m.process_stamp(child_pid)
+            deadline = time.monotonic() + 10
+            while self.m.process_stamp(leader) is not None:
+                self.assertLess(time.monotonic(), deadline, 'command leader did not exit')
+                threading.Event().wait(0.005)
+            with self.m.machine_queue() as queue:
+                self.assertEqual(len(queue.rows), 1)
+                supervisor, supervisor_stamp = queue.rows[0]['child']
+            # Pause a live, identity-checked supervisor so capacity is tested before
+            # cleanup can finish. On the old runner this identity is already dead.
+            if self.m.process_stamp(supervisor) == supervisor_stamp:
+                os.kill(supervisor, signal.SIGSTOP)
+                paused = True
+            proc.kill(); proc.wait(timeout=10)
+            self.assertEqual(self.m.process_stamp(child_pid), child_stamp)
+            with self.m.machine_queue() as queue:
+                self.assertEqual(len(queue.rows), 1, 'wrapper crash reclaimed a live descendant slot')
+                self.assertEqual(queue.rows[0]['state'], 'running')
+            os.kill(supervisor, signal.SIGCONT)
+            paused = False
+            self.assertEqual(self.heavy_readline(proc), b'')  # EOF only after supervisor cleanup
+            self.assertIsNone(self.m.process_stamp(child_pid))
+            with self.m.machine_queue() as queue:
+                self.assertEqual(queue.rows, [])
+        finally:
+            if paused and self.m.process_stamp(supervisor) == supervisor_stamp:
+                os.kill(supervisor, signal.SIGCONT)
+            if proc.poll() is None:
+                proc.terminate(); proc.wait(timeout=10)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
+            if child_pid and child_stamp and self.m.process_stamp(child_pid) == child_stamp:
+                os.kill(child_pid, signal.SIGKILL)
+
+    def test_heavy_run_spawn_failure_releases_slot(self):
+        with self.assertRaises(OSError):
+            self.m.machine_execute([sys.executable, '-c', 'pass'], cwd=self.tmp / 'missing-folder')
+        with self.m.machine_queue() as queue:
+            self.assertEqual(queue.rows, [])
+
+    def test_heavy_run_escalation_uses_deadline_without_real_wait(self):
+        import signal
+        clock = mock.Mock(return_value=50)
+        observer = mock.Mock()
+        escalation = self.m.MachineEscalation(clock=clock)
+        members = {123: (456, 789)}
+        escalation.apply(observer, members, signal.SIGTERM)
+        self.assertEqual(escalation.deadline, 51)
+        observer.send.assert_called_once_with(123, (456, 789), signal.SIGTERM)
+        clock.return_value = 50.999
+        escalation.apply(observer, members, signal.SIGTERM)
+        self.assertEqual(observer.send.call_count, 1)
+        clock.return_value = 51
+        escalation.apply(observer, members, signal.SIGTERM)
+        observer.send.assert_called_with(123, (456, 789), signal.SIGKILL)
+
+    def test_heavy_run_observer_failure_has_bounded_retained_terminal_path(self):
+        observer = mock.Mock()
+        observer.members.side_effect = OSError('fixture observer unavailable')
+        known = {123: (456, 789)}
+        tick = iter([10, 10, 13])
+        with mock.patch.object(self.m.time, 'monotonic', side_effect=lambda: next(tick)):
+            self.assertFalse(self.m.machine_heavy_monitor(observer, 999, lambda: True,
+                             lambda: 0, lambda: None, known=known))
+        self.assertGreaterEqual(observer.send.call_count, 1)
+        token = self.m.machine_wait('verify')
+        self.m.machine_heavy_uncertain(token)
+        with mock.patch.object(self.m, 'process_stamp', return_value=None), \
+                self.m.machine_queue() as queue:
+            self.assertEqual([row['token'] for row in queue.rows], [token])
+        self.m.machine_release(token)
+
+    def test_heavy_run_native_identity_rejects_stale_signal_without_pid_kill(self):
+        import signal
+        observer = self.m.MachineProcesses()
+        child = subprocess.Popen([sys.executable, '-c', 'import sys; print("ready",flush=True); sys.stdin.read()'],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            self.assertEqual(child.stdout.readline(), b'ready\n')
+            identity = observer.identity(child.pid)
+            stale = ((identity[0], identity[1] ^ 1) if sys.platform == 'darwin' else (identity[0] + 1,))
+            with mock.patch.object(os, 'kill', side_effect=AssertionError('bare PID signal')):
+                observer.send(child.pid, stale, signal.SIGTERM)
+                self.assertIsNone(child.poll())
+                observer.send(child.pid, identity, signal.SIGTERM)
+                self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        finally:
+            child.stdin.close()
+            child.wait(timeout=10)
+            child.stdout.close()
+
+    def test_heavy_run_forced_cleanup_uses_real_owned_process_with_controlled_clock(self):
+        import signal
+        observer = self.m.MachineProcesses()
+        child = subprocess.Popen([sys.executable, '-c',
+                'import signal,sys; signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+                'print("ready",flush=True); sys.stdin.read()'], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            self.assertEqual(child.stdout.readline(), b'ready\n')
+            clock = mock.Mock(return_value=0)
+            escalation = self.m.MachineEscalation(clock=clock)
+            owned = {child.pid: observer.identity(child.pid)}
+            escalation.apply(observer, owned, signal.SIGTERM)
+            self.assertIsNone(child.poll())
+            clock.return_value = 1
+            escalation.apply(observer, owned, signal.SIGTERM)
+            self.assertEqual(child.wait(timeout=10), -signal.SIGKILL)
+        finally:
+            child.stdin.close(); child.wait(timeout=10); child.stdout.close()
+
+    def test_heavy_run_linux_signal_keeps_the_opened_reference_after_pid_reuse(self):
+        import signal
+        observer = object.__new__(self.m.MachineProcesses)
+        observer.pidfds, observer.references = {}, {1: 99}
+        try:
+            with mock.patch.object(sys, 'platform', 'linux'), \
+                    mock.patch.object(signal, 'pidfd_send_signal', create=True) as send, \
+                    mock.patch.object(os, 'kill', side_effect=AssertionError('bare PID signal')):
+                observer.send(777, (1, 99), signal.SIGTERM)
+                send.assert_called_once_with(99, signal.SIGTERM)
+                observer.send(777, (2, 99), signal.SIGTERM)
+                self.assertEqual(send.call_count, 1)
+        finally:
+            observer.references.clear()
+
+    def test_heavy_run_queue_preserves_session_after_both_helpers_die(self):
+        owner = [123, 'fixture']
+        row = dict(token='1' * 32, owner=owner, child=owner, kind='verify', state='running', session=123)
+        observer = mock.Mock()
+        with mock.patch.object(self.m, 'process_stamp', return_value=None), \
+                mock.patch.object(self.m, 'MachineProcesses', return_value=observer):
+            for observation in ({456: (789, 1)}, None):
+                observer.members.return_value = observation
+                self.assertTrue(self.m.machine_queue.alive(row))
+            observer.members.return_value = {}
+            self.assertFalse(self.m.machine_queue.alive(row))
+
+    def test_heavy_run_supervisor_crash_is_cleaned_up_by_wrapper(self):
+        import signal
+        root = self.init('oak')
+        child = "import os,sys; os.setpgrp(); print(os.getpid(),flush=True); sys.stdin.buffer.read(1)"
+        code = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[1]]).wait()"
+        proc = subprocess.Popen([sys.executable, str(root / 'core/bin/brain'), 'heavy', 'run', '--',
+                                 sys.executable, '-c', code, child], cwd=root, env=self.env,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+        try:
+            pid = int(self.heavy_readline(proc))
+            with self.m.machine_queue() as queue:
+                supervisor = queue.rows[0]['child'][0]
+            # This supervisor and every process signalled by the fixture belong
+            # to the wrapper just started above.
+            os.kill(supervisor, signal.SIGKILL)
+            self.assertEqual(proc.wait(timeout=10), 128 + signal.SIGKILL)
+            self.assertIsNone(self.m.process_stamp(pid))
+            with self.m.machine_queue() as queue:
+                self.assertEqual(queue.rows, [])
+        finally:
+            proc.stdin.close()
+            if proc.poll() is None:
+                proc.terminate(); proc.wait(timeout=10)
+            proc.stdout.close(); proc.stderr.close()
+
+    def test_heavy_run_does_not_need_ps_for_process_ownership(self):
+        observer = self.m.MachineProcesses()
+        with mock.patch.object(subprocess, 'run', side_effect=AssertionError('ps must not be used')):
+            self.assertIsNotNone(observer.identity(os.getpid()))
+            self.assertIn(os.getpid(), observer.members(os.getsid(0), {}))
+
     def samples(self, count, reading=None):
         now = time.time()
         return [{"at": now - (count - i - 1) * 60, "reading": dict(reading or self.good)} for i in range(count)]

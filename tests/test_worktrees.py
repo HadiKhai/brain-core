@@ -98,6 +98,25 @@ class RebindLedgerJob(Scenario):
 class Workbench(Scenario):
     fixture_init_in_process = True
 
+    def test_setup_holds_machine_slot_and_absent_or_disabled_setup_does_not_queue(self):
+        root = self.init('oak')
+        home = self.repo(self.tmp / 'code/app')
+        self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+        queue_path = self.tmp / '.local/state/brain/machine-care-queue.json'
+        self.b(root, 'wt', 'add', 'app', 'no-script')
+        self.assertTrue(not queue_path.exists() or json.loads(queue_path.read_text()) == [])
+        setup = root / 'nodes/app/worktree-setup.sh'
+        setup.write_text("cat \"$HOME/.local/state/brain/machine-care-queue.json\" > reservation.json\n")
+        self.b(root, 'wt', 'add', 'app', 'disabled', '--no-setup')
+        self.assertTrue(not queue_path.exists() or json.loads(queue_path.read_text()) == [])
+        self.b(root, 'wt', 'add', 'app', 'with-script')
+        worktree = self.tmp / 'code/app-work/worktrees/with-script'
+        rows = json.loads((worktree / 'reservation.json').read_text())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['kind'], rows[0]['state']), ('verify', 'running'))
+        self.assertIn('child', rows[0])
+        self.assertTrue(not queue_path.exists() or json.loads(queue_path.read_text()) == [])
+
     def projection_race(self, command, change=None):
         root = self.init('projection-race')
         home = self.repo(self.tmp / 'app')
