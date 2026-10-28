@@ -3,7 +3,8 @@
 `core/` stays the Git submodule (the staged source that `git submodule update` rewrites).
 Each installed release is a copy in `.brain/cores/<sha>` with checked-hash bytecode, plus a
 `<sha>.pin` file. `.brain/core-current` is a relative symlink to the running release;
-`.brain/core-previous` names the rollback target. The launcher resolves core-current once
+`cores/<sha>.previous`, written before that release is activated, names its rollback target,
+so the one core-current rename switches both identities atomically. The launcher resolves core-current once
 (or BRAIN_CORE_RELEASE, which a gate exports to its command)
 and holds a shared flock on the release's pin for its whole life, so a swap never changes
 the code a running process (or gate) imports, and prune skips any release still pinned.
@@ -19,7 +20,6 @@ from pathlib import Path
 from . import common as _m_common
 
 CURRENT = "core-current"
-PREVIOUS = "core-previous"
 SHA = re.compile(r"[0-9a-f]{40}")
 # Bytecode belongs in the release's own __pycache__, beside the sources it hashes.
 BYTECODE_ENV = ("PYTHONPYCACHEPREFIX", "PYTHONDONTWRITEBYTECODE")
@@ -49,8 +49,22 @@ def current(root):
     return _link_target(root, CURRENT)
 
 
+def previous_path(root, sha):
+    return cores_dir(root) / (sha + ".previous")
+
+
 def previous(root):
-    return _link_target(root, PREVIOUS)
+    """The rollback target recorded for the current release; None without one."""
+    sha = current(root)
+    if sha is None:
+        return None
+    try:
+        back = previous_path(root, sha).read_text().strip()
+    except FileNotFoundError:
+        return None
+    if not SHA.fullmatch(back):
+        raise ValueError(f"{previous_path(root, sha)} names no release")
+    return back
 
 
 def pinned(root):
@@ -146,11 +160,17 @@ def swap(root, sha):
     old = current(root)
     if old == sha:
         return previous(root)
-    # Activate first: an interruption before the second rename leaves `sha` running and the
-    # older rollback target in place, never both links on the release being left.
-    _point(root, CURRENT, sha)
+    # Record the rollback target first: until the single rename below, `old` (and its own
+    # record) stays current, so an interruption anywhere leaves a consistent pair.
+    record = previous_path(root, sha)
     if old:
-        _point(root, PREVIOUS, old)
+        _m_common.atomic_write(record, old + "\n")
+    else:
+        try:
+            record.unlink()
+        except FileNotFoundError:
+            pass
+    _point(root, CURRENT, sha)
     return old
 
 
@@ -184,6 +204,10 @@ def prune(root):
                 continue
             # Holding the exclusive pin: a launcher that opened it waits, then sees the release gone.
             shutil.rmtree(release)
+            try:
+                previous_path(root, release.name).unlink()
+            except FileNotFoundError:
+                pass
             pin.unlink()
             removed.append(release.name)
         finally:

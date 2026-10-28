@@ -4043,12 +4043,13 @@ checked-hash bytecode with the launcher's interpreter. Compiling happens at the
 final path because Apple's Python 3.9 keys its default pycache prefix by source
 path. The pin file is written last and marks completion. A failed compile or
 launcher smoke test (runpy of the release's bin/brain) removes the unpinned copy
-and never swaps. `brain upgrade` then checks the staged core back out at its
-prior commit, so the launcher a broken release shipped never stays installed.
-Swap renames a fresh relative symlink over core-current first, then over
-core-previous. If it is interrupted between the two, the new release runs and
-the older rollback target survives.
-`--rollback` swaps the two, checks the staged core out at the restored sha and
+and never swaps. `brain upgrade` fetches origin and validates the target first.
+Only after the swap does it check the staged core out at that sha, so a broken
+release's launcher never reaches `core/bin/brain`. The rollback target is stored
+in `cores/<sha>.previous` and written before `<sha>` is activated. The single
+core-current rename therefore switches the current and previous identities
+together, and an interrupted upgrade or rollback changes neither.
+`--rollback` activates the recorded previous release, checks the staged core out at the restored sha and
 commits the gitlink. Prune removes only releases that are neither current nor
 previous and whose pin it can lock exclusively. It deletes while holding that
 lock, and a launcher re-resolves when its release disappeared. A gate exports
@@ -4066,6 +4067,6 @@ because those processes import from the directory the submodule update
 rewrites. This matches the base upgrade, which rewrote `core/` under the same
 guard; the migration adds no new exposure, and processes started after it are
 pinned. Migration: that first upgrade installs the plain core's commit as
-core-previous and the new release as core-current. Rollback before migration is
+the new release's previous and activates the new release. Rollback before migration is
 refused. Old cores interpreting post-upgrade `task migrate --all` records are
 not version-gated here.

@@ -104,7 +104,7 @@ class InstallAndUpgrade(Scenario):
         # first-install migration: both the plain core's release and the new one are pinned releases
         second = self.git("rev-parse", "HEAD", cwd=bob / "core").strip()
         self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", second))
-        self.assertEqual(os.readlink(bob / ".brain/core-previous"), os.path.join("cores", first))
+        self.assertEqual((bob / ".brain/cores" / (second + ".previous")).read_text().strip(), first)
         self.assertIn("UPGRADED", (bob / ".brain/cores" / second / "README.md").read_text())
         self.assertNotIn("UPGRADED", (bob / ".brain/cores" / first / "README.md").read_text())
         self.assertNotIn("core", self.git("status", "--porcelain", cwd=bob))
@@ -118,7 +118,7 @@ class InstallAndUpgrade(Scenario):
         # rollback swaps back and points the staged core and gitlink at the previous release
         self.assertIn("rolled back", self.b(bob, "upgrade", "--rollback"))
         self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", first))
-        self.assertEqual(os.readlink(bob / ".brain/core-previous"), os.path.join("cores", second))
+        self.assertEqual((bob / ".brain/cores" / (first + ".previous")).read_text().strip(), second)
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=bob / "core").strip(), first)
         self.assertIn("Roll back core", self.git("log", "-1", "--format=%s", cwd=bob))
         self.assertIn("Improve the README", self.b(bob, "upgrade"))
@@ -126,7 +126,7 @@ class InstallAndUpgrade(Scenario):
         # a release whose launcher fails never activates, and the staged launcher is restored
         (src / "bin/brain").write_text("raise SystemExit('broken launcher')\n")
         self.git("commit", "-qam", "Break the launcher", cwd=src)
-        self.assertIn("staged core restored to", self.b(bob, "upgrade", ok=False))
+        self.assertIn("running processes keep core", self.b(bob, "upgrade", ok=False))
         self.assertEqual(self.git("rev-parse", "HEAD", cwd=bob / "core").strip(), second)
         self.assertEqual(os.readlink(bob / ".brain/core-current"), os.path.join("cores", second))
         t = subprocess.run([str(cmd), "tree"], cwd=self.tmp, env=env, capture_output=True, text=True)
@@ -241,6 +241,8 @@ class R2VersionAndUpgrade(Scenario):
         })
         (root / '.brain').mkdir()
         self.repo(root / "core", {"CHANGES.md": "## 2026-01-01: Fixture\n"})
+        self.git("remote", "add", "origin", str(root / "core"), cwd=root / "core")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=root / "core")
         home = self.repo(self.tmp / "project")
         inst = m.Instance(root)
         inst.local['machine'] = 'fixture'
@@ -255,7 +257,7 @@ class R2VersionAndUpgrade(Scenario):
         real_run = subprocess.run
 
         def run(args, **kwargs):
-            if "submodule" in args:
+            if "submodule" in args or "fetch" in args:
                 mutations.append(args)
                 return subprocess.CompletedProcess(args, 0, "", "")
             return real_run(args, **kwargs)
@@ -347,7 +349,7 @@ class R2VersionAndUpgrade(Scenario):
         other["dir"].mkdir()
         inst.nodes = lambda: [n, other]
         url = "https://example.invalid/core.git"
-        self.git("remote", "add", "origin", url, cwd=inst.root / "core")
+        self.git("remote", "set-url", "origin", url, cwd=inst.root / "core")
         self.git("remote", "add", "origin", "git@example.invalid:core", cwd=n["home_path"])
 
         def held(node):
@@ -723,24 +725,23 @@ class PinnedCoreReleases(Scenario):
         self.git("checkout", "-q", "--", "README.md", cwd=root / "core")
         with mock.patch.object(releases.os, "replace", wraps=os.replace) as rename:
             self.assertEqual(releases.swap(root, second), sha)
-        self.assertEqual([Path(c.args[1]).name for c in rename.call_args_list], ["core-current", "core-previous"])
+        # The rollback record lands first; one core-current rename then switches both identities.
+        self.assertEqual([Path(c.args[1]).name for c in rename.call_args_list], [second + ".previous", "core-current"])
         self.assertEqual((releases.current(root), releases.previous(root)), (second, sha))
         self.assertEqual(list((root / ".brain").glob(".core-*")), [])
         self.assertEqual(list((root / ".brain/cores").glob(".partial-*")), [])
         third = self.advance(src, root, "C")
         releases.install(root, third)
-        real_point = releases._point
-
-        def interrupted(where, name, target):
-            if name == releases.PREVIOUS:
-                raise OSError("interrupted")
-            real_point(where, name, target)
-
-        with mock.patch.object(releases, "_point", side_effect=interrupted):
+        with mock.patch.object(releases, "_point", side_effect=OSError("interrupted")):
             with self.assertRaises(OSError):
-                releases.swap(root, third)
-        # Interrupted between the renames: the new release runs, the older rollback target survives.
-        self.assertEqual((releases.current(root), releases.previous(root)), (third, sha))
+                releases.swap(root, third)  # interrupted after recording, before activation
+        self.assertEqual((releases.current(root), releases.previous(root)), (second, sha))
+        with mock.patch.object(releases, "_point", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                releases.rollback(root)  # an interrupted rollback changes neither identity
+        self.assertEqual((releases.current(root), releases.previous(root)), (second, sha))
+        releases.swap(root, third)
+        self.assertEqual((releases.current(root), releases.previous(root)), (third, second))
         (src / "bin/brain").write_text("raise SystemExit('broken launcher')\n")
         self.git("commit", "-qam", "broken launcher", cwd=src)
         self.git("pull", "-q", "--ff-only", cwd=root / "core")

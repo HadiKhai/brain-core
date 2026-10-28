@@ -142,6 +142,22 @@ def upgrade_busy(inst, idle, node=None):
     return open_jobs_anywhere(inst, idle=idle, own=own)
 
 
+def _fetch_core_target(root):
+    """Fetch the core's origin and name the commit `submodule update --remote` would check out."""
+    core = root / "core"
+    fetch = subprocess.run(["git", "-C", str(core), "-c", "protocol.file.allow=always", "fetch", "-q", "origin"],
+                           capture_output=True, text=True)
+    if fetch.returncode:
+        _m_common.die(f"couldn't update core: {fetch.stderr.strip()}")
+    branch = _m_common.git("config", "-f", str(root / ".gitmodules"), "--get", "submodule.core.branch",
+                           cwd=root).stdout.strip()
+    ref = f"refs/remotes/origin/{branch}" if branch else cached_origin_ref(core)
+    target = _version_git("rev-parse", "--verify", ref + "^{commit}", cwd=core)
+    if target.returncode or not _m_core_releases.SHA.fullmatch(target.stdout.strip()):
+        _m_common.die(f"couldn't update core: {ref} is unavailable after fetch")
+    return target.stdout.strip()
+
+
 def _commit_core(root, message):
     inst = _m_instance.Instance(root)
     inst.commit(["core", ".gitmodules"], message)
@@ -170,28 +186,27 @@ def cmd_upgrade(a):
     except (OSError, ValueError) as error:
         _m_common.die(f"couldn't read the installed core release: {error}")
     old = running or staged
-    r = subprocess.run(["git", "-C", str(root), "-c", "protocol.file.allow=always", "submodule", "update",
-                        "--remote", "core"], capture_output=True, text=True)
-    if r.returncode:
-        _m_common.die(f"couldn't update core: {r.stderr.strip()}")
-    new = _m_common.git("rev-parse", "HEAD", cwd=root / "core").stdout.strip()
-    if old == new:
+    # Fetch and validate before the staged core (and its launcher) changes: a release that
+    # fails to install never reaches core/bin/brain.
+    new = _fetch_core_target(root)
+    if old == new and staged == new:
         print(f"core is up to date ({new[:7]})")
         return
-    try:
-        if running is None:
-            # First install from a plain core: the release it ran becomes the rollback target.
-            _m_core_releases.install(root, old)
-        _m_core_releases.install(root, new)
-        if running is None:
-            _m_core_releases.swap(root, old)
-        _m_core_releases.swap(root, new)
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        # The staged launcher must not stay on a release that failed to install.
-        restored = _m_common.git("checkout", "-q", "--detach", staged, cwd=root / "core").returncode == 0
-        _m_common.die(f"couldn't install core {new[:7]} ({error}); running processes keep core {old[:7]}; "
-                      f"staged core {'restored to ' + staged[:7] if restored else 'NOT restored: check core/'}; "
-                      f"retry brain upgrade")
+    if old != new:
+        try:
+            if running is None:
+                # First install from a plain core: the release it ran becomes the rollback target.
+                _m_core_releases.install(root, old)
+            _m_core_releases.install(root, new)
+            if running is None:
+                _m_core_releases.swap(root, old)
+            _m_core_releases.swap(root, new)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            _m_common.die(f"couldn't install core {new[:7]} ({error}); running processes keep core {old[:7]}; "
+                          f"retry brain upgrade")
+    r = _m_common.git("checkout", "-q", "--detach", new, cwd=root / "core")
+    if r.returncode:
+        print(f"! release {new[:7]} runs, but the staged core stays at {staged[:7]}: {r.stderr.strip()}")
     print(f"core {old[:7]} -> {new[:7]}")
     print(_m_common.git("log", "--oneline", f"{old}..{new}", cwd=root / "core").stdout.rstrip(), flush=True)
     before = {e["id"] for e in changes_entries(_m_common.git("show", f"{old}:CHANGES.md", cwd=root / "core").stdout)}
