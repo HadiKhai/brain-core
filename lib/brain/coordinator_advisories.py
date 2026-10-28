@@ -12,6 +12,7 @@ _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 
 
 COORDINATOR_OBSERVATION_MAX_AGE = 180
+COORDINATOR_TRANSPORT_GRACE = 60  # drain start and delivery slack past one rate window
 
 
 def coordinator_time(value):
@@ -85,33 +86,56 @@ def coordinator_native_queue(inst, n, now):
     return queued
 
 
+def coordinator_transport(view, now, held=False):
+    """Doorbells inside the delivery rate window are in transport, not queued at the coordinator.
+
+    One drain delivers every pending doorbell together, so they are all in transport
+    while the oldest is younger than the window; past it, none is waiting on the window.
+    A delivered but unconsumed turn (held) waits on the coordinator itself.
+    """
+    if (view['count'] and not held
+            and now - view['oldest_at'] <= _m_hosts.WAKE_INTERVAL + COORDINATOR_TRANSPORT_GRACE):
+        return {**view, 'count': 0, 'oldest_at': None, 'episode': None, 'transport': view['count']}
+    return {**view, 'transport': 0}
+
 
 def coordinator_queue_view(inst, n, now, host_record=None):
-    """Use the transport owner's bound turn projection when that hook is installed."""
+    """Use the transport owner's bound turn projection when that hook is installed.
+
+    The episode is the condition's start, so later arrivals never replace it.
+    """
     if host_record and host_record.get('queued') is not None and host_record['thread'] == n['local'].get('coordinator'):
         queued = host_record['queued']
-        source = 'fresh_host_snapshot'
-    else:
-        reader = getattr(_m_hosts, 'wake_turn_queue', None)
-        if reader:
-            unknown = {'count': None, 'oldest_at': None, 'episode': None, 'source': 'coalesced_queue_unknown'}
-            try:
-                value = reader(inst, n)
-                count, at = value.get('item_count'), value.get('oldest_at')
-                if value.get('known') is not True or type(count) is not int or count < 0:
-                    return unknown
-                if count and (type(at) not in (int, float) or not math.isfinite(at) or at > now):
-                    return unknown
-                if not count and at is not None:
-                    return unknown
-                return {'count': count, 'oldest_at': at, 'episode': [at], 'source': 'coalesced_native_queue'}
-            except (OSError, ValueError, TypeError, AttributeError):
+        at = min(queued.values()) if queued else None
+        return {'count': len(queued), 'oldest_at': at, 'episode': [at], 'source': 'fresh_host_snapshot',
+                'transport': 0}  # the host's own queue wins over brain's transport
+    reader = getattr(_m_hosts, 'wake_turn_queue', None)
+    if reader:
+        unknown = {'count': None, 'oldest_at': None, 'episode': None, 'source': 'coalesced_queue_unknown',
+                   'transport': None}
+        try:
+            value = reader(inst, n)
+            count, at = value.get('item_count'), value.get('oldest_at')
+            if value.get('known') is not True or type(count) is not int or count < 0:
                 return unknown
-        queued = coordinator_native_queue(inst, n, now)
-        source = 'native_pending_only'
-    oldest = min(queued, key=lambda key: (queued[key], key)) if queued else None
-    at = queued[oldest] if oldest is not None else None
-    return {'count': len(queued), 'oldest_at': at, 'episode': [oldest, at], 'source': source}
+            if count and (type(at) not in (int, float) or not math.isfinite(at) or at > now):
+                return unknown
+            if not count and at is not None:
+                return unknown
+            return coordinator_transport({'count': count, 'oldest_at': at, 'episode': [at],
+                                          'source': 'coalesced_native_queue'}, now, value.get('unconsumed_wake') is True)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return unknown
+    queued = coordinator_native_queue(inst, n, now)
+    at = min(queued.values()) if queued else None
+    return coordinator_transport({'count': len(queued), 'oldest_at': at, 'episode': [at],
+                                  'source': 'native_pending_only'}, now)
+
+
+def coordinator_queue_severity(count, age):
+    """Re-fire only when materially worse: each doubling past four items, and once at 30 minutes."""
+    return [max(0, count.bit_length() - 3), age >= 1800]
+
 
 def coordinator_advisories(inst):
     now = inst.now_dt().timestamp()
@@ -126,15 +150,15 @@ def coordinator_advisories(inst):
         rec = host.get(n['id'])
         rec = rec if rec and rec['thread'] == thread else None
         queue = coordinator_queue_view(inst, n, now, rec)
-        if not queue['count']:
+        if not queue['count'] and not queue.get('transport'):
             continue
         oldest_at = queue['oldest_at']
         def add(kind, identity, text):
             episode = hashlib.sha256(json.dumps([n['id'], thread, kind, identity], sort_keys=True).encode()).hexdigest()
             items.append({'node': 'root', 'kind': kind, 'subject_node': n['id'],
                           'episode': episode, 'text': text})
-        if queue['count'] > 3 or now - oldest_at > 600:
-            add('coordinator-queue', queue['episode'],
+        if queue['count'] and (queue['count'] > 3 or now - oldest_at > 600):
+            add('coordinator-queue', [queue['episode'], coordinator_queue_severity(queue['count'], now - oldest_at)],
                 f"{n['id']}: coordinator has {queue['count']} queued item(s); oldest waiting "
                 f"{int((now - oldest_at) / 60)} min. Drain all queued work in one turn.")
         try:
@@ -143,7 +167,7 @@ def coordinator_advisories(inst):
                 busy_minutes = 20
         except (ValueError, TypeError):
             busy_minutes = 20
-        if rec and queue['count'] and rec['status'] == 'active' and now - rec['started'] >= busy_minutes * 60:
+        if rec and rec['status'] == 'active' and now - rec['started'] >= busy_minutes * 60:
             add('coordinator-busy', [rec['run'], rec['started']],
                 f"{n['id']}: coordinator active for {int((now - rec['started']) / 60)} min "
                 'with wakes queued behind this run; inspect its current work.')

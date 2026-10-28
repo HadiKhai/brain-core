@@ -2,7 +2,11 @@
 
 Root's due list and file watcher report `coordinator-queue` when a bound
 coordinator has more than three queued items or its oldest item has waited more
-than ten minutes. Native `.brain/wake/<URL-encoded-node-id>/*.pending` files
+than ten minutes. Doorbells still inside the delivery rate window (two minutes
+plus one minute of drain slack) are in transport, not queued: the view reports
+them as `transport` and they raise no queue advisory. One drain sends every
+pending doorbell together, so once the oldest is past the window all of them
+count. A delivered but unconsumed coalesced turn always counts. Native `.brain/wake/<URL-encoded-node-id>/*.pending` files
 supply local queue facts when the transport queue projection is unavailable. A coalesced file's distinct item IDs count separately;
 its modification time supplies queue age. Unknown or unsafe files are retained
 and do not establish facts. Transport queues already delivered to a host are
@@ -33,9 +37,13 @@ Only a matching active run with queued wakes produces `coordinator-busy` after
 or busy. No host exporter is installed by this feature. A host inventory without
 actual start times and queued wakes cannot produce this snapshot.
 
-Advisory episodes identify the oldest queued item or active run, independently
-of changing display ages. Ordinary watcher receipts deliver an episode once;
-queue progress or a new run can establish a new episode. These are advisories,
+A queue episode is the condition's start (its oldest enqueue time) plus a
+severity band, independent of new arrivals and changing display ages. Root is
+woken once per condition, and again only when it materially worsens: each
+doubling past four items, and once when the oldest passes 30 minutes. A busy
+episode is the active run. Ordinary watcher receipts deliver an episode once;
+queue progress or a new run can establish a new episode. A fresh host snapshot's
+queue count overrides brain's own transport. These are advisories,
 not cancellation, rotation or permission to change host state.
 
 When the transport owner supplies `hosts.wake_turn_queue(inst, node)`, the reader

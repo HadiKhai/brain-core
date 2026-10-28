@@ -155,6 +155,69 @@ class CoordinatorAdvisories(unittest.TestCase):
         self.pending(count=1, age=601)
         self.assertEqual(len(self.m.coordinator_advisories(self.inst)),1)
 
+    def doorbell(self, stem, first, count, age):
+        import json
+        import os
+        directory = self.m.wake_directory(self.inst, self.n)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / (stem*64+'.pending')
+        path.write_text(json.dumps({'items':[{'kind':'handback','id':format(i,'064x')} for i in range(first, first+count)]}))
+        stamp = self.now.timestamp() - age
+        os.utime(path, (stamp,stamp))
+
+    def test_doorbells_inside_rate_window_are_transport_not_queue(self):
+        window = self.m.WAKE_INTERVAL + self.m.COORDINATOR_TRANSPORT_GRACE
+        self.doorbell('a', 0, 6, window - 5)
+        self.doorbell('b', 6, 3, 1)
+        self.assertEqual(self.m.coordinator_advisories(self.inst), [])
+        view = self.m.coordinator_queue_view(self.inst, self.n, self.now.timestamp())
+        self.assertEqual((view['count'], view['transport'], view['episode']), (0, 9, None))
+        import datetime
+        self.now += datetime.timedelta(seconds=10)
+        items = self.m.coordinator_advisories(self.inst)
+        self.assertEqual([i['kind'] for i in items], ['coordinator-queue'])
+        self.assertIn('9 queued item(s)', items[0]['text'])
+        hosts = self.m.coordinator_advisories.__globals__['_m_hosts']
+        held = {'known':True,'item_count':4,'oldest_at':self.now.timestamp()-30,'unconsumed_wake':False}
+        with mock.patch.object(hosts,'wake_turn_queue',return_value=held,create=True):
+            self.assertEqual(self.m.coordinator_advisories(self.inst), [])
+            held['unconsumed_wake'] = True
+            self.assertEqual([i['kind'] for i in self.m.coordinator_advisories(self.inst)], ['coordinator-queue'])
+
+    def test_backlog_episode_is_stable_across_new_doorbells_and_refires_only_when_worse(self):
+        import datetime
+        self.doorbell('a', 0, 4, 300)
+        first = self.m.coordinator_advisories(self.inst)
+        self.assertEqual(len(first), 1)
+        for minute in range(3):
+            self.doorbell('bcd'[minute], 10 + minute, 1, 0)
+            self.now += datetime.timedelta(minutes=1)
+            items = self.m.coordinator_advisories(self.inst)
+            self.assertEqual([i['episode'] for i in items], [first[0]['episode']])
+        self.doorbell('e', 20, 1, 0)
+        doubled = self.m.coordinator_advisories(self.inst)
+        self.assertIn('8 queued item(s)', doubled[0]['text'])
+        self.assertNotEqual(doubled[0]['episode'], first[0]['episode'])
+        self.now += datetime.timedelta(minutes=10)
+        self.assertEqual(self.m.coordinator_advisories(self.inst)[0]['episode'], doubled[0]['episode'])
+        self.now += datetime.timedelta(minutes=13)
+        aged = self.m.coordinator_advisories(self.inst)
+        self.assertNotIn(aged[0]['episode'], (first[0]['episode'], doubled[0]['episode']))
+
+    def test_fresh_host_snapshot_count_overrides_native_doorbells(self):
+        self.doorbell('a', 0, 6, 900)
+        self.assertEqual(len(self.m.coordinator_advisories(self.inst)), 1)
+        self.host(status='completed', queued_wakes=[])
+        self.assertEqual(self.m.coordinator_advisories(self.inst), [])
+        self.host(status='completed', queued_wakes=[{'id':'wake-'+str(i),'queued_at':'2026-01-01T11:59:30+00:00'}
+                                                    for i in range(5)])
+        items = self.m.coordinator_advisories(self.inst)
+        self.assertEqual([i['kind'] for i in items], ['coordinator-queue'])
+        self.assertIn('5 queued item(s)', items[0]['text'])
+        view = self.m.coordinator_queue_view(self.inst, self.n, self.now.timestamp(),
+                                             self.m.coordinator_host_runs(self.inst, self.now.timestamp())['app'])
+        self.assertEqual((view['source'], view['transport']), ('fresh_host_snapshot', 0))
+
     def test_busy_requires_fresh_matching_active_run_and_queued_wakes(self):
         self.host()
         self.assertEqual([i['kind'] for i in self.m.coordinator_advisories(self.inst)], ['coordinator-busy'])
