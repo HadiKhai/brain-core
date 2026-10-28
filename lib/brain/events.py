@@ -1243,7 +1243,8 @@ def events_view_without_current(inst, n):
     return views[n['id']]
 
 
-def cap_now(inst, n, *, prepare=False, text=None):
+def plan_cap_now(inst, n, text=None):
+    """Prepare overflow bytes without entering the owned publication boundary."""
     path = n['dir'] / 'status.md'
     if not path.exists():
         return
@@ -1266,12 +1267,18 @@ def cap_now(inst, n, *, prepare=False, text=None):
         return
     archive = n['dir'] / 'status-archive.md'
     previous = archive.read_text() if archive.exists() else ''
-    plan = (text[:match.start(1)] + ''.join(lines[:cut]) + '\n' + text[match.end(1):],
-            previous + '\n## ' + inst.now() + ': Now overflow\n\n' + ''.join(lines[cut:]) + '\n')
-    if prepare:
-        return plan
+    return (text[:match.start(1)] + ''.join(lines[:cut]) + '\n' + text[match.end(1):],
+            previous, ''.join(lines[cut:]))
+
+
+def cap_now(inst, n, *, prepared=None):
+    """Publish a prepared overflow transformation under the writer's ownership."""
+    plan = prepared if prepared is not None else plan_cap_now(inst, n)
+    if plan is None:
+        return
+    path, archive = n['dir'] / 'status.md', n['dir'] / 'status-archive.md'
     owned = ownership_before(inst, n)
-    common.atomic_write(archive, plan[1])
+    common.atomic_write(archive, plan[1] + '\n## ' + inst.now() + ': Now overflow\n\n' + plan[2] + '\n')
     common.atomic_write(path, plan[0])
     common.touch(path, archive)
     own_transformation(inst, n, owned)
@@ -1562,8 +1569,12 @@ def maintain(op, changed):
                 else:
                     view = compared
                 text = status.refreshed_text(current, target, view)
-                overflow = cap_now(current, target, prepare=True, text=text) if materialize else None
-                result[nid] = (view, overflow[0] if overflow else text, compared, overflow)
+                overflow = plan_cap_now(current, target) if materialize else None
+                # Keep the publication plan relative to the fenced source, so
+                # cap_now owns exactly its usual transformation. The refreshed
+                # document must retain that same cap when it publishes next.
+                capped = plan_cap_now(current, target, text=text) if overflow else None
+                result[nid] = (view, capped[0] if capped else text, compared, overflow)
             return result
         try:
             prepared = status_refresh.compute(op.inst, next(iter(selected.values())), prepare_views,
@@ -1610,15 +1621,11 @@ def maintain(op, changed):
         views[n['id']] = view
         if materialize:
             overflow = prepared[n['id']][3] if op.command == 'status' else None
-            owned = ownership_before(op.inst, n) if overflow else None
             if overflow:
-                common.atomic_write(n['dir'] / 'status-archive.md', overflow[1])
-                common.touch(n['dir'] / 'status-archive.md')
+                cap_now(op.inst, n, prepared=overflow)
             status.refresh_status(op.inst, n, view,
                                   prepared_text=prepared[n['id']][1] if op.command == 'status' or released_projection else text)
             active_table(op.inst, n, view)
-            if overflow:
-                own_transformation(op.inst, n, owned)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
             force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)
             message = None

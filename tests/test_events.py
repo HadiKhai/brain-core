@@ -1098,20 +1098,49 @@ class EventViews(Scenario):
                 before = path.read_bytes(), archive.read_bytes()
                 error = SystemExit('state changed during the unlocked step; retry from fresh state') if failure == 'contention' else ValueError('preparation failed')
                 with instance.brain_lock(r), mock.patch.object(status, 'refreshed_text', side_effect=error), \
+                        mock.patch.object(events, 'cap_now', wraps=events.cap_now) as publish, \
                         contextlib.redirect_stderr(io.StringIO()), \
                         self.assertRaisesRegex(SystemExit, 'maintenance refused'):
                     with events.Command(r, command='status'):
                         pass
+                publish.assert_not_called()
                 self.assertEqual((path.read_bytes(), archive.read_bytes()), before)
                 self.assertEqual(events.pending(events.read(instance.Instance(r))), {})
                 if failure == 'contention':
                     self.assertEqual(events.read(instance.Instance(r))[-1]['kind'], 'abort')
+                original = events.cap_now
+                published = []
+                def owned_publish(*args, **kwargs):
+                    self.assertIsNotNone(instance._LOCK['fh'])
+                    self.assertIsNotNone(kwargs.get('prepared'))
+                    published.append(True)
+                    return original(*args, **kwargs)
+                with instance.brain_lock(r), mock.patch.object(events, 'cap_now', side_effect=owned_publish):
+                    with events.Command(r, command='status'):
+                        pass
+                self.assertEqual(published, [True])
                 self.b(r, 'status', 'root', '--refresh')
                 now = path.read_text().split('## Now\n', 1)[1].split('## Next', 1)[0]
                 self.assertEqual(sum(bool(line.strip()) for line in now.splitlines()), 30)
                 for i in range(30, 35):
                     self.assertEqual(archive.read_text().count('- note %d\n' % i), 1)
                 self.assertTrue(archive.read_text().startswith('Existing archive\n'))
+
+    def test_overflow_plan_is_read_only_and_uses_the_publication_clock(self):
+        r = self.init('overflow-clock')
+        inst = instance.Instance(r)
+        path, archive = r / 'status.md', r / 'status-archive.md'
+        path.write_text('# Demo\n\n## Now\n' + ''.join('- item %d\n' % i for i in range(35)))
+        archive.write_text('Existing archive\n')
+        before = path.read_bytes(), archive.read_bytes()
+        with mock.patch.object(inst, 'now', return_value='2026-01-01 10:00 +00:00'):
+            plan = events.plan_cap_now(inst, inst.node('root'))
+        self.assertEqual((path.read_bytes(), archive.read_bytes()), before)
+        with instance.brain_lock(r), mock.patch.object(inst, 'now', return_value='2026-01-01 10:01 +00:00'):
+            events.cap_now(inst, inst.node('root'), prepared=plan)
+        self.assertIn('2026-01-01 10:01 +00:00: Now overflow', archive.read_text())
+        self.assertNotIn('2026-01-01 10:00', archive.read_text())
+        self.assertEqual(path.read_text(), plan[0])
 
     def test_hook_fold_refreshes_its_node_even_when_next_command_targets_another(self):
         r = self.init('demo')

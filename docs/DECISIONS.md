@@ -3894,3 +3894,10 @@ deadline budget, restoring the normal process-local wait limit before any nested
 work. Expiry refuses without claiming
 a current view. Live leases are never adopted or closed; dead operations and
 stream damage keep their existing strict refusal and recovery behavior.
+
+The overflow planner is separate from the owned cap_now publication boundary.
+After successful fenced preparation, cap_now publishes the source transformation
+and ownership stamps under the writer lock, before the prepared refreshed text.
+This preserves the native transaction evidence protocol: unlocked planning is
+not a publication, and archive/stamp changes remain exactly witnessed by the
+existing publisher. Rehearsal validation and refusal assertions stay unchanged.
