@@ -30,6 +30,19 @@ class ActiveWorkStateParsing(unittest.TestCase):
         self.node = {'id': 'app', 'dir': Path(self.temp.name), 'home_path': CORE,
                      'local': {'worktrees': {}}, 'parent': None}
 
+    def test_partial_process_inventory_retains_positive_evidence_and_unknowns(self):
+        for code, output, errors, expected in (
+                (1, 'p123\nfcwd\nn/worktree\n', '', 'running processes use this worktree'),
+                (0, 'p123\n', 'partial inventory', 'running processes use this worktree'),
+                (1, '', '', ''),
+                (1, '', 'inventory failed', 'process inventory unavailable'),
+                (2, '', '', 'process inventory unavailable')):
+            with self.subTest(code=code, output=output, errors=errors), \
+                    mock.patch.object(self.core.shutil, 'which', return_value='/fixture/lsof'), \
+                    mock.patch.object(self.core.subprocess, 'run', return_value=
+                               subprocess.CompletedProcess([], code, output, errors)):
+                self.assertEqual(self.core.prune_process_refusal(self.temp.name), expected)
+
     def test_terminal_notes_are_filtered_but_references_stay_inspectable(self):
         terminal = ['merged', ' Merged — fixture shipped ', 'MERGED – fixture shipped',
                     'closed - fixture retired', 'done: fixture complete', 'abandoned — fixture dropped']

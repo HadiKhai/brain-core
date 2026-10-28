@@ -520,7 +520,8 @@ def prune_process_refusal(path):
                                 capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return 'process inventory unavailable'
-    if result.returncode == 0 and any(line.startswith('p') for line in result.stdout.splitlines()):
+    # Even an incomplete inventory proves the checkout busy when it found a PID.
+    if any(line.startswith('p') for line in result.stdout.splitlines()):
         return 'running processes use this worktree'
     if result.returncode != 1 or result.stdout.strip() or result.stderr.strip():
         return 'process inventory unavailable'

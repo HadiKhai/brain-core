@@ -3764,3 +3764,7 @@ Worktree pruning accepts repeatable exclusions for branch names and registered
 paths before inspecting removal candidates. Existing cleanup checks remain in
 force, with a bounded process inventory retaining checkouts used by running
 processes or when that inventory is unavailable.
+
+A process ID in even a partial process inventory is sufficient to retain the
+checkout as busy. A nonzero inventory exit cannot discard that positive evidence;
+an empty unsuccessful inventory still retains the checkout as unavailable.
