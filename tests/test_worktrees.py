@@ -487,6 +487,54 @@ class PruneSafety(AutonomyProject):
                 self.assertIn('removed: job-a', self.b(r, 'wt', 'prune', 'app', '--offline'))
                 self.assertFalse(wt.exists())
 
+    def stacked(self, merge_child=True):
+        r, home, base = self.project()
+        (base / 'base-result').write_text('base work\n')
+        self.git('add', '.', cwd=base)
+        self.git('commit', '-qm', 'base work', cwd=base)
+        self.b(r, 'wt', 'add', 'app', 'job-b', '--base', 'job-a')
+        local = json.loads((r / '.brain/local.json').read_text())
+        child = Path(local['nodes']['app']['worktrees']['job-b']['path'])
+        self.assertEqual(local['nodes']['app']['worktrees']['job-b']['base'], 'job-a')
+        (child / 'child-result').write_text('stacked work\n')
+        self.git('add', '.', cwd=child)
+        self.git('commit', '-qm', 'stacked work', cwd=child)
+        if merge_child:
+            self.git('merge', '--ff-only', 'job-b', cwd=base)
+        return r, home, base, child
+
+    def test_stacked_branch_prunes_after_landing_via_deleted_base(self):
+        r, home, base, child = self.stacked()
+        self.git('merge', '--ff-only', 'job-a', cwd=home)
+        self.b(r, 'wt', 'rm', 'app', 'job-a')
+        self.git('branch', '-d', 'job-a', cwd=home)
+        self.assertFalse(base.exists())
+        self.assertIn('would remove: job-b', self.b(r, 'wt', 'prune', 'app', '--offline', '--dry-run'))
+        self.assertTrue(child.exists())
+        self.assertIn('removed: job-b', self.b(r, 'wt', 'prune', 'app', '--offline'))
+        self.assertFalse(child.exists())
+        self.assertIn('merged', self.b(r, 'jobs', 'app', '--branch', 'job-b'))
+
+    def test_stacked_branch_merged_only_into_base_is_retained(self):
+        r, home, base, child = self.stacked()
+        for flags in (('--dry-run',), ()):
+            out = self.b(r, 'wt', 'prune', 'app', '--offline', *flags)
+            self.assertIn('job-a (not merged)', out)
+            self.assertIn('job-b (not merged)', out)
+            self.assertTrue(base.exists())
+            self.assertTrue(child.exists())
+
+    def test_unmerged_stacked_branch_survives_deleted_landed_base(self):
+        r, home, base, child = self.stacked(merge_child=False)
+        self.git('merge', '--ff-only', 'job-a', cwd=home)
+        self.b(r, 'wt', 'rm', 'app', 'job-a')
+        self.git('branch', '-d', 'job-a', cwd=home)
+        self.assertFalse(base.exists())
+        for flags in (('--dry-run',), ()):
+            out = self.b(r, 'wt', 'prune', 'app', '--offline', *flags)
+            self.assertIn('job-b (not merged)', out)
+            self.assertTrue(child.exists())
+
     def test_pr_mode_uses_remote_default_despite_stale_local_main(self):
         r, home, wt = self.project()
         origin = self.tmp / 'origin.git'

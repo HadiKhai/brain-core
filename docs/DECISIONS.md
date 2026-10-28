@@ -3727,3 +3727,12 @@ The test change addresses scheduling and startup tolerance, not another enqueue
 race. Outcome assertions remain intact. The unrelated-process helper blocks on
 its own stdin pipe so its lifetime does not expire while a slow test is still
 checking that takeover leaves it alive; EOF also releases it if the test exits.
+## 2026-10-28: Keep stacked worktree cleanup independent of its creation base
+
+A worktree's recorded base describes where it started; cleanup uses ancestry
+against the node's integration target. A stacked branch remains prunable after
+landing through its base even when that base's worktree and branch are gone.
+Merging into an unlanded base does not authorize cleanup, and deleting a landed
+base does not authorize removal of its unmerged child. Regression scenarios use
+real stacked commits and remove the base before inspecting and pruning the child.
+The existing integration ancestry and cleanup generation checks remain unchanged.
