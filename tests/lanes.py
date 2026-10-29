@@ -30,6 +30,21 @@ SERIAL_TESTS = (
     'HandbackLifecycle::test_p6_cli_enqueue_foreground_terminal_and_live_join',
     'HandbackLifecycle::test_m3_cli_empty_scan_silent_then_one_synthetic_ask',
     'RepositoryLanes::test_unassigned_duplicate_and_removed_tests_fail',
+    # Guardian startup and cleanup have real deadlines. Run these probes only
+    # after the shard's parallel workers exit, without changing those deadlines.
+    'RehearsalRetention::test_evidence_off_keeps_fixture_and_native_cleanup_unchanged',
+    'RehearsalRetention::test_native_early_exception_persists_then_cleans_owned_temporary_directory',
+    'RehearsalRetention::test_native_temporary_directory_preserves_unsaved_operands_before_delete',
+    'RehearsalStability::test_connectivity_requires_branch_and_tag_objects_but_not_private_refs',
+    'RehearsalStability::test_copied_git_locks_do_not_block_materialization',
+    'BaselineDiagnostics::test_identical_failed_check_and_fix_keep_named_warnings',
+    'BaselineDiagnostics::test_incomplete_baseline_records_conditions_and_exit_codes',
+    'FrozenClock::test_default_lanes_are_private_and_live_commit_does_not_change_result',
+    'FrozenClock::test_git_relative_cutoffs_in_parent_and_helper_use_the_snapshot_clock',
+    'FrozenInputs::test_detached_git_copies_tighten_existing_targets_before_content',
+    'FrozenInputs::test_ui_volatility_allowlist_is_exact_and_reported',
+    'FrozenInputs::test_unversioned_core_links_round_trip_through_evidence',
+    'OwnedCopyLifecycle::test_kill_recovery_covers_live_child_staging_and_preserves_refusals',
 )
 MODULE_LANES = (
     'briefs', 'check', 'cli', 'connect', 'guard', 'history', 'hosts', 'jobs',
