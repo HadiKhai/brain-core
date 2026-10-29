@@ -211,6 +211,13 @@ class _LockSiteScenario(Scenario):
         elif site == "history_out":
             sessions = self.tmp / ".codex/sessions"
             sessions.mkdir(parents=True)
+            # These lock probes read synthetic sessions, independently of
+            # whether a real Codex executable is installed on the host.
+            config = self.tmp / ".config/brain"
+            config.mkdir(parents=True, exist_ok=True)
+            (config / "subscriptions.json").write_text(json.dumps({"subscriptions": [{
+                "id": "fixture", "runtime": "codex", "config_dir": str(sessions.parent),
+                "brains": ["*"]}]}))
             rows = [
                 {"type": "session_meta", "payload": {"id": "a0000001-fixture", "cwd": str(self.home)}},
                 {"type": "event_msg", "payload": {"type": "user_message", "message": "Use a small queue."}},
