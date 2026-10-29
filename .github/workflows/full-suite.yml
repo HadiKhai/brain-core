@@ -8,11 +8,6 @@ on:
 permissions:
   contents: read
 
-# Standalone Python keeps the 3.9 runtime available as ubuntu-latest advances.
-env:
-  UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
-  UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/pythons
-
 jobs:
   inventory:
     runs-on: ubuntu-latest
@@ -26,6 +21,9 @@ jobs:
           enable-cache: false
       - name: Install Python 3.9
         run: |
+          # Standalone Python remains available as ubuntu-latest advances.
+          export UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/pythons"
+          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache"
           uv python install 3.9
           uv venv --python 3.9 "$RUNNER_TEMP/ci-venv"
           echo "$RUNNER_TEMP/ci-venv/bin" >> "$GITHUB_PATH"
@@ -55,6 +53,9 @@ jobs:
           enable-cache: false
       - name: Install Python 3.9
         run: |
+          # Standalone Python remains available as ubuntu-latest advances.
+          export UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/pythons"
+          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache"
           uv python install 3.9
           uv venv --python 3.9 "$RUNNER_TEMP/ci-venv"
           echo "$RUNNER_TEMP/ci-venv/bin" >> "$GITHUB_PATH"
@@ -94,6 +95,9 @@ jobs:
           enable-cache: false
       - name: Install Python 3.9
         run: |
+          # Standalone Python remains available as ubuntu-latest advances.
+          export UV_PYTHON_INSTALL_DIR="$RUNNER_TEMP/pythons"
+          export UV_CACHE_DIR="$RUNNER_TEMP/uv-cache"
           uv python install 3.9
           uv venv --python 3.9 "$RUNNER_TEMP/ci-venv"
           echo "$RUNNER_TEMP/ci-venv/bin" >> "$GITHUB_PATH"
