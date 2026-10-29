@@ -95,6 +95,7 @@ SHARED_INPUTS = (
     'tests/conftest.py', 'tests/tempdirs.py', 'tests/lanes.py', 'tests/check_lanes.py', 'tests/per_change_gate.py',
     'bin/**', 'templates/**', 'skills/**', 'roles/**', 'adapters/**', 'ui/**', '!ui/**/*.png',
     'install.sh', 'MODEL.md', 'CHANGES.md', '.gitignore', 'requirements-test.txt', 'pytest.ini',
+    '.github/workflows/**', 'tools/ci_*.py', 'tools/ci_durations.json',
 )
 
 
