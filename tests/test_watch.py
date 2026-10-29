@@ -425,6 +425,34 @@ class Watcher(Scenario):
         notice = '- 2026-10-28 07:00 from worker job: fyi: landed <!-- wake:' + episode + ' -->'
         self.assertIsNone(self.m.watch_handback_wake_items(inst, n, 'job', 'attempt', episode, line=notice))
 
+    def test_producer_inbox_wake_ref_tracks_stored_and_recurrent_request_episodes(self):
+        self.b(self.root, 'new', 'kid', '--title', 'Kid')
+        episode = 'a' * 32
+        line = ('- 2026-10-28 07:00 from worker job: question: Choose blue <!-- wake:' + episode
+                + ' --> <!-- handback:' + 'b' * 24 + ' -->')
+        inbox = self.root / 'nodes/kid/inbox.md'
+        inbox.write_text(line + '\n')
+        inst = self.m.Instance(self.root)
+        n = inst.node('kid')
+        with self.m.lifecycle_store(inst) as data:
+            data['inbox']['kid'] = {self.m.inbox_source_id(n, line): {'id': 'd' * 24, 'answered': False}}
+        receipt = self.root / '.brain/wake/lifecycle.json'
+        identities = []
+        for generation in range(2):
+            with self.subTest(generation=generation):
+                before = receipt.read_bytes()
+                direct = self.m.watch_handback_wake_items(inst, n, 'job', 'attempt', episode, line=line)
+                self.assertEqual(receipt.read_bytes(), before)
+                scanned = [i for i in self.m.watch_items(inst, n) if i.get('reason') == 'wake:' + episode]
+                self.assertEqual(len(scanned), 1)
+                self.assertEqual(direct, scanned)
+                identities.append(scanned[0]['id'])
+            if generation == 0:
+                inbox.write_text('')
+                self.m.watch_items(inst, n)  # observe retirement before the same line reappears
+                inbox.write_text(line + '\n')
+        self.assertNotEqual(identities[0], identities[1])
+
     def watch_fixture(self):
         self.root = self.init('oak')
         self.b(self.root, 'set', 'root', 'wake=fixture-send', 'coordinator=fixture-root')

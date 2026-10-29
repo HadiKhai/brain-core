@@ -562,7 +562,8 @@ def watch_handback_wake_items(inst, n, branch, attempt_id, wake_id, line=None):
         if (inbox_notices.informational_notice(line)
                 or line not in _m_status.inbox_lines(n, readonly=True)):
             return None
-        item = {'node': n['id'], 'kind': 'inbox', 'text': _m_guard.redact(line[2:], _m_guard.never_terms(n))}
+        item = {'node': n['id'], 'kind': 'inbox', 'text': _m_guard.redact(line[2:], _m_guard.never_terms(n)),
+                'episode': _m_reminders.request_episode_id(inst, n, line)}
         entry = watch_item_entry(n, item, [], {}, [])
     else:
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
