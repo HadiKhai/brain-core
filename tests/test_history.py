@@ -779,8 +779,17 @@ class HistorySizes(History):
         for f in ("instance.md", "node.md"):
             (self.tmp / "holder/deep/inner" / f).write_text("x\n")
         home_folder, brain = "your home folder or a brain", "your home folder or a brain"
-        for bad, why in ((str(self.tmp.parent), home_folder), (str(self.tmp).upper(), home_folder),
-                         (str(self.r / "nodes"), brain), (str(self.r).upper(), brain),
+        aliases = []
+        for label, folder in (('home', self.tmp), ('brain', self.r)):
+            alias = Path(str(folder).upper())
+            if not alias.exists():
+                # Case-sensitive filesystems need an owned alias to the same
+                # directory; a nonexistent uppercase path has no inode identity.
+                alias = self.tmp / (label + '-case-alias')
+                alias.symlink_to(folder, target_is_directory=True)
+            aliases.append(str(alias))
+        for bad, why in ((str(self.tmp.parent), home_folder), (aliases[0], home_folder),
+                         (str(self.r / "nodes"), brain), (aliases[1], brain),
                          (str(loose), brain), (str(loose / "nodes/x"), brain), (str(self.tmp / "holder"), brain),
                          ("relative/path", "absolute"),
                          (str(self.tmp / "OtherHome" / "src"), "another project's home"),
