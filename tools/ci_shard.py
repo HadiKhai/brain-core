@@ -113,12 +113,15 @@ class ProgressJUnit:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('plan', 'run'))
-    parser.add_argument('--plan', type=Path, required=True)
+    parser.add_argument('command', choices=('plan', 'run', 'isolated'))
+    parser.add_argument('--plan', type=Path)
     parser.add_argument('--shard', type=int, choices=range(SHARDS))
+    parser.add_argument('--nodeid')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     os.chdir(ROOT)
+    if args.command in ('plan', 'run') and args.plan is None:
+        parser.error('plan and run require --plan')
     if args.command == 'plan':
         ids = collect()
         files = sorted({nodeid.split('::', 1)[0] for nodeid in ids})
@@ -131,17 +134,25 @@ def main():
         print('Partition verified: {} tests in {} files, {} disjoint shards'.format(
             len(ids), len(files), SHARDS))
         return 0
-    if args.shard is None or args.output is None:
-        parser.error('run requires --shard and --output')
-    plan = json.loads(args.plan.read_text())
-    files = plan['shards'][args.shard]
-    expected = sorted(nodeid for nodeid in plan['nodeids'] if nodeid.split('::', 1)[0] in files)
-    targets = sorted({'::'.join(nodeid.split('::')[:2]) for nodeid in expected})
+    if args.output is None:
+        parser.error('run and isolated require --output')
+    if args.command == 'isolated':
+        if not args.nodeid or args.nodeid not in collect():
+            parser.error('isolated requires one exact canonical collected test node ID')
+        expected = targets = [args.nodeid]
+    else:
+        if args.shard is None:
+            parser.error('run requires --shard')
+        plan = json.loads(args.plan.read_text())
+        files = plan['shards'][args.shard]
+        expected = sorted(nodeid for nodeid in plan['nodeids'] if nodeid.split('::', 1)[0] in files)
+        targets = sorted({'::'.join(nodeid.split('::')[:2]) for nodeid in expected})
     args.output.mkdir(parents=True, exist_ok=True)
     write_json(args.output / 'expected.json', expected)
     import pytest
     progress = ProgressJUnit(args.output)
-    code = pytest.main(['-q', '-p', 'no:cacheprovider', '-n', 'auto', '--serial-after-parallel',
+    workers = '0' if args.command == 'isolated' else 'auto'
+    code = pytest.main(['-q', '-p', 'no:cacheprovider', '-n', workers, '--serial-after-parallel',
                         '--junitxml=' + str(args.output / 'junit.xml'),
                         '--completed-results=' + str(args.output / 'completed-results.jsonl'),
                         *targets], plugins=[progress])
