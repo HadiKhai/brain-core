@@ -712,6 +712,30 @@ class AutonomyFacts(AutonomyProject):
         self.assertEqual(len(builds), 2, 'the second attempt reused its own fenced view')
         self.assertEqual((root / 'status.md').read_bytes(), published)
 
+    def test_refresh_shared_worktree_first_cached_view_keeps_publication_fence(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_first_shared_fence')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        builds = []
+        def read():
+            builds.append(True)
+            return refresh.common.git('status', '--porcelain', '--untracked-files=all', cwd=root).stdout
+        def prepare(current, node):
+            return [refresh.view(current, node, read, variant) for variant in ('first', 'second')]
+        published = (root / 'status.md').read_bytes()
+        with mock.patch.dict(os.environ, self.env), refresh.invocation():
+            result = refresh.compute(inst, inst.node('root'), prepare, incremental=True)
+            def overtaken(current, node):
+                value = refresh.view(current, node, read, 'first')
+                self.assertEqual(value, result[0])
+                self.assertEqual(len(builds), 2, 'the first view must reuse its own evidence')
+                (root / 'new-untracked-source.txt').write_text('a meaningful worktree change\n')
+                return value
+            with self.assertRaisesRegex(SystemExit, 'status refresh inputs changed'):
+                refresh.compute(inst, inst.node('root'), overtaken, incremental=True)
+        self.assertEqual((root / 'status.md').read_bytes(), published)
+
     def test_refresh_retry_reuses_git_queries_but_observes_a_new_oid(self):
         root = self.init('alice')
         m, cli, status, events, instance = self.refresh_cli(root, 'incremental_refresh_git')

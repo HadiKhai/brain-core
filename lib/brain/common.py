@@ -886,12 +886,10 @@ def git_read_index(cwd, env, *, diff=False):
     refresh a disposable copy instead of the caller's index. Split indexes are
     flattened privately so reads cannot freshen their original backing files.
     """
-    dirs = worktree_git_dir(cwd or Path.cwd(), env)
-    if dirs is not None:
-        source = dirs[0] / 'index'  # what --git-path index names for this layout
-    else:
-        location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
-        source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
+    # Publication replays temporarily disable the observer. Resolve through Git
+    # there too, so the replay follows the same index binding as the observed read.
+    location = git('rev-parse', '--path-format=absolute', '--git-path', 'index', cwd=cwd, env=env)
+    source = Path(location.stdout.removesuffix('\n')) if not location.returncode else None
     if source is None or not source.is_file():
         yield env  # no repository/index to refresh; preserve Git's own verdict
         return
@@ -911,11 +909,8 @@ def git_read_index(cwd, env, *, diff=False):
         os.utime(private, ns=(original.st_atime_ns, original.st_mtime_ns))
         child = {**env, 'GIT_INDEX_FILE': str(private)}
         if split:
-            if dirs is not None:
-                own = dirs[0]
-            else:
-                own = git('rev-parse', '--absolute-git-dir', cwd=cwd, env=env, check=True)
-                own = Path(own.stdout.removesuffix('\n'))
+            own = git('rev-parse', '--absolute-git-dir', cwd=cwd, env=env, check=True)
+            own = Path(own.stdout.removesuffix('\n'))
             shared = [path for path in own.glob('sharedindex.*') if path.is_file()]
             if shared:
                 # Flatten the copied split index before the actual read. Moving
