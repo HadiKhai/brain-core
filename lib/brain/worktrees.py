@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import common as _m_common
@@ -379,20 +380,100 @@ def worktree_state(home, w, branch, n=None):
     return dirty, merged, ahead
 
 
+LIST_PR_TIMEOUT = 3
+
+def list_worktree_states(n, pr_cache):
+    """One ref/graph/PR observation per repo; only working indexes need separate reads.
+
+    This display snapshot is never used as cleanup or publication evidence.
+    """
+    home = n['home_path']
+    wts = n['local'].get('worktrees', {})
+    refs = _m_common.branch_refs(home) or {}
+    base = integration_target(n)
+    tips = {br: refs.get('refs/heads/' + br, '') for br in wts}
+    graph = {}
+    valid_graph = False
+    if base and refs.get(base) and any(tips.values()):
+        result = _m_common.git('rev-list', '--parents', *sorted(set(tips.values()) - {''}),
+                               '--not', refs[base], cwd=home)
+        valid_graph = result.returncode == 0
+        if valid_graph:
+            graph = {parts[0]: parts[1:] for line in result.stdout.splitlines()
+                     if (parts := line.split())}
+
+    def ahead(tip):
+        seen, pending = set(), [tip]
+        while pending:
+            sha = pending.pop()
+            if sha in graph and sha not in seen:
+                seen.add(sha)
+                pending.extend(graph[sha])
+        return str(len(seen)) if valid_graph and tip else ''
+
+    counts = {br: ahead(tip) for br, tip in tips.items()}
+    moved = {br for br, tip in tips.items() if tip and tip != wts[br].get('start')}
+    merged = {br for br in moved if valid_graph and counts[br] == '0'}
+    key = None
+    if moved - merged and base and shutil.which('gh') and 'github.com' in _m_nodes.remote_url(home):
+        location = _m_common.git('rev-parse', '--git-common-dir', cwd=home)
+        key = str((Path(home) / location.stdout.strip()).resolve()) if location.returncode == 0 else str(Path(home).resolve())
+
+    def merged_prs():
+        # Fetch every page: a default result limit would lose old squash
+        # merges. One CLI invocation serves every registered branch/base.
+        # None records an unanswered lookup, which listing reports.
+        try:
+            result = subprocess.run(['gh', 'pr', 'list', '--state', 'merged', '--limit', '1000000',
+                                     '--json', 'headRefName,baseRefName'],
+                                    cwd=home, capture_output=True, text=True, timeout=LIST_PR_TIMEOUT)
+            if result.returncode == 0:
+                return {(pr['headRefName'], pr['baseRefName']) for pr in json.loads(result.stdout or '[]')}
+        except (subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+            pass
+        return None
+
+    def dirty(path):
+        return (len(_m_common.git('status', '--porcelain', cwd=path).stdout.splitlines())
+                if Path(path).exists() else None)
+
+    # The PR lookup is network-bound; overlap it with the bounded index reads.
+    with ThreadPoolExecutor(max_workers=1) as lookup, ThreadPoolExecutor(max_workers=8) as pool:
+        prs = lookup.submit(merged_prs) if key is not None and key not in pr_cache else None
+        values = dict(zip(wts, pool.map(dirty, (w['path'] for w in wts.values()))))
+        if prs is not None:
+            pr_cache[key] = prs.result()
+    if key is not None and pr_cache[key]:
+        target = base.removeprefix('refs/heads/').removeprefix('refs/remotes/origin/')
+        merged.update(br for br in moved if (br, target) in pr_cache[key])
+    return {br: (values[br], br in merged, counts[br]) for br in wts}
+
+
 def cmd_wt_list(a):
     inst = _m_nodes.load()
+    with _m_common.git_read_snapshot():
+        _list_worktrees(inst, a)
+
+
+def _list_worktrees(inst, a):
+    pr_cache = {}
     for n in inst.nodes():
         if a.id and n["id"] != a.id:
             continue
         wts = n["local"].get("worktrees", {})
         if not wts:
             continue
+        states = list_worktree_states(n, pr_cache)
         print(n["id"])
         for br, w in sorted(wts.items()):
-            dirty, merged, ahead = worktree_state(n["home_path"], w, br, n)
+            dirty, merged, ahead = states[br]
             state = "missing" if dirty is None else (f"{dirty} uncommitted" if dirty else "clean")
             print(f"  {br:<28} {port_text(w.get('port'), w.get('ports', 1))}  {state}  "
                   f"{'merged' if merged else (ahead + ' commit(s) ahead') if ahead else ''}  {_m_common.tilde(w['path'])}")
+    if None in pr_cache.values():
+        print(f"brain: GitHub merged-PR lookup unavailable within {LIST_PR_TIMEOUT} s; "
+              "squash-merged branches may show as commits ahead", file=sys.stderr)
+
 
 
 def job_commits(home, w, branch):

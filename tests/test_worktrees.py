@@ -461,6 +461,34 @@ cli.main()
         self.b(r, "set", "x", "workbench=" + str(r / "wb"))
         self.assertIn("workbench is inside the instance", self.b(r, "check", ok=False))
 
+    def test_batched_list_matches_individual_git_merge_and_ahead_verdicts(self):
+        home = self.repo(self.tmp / 'list-states')
+        start = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('checkout', '-qb', 'merged', cwd=home)
+        (home / 'landed').write_text('landed\n')
+        self.git('add', '.', cwd=home)
+        self.git('commit', '-qm', 'landed work', cwd=home)
+        self.git('checkout', '-q', 'main', cwd=home)
+        self.git('merge', '--ff-only', 'merged', cwd=home)
+        self.git('branch', 'fresh', cwd=home)
+        fresh = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        self.git('checkout', '-qb', 'open', start, cwd=home)
+        (home / 'pending').write_text('pending\n')
+        self.git('add', '.', cwd=home)
+        self.git('commit', '-qm', 'pending work', cwd=home)
+        core = core_loader.SourceFileLoader('list_states', str(CORE / 'bin/brain')).load_module()
+        wts = {br: {'path': str(home), 'start': start if br != 'fresh' else fresh}
+               for br in ('merged', 'open', 'fresh')}
+        n = {'home_path': home, 'fm': {}, 'local': {'worktrees': wts}}
+        expected = {br: core.worktree_state(home, w, br, n) for br, w in wts.items()}
+        with core.git_read_snapshot():
+            self.assertEqual(core.list_worktree_states(n, {}), expected)
+        self.assertTrue(expected['merged'][1])
+        self.assertFalse(expected['open'][1])
+        self.assertEqual(expected['open'][2], '1')
+        self.assertFalse(expected['fresh'][1])
+
+
 class PruneSafety(AutonomyProject):
     def close_job(self, r, branch='job-a'):
         ledger = r / 'nodes/app/job-ledger.md'
@@ -879,6 +907,81 @@ class WorktreeGuardUnits(unittest.TestCase):
         with mock.patch.object(self.core, 'git', return_value=subprocess.CompletedProcess([], 0, '1', '')) as git:
             self.assertEqual(self.core.job_commits(CORE, {'start': 'old'}, 'job'), '1')
             self.assertIn('old..refs/heads/job', git.call_args.args)
+
+    def test_list_batches_git_and_one_pr_lookup_per_repo_without_changing_merge_states(self):
+        refs = {'refs/heads/main': 'main', 'refs/heads/merged': 'main',
+                'refs/heads/open': 'open', 'refs/heads/squash': 'squash', 'refs/heads/new': 'main'}
+        wts = {br: {'path': str(CORE), 'start': 'start'} for br in ('merged', 'open', 'squash')}
+        wts['new'] = {'path': str(CORE), 'start': 'main'}
+        wts['missing'] = {'path': str(CORE / 'absent-fixture'), 'start': 'start'}
+        n = {'home_path': CORE, 'fm': {}, 'local': {'worktrees': wts}}
+        def git(*args, **kwargs):
+            output = 'open start\nsquash start\n' if args[0] == 'rev-list' else ''
+            return subprocess.CompletedProcess(args, 0, output, '')
+        with mock.patch.object(self.core, 'branch_refs', return_value=refs), \
+             mock.patch.object(self.core, 'integration_ref', return_value='refs/heads/main'), \
+             mock.patch.object(self.core, 'git', side_effect=git) as calls, \
+             mock.patch.object(self.core, 'remote_url', return_value='https://github.com/example/repo'), \
+             mock.patch.object(shutil, 'which', return_value='/fake/gh'), \
+             mock.patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
+                 '[{"headRefName":"squash","baseRefName":"main"},'
+                 '{"headRefName":"open","baseRefName":"other"}]', '')) as run:
+            cache = {}
+            for _ in range(2):
+                states = self.core.list_worktree_states(n, cache)
+                self.assertEqual(states['merged'], (0, True, '0'))
+                self.assertEqual(states['open'], (0, False, '1'))
+                self.assertEqual(states['squash'], (0, True, '1'))
+                self.assertEqual(states['new'], (0, False, '0'))
+                self.assertEqual(states['missing'], (None, False, ''))
+        run.assert_called_once()
+        self.assertFalse(any(c.args[0] == 'merge-base' for c in calls.call_args_list))
+        self.assertTrue(all(c.args == ('rev-parse', '--git-common-dir') for c in calls.call_args_list
+                            if c.args[0] == 'rev-parse'))
+        self.assertEqual(sum(c.args[0] == 'rev-list' for c in calls.call_args_list), 2)
+
+
+    def test_list_failed_graph_or_pr_lookup_never_claims_merged(self):
+        n = {'home_path': CORE, 'fm': {}, 'local': {'worktrees': {
+            'job': {'path': str(CORE), 'start': 'old'}}}}
+        with mock.patch.object(self.core, 'branch_refs', return_value={'refs/heads/main': 'base', 'refs/heads/job': 'tip'}), \
+             mock.patch.object(self.core, 'integration_ref', return_value='refs/heads/main'), \
+             mock.patch.object(self.core, 'git', return_value=subprocess.CompletedProcess([], 1, '', '')), \
+             mock.patch.object(self.core, 'remote_url', return_value='https://github.com/example/repo'), \
+             mock.patch.object(shutil, 'which', return_value='/fake/gh'), \
+             mock.patch.object(subprocess, 'run', side_effect=subprocess.TimeoutExpired('gh', 30)):
+            self.assertEqual(self.core.list_worktree_states(n, {})['job'], (0, False, ''))
+
+
+    def test_list_pr_lookup_is_bounded_and_overlaps_index_reads(self):
+        wts = {'job': {'path': str(CORE), 'start': 'old'}}
+        n = {'id': 'app', 'home_path': CORE, 'fm': {}, 'local': {'worktrees': wts}}
+        status_seen = threading.Event()
+        def git(*args, **kwargs):
+            if args[0] == 'status':
+                status_seen.set()
+            return subprocess.CompletedProcess(args, 0, 'tip base\n' if args[0] == 'rev-list' else '', '')
+        def gh(cmd, **kwargs):
+            self.assertEqual(kwargs['timeout'], self.core.LIST_PR_TIMEOUT)
+            # A serial lookup would finish before any index read starts.
+            overlapped.append(status_seen.wait(5))
+            raise subprocess.TimeoutExpired(cmd, kwargs['timeout'])
+        overlapped = []
+        fake = mock.Mock(nodes=lambda: [n])
+        with mock.patch.object(self.core, 'branch_refs', return_value={'refs/heads/main': 'base', 'refs/heads/job': 'tip'}), \
+             mock.patch.object(self.core, 'integration_ref', return_value='refs/heads/main'), \
+             mock.patch.object(self.core, 'git', side_effect=git), \
+             mock.patch.object(self.core, 'remote_url', return_value='https://github.com/example/repo'), \
+             mock.patch.object(shutil, 'which', return_value='/fake/gh'), \
+             mock.patch.object(subprocess, 'run', side_effect=gh), \
+             contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            self.core._list_worktrees(fake, argparse.Namespace(id='app'))
+        self.assertLessEqual(self.core.LIST_PR_TIMEOUT, 3)
+        self.assertEqual(overlapped, [True])
+        self.assertIn('job', out.getvalue())
+        self.assertNotIn('merged', out.getvalue())
+        self.assertIn('merged-PR lookup unavailable', err.getvalue())
+
 
 
 class WorktreeSetupDiagnostics(Scenario):
