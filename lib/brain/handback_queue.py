@@ -798,12 +798,12 @@ def maintain_view_batch(inst):
     if fd is None:
         return False
     try:
-        return _maintain_view_batch(inst)
+        return _maintain_view_batch(inst, fd)
     finally:
         os.close(fd)
 
 
-def _maintain_view_batch(inst):
+def _maintain_view_batch(inst, projection_fd):
     """Publish receipt-node groups before repairing unrelated invalid views.
 
     Each marker follows its own fenced projection commit. The detached drainer
@@ -834,6 +834,10 @@ def _maintain_view_batch(inst):
         succeeded = succeeded and ok
     if not succeeded:
         return False
+    if waiting:
+        # Receipt-local projection is complete. The applier remains busy with
+        # unrelated recovery; standalone deferred projection keeps its marker.
+        fcntl.flock(projection_fd, fcntl.LOCK_UN)
     # Markers are already durable. This remaining work must not hold their
     # queue wait barriers, and a failure must not revoke their successful pass.
     try:
@@ -844,7 +848,7 @@ def _maintain_view_batch(inst):
                      (events.node_ref(n['id']) in invalid or status.generated_stale(n))]
             if nodes:
                 operation = open_view_batch(inst, nodes[0])
-                operation.project_nodes = nodes
+                operation.repair_nodes = nodes
                 operation.__exit__(None, None, None)
                 invalid = events.journal(_m_instance.Instance(inst.root)).state['invalid']
                 return (getattr(operation, 'maintenance_ok', False) is True

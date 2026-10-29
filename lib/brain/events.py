@@ -827,7 +827,8 @@ class Command:
                 if getattr(self, 'write_batch', False):
                     invalid = journal(self.inst).state['invalid']
                     stale.update({n['id']: n for n in self.inst.nodes() if not n['archived'] and
-                                  (n['id'] in getattr(self, 'project_nodes', ()) or node_ref(n['id']) in invalid)})
+                                  (n['id'] in getattr(self, 'project_nodes', ()) or
+                                   n['id'] in getattr(self, 'repair_nodes', ()) or node_ref(n['id']) in invalid)})
                 for node in stale.values():
                     try:
                         if status.mark_generated_stale(node):
@@ -1633,7 +1634,8 @@ def maintain(op, changed):
         for n in op.inst.nodes():
             if not n['archived'] and (node_ref(n['id']) in invalid
                                       and not hasattr(op, 'project_nodes')
-                                      or n['id'] in getattr(op, 'project_nodes', ())):
+                                      or n['id'] in getattr(op, 'project_nodes', ())
+                                      or n['id'] in getattr(op, 'repair_nodes', ())):
                 selected[n['id']] = n
     prepared = {}
     # Every writer uses the same fenced preparation, including new commands.

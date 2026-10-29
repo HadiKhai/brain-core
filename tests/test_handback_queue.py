@@ -618,6 +618,36 @@ class HandbackLifecycle(Scenario):
         self.assertFalse(events.journal(m.Instance(inst.root)).state['opened'])
         self.assertEqual(self.views(queue, inst, requests), ['current'])
 
+    def test_unrelated_repair_projects_every_stale_only_node_after_receipt_publication(self):
+        m, inst, n, row = self.fixture()
+        events, queue = m._owners['Command'], m._owners['drain_intents']
+        for nid in ('app', 'peer'):
+            node = inst.root / 'nodes' / nid
+            node.mkdir(parents=True)
+            (node / 'node.md').write_text('---\ntitle: Fixture\nhome: none\n---\n')
+        inst = m.Instance(inst.root)
+        with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m.Instance, 'commit'):
+            for nid in ('app', 'peer'):
+                with m.brain_lock(inst):
+                    operation = events.Command(inst.root, command='set', node=nid)
+                    operation.defer_views = True
+                    with operation:
+                        (inst.node(nid)['dir'] / 'backlog.md').write_text('- Deferred fixture\n')
+            # A metadata-only study clears invalidation without materializing
+            # the retained stale files. Both still need background repair.
+            args = argparse.Namespace(id='root', branch='import:fixture', f=m.cmd_handback)
+            with m.brain_lock(inst), events.Command(inst.root, args):
+                pass
+            self.assertFalse(events.journal(m.Instance(inst.root)).state['invalid'])
+            self.assertTrue(all(m.generated_stale(inst.node(nid)) for nid in ('app', 'peer')))
+            request = m.submit_intent(inst, dict(kind='inbox', node='root', text='Receipt fixture',
+                                              at=inst.now()), start=False)
+            m.drain_intents(inst)
+        self.assertEqual(queue.intent_receipt(inst, request['id'])['view'], 'current')
+        self.assertFalse(any(m.generated_stale(inst.node(nid)) for nid in ('app', 'peer')))
+        self.assertEqual(set(events.read(inst)[-1]['data']['views']),
+                         {events.node_ref(nid) for nid in ('app', 'peer')})
+
     def test_unrelated_repair_open_failure_does_not_block_new_writes(self):
         m, inst, n, events, queue, requests = self.batch_fixture(1)
         app = inst.root / 'nodes/app'
