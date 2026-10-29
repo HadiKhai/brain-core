@@ -1722,6 +1722,13 @@ def maintain(op, changed):
             active_table(op.inst, n, view)
             ledger = (n["dir"] / "job-ledger.md").relative_to(op.inst.root).as_posix()
             force = op.command in ('new', 'merge', 'changes') or (op.close_job and ledger in changed)
+            # A deferred setup/task projection can consume the hourly allowance
+            # while verification releases the lock. Checked handbacks still
+            # publish their own terminal facts before returning their verdict.
+            force = force or (op.command == 'handback' and n['id'] == op.node
+                              and getattr(op.args, 'state', None) == 'done'
+                              and (getattr(op.args, 'reviews', None) is not None
+                                   or getattr(op.args, 'record', False)))
             message = None
             if op.command == 'merge':
                 message = common.git('log', '-1', '--format=%s', cwd=op.inst.root).stdout.strip()

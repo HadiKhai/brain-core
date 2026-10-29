@@ -939,6 +939,29 @@ class VerifyLogs(Scenario):
         self.assertEqual(self.git('status', '--porcelain', cwd=r), '')
         self.assertNotIn('.log', self.git('ls-files', 'nodes/a/job-handbacks', cwd=r))
 
+    def test_checked_handback_commits_terminal_facts_after_recent_projection(self):
+        r, home, wt = self.job()
+        # Model a deferred setup projection finishing during verification: its
+        # recent status commit must not suppress the checked terminal facts.
+        (r / '.brain/events-status-commits.json').unlink(missing_ok=True)
+        self.b(r, 'status', 'root', '--refresh')
+        self.b(r, 'status', 'a', '--refresh')
+        self.assertEqual(self.git('status', '--porcelain', cwd=r), '')
+        self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done',
+               '--reviews', '1', '--summary', 'Checked terminal result')
+        self.assertEqual(self.git('status', '--porcelain', cwd=r), '')
+        status = r / 'nodes/a/status.md'
+        committed = self.git('show', 'HEAD:nodes/a/status.md', cwd=r)
+        self.assertEqual(committed, status.read_text())
+        self.assertIn('job: done;', committed)
+        # Force still respects the ownership guard for coordinator judgement.
+        status.write_text(status.read_text().replace('## Now', '## Now\n\nUncommitted coordinator judgement.'))
+        self.b(r, 'handback', 'a', '--branch', 'job', '--state', 'done',
+               '--reviews', '1', '--summary', 'Checked result with private edit')
+        self.assertNotIn('Uncommitted coordinator judgement.',
+                         self.git('show', 'HEAD:nodes/a/status.md', cwd=r))
+        self.assertIn('Uncommitted coordinator judgement.', status.read_text())
+
     def test_split_utf8_and_progress_after_command_closes_output(self):
         m, inst, n, home, wt = self.runner()
         m.VERIFY_PROGRESS_SECONDS = .1
