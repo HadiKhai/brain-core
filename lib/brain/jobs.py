@@ -664,7 +664,8 @@ def job_started(inst, n, branch, runtime, task_id=None):
         rows = ledger_rows(n)
         if rows is not None and not open_job(rows, branch):
             try:
-                _m_tasks.prepare_start(n, task_id, branch)
+                # Keep final validation and ledger publication under one writer.
+                _m_tasks._prepare_start(n, task_id, branch)
             except ValueError as error:
                 _m_common.die(str(error))
             rows.append({"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0", "Runtime": runtime})

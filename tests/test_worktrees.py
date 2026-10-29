@@ -96,6 +96,29 @@ class RebindLedgerJob(Scenario):
 
 
 class Workbench(Scenario):
+    def test_add_rechecks_dispatch_after_expected_machine_sample_change(self):
+        root = self.init('admission-sample')
+        home = self.repo(self.tmp / 'admission-home')
+        self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
+        core = core_loader.SourceFileLoader('admission_sample', str(CORE / 'bin/brain')).load_module()
+        inst = core.Instance(root)
+        args = argparse.Namespace(id='app', branch='job/admitted', task_id=None, base=None, no_setup=True)
+        def admitted(*args, **kwargs):
+            (root / '.brain/machine.json').write_text('{"sample":"changed during admission"}\n')
+            # Ordinary work elsewhere must not make a cleared admission stale.
+            (root / 'job-ledger.md').write_text('unrelated concurrent ledger write\n')
+        with core.brain_lock(inst), mock.patch.object(core, 'load', return_value=inst), \
+             mock.patch.object(core, 'machine_reasons', return_value=['fixture hold']), \
+             mock.patch.object(core, 'machine_reading', return_value={}), \
+             mock.patch.object(core, 'machine_run', return_value=contextlib.nullcontext(object())), \
+             mock.patch.object(core, 'machine_wait', side_effect=admitted), \
+             mock.patch.object(core, 'prepare_start', wraps=core.prepare_start) as prepare, \
+             contextlib.redirect_stdout(io.StringIO()):
+            core.cmd_wt_add(args)
+        self.assertEqual(prepare.call_count, 2)  # before and after admission; publication stays locked
+        self.assertIn('job/admitted', core.Instance(root).node('app')['local']['worktrees'])
+
+
     fixture_init_in_process = True
 
     def test_setup_holds_machine_slot_and_absent_or_disabled_setup_does_not_queue(self):

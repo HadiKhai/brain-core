@@ -12,6 +12,89 @@ from brain.instance import Instance
 
 
 class Tasks(Scenario):
+    def test_start_proves_dependencies_outside_lock_and_checks_whole_loaded_graph(self):
+        from brain import instance, task_flow
+        self.ops_done(self.n)
+        self.add('SELECTED', status='ready', depends_on=['OPS-1'])
+        self.add('UNRELATED')
+        completion = task_flow.completion
+        observed = []
+        def checked(node, row, *args, **kwargs):
+            self.assertIsNone(instance._LOCK['fh'])
+            observed.append(row['id'])
+            return completion(node, row, *args, **kwargs)
+        with instance.brain_lock(self.inst), mock.patch.object(task_flow, 'completion', side_effect=checked):
+            tasks.prepare_start(self.n, 'SELECTED', 'job/selected')
+            self.assertIsNotNone(instance._LOCK['fh'])
+        self.assertEqual(observed, ['OPS-1'])
+        with mock.patch.object(tasks, 'read_records', wraps=tasks.read_records) as reads:
+            tasks._prepare_start(self.n, 'SELECTED', 'job/selected')
+        self.assertEqual(sum(call.args == (self.n,) and not call.kwargs for call in reads.call_args_list), 1)
+
+    def test_job_start_keeps_lock_through_final_check_despite_sampler_update(self):
+        from brain import instance, jobs
+        self.add('SELECTED', status='ready')
+        prepare = tasks._prepare_start
+        def sampled(*args):
+            self.assertIsNotNone(instance._LOCK['fh'])
+            (self.root / '.brain/machine.json').parent.mkdir(exist_ok=True)
+            (self.root / '.brain/machine.json').write_text('{"sample":"concurrent sampler update"}\n')
+            return prepare(*args)
+        with mock.patch.object(tasks, '_prepare_start', side_effect=sampled):
+            jobs.job_started(self.inst, self.n, 'job/selected', 'codex', task_id='SELECTED')
+        self.assertEqual(tasks.read_records(self.n)['SELECTED']['status'], 'in-progress')
+        self.assertEqual(jobs.read_jobs(self.n)[0]['Task'], 'SELECTED')
+
+
+    def test_start_refuses_task_change_during_unlocked_validation(self):
+        from brain import instance
+        self.add('SELECTED', status='ready')
+        prepare = tasks._prepare_start
+        def changed(*args):
+            prepare(*args)
+            row = tasks.read_records(self.n)['SELECTED']
+            row['hold'] = 'concurrent hold'
+            tasks.save_record(self.n, row)
+        with instance.brain_lock(self.inst), mock.patch.object(tasks, '_prepare_start', side_effect=changed):
+            with self.assertRaisesRegex(SystemExit, 'state changed'):
+                tasks.prepare_start(self.n, 'SELECTED', 'job/selected')
+
+
+    def test_start_refuses_capacity_ledger_change_during_unlocked_validation(self):
+        from brain import instance
+        self.add('SELECTED', status='ready')
+        prepare = tasks._prepare_start
+        def changed(*args):
+            prepare(*args)
+            (self.n['dir'] / 'job-ledger.md').write_text('concurrent job start\n')
+        with instance.brain_lock(self.inst), mock.patch.object(tasks, '_prepare_start', side_effect=changed):
+            with self.assertRaisesRegex(SystemExit, 'state changed'):
+                tasks.prepare_start(self.n, 'SELECTED', 'job/selected')
+
+
+    def test_start_refuses_dependency_main_change_during_unlocked_proof(self):
+        from brain import instance
+        home = self.repo(self.tmp / 'code', {'engine.py': 'before\n'})
+        base = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        (home / 'engine.py').write_text('after\n')
+        self.git('add', '.', cwd=home)
+        self.git('commit', '-qm', 'deliver', cwd=home)
+        head = self.git('rev-parse', 'HEAD', cwd=home).strip()
+        tasks._m_common.write_fm(self.root / 'node.md',
+            {'id': 'root', 'owners': 'sample', 'home': str(home)}, '')
+        self.n = self.inst.node('root')
+        self.add('DEPENDENCY', status='done', baseline_sha=base, merge_sha=head,
+                 scope=['engine.py'], code_path='engine.py', evidence=['passed'])
+        self.add('SELECTED', status='ready', depends_on=['DEPENDENCY'])
+        prepare = tasks._prepare_start
+        def changed(*args):
+            prepare(*args)
+            self.git('update-ref', 'refs/heads/main', base, cwd=home)
+        with instance.brain_lock(self.inst), mock.patch.object(tasks, '_prepare_start', side_effect=changed):
+            with self.assertRaisesRegex(SystemExit, 'state changed'):
+                tasks.prepare_start(self.n, 'SELECTED', 'job/selected')
+
+
     def test_projection_reverse_edges_keep_record_order_and_duplicate_dependencies_once(self):
         self.add('BASE')
         self.add('SECOND', depends_on=['BASE', 'BASE'])

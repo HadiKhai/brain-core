@@ -579,8 +579,28 @@ def register(sub):
         p.set_defaults(f=cmd_task)
 
 
+def start_paths(inst, n, task_id):
+    paths = mutation_paths(inst, n['id'], {}, task_id)
+    # Capacity can change through an ordinary ledger start without adding a
+    # worktree. Machine samples and every reachable node's policy also gate start.
+    for node in inst.nodes():
+        paths.extend(node['dir'] / name for name in ('tasks', 'requirements', 'job-ledger.md', 'task-sync.json'))
+    paths.append(inst.root / '.brain/machine.json')
+    return paths
+
+
 def prepare_start(n, task_id=None, branch=''):
     """Refuse before worktree creation. Existing instances remain opt-in."""
+    from . import task_flow as _m_flow
+    inst = _m_flow.instance_for(n)
+    # Completion may read Git and report artifacts. Fence their generations,
+    # along with task/hold/capacity inputs, instead of retaining the writer lock.
+    with _m_instance.released(inst, list(inst.nodes()),
+            extra=lambda: start_paths(inst, n, task_id)):
+        _prepare_start(n, task_id, branch)
+
+
+def _prepare_start(n, task_id=None, branch=''):
     rows = read_records(n)
     if branch.startswith('import:'):
         return

@@ -284,6 +284,11 @@ def cmd_wt_add(a):
                 _m_machine.machine_run('heavy', inst, n['id'], a.branch) as token:
             _m_machine.machine_wait('heavy', inst, n['id'], job=a.branch, token=token)
         n = inst.node(a.id)  # released admission reloads validated local bindings
+        # Admission may outlive a task or capacity change; validate again before Git.
+        try:
+            _m_tasks.prepare_start(n, getattr(a, 'task_id', None), a.branch)
+        except ValueError as error:
+            _m_common.die(str(error))
     wb = workbench(inst, n, create=True)
     path = wb / "worktrees" / a.branch.replace("/", "-")
     for owner, record in n["local"].get("worktrees", {}).items():
