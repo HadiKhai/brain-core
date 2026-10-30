@@ -76,9 +76,15 @@ def wake_configured_route(inst, n):
     return target, target["local"].get("wake") or inst.local_of("root").get("wake_default", "")
 
 
+def wake_noop(command):
+    """Recognize explicit shell no-ops without evaluating user shell syntax."""
+    return command.strip().rstrip(';').strip() in ('true', '/usr/bin/true', '/bin/true', ':')
+
+
 def wake_route_disabled(inst, n, target=None):
     target = target or wake_configured_route(inst, n)[0]
-    return (n['local'].get('wake_enabled') == 'off' or target['local'].get('wake_enabled') == 'off'
+    command = wake_configured_route(inst, n)[1]
+    return (wake_noop(command) or n['local'].get('wake_enabled') == 'off' or target['local'].get('wake_enabled') == 'off'
             or not target['local'].get('wake') and inst.local_of('root').get('wake_enabled') == 'off')
 
 
@@ -198,7 +204,7 @@ def wake_delivery_lock(inst):
 
 
 def wake_owner_binding(inst, n):
-    target, command = wake_target(inst, n)
+    target, command = wake_configured_route(inst, n)
     return hashlib.sha256(json.dumps([target['id'], target['local'].get('coordinator'), command]).encode()).hexdigest()
 
 
@@ -572,7 +578,8 @@ def wake_actionable_pending(inst, path, terminal_quarantine=False):
 def request_wake(inst, n, reason, items=None, explicit=False):
     """Fail open, enqueue then detach; never run a transport in the hook's process."""
     try:
-        target, command = wake_target(inst, n)
+        target, command = wake_configured_route(inst, n)
+        disabled = wake_route_disabled(inst, n, target)
         if not command or _m_common.outward_links(inst.root):
             return False
         directory = wake_directory(inst, target)
@@ -621,7 +628,8 @@ def request_wake(inst, n, reason, items=None, explicit=False):
             refs = allowed
             _m_common.atomic_write(pending, json.dumps({'items': refs, 'binding': _m_wake_turns.wake_turn_binding(inst, target),
                               **({'explicit_kinds': True} if explicit else {})}) + '\n', private=True)
-        wake_start(inst, target)
+        if not disabled:
+            wake_start(inst, target)
         return True
     except (Exception, SystemExit):
         return False  # the inbox remains durable; the watcher retries unacknowledged work
@@ -684,20 +692,22 @@ def wake_http_status(command, reason=None):
 
 
 def wake_send(command, reason=None):
-    """Send the event and opaque cause, discarding all transport output."""
+    """Return a real HTTP code or shell outcome, discarding all transport output."""
     payload = wake_payload(reason or 'new request ' + wake_binding(command))
     if command.startswith(("https://", "http://")):
         status = wake_http_status(command, reason)
         if not 200 <= status < 300:
             # Internal exception carries only a code; callers never expose transport errors.
             raise WakeRefused(status)
-        return True
+        return status
+    if wake_noop(command):
+        return False
     import signal
     process = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     try:
         process.communicate(payload, timeout=WAKE_TIMEOUT)
-        return process.returncode == 0
+        return 'shell exit 0' if process.returncode == 0 else False
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait()
@@ -724,8 +734,9 @@ def wake_read(directory, command, name="delivery.json"):
         record = json.loads((directory / name).read_text())
         status = record["status"]
         if (record["binding"] == wake_binding(command)
-                and (type(status) is int and 100 <= status <= 599
-                     or status in ("transport error", "delivery failed", "delivered; history write failed"))
+                and (type(status) is int and command.startswith(("https://", "http://")) and 100 <= status <= 599
+                     or status in ("transport error", "delivery failed", "delivered; history write failed",
+                                   "shell exit 0", "transport accepted", "accepted; history write failed"))
                 and type(record["at"]) in (int, float) and math.isfinite(record["at"])):
             return record
     except (OSError, ValueError, KeyError, TypeError):
@@ -764,12 +775,18 @@ def wake_probe(inst, n, force=False):
 
 
 def wake_diagnostic(inst, n):
+    disabled = wake_disabled_notice(inst, n)
+    if disabled:
+        return disabled
+    stuck = _m_wake_turns.wake_turn_stuck(inst, n)
+    if stuck:
+        return stuck
     target, command = wake_target(inst, n)
     directory = wake_directory(inst, target)
     records = [wake_read(directory, command),
                wake_read(directory, command, "probe-" + wake_binding(command) + ".json")]
     for record in records:
-        if record and not (type(record["status"]) is int and 200 <= record["status"] < 300):
+        if record and record["status"] not in ("shell exit 0", "transport accepted") and not (type(record["status"]) is int and 200 <= record["status"] < 300):
             status = record["status"]
             return "last wake delivery refused: HTTP " + str(status) if type(status) is int else "last wake delivery: " + status
     return None
@@ -946,7 +963,8 @@ def wake_drain(inst, n, once=False):
                         if action == 'reminder':
                             reason = 'Coordinator wake remains unconsumed for 30 minutes.'
                         sent = wake_send(command, reason=reason)
-                        status = 200 if sent else "delivery failed"
+                        status = (sent if type(sent) is int or isinstance(sent, str)
+                                  else "transport accepted" if sent else "delivery failed")
                     except WakeRefused as error:
                         sent, status = False, error.args[0]
                     except Exception:
@@ -954,16 +972,8 @@ def wake_drain(inst, n, once=False):
                     if action != 'reminder':
                         _m_wake_turns.wake_turn_finish(current, target, turn_token, sent)
                     if sent and action != 'reminder':
-                        for item in refs:
-                            if item['kind'] in WAKE_TERMINAL_KINDS:
-                                wake_accept_write(wake_terminal_receipt(current, item['id']), 'delivered\n')
-                        try:
-                            wake_ack_shown(current, target, snapshot)
-                        except OSError:
-                            status = 'delivered; shown acknowledgement write failed'
-                        for path in pending:  # one generic tick covers all currently queued reasons
-                            wake_accept_write(path.with_suffix(".sent"), "delivered\n")
-                            path.unlink(missing_ok=True)
+                        # Acceptance is not consumption. Keep pending, terminal and shown
+                        # acknowledgements untouched until due renders this binding's receipt.
                         # Logging cannot undo delivery and cause another model wake on retry.
                         try:
                             # Only the latest comparison is read. Retain its complete
@@ -972,9 +982,11 @@ def wake_drain(inst, n, once=False):
                                         for row in history[-99:]]
                             wake_accept_write(directory / 'history.json', json.dumps({'version': 1,
                                 'deliveries': retained + [{'at': WAKE_CLOCK.time(), 'items': wake_log_refs(refs), 'reason': reason,
-                                    'before': wake_log_refs(before), 'snapshot': wake_log_refs(snapshot), 'ack_binding': wake_owner_binding(current, target)}]}) + '\n')
+                                    'before': wake_log_refs(before), 'snapshot': wake_log_refs(snapshot),
+                                    'episode': turn_token, 'confirmation': 'unconfirmed', 'start_state': 'UNKNOWN',
+                                    'transport_status': status}]}) + '\n')
                         except OSError:
-                            status = 'delivered; history write failed'
+                            status = 'accepted; history write failed'
                     try:
                         inflight.unlink(missing_ok=True)
                     except OSError:

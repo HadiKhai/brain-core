@@ -1,4 +1,4 @@
-"""Optional consumption-aware wake receipts, independent of display history."""
+"""Binding-fenced consumption receipts; transport acceptance never proves a run."""
 import contextlib
 import fcntl
 import json
@@ -25,12 +25,12 @@ def wake_turn_lock(directory):
 
 
 def wake_turn_binding(inst, n):
-    target, command = _m_hosts.wake_target(inst, n)
+    target, command = _m_hosts.wake_configured_route(inst, n)
     return _m_hosts.wake_binding(str(target['local'].get('coordinator', '')) + '\0' + command)
 
 
 def wake_turn_enabled(n):
-    return n['local'].get('wake_coalesce') == 'on'
+    return True  # consumption fencing is mandatory, including legacy routes
 
 
 def wake_turn_read(path, binding):
@@ -84,9 +84,9 @@ def wake_turn_pending_summary(pending):
 
 
 def wake_turn_prepare(inst, n, pending, refs):
-    """Return (action, token). A damaged/unwritable receipt never suppresses work."""
+    """Reserve before transport; unknown prior acceptance must never cause a duplicate."""
     if not wake_turn_enabled(n):
-        return 'legacy', None
+        return 'hold', None
     directory = _m_hosts.wake_directory(inst, n)
     try:
         with wake_turn_lock(directory) as path:
@@ -99,16 +99,13 @@ def wake_turn_prepare(inst, n, pending, refs):
                 _m_common.safe_target(retired)
                 path.replace(retired)
             opaque, known = wake_turn_pending_summary(pending)
-            if value and value['sent'] and not value['consumed']:
+            if value and not value['consumed']:
                 value['items'] = _m_hosts.wake_item_refs(value['items'] + refs)
                 value['paths'] = sorted(set(value['paths']) | {p.name for p in pending})
                 value['opaque_paths'] = sorted(set(value.get('opaque_paths', [])) | set(opaque))
                 value['queue_known'] = value.get('queue_known', False) and known
-                reminder = not value['reminded'] and _m_hosts.WAKE_CLOCK.time() - value['at'] >= 1800
-                if reminder:
-                    value['reminded'] = True  # at most one reminder attempt per consumption episode
                 wake_turn_write(path, value)
-                return ('reminder' if reminder else 'hold'), value['token']
+                return 'hold', value['token']
             if not pending:
                 return 'hold', None
             token = os.urandom(16).hex()
@@ -118,7 +115,7 @@ def wake_turn_prepare(inst, n, pending, refs):
             wake_turn_write(path, value)
             return 'send', token
     except (OSError, ValueError, KeyError, TypeError):
-        return 'legacy', None
+        return 'hold', None
 
 
 def wake_turn_finish(inst, n, token, sent):
@@ -139,7 +136,7 @@ def wake_turn_finish(inst, n, token, sent):
 
 def wake_turn_consume(inst, n, consume=True, shown=None):
     """Consume only this binding's captured reasons; later arrivals stay queued."""
-    if not wake_turn_enabled(n):
+    if _m_hosts.wake_route_disabled(inst, n):
         return None
     directory = _m_hosts.wake_directory(inst, n)
     try:
@@ -184,10 +181,12 @@ def wake_turn_stuck(inst, n):
         return None
     try:
         value = wake_turn_read(_m_hosts.wake_directory(inst, n) / 'turn.json', wake_turn_binding(inst, n))
-        if value and value['sent'] and not value['consumed'] and _m_hosts.WAKE_CLOCK.time() - value['at'] >= 1800:
-            return 'coordinator wake unconsumed for 30 minutes; inspect coordinator activity'
+        if value and not value['consumed'] and _m_hosts.WAKE_CLOCK.time() - value['at'] >= 120:
+            return ('coordinator wake stalled: ' + ('transport accepted' if value['sent'] else 'transport outcome unknown') +
+                    ', unconsumed for 120 seconds; '
+                    'start state UNKNOWN; inspect coordinator activity; automatic retry unavailable')
     except (OSError, ValueError, KeyError, TypeError):
-        pass
+        return 'coordinator wake receipt unavailable; start state UNKNOWN; pending work retained'
     return None
 
 

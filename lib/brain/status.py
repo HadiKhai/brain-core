@@ -1187,7 +1187,8 @@ def _due_tick(a, inst, nodes):
     if a.id == 'root':
         items += [{'node': n['id'], 'kind': 'wake', 'text': text}
                   for n in inst.nodes() if not n['archived']
-                  for text in [_m_wake_turns.wake_turn_stuck(inst, n)] if text]
+                  if n['id'] not in wake_seen
+                  for text in [_m_hosts.wake_disabled_notice(inst, n) or _m_wake_turns.wake_turn_stuck(inst, n)] if text]
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [
