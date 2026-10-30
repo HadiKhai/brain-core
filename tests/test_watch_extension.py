@@ -6,7 +6,7 @@ import os
 from unittest import mock
 
 import core_loader
-from scenario import CORE, Scenario
+from scenario import consume_fixture_wake, CORE, Scenario
 
 
 class WatchExtension(Scenario):
@@ -82,12 +82,14 @@ class WatchExtension(Scenario):
                 with mock.patch.object(self.m, 'rotation_due', return_value=f'coordinator context {context} tokens, {turns} turns; rotate'):
                     self.watch()
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             root['local']['coordinator_sessions'] = ['fixture-session-b']
             self.inst.local_of('root')['coordinator_sessions'] = ['fixture-session-b']
             with mock.patch.object(self.m, 'rotation_due', return_value='coordinator context 160000 tokens, 50 turns; rotate'):
                 self.watch()
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
 
     def test_republished_done_after_new_tip_wakes_owner_again(self):
@@ -99,18 +101,22 @@ class WatchExtension(Scenario):
             first = self.m.read_handback(n, row)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             self.tip(w['path'], 'rebased-tip')
             self.b(self.root, 'handback', "--summary", "Synthetic result", 'app', '--branch', row['Job'], '--state', 'done')
             second = self.m.read_handback(n, row)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
             self.assertNotEqual(first.get('wake_id'), second.get('wake_id'))
             self.assertEqual(self.root_events(), [])  # done is never a ready claim
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 2)
 
     def test_stored_ready_notifies_root_once_and_second_tip_is_new(self):
@@ -150,16 +156,19 @@ class WatchExtension(Scenario):
                     self.save_signal(n, row, signal)
                 self.watch()
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             signal['ready']['checked_at'] = self.inst.now_dt().isoformat()
             self.save_signal(n, row, signal)
             self.watch()
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)  # same wake_id, only checked_at changed
             signal['wake_id'] = 'b' * 32
             self.save_signal(n, row, signal)
             self.watch()
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
 
     def test_landed_episode_ignores_end_head_and_batch_bookkeeping(self):
@@ -176,11 +185,13 @@ class WatchExtension(Scenario):
                 self.m.write_jobs(self.inst, n, [row])
                 self.watch()
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             other = {**row, 'Job': 'job/other'}
             self.m.write_jobs(self.inst, n, [row, other])
             self.watch()
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
 
     def test_malformed_failed_or_wrong_job_ready_never_notifies_root(self):
@@ -218,12 +229,14 @@ class WatchExtension(Scenario):
             for _ in range(2):
                 self.watch()
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             self.tip(w['path'], 'second-reviewed-tip')
             self.signal(n, row, episode='b' * 32)
             for _ in range(2):
                 self.watch()
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
 
     def test_legacy_ready_packet_is_read_but_never_resurrected_over_new_signal(self):
@@ -252,6 +265,7 @@ class WatchExtension(Scenario):
                 mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.watch()
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             history = self.m.wake_history(self.m.wake_directory(self.inst, root))
             self.assertEqual([i['kind'] for i in history[-1]['items']], ['job-landed', 'job-landed'])
@@ -259,6 +273,7 @@ class WatchExtension(Scenario):
             self.m.write_jobs(self.inst, n, rows)
             self.watch()
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             self.assertNotIn('job/private-', json.dumps(self.root_events()))
 
@@ -275,6 +290,7 @@ class WatchExtension(Scenario):
             signal['state'] = 'blocked'
             self.save_signal(n, row, signal)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             history = self.m.wake_history(self.m.wake_directory(self.inst, root))
             self.assertEqual(history[-1]['items'], [question])
@@ -292,6 +308,7 @@ class WatchExtension(Scenario):
             with mock.patch.object(self.m, 'watch_completion_items', side_effect=OSError('fixture unreadable evidence')), \
                     contextlib.suppress(OSError):
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             history = self.m.wake_history(self.m.wake_directory(self.inst, root))
             self.assertIn(question, history[-1]['items'])
@@ -310,6 +327,7 @@ class WatchExtension(Scenario):
                 mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', side_effect=send):
             self.m.request_wake(old_inst, root, 'first unrelated request', items=[{'id': 'f' * 64, 'kind': 'inbox'}], explicit=True)
             self.m.wake_drain(old_inst, root)
+            consume_fixture_wake(self.m, old_inst, root)
             self.assertEqual(len(calls), 2)
             history = self.m.wake_history(self.m.wake_directory(self.inst, root))
             self.assertEqual([[i['kind'] for i in h['items']] for h in history], [['inbox'], ['job-ready']])
@@ -339,6 +357,7 @@ class WatchExtension(Scenario):
                            mock.patch.object(self.m, 'watch_recorded_ready', side_effect=OSError('fixture read failure')))
                 with failure:
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, 1)
                 history = self.m.wake_history(self.m.wake_directory(self.inst, root))
                 self.assertIn('job-ready', [i['kind'] for i in history[-1]['items']])
@@ -350,6 +369,7 @@ class WatchExtension(Scenario):
                     self.m.request_wake(self.inst, root, 'repeat ' + mode,
                                         items=history[-1]['items'], explicit=True)
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, 1)
                 self.watch()
                 self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
@@ -385,6 +405,7 @@ class WatchExtension(Scenario):
             self.git('update-ref', 'refs/remotes/origin/main', advanced, cwd=home)
             self.assertEqual(self.root_events(), [])
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 0)
             self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
             # A valid local integration branch ahead of cached origin remains eligible.
@@ -430,6 +451,7 @@ class WatchExtension(Scenario):
                 self.m.request_wake(self.inst, root, 'two jobs and a question ' + str(index), items=[stale, unknown, question], explicit=True)
                 with failure:
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, index + 1)
                 refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
                 self.assertNotIn(stale['id'], [i['id'] for i in refs])
@@ -439,6 +461,7 @@ class WatchExtension(Scenario):
                     self.m.request_wake(self.inst, root, 'repeat jobs ' + str(index),
                                         items=[stale, unknown, question], explicit=True)
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, index + 1)
 
     def test_unknown_unrelated_ledger_does_not_keep_stale_ready_notice(self):
@@ -470,6 +493,7 @@ class WatchExtension(Scenario):
                            if error else contextlib.nullcontext())
                 with failure:
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, index + 1)
                 refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
                 self.assertNotIn(stale['id'], [i['id'] for i in refs])
@@ -479,6 +503,7 @@ class WatchExtension(Scenario):
                     self.m.request_wake(self.inst, root, 'repeat ledger ' + str(index),
                                         items=[stale, unknown, question], explicit=True)
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, index + 1)
 
     def test_completion_owned_envelopes_preserve_process_interrupts(self):

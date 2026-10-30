@@ -28,6 +28,26 @@ binds this exact coordinator, and stores the returned URL privately. This comman
 must run inside that coordinator. Missing T3 Connect remote access leaves the
 host task id available for reconciliation and writes no invented wake URL.
 
+Wake transport acceptance does not prove that a coordinator queued or started a
+run. Every route retains a binding-fenced consumption episode until `brain due`
+renders its captured reasons successfully. Shell success is recorded as a shell
+outcome, never as an HTTP status. Explicit `wake_enabled=off` and known shell
+no-ops retain pending reasons and show a disabled notice in the owner/root due
+views. Disabling a route never activates a fallback.
+
+An unconsumed episode becomes a visible stall after 120 seconds. Start state
+remains UNKNOWN: unrelated newer host runs cannot confirm delivery. Without a
+host-supported correlated receipt and idempotent retry contract, the core does
+not blindly resend an accepted or unknown attempt. Reconcile the host before
+recovery; re-provision a webhook when its coordinator changes. A known unchanged
+webhook from a retired episode is refused. Preexisting remote schedule enablement
+and binding still require host-side inspection.
+
+External watchers should invoke `brain watch --once` on each pass to reconcile
+pending episodes independently of rule refire intervals, and treat a failed wake
+enqueue as a retryable failure. A successful enqueue proves durable local queue
+publication, not host progress. The watcher itself is instance-owned code.
+
 `brain host watch app --url <pull-request-url>` starts the host's PR watch from
 the bound coordinator and checks the returned confirmation. The host maintains
 checks/reviews/conflict watching. This command does not infer merge readiness.

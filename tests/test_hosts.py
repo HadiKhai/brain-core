@@ -27,16 +27,7 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 
 
 import test_verify as _test_verify
-from scenario import Scenario, AutonomyProject, shlex_quote
-
-
-
-def consume_fixture_wake(module, inst, node):
-    """Simulate the fixture coordinator rendering its frozen receipt after transport."""
-    directory = module.wake_directory(inst, node)
-    receipt = module.wake_turn_read(directory / 'turn.json', module.wake_turn_binding(inst, node))
-    if receipt and not receipt['consumed']:
-        return module.wake_turn_consume(inst, node, shown=receipt)
+from scenario import consume_fixture_wake, Scenario, AutonomyProject, shlex_quote
 
 
 class LockHotfix(Scenario):
@@ -400,6 +391,9 @@ if projection:
             self.assertEqual(set(json.loads(calls.read_text())), {'event', 'reason'})
             self.assertRegex(json.loads(calls.read_text())['reason'],
                              r'^new request [0-9a-f]{64}(; new request [0-9a-f]{64})*$')
+            self.assertEqual(len(list(directory.glob("*.pending"))), 2)
+            self.assertFalse(list(directory.glob("*.sent")))
+            consume_fixture_wake(m, inst, inst.node("a"))
             self.assertEqual(len(list(directory.glob("*.sent"))), 2)
             self.assertFalse(list(directory.glob("*.pending")))
         finally:
@@ -415,7 +409,8 @@ if projection:
         self.b(r, "set", "root", "wake=exit 0")
         directory = r / ".brain/wake/root"
         directory.mkdir(parents=True)
-        (directory / "reason.pending").touch()
+        key = "a" * 64
+        (directory / (key + ".pending")).touch()
         (directory / "last").write_text(str(time.time()))
         def held(name):
             # Lock holders aren't recorded; probe each flock instead.
@@ -437,10 +432,16 @@ if projection:
                 self.assertEqual(p.returncode, 0, out + err)
                 wait(lambda: held("retry.lock"), "drain scheduled no timer for the window opening")
                 self.assertFalse(held("lock"), "the timer must not hold the delivery lock")
-                self.assertFalse((directory / "reason.sent").exists())
+                self.assertFalse((directory / (key + ".sent")).exists())
             self.responsive(r)
             (directory / "last").write_text(str(time.time() - 121))
-            wait(lambda: (directory / "reason.sent").exists(), "the timer did not deliver at the opening")
+            wait(lambda: (directory / 'turn.json').exists() and json.loads((directory / 'turn.json').read_text())['sent'],
+                 "the timer did not deliver at the opening")
+            self.assertTrue((directory / (key + '.pending')).exists())
+            m = core_loader.SourceFileLoader('rate_consumer', str(CORE / 'bin/brain')).load_module()
+            inst = m.Instance(r)
+            consume_fixture_wake(m, inst, inst.node('root'))
+            self.assertTrue((directory / (key + '.sent')).exists())
             # Requests published after that delivery wait for the next opening under a new timer.
             wait(lambda: held("retry.lock") or not list(directory.glob("*.pending")),
                  "a request remained without a timer")
@@ -532,6 +533,7 @@ class QuestionWake(Scenario):
 
     def drain(self, node=None):
         self.module.wake_drain(self.inst, node or self.n, once=True)
+        consume_fixture_wake(self.module, self.inst, node or self.n)
 
     @contextlib.contextmanager
     def inline_timer(self):
@@ -543,6 +545,7 @@ class QuestionWake(Scenario):
         def start(inst, node):
             calls.starts.append(node["id"])
             self.module.wake_drain(inst, node)
+            consume_fixture_wake(self.module, inst, node)
         with mock.patch.object(self.module, "wake_schedule", side_effect=schedule), \
                 mock.patch.object(self.module, "wake_start", side_effect=start):
             yield calls
@@ -579,6 +582,7 @@ class QuestionWake(Scenario):
                 mock.patch.object(self.module, "wake_schedule") as schedule:
             start = time.monotonic()
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
             self.assertLess(time.monotonic() - start, 0.14, "a closed window must end the drain, not wait")
             self.assertEqual(sleeps, [])
             self.assertEqual(schedule.call_count, 1)
@@ -607,6 +611,7 @@ class QuestionWake(Scenario):
                                   side_effect=AssertionError("closed window captured snapshot")), \
                 mock.patch.object(self.module, "wake_schedule") as schedule:
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
         schedule.assert_called_once_with(self.inst, self.n)
         clock.sleep.assert_not_called()
         self.assertEqual(len(list(directory.glob("*.pending"))), 1)
@@ -915,6 +920,7 @@ class QuestionWake(Scenario):
         (directory / "last").write_text(str(time.time() + 86400))
         with mock.patch.object(self.module, "WAKE_INTERVAL", 0.1), self.inline_timer() as calls:
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
         self.assertEqual(len(self.calls.read_text().splitlines()), 1)
         self.assertEqual((calls.schedules, calls.starts), (["a"], ["a"]))
 
@@ -994,6 +1000,7 @@ class QuestionWake(Scenario):
         def send(command, reason=None):
             time.sleep(.001)  # An unrelated stdlib poll must not advance the wake clock.
             sends.append(now[0])
+            consume_fixture_wake(self.module, self.inst, self.n)
             if len(sends) <= 5:
                 before = len(calls.starts)
                 self.module.request_wake(self.inst, self.n, "during-send-" + str(len(sends)))
@@ -1003,6 +1010,7 @@ class QuestionWake(Scenario):
         with mock.patch.object(self.module, "WAKE_CLOCK", clock), \
                 mock.patch.object(self.module, "wake_send", side_effect=send), self.inline_timer() as calls:
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
         directory = self.module.wake_directory(self.inst, self.n)
         self.assertFalse(list(directory.glob("*.pending")))
         self.assertEqual(sends, [1000.0 + i * 120 for i in range(6)])
@@ -1033,6 +1041,7 @@ class QuestionWake(Scenario):
                 mock.patch.object(self.module, "wake_start") as start, \
                 mock.patch.object(self.module, "wake_schedule") as schedule:
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
         # The drain no longer waits out a window; the watcher's next start retries the failure.
         self.assertEqual(send.call_count, 1)
         start.assert_not_called()
@@ -1048,6 +1057,7 @@ class QuestionWake(Scenario):
                 self.inline_timer() as calls:
             now[0] += 60
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
         self.assertEqual(send.call_count, 1)
         self.assertEqual((calls.schedules, calls.starts), (["a"], ["a"]))
         self.assertEqual(now[0], 1120.0)
@@ -1059,6 +1069,7 @@ class QuestionWake(Scenario):
                 mock.patch.object(self.module, "wake_start") as start:
             with self.assertRaises(OSError):
                 self.module.wake_drain(self.inst, self.n)
+                consume_fixture_wake(self.module, self.inst, self.n)
         start.assert_not_called()
         directory = self.module.wake_directory(self.inst, self.n)
         self.assertEqual(len(list(directory.glob("*.pending"))), 1)
@@ -1078,11 +1089,13 @@ class QuestionWake(Scenario):
             return result
         def start(inst, node):
             self.module.wake_drain(inst, node)
+            consume_fixture_wake(self.module, inst, node)
         with mock.patch.object(Path, "replace", autospec=True, side_effect=move), \
                 mock.patch.object(self.module, "wake_start", side_effect=start), \
                 mock.patch.object(self.module, "wake_send", return_value=True) as send, \
                 mock.patch.object(self.module, "WAKE_INTERVAL", 0):
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
         root_directory = self.module.wake_directory(self.inst, self.inst.node("root"))
         self.assertEqual(injected, [True])
         self.assertFalse(list(directory.glob("*.pending")))
@@ -1115,6 +1128,7 @@ class QuestionWake(Scenario):
         self.enqueue("first")
         sends = []
         def send(command, reason=None):
+            consume_fixture_wake(self.module, self.inst, self.n)
             sends.append(command)
             if len(sends) == 1:
                 self.enqueue("second")
@@ -1122,6 +1136,7 @@ class QuestionWake(Scenario):
         with mock.patch.object(self.module, "wake_send", side_effect=send), \
                 mock.patch.object(self.module, "WAKE_INTERVAL", .01), self.inline_timer():
             self.module.wake_drain(self.inst, self.n)
+            consume_fixture_wake(self.module, self.inst, self.n)
         directory = self.module.wake_directory(self.inst, self.n)
         self.assertEqual(len(sends), 2)
         self.assertEqual(len(list(directory.glob("*.sent"))), 2)
@@ -1493,10 +1508,11 @@ class StopHook(Scenario):
             self.assertLess(time.monotonic() - start, 10)
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
-                if calls.exists() and len(calls.read_text().splitlines()) == count and list((r / ".brain/wake/a").glob("*.sent")):
+                if calls.exists() and len(calls.read_text().splitlines()) == count :
                     break
                 time.sleep(0.05)
             self.assertEqual(len(calls.read_text().splitlines()), count)
+            self.b(r, "due", "a")  # fixture coordinator renders and consumes this receipt
             (d / "inbox.md").write_text("")  # coordinator answered the previous episode
             (r / ".brain/wake/a/last").write_text(str(time.time() - 121))
 
@@ -1550,8 +1566,9 @@ class StopHook(Scenario):
             self.assertIn("Choose blue?", (d / "inbox.md").read_text())
             release.touch()
             deadline = time.monotonic() + 10
-            while not list(directory.glob("*.sent")) and time.monotonic() < deadline:
+            while not calls.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
+            self.b(r, "due", "a")  # receipt acknowledgement follows visible consumption
             self.assertEqual(len(list(directory.glob("*.sent"))), 1)
             self.assertEqual(calls.read_text().splitlines(), ["called"])
             self.hook(r, d, active=True, transcript=transcript)
@@ -2365,9 +2382,11 @@ class WakeIdentityTypes(Scenario):
                         mock.patch.object(m, 'wake_snapshot', return_value=[]):
                     with mock.patch.object(m, 'wake_send', return_value=False):
                         m.wake_drain(inst, node, once=True)
+                        consume_fixture_wake(m, inst, node)
                     self.assertEqual(pending.read_text(), raw)
                     with mock.patch.object(m, 'wake_send', return_value=True) as send:
                         m.wake_drain(inst, node, once=True)
+                        consume_fixture_wake(m, inst, node)
                     self.assertEqual(send.call_count, 1)
                     self.assertTrue(pending.exists())
                     consume_fixture_wake(m, inst, node)
@@ -2417,7 +2436,9 @@ class RegisteredDelegatedWake(Scenario):
             self.m.host_task_refresh(self.inst, rpc=self.rpc)
         with mock.patch.object(self.m, 'WAKE_INTERVAL', 0), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.m.wake_drain(self.inst, self.inst.node('app'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('app'))
             self.m.wake_drain(self.inst, self.inst.node('app'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('app'))
             self.assertEqual(send.call_count, 1)
         self.assertEqual(len(self.m.host_task_items(self.inst)), 1)
         self.assertEqual(sum(name == 'task_status' for name, _ in self.calls), 2,
@@ -2452,6 +2473,7 @@ class DisabledWakeDiagnostics(Scenario):
                 contextlib.redirect_stdout(io.StringIO()) as output:
             m.cmd_check(argparse.Namespace(fix=True, live=True))
             m.wake_drain(inst, n, once=True)
+            consume_fixture_wake(m, inst, n)
             self.assertEqual(m.wake_target(inst, n)[1], '')
             self.assertTrue(m.request_wake(inst, n, 'fixture-question'))
             probe.assert_not_called()

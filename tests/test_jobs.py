@@ -27,7 +27,7 @@ CORE = Path(os.environ.get("BRAIN_CORE") or Path(__file__).resolve().parent.pare
 
 import test_hosts as _test_hosts
 import test_verify as _test_verify
-from scenario import Scenario, AutonomyProject, shlex_quote
+from scenario import consume_fixture_wake, Scenario, AutonomyProject, shlex_quote
 
 
 def settlement_export(test, root, node, branch=None, key=None, all_closed=False):
@@ -647,6 +647,7 @@ class UnifiedHandbacks(Scenario):
                 if count == 2:
                     (directory / "last").write_text(str(time.time() - 121))
                 module.wake_drain(inst, inst.node("root"), once=True)
+                consume_fixture_wake(module, inst, inst.node('root'))
                 self.assertEqual(len(calls.read_text().splitlines()), count)
                 (r / "nodes/a/inbox.md").write_text("")
 
@@ -668,6 +669,7 @@ class UnifiedHandbacks(Scenario):
                 if count == 2:
                     (directory / "last").write_text(str(time.time() - 121))
                 module.wake_drain(inst, inst.node("root"), once=True)
+                consume_fixture_wake(module, inst, inst.node('root'))
                 self.assertEqual(len(calls.read_text().splitlines()), count)
 
     def test_question_handback_preserves_a_concurrent_runtime_inbox_append(self):

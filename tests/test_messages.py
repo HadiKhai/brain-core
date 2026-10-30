@@ -1,7 +1,7 @@
 """Made-up worker commands: four kinds, optional context and direct peer briefs."""
 import re
 
-from scenario import Scenario, CORE
+from scenario import consume_fixture_wake, Scenario, CORE
 
 
 class WorkerMessages(Scenario):
@@ -380,6 +380,7 @@ class TypedCommunication(Scenario):
                 self.assertEqual(item['reason'], 'question:' + question['id'])
                 m.watch_run(self.inst, groups=groups, quiet=True)
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             self.assertEqual(m.wake_history(m.wake_directory(self.inst, n))[-1]['snapshot'],
                              [{'id': question['id'], 'kind': 'question'}])
@@ -391,6 +392,7 @@ class TypedCommunication(Scenario):
             m.communication_record(self.inst, n, 'question', 'First fixture question', 'first', self.spec('outward'))
             with mock.patch.object(m, 'wake_send', return_value=True):
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             m.communication_record(self.inst, n, 'question', 'Second fixture question', 'second', self.spec('outward'))
             observed = []
             def send(*args, **kwargs):
@@ -398,6 +400,7 @@ class TypedCommunication(Scenario):
                 return True
             with mock.patch.object(m, 'wake_send', side_effect=send):
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             questions = [i for i in observed if i['kind'] == 'question']
             self.assertEqual(len(questions), 1)
             self.assertTrue(questions[0]['text'].startswith('Second fixture question'))
@@ -439,6 +442,7 @@ class NativeDispatcher(Scenario):
             self.assertEqual(result['accepted'], 1)
             self.assertEqual(self.m.dispatch_run(self.inst)['accepted'], 0)
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertEqual(send.call_count, 1)
 
     def test_failed_enqueue_is_not_a_dispatch_receipt(self):

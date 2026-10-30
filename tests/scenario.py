@@ -517,3 +517,18 @@ class AutonomyProject(Scenario):
 def shlex_quote(value):
     import shlex
     return shlex.quote(value)
+
+
+def consume_fixture_wake(module, inst, node):
+    """Simulate a fixture coordinator rendering its frozen receipt after transport.
+
+    Tests of raw transport acceptance and receipt failures do not call this helper.
+    It uses the real consumption implementation and never invents host activity.
+    """
+    directory = module.wake_directory(inst, node)
+    try:
+        receipt = module.wake_turn_read(directory / 'turn.json', module.wake_turn_binding(inst, node))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if receipt and not receipt['consumed']:
+        return module.wake_turn_consume(inst, node, shown=receipt)

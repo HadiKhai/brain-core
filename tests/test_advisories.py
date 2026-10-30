@@ -321,7 +321,7 @@ class CoordinatorAdvisories(unittest.TestCase):
         self.assertEqual(self.m.coordinator_advisories(self.inst),[])
 
 
-from scenario import Scenario
+from scenario import consume_fixture_wake, Scenario
 
 
 class CoordinatorWakeDelivery(Scenario):
@@ -346,9 +346,11 @@ class CoordinatorWakeDelivery(Scenario):
             inst = m.Instance(root)
             m.watch_once(inst)
             m.wake_drain(inst,inst.node('root'),once=True)
+            consume_fixture_wake(m, inst, inst.node('root'))
             self.assertEqual(send.call_count,1)
             m.watch_once(inst)
             m.wake_drain(inst,inst.node('root'),once=True)
+            consume_fixture_wake(m, inst, inst.node('root'))
             self.assertEqual(send.call_count,1)
             data['runs'][0]['run']='fixture-new-run'
             snapshot.write_text(json.dumps(data))
@@ -356,4 +358,5 @@ class CoordinatorWakeDelivery(Scenario):
             directory=m.wake_directory(inst,inst.node('root'))
             (directory / 'last').write_text('0')
             m.wake_drain(inst,inst.node('root'),once=True)
+            consume_fixture_wake(m, inst, inst.node('root'))
             self.assertEqual(send.call_count,2)

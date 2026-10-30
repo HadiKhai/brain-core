@@ -1185,10 +1185,16 @@ def _due_tick(a, inst, nodes):
             items.append({'node': 'root', 'kind': 'watcher',
                           'text': 'watcher state invalid; restore .brain/watch.json before watching'})
     if a.id == 'root':
-        items += [{'node': n['id'], 'kind': 'wake', 'text': text}
-                  for n in inst.nodes() if not n['archived']
-                  if n['id'] not in wake_seen
-                  for text in [_m_hosts.wake_diagnostic(inst, n)] if text]
+        for n in inst.nodes():
+            if n['archived']:
+                continue
+            target, _ = _m_hosts.wake_target(inst, n)
+            if target['id'] in wake_seen:
+                continue
+            text = _m_hosts.wake_diagnostic(inst, n)
+            if text:
+                wake_seen.add(target['id'])
+                items.append({'node': target['id'], 'kind': 'wake', 'text': text})
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [

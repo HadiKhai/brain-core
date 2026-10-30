@@ -15,7 +15,7 @@ import time
 from unittest import mock
 
 import core_loader
-from scenario import CORE, Scenario
+from scenario import consume_fixture_wake, CORE, Scenario
 
 
 class DecisionGate(Scenario):
@@ -982,11 +982,13 @@ print('fixture proof isolated; enclosing proof restored and still held')
                 with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
                         mock.patch.object(self.m, 'wake_send', return_value=False) as send:
                     self.m.wake_drain(inst, child, once=True)
+                    consume_fixture_wake(self.m, inst, child)
                     destination = self.m.wake_directory(inst, root) / path.name
                     if mode == 'bookkeeping':
                         self.assertFalse(path.exists())
                         self.assertFalse(destination.exists())
                         self.m.wake_drain(inst, root, once=True)
+                        consume_fixture_wake(self.m, inst, root)
                         send.assert_not_called()
                         continue
                     self.assertFalse(path.exists())
@@ -995,10 +997,12 @@ print('fixture proof isolated; enclosing proof restored and still held')
                     self.assertEqual(value['items'], expected)
                     self.assertEqual(value['explicit_kinds'], mode == 'explicit')
                     self.m.wake_drain(inst, root, once=True)
+                    consume_fixture_wake(self.m, inst, root)
                     self.assertEqual(send.call_count, 1)
                     self.assertTrue(destination.exists())
                     send.return_value = True
                     self.m.wake_drain(inst, root, once=True)
+                    consume_fixture_wake(self.m, inst, root)
                     self.assertEqual(send.call_count, 2)
                     self.assertFalse(destination.exists())
                     history = self.m.wake_history(self.m.wake_directory(inst, root))
@@ -1051,15 +1055,18 @@ print('fixture proof isolated; enclosing proof restored and still held')
                             inst.local_of('sample').pop('coordinator')
                             inst.save_local()
                             self.m.wake_drain(inst, n, once=True)
+                            consume_fixture_wake(self.m, inst, n)
                             self.assertFalse(path.exists())
                             path = self.m.wake_directory(inst, inst.node('root')) / path.name
                             self.assertEqual(path.read_bytes(), original)
                         self.m.wake_drain(inst, inst.node('root'), once=True)
+                        consume_fixture_wake(self.m, inst, inst.node('root'))
                         self.assertEqual(send.call_count, 1)
                         self.assertEqual(path.read_bytes(), original)
                         self.assertNotIn('future-question', send.call_args.kwargs['reason'])
                         send.return_value = True
                         self.m.wake_drain(inst, inst.node('root'), once=True)
+                        consume_fixture_wake(self.m, inst, inst.node('root'))
                         self.assertEqual(send.call_count, 2)
                         self.assertFalse(path.exists())
                         path.with_suffix('.sent').unlink()
@@ -1081,10 +1088,12 @@ print('fixture proof isolated; enclosing proof restored and still held')
             # One internally valid receipt conflicts with the current display snapshot.
             self.assertTrue(self.m.request_wake(self.inst, self.n, 'snapshot conflict', items=[conflicting]))
             self.m.wake_drain(self.inst, self.n, once=True)
+            consume_fixture_wake(self.m, self.inst, self.n)
             self.assertEqual(send.call_count, 1)
             # Two internally valid receipts conflict when normalized as a delivery batch.
             self.assertTrue(self.m.request_wake(self.inst, self.n, 'first conflict', items=[question]))
             self.assertTrue(self.m.request_wake(self.inst, self.n, 'second conflict', items=[conflicting]))
             self.m.wake_drain(self.inst, self.n, once=True)
+            consume_fixture_wake(self.m, self.inst, self.n)
             self.assertEqual(send.call_count, 2)
             self.assertFalse(list(self.m.wake_directory(self.inst, self.n).glob('*.pending')))

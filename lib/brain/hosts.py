@@ -438,7 +438,7 @@ def wake_comparison_before(inst, n, history):
     """Display baseline only: older delivered refs, never an acknowledgement of new work."""
     if history:
         previous = history[-1]
-        if previous.get('ack_binding') not in (None, wake_owner_binding(inst, n)):
+        if previous.get('comparison_binding', previous.get('ack_binding')) not in (None, wake_owner_binding(inst, n)):
             return []  # a replacement coordinator must see its own fresh comparison
         refs = previous.get('before', []) + previous.get('snapshot', previous['items'])
     else:
@@ -780,10 +780,10 @@ def wake_diagnostic(inst, n):
     disabled = wake_disabled_notice(inst, n)
     if disabled:
         return disabled
-    stuck = _m_wake_turns.wake_turn_stuck(inst, n)
+    target, command = wake_target(inst, n)
+    stuck = _m_wake_turns.wake_turn_stuck(inst, target)
     if stuck:
         return stuck
-    target, command = wake_target(inst, n)
     directory = wake_directory(inst, target)
     records = [wake_read(directory, command),
                wake_read(directory, command, "probe-" + wake_binding(command) + ".json")]
@@ -989,6 +989,7 @@ def wake_drain(inst, n, once=False):
                                 'deliveries': retained + [{'at': WAKE_CLOCK.time(), 'items': wake_log_refs(refs), 'reason': reason,
                                     'before': wake_log_refs(before), 'snapshot': wake_log_refs(snapshot),
                                     'episode': turn_token, 'confirmation': 'unconfirmed', 'start_state': 'UNKNOWN',
+                                    'comparison_binding': wake_owner_binding(current, target),
                                     'transport_status': status}]}) + '\n')
                         except OSError:
                             status = 'accepted; history write failed'

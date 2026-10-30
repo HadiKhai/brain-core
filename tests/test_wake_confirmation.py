@@ -281,3 +281,14 @@ class WakeConfirmation(Scenario):
         send = self.drain(202)
         self.assertEqual(send.call_args.args[0], 'https://wake.invalid/fixture-next')
         self.assertTrue(pending.exists())
+
+    def test_root_due_deduplicates_a_disabled_inherited_route(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=/usr/bin/true')
+        self.configure('coordinator=', 'wake=')
+        self.b(self.r, 'new', 'another', '--title', 'Another fixture')
+        self.refresh()
+        out = io.StringIO()
+        args = argparse.Namespace(id='root', quiet=False, json=False, handled=False, machine=False)
+        with contextlib.redirect_stdout(out):
+            self.m._due_tick(args, self.inst, [self.inst.node('root')])
+        self.assertEqual(out.getvalue().count('wake delivery explicitly disabled'), 1)

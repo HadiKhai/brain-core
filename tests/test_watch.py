@@ -12,7 +12,7 @@ import threading
 import time
 from unittest import mock
 
-from scenario import Scenario, CORE
+from scenario import consume_fixture_wake, Scenario, CORE
 import core_loader
 
 
@@ -402,6 +402,7 @@ class Watcher(Scenario):
             self.assertTrue(m.wake_actionable_pending(inst, pending))
             self.assertEqual(json.loads(pending.read_text())['items'], refs[3:])
             m.wake_drain(inst, n, once=True)
+            consume_fixture_wake(m, inst, n)
         send.assert_called_once()
         self.assertFalse(pending.exists())
 
@@ -1118,6 +1119,7 @@ class Watcher(Scenario):
             self.m.machine_sample(self.inst)
             self.watch(kinds={'machine-alert', 'machine-hold', 'machine-repair'})
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
 
     def queued_machine_work(self):
         with self.m.machine_queue() as queue:
@@ -1252,6 +1254,7 @@ class Watcher(Scenario):
             def tick(expected):
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
                 self.assertEqual(send.call_count, expected)
             tick(1)
             tick(1)
@@ -1275,6 +1278,7 @@ class Watcher(Scenario):
                 reading['load_per_cpu'] = [load] * 3
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertEqual(send.call_count, 1)
             history = self.m.wake_history(self.m.wake_directory(self.inst, self.inst.node('root')))
             self.assertEqual([i['kind'] for i in history[-1]['items']], ['machine-hold'])
@@ -1289,6 +1293,7 @@ class Watcher(Scenario):
             def tick(expected):
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
                 self.assertEqual(send.call_count, expected)
             reading['load_per_cpu'] = [1.5] * 3
             tick(1)
@@ -1318,6 +1323,7 @@ class Watcher(Scenario):
             pending[0].write_text(json.dumps(value))
             reading.update(good)
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertEqual(send.call_count, 1)
             self.assertEqual(self.m.wake_history(directory)[-1]['items'], [question])
 
@@ -1336,6 +1342,7 @@ class Watcher(Scenario):
             self.assertEqual(results, [1, 0, 0, 0])
             self.watch()
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             send.assert_not_called()
             (self.root / 'inbox.md').write_text('- fixture: choose a plan <!-- host-question:fixture -->\n')
             with self.assertRaises(SystemExit) as result:
@@ -1377,6 +1384,7 @@ class Watcher(Scenario):
             self.assertEqual(len(list(directory.glob('*.pending'))), 1)
             reading.update(good)
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             send.assert_not_called()
             self.assertFalse(list(directory.glob('*.pending')))
 
@@ -1392,6 +1400,7 @@ class Watcher(Scenario):
             (self.root / 'inbox.md').write_text('- fixture: choose a plan <!-- host-question:fixture -->\n')
             self.watch()
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertEqual(send.call_count, 1)
             self.assertEqual(state.read_text(), 'broken')
             history = self.m.wake_history(self.m.wake_directory(self.inst, self.inst.node('root')))
@@ -1482,10 +1491,12 @@ class Watcher(Scenario):
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.watch()
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertEqual(send.call_count, 0)
             inbox.write_text('- question <!-- host-question:fixture --> [machine episode ' + 'a' * 24 + ' close]\n')
             self.watch()
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertEqual(send.call_count, 1)
 
     def test_pending_machine_transitions_are_retired_and_mixed_questions_survive(self):
@@ -1496,9 +1507,11 @@ class Watcher(Scenario):
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.m.request_wake(self.inst, n, 'old transition', items=[transition])
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 0)
             self.m.request_wake(self.inst, n, 'mixed transition and question', items=[transition, question])
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             history = self.m.wake_history(self.m.wake_directory(self.inst, n))
             self.assertEqual(history[-1]['items'], [question])
@@ -1560,6 +1573,7 @@ class Watcher(Scenario):
             with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertEqual(send.call_count, 0)
             self.assertFalse(list(directory.glob('*.pending')))
 
@@ -1576,16 +1590,19 @@ class Watcher(Scenario):
             self.assertEqual(self.since(), first)  # durable enqueue is not delivery
             with mock.patch.object(self.m, 'wake_send', return_value=False):
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(self.since(), first)
             self.assertFalse((directory / 'history.json').exists())
             with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
                 self.assertEqual(self.since(), first)  # the item that woke us remains visible
                 inbox.write_text(inbox.read_text() + '- fabricated second item\n')
                 new = [i for i in self.since() if i['id'] != first[0]['id']]
                 self.assertEqual(len(new), 1)
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
                 self.assertEqual(send.call_count, 2)
             history = self.m.wake_history(directory)
             self.assertEqual([r['items'] for r in history], [
@@ -1597,6 +1614,7 @@ class Watcher(Scenario):
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             with mock.patch.object(self.m, 'wake_send', return_value=True):
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual([i['text'] for i in self.since()], ['fabricated third item'])
             self.assertNotIn('.brain/', self.git('ls-files', cwd=self.root))
 
@@ -1614,6 +1632,7 @@ class Watcher(Scenario):
             self.assertIn('unsettled-threads', [i['kind'] for i in self.m.watch_items(self.inst, child)])
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 0)
             budget = {**row, 'Job': 'import:budget', 'Ended': '', 'Outcome': ''}
             self.m.write_jobs(self.inst, child, [row, budget])
@@ -1626,6 +1645,7 @@ class Watcher(Scenario):
                                 for text in self.m.runaway_jobs(self.inst, child)))
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 0)
             self.assertEqual(self.since(), [])
             # A child with a coordinator receives its own settlement work.
@@ -1643,14 +1663,17 @@ class Watcher(Scenario):
             self.assertTrue(routed)
             self.assertTrue(all(i['node'] == 'sample' for i in routed))
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             self.assertIn('overdue-question', [i['kind'] for i in self.m.wake_history(directory)[-1]['items']])
             (child['dir'] / 'inbox.md').write_text(line + '\n- from watcher: worker run failed (provider error)\n')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
 
     def test_overdue_block_is_one_wake_even_as_age_advances(self):
@@ -1663,12 +1686,14 @@ class Watcher(Scenario):
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             import datetime
             later = self.inst.now_dt() + datetime.timedelta(days=2)
             with mock.patch.object(self.inst, 'now_dt', return_value=later):
                 self.watch()
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
                 self.assertEqual([i['kind'] for i in self.since()], ['blocked-overdue'])
             self.assertEqual(send.call_count, 1)
 
@@ -1690,6 +1715,7 @@ class Watcher(Scenario):
                     self.git('commit', '-qm', 'child status fixture ' + str(index), cwd=self.root)
                 self.watch()
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
 
     def test_due_item_resolution_rearms_same_item_without_expiring_sent_receipt(self):
@@ -1701,11 +1727,13 @@ class Watcher(Scenario):
             inbox.write_text('- Choose blue\n')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             inbox.write_text('')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             inbox.write_text('- Choose blue\n')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
             self.assertEqual([i['text'] for i in self.since()], ['Choose blue'])
 
@@ -1738,6 +1766,7 @@ class Watcher(Scenario):
                 inbox.write_text('- Decision needed: choose blue\n')
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, 1)
             finally:
                 resume.set()
@@ -1746,6 +1775,7 @@ class Watcher(Scenario):
             self.assertEqual(errors, [])
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
 
     def test_due_job_text_and_state_changes_wake_but_display_metadata_does_not(self):
@@ -1758,17 +1788,21 @@ class Watcher(Scenario):
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             item.update(count=9, at='2099-01-01T00:00Z', head='a' * 40)
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             item['text'] = 'job/fixture: conflicting inputs need repair'
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
             item['state'] = 'blocked'
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 3)
 
     def test_resolved_due_episode_pending_retires_but_inbox_decision_still_delivers(self):
@@ -1784,6 +1818,7 @@ class Watcher(Scenario):
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             status.write_text(original)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             refs = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']
             self.assertEqual([i['kind'] for i in refs], ['inbox'])
@@ -1798,6 +1833,7 @@ class Watcher(Scenario):
             first = self.since()
             self.assertTrue(self.m.request_wake(self.inst, n, 'wake:' + episode))
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(self.since(), first)
             path = self.m.wake_directory(self.inst, n) / 'history.json'
             self.assertEqual(self.m.wake_history(path.parent)[-1]['items'],
@@ -1809,6 +1845,7 @@ class Watcher(Scenario):
             (self.root / 'inbox.md').write_text('')
             with mock.patch.object(self.m, 'WAKE_INTERVAL', 0):
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(self.m.wake_history(path.parent)[-1]['items'],
                              [{'id': second[0]['id'], 'kind': 'inbox'}])
             path.write_text('{torn')
@@ -1824,6 +1861,7 @@ class Watcher(Scenario):
             directory = self.m.wake_directory(self.inst, n)
             (directory / 'history.json').write_text('{torn')
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             self.assertFalse(list(directory.glob('*.pending')))
             self.assertEqual(self.m.wake_history(directory)[-1]['items'], [])
@@ -1840,6 +1878,7 @@ class Watcher(Scenario):
             for index, value in enumerate(('{torn', '{"items":null}', '{"items":[{}]}')):
                 (directory / (f'{index:064x}' + '.pending')).write_text(value)
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 3)
             self.assertFalse(list(directory.glob('*.pending')))
 
@@ -1855,7 +1894,9 @@ class Watcher(Scenario):
             self.assertTrue(self.m.request_wake(self.inst, n, 'fixture request'))
             with mock.patch.object(self.m, 'atomic_write', side_effect=fail_history):
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             self.assertFalse(list(self.m.wake_directory(self.inst, n).glob('*.pending')))
             self.assertIn('history write failed', self.m.wake_diagnostic(self.inst, n))
@@ -1882,7 +1923,9 @@ class Watcher(Scenario):
             self.m.request_wake(self.inst, child, 'mixed', items=[housekeeping, question])
             self.b(self.root, 'set', 'sample', 'coordinator=')
             self.m.wake_drain(self.inst, child, once=True)
+            consume_fixture_wake(self.m, self.inst, child)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             history = self.m.wake_history(self.m.wake_directory(self.inst, root))
             self.assertEqual(history[-1]['items'], [question])
@@ -1896,6 +1939,7 @@ class Watcher(Scenario):
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             with mock.patch.object(self.m, 'wake_send', return_value=True):
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             inbox.write_text(inbox.read_text() + '- fabricated B\n')
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             observed = []
@@ -1904,6 +1948,7 @@ class Watcher(Scenario):
                 return True
             with mock.patch.object(self.m, 'wake_send', side_effect=host_starts):
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual([i['text'] for i in observed], ['fabricated B'])
             self.assertEqual(observed, self.since())
             directory = self.m.wake_directory(self.inst, n)
@@ -1927,6 +1972,7 @@ class Watcher(Scenario):
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             with mock.patch.object(self.m, 'wake_send', return_value=True):
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual([i['text'] for i in self.since()], ['fabricated new B'])
 
     def test_unchanged_new_handback_removed_and_returned_and_stale(self):
@@ -1969,6 +2015,7 @@ class Watcher(Scenario):
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             directory = self.m.wake_directory(self.inst, self.inst.node('root'))
             self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
             self.assertTrue(list(directory.glob('*.pending')))
             with mock.patch.object(self.m, 'request_wake') as request:
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
@@ -1987,9 +2034,11 @@ class Watcher(Scenario):
                                           'report': 'fabricated/report.md'}))
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
 
     def test_blocked_episodes_share_direct_and_watcher_identity(self):
@@ -2021,10 +2070,12 @@ class Watcher(Scenario):
                 if count == 2:
                     (directory / 'last').write_text(str(time.time() - 121))
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
                 self.assertEqual(send.call_count, count)
                 self.watch()
                 self.watch()
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
                 self.assertEqual(send.call_count, count)
                 self.assertFalse(list(directory.glob('*.pending')))
         self.assertEqual(len(set(episodes)), 2)
@@ -2044,10 +2095,12 @@ class Watcher(Scenario):
         with mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             signal.write_text(json.dumps({**record, 'report': 'another-report.md'}))
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
 
     def test_question_episode_shares_inbox_wake_and_keeps_unanswered_dedup(self):
@@ -2067,22 +2120,27 @@ class Watcher(Scenario):
             item = next(i for i in self.m.watch_items(self.inst, n) if i['kind'] == 'inbox')
             self.assertEqual(item['reason'], 'wake:' + episode)
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.watch()
             self.m.cmd_handback(args)  # The same unanswered question still has one inbox owner.
             self.assertEqual(self.m.read_handback(n, row)['wake_id'], episode)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             (self.root / 'inbox.md').write_text('')
             self.watch()
             (directory / 'last').write_text(str(time.time() - 121))
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             self.m.cmd_handback(args)
             (directory / 'last').write_text(str(time.time() - 121))
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 2)
 
     def test_answered_blocked_human_episode_does_not_wake_again_after_rerun(self):
@@ -2099,6 +2157,7 @@ class Watcher(Scenario):
             self.m.cmd_handback(args)
             episode = self.m.read_handback(n, row).get('wake_id')
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.watch()
             self.m.cmd_handback(args)
             repeated = self.m.read_handback(n, row).get('wake_id')
@@ -2107,6 +2166,7 @@ class Watcher(Scenario):
             self.watch()
             (directory / 'last').write_text(str(time.time() - 121))
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             # Behaviour first: this also fails on the pre-episode runtime without a missing-field error.
             self.assertEqual(send.call_count, 1)
             self.assertRegex(episode, r'^[0-9a-f]{32}$')
@@ -2115,8 +2175,10 @@ class Watcher(Scenario):
             self.assertNotEqual(self.m.read_handback(n, row)['wake_id'], episode)
             (directory / 'last').write_text(str(time.time() - 121))
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             self.assertEqual(send.call_count, 2)
 
     def test_provider_failure_closed_job_and_screened_excerpts(self):
@@ -2213,16 +2275,19 @@ class Watcher(Scenario):
             self.m.request_wake(self.inst, child, '<!-- host-question:abc -->')
             with mock.patch.object(self.m, 'wake_send', return_value=True):
                 self.m.wake_drain(self.inst, child, once=True)
+                consume_fixture_wake(self.m, self.inst, child)
             # Match cmd_due's escalation reason: a previously delivered escalation is not resent.
             import hashlib
             reason = 'overdue:' + hashlib.sha256(line.encode()).hexdigest()
             self.m.request_wake(self.inst, self.inst.node('root'), reason)
             with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
                 self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
                 self.assertEqual(send.call_count, 1)
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+                consume_fixture_wake(self.m, self.inst, self.inst.node('root'))
                 self.assertEqual(send.call_count, 1)
             child_queue = self.m.wake_directory(self.inst, child)
             self.assertFalse(list(child_queue.glob('*.pending')))
@@ -2433,8 +2498,10 @@ class Watcher(Scenario):
             self.watch()
             with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
                 self.watch()
                 self.m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(self.m, self.inst, n)
                 self.assertEqual(send.call_count, 1)
 
     def test_bad_watcher_state_sampler_one_line_and_due_root_diagnostic(self):
@@ -2545,6 +2612,7 @@ class StallWatcher(Scenario):
         with mock.patch.object(type(self.inst), 'now_dt', return_value=now):
             self.watch()
             self.m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(self.m, self.inst, n)
             return [i for i in self.m.watch_state(self.inst)['items']
                     if i['kind'] == 'job-stall' and i['node'] == n['id']]
 
@@ -2810,11 +2878,13 @@ class WakeNoise(Scenario):
             pending = list(directory.glob('*.pending'))
             self.assertEqual(len(pending), 1)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertTrue(pending[0].exists(), 'failed delivery must retain the accepted wake')
             self.assertEqual(send.call_count, 1)
             self.watch()
             self.assertTrue(pending[0].exists(), 'the next scan must not retire unknown episode work')
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 2)
             self.assertFalse(list(directory.glob('*.pending')))
             self.assertTrue(self.m.wake_history(directory)[-1]['items'])
@@ -2852,6 +2922,7 @@ class WakeNoise(Scenario):
                         self.assertIn('blocked-overdue', output.getvalue())
                         self.assertTrue(pending[0].exists(), 'filtered due must retain a still-open blocker')
                         self.m.wake_drain(self.inst, root, once=True)
+                        consume_fixture_wake(self.m, self.inst, root)
                     self.assertEqual(send.call_count, 1 if fault == 'corrupt' else 2)
                     self.assertEqual(episodes.read_text(), '{broken' if fault == 'corrupt' else healthy)
                     self.assertFalse(list(directory.glob('*.pending')))
@@ -2878,10 +2949,12 @@ class WakeNoise(Scenario):
                             self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
                         self.assertIn('overdue-question', output.getvalue())
                         self.m.wake_drain(self.inst, root, once=True)
+                        consume_fixture_wake(self.m, self.inst, root)
                         self.assertEqual(send.call_count, before + 1)
                         inbox.write_text('- another new inbox item ' + str(before) + '\n')
                         self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                         self.m.wake_drain(self.inst, root, once=True)
+                        consume_fixture_wake(self.m, self.inst, root)
                         self.assertEqual(send.call_count, before + 2)
                         self.assertEqual(path.read_text(), damaged)
             original_read = self.m.watch_read
@@ -2896,10 +2969,12 @@ class WakeNoise(Scenario):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, before + 1)
                 inbox.write_text('- new inbox work with unreadable receipts\n')
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, before + 2)
 
             before = send.call_count
@@ -2910,6 +2985,7 @@ class WakeNoise(Scenario):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, expected)
 
     def test_closed_episode_acknowledgements_are_pruned_and_pending_work_retained(self):
@@ -2928,6 +3004,7 @@ class WakeNoise(Scenario):
                     with contextlib.redirect_stdout(io.StringIO()):
                         self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
                     self.m.wake_drain(self.inst, root, once=True)
+                    consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, index + 1)
                 self.assertEqual(json.loads((self.root / '.brain/wake/due-seen.json').read_text())['seen'], [])
             self.watch()
@@ -2940,6 +3017,7 @@ class WakeNoise(Scenario):
             self.watch()
             self.assertEqual(set(json.loads((self.root / '.brain/watch.json').read_text())['seen']), pending_ids)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.watch()
             self.assertEqual(json.loads((self.root / '.brain/watch.json').read_text())['seen'], [])
 
@@ -2975,6 +3053,7 @@ class WakeNoise(Scenario):
                 outputs.append(json.loads(output.getvalue()))
                 self.watch()
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
             self.assertTrue(all(any(i['kind'] == 'blocked-overdue' for i in out) for out in outputs))
             self.assertTrue(all(any(i['kind'] == 'machine' for i in out) for out in outputs))
             self.assertEqual(send.call_count, 1, 'six unchanged ticks must deliver only one wake')
@@ -2996,6 +3075,7 @@ class WakeNoise(Scenario):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, expected)
 
     def test_delivered_wake_reason_names_opaque_item_and_cause(self):
@@ -3006,6 +3086,7 @@ class WakeNoise(Scenario):
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             reason = send.call_args.kwargs['reason']
             item = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items'][0]
             self.assertIn(item['id'], reason)
@@ -3039,6 +3120,7 @@ class WakeNoise(Scenario):
             self.watch()
             root = self.inst.node('root')
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertFalse(any(i['kind'] == 'overdue-question'
                                  for i in self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items']))
             first = send.call_count  # the independent inbox item may still be new
@@ -3048,6 +3130,7 @@ class WakeNoise(Scenario):
             inbox.write_text(original)
             self.watch()
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, first + 1)
 
     def test_question_crossing_escalation_tier_keeps_new_item_wakes(self):
@@ -3063,16 +3146,19 @@ class WakeNoise(Scenario):
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
             self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
             self.m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(self.m, self.inst, root)
             self.assertEqual(send.call_count, 1)
             with mock.patch.object(self.m.Instance, 'now_dt', return_value=at + datetime.timedelta(minutes=11)):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.m.cmd_due(argparse.Namespace(id='root', quiet=False, json=True))
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, 2)
                 self.assertIn('escalation tier item ', send.call_args.kwargs['reason'])
                 inbox.write_text(inbox.read_text() + '- a genuinely new decision\n')
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, 3)
 
 
@@ -3109,10 +3195,12 @@ class WakeVisibility(Scenario):
                 m.request_wake(self.inst, root, 'fixture-result-' + state,
                                items=[{'id': format(i, '064x'), 'kind': 'handback', 'state': state}])
                 m.wake_drain(self.inst, root, once=True)
+                consume_fixture_wake(m, self.inst, root)
             self.assertEqual(send.call_count, 0)
             m.request_wake(self.inst, root, 'fixture-question',
                            items=[{'id': '3' * 64, 'kind': 'handback', 'state': 'question'}])
             m.wake_drain(self.inst, root, once=True)
+            consume_fixture_wake(m, self.inst, root)
             self.assertEqual(send.call_count, 1)
 
     def test_visible_queue_matches_due_and_fresh_inbox_union(self):

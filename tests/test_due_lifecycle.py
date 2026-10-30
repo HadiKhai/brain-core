@@ -9,7 +9,7 @@ import sys
 from unittest import mock
 
 import core_loader
-from scenario import CORE, Scenario
+from scenario import consume_fixture_wake, CORE, Scenario
 
 
 class DueLifecycle(Scenario):
@@ -120,6 +120,7 @@ class DueLifecycle(Scenario):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.m.watch_once(self.inst)
                 self.m.wake_drain(self.inst, self.n, once=True)
+                consume_fixture_wake(self.m, self.inst, self.n)
                 self.assertEqual(send.call_count, 1)
             self.assertEqual(len(first_ids), 6)
             self.assertGreater(len(displays), 1)
@@ -339,6 +340,7 @@ class DueLifecycle(Scenario):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.m.watch_once(self.inst)
             self.m.wake_drain(self.inst, self.n, once=True)
+            consume_fixture_wake(self.m, self.inst, self.n)
             self.assertEqual(send.call_count, 0)
         self.assertEqual((self.root / 'inbox.md').read_text(), line)
 
@@ -986,6 +988,7 @@ class DueLifecycle(Scenario):
                 with contextlib.redirect_stdout(io.StringIO()):
                     self.m.watch_once(self.inst)
                 self.m.wake_drain(self.inst, self.n, once=True)
+                consume_fixture_wake(self.m, self.inst, self.n)
                 current = dashboard_restarts()
                 self.assertEqual(len(current), 1)
                 self.assertEqual(current[0]['episode'], first[0]['episode'])
