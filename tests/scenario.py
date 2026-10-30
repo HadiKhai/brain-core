@@ -525,6 +525,8 @@ def consume_fixture_wake(module, inst, node, required=False):
     Tests of raw transport acceptance and receipt failures do not call this helper.
     It uses the real consumption implementation and never invents host activity.
     """
+    inst = module.Instance(inst.root)
+    node = inst.node(node['id'])
     directory = module.wake_directory(inst, node)
     try:
         receipt = module.wake_turn_read(directory / 'turn.json', module.wake_turn_binding(inst, node))

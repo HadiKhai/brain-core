@@ -40,7 +40,10 @@ remains UNKNOWN: unrelated newer host runs cannot confirm delivery. Without a
 host-supported correlated receipt and idempotent retry contract, the core does
 not blindly resend an accepted or unknown attempt. Reconcile the host before
 recovery; re-provision a webhook when its coordinator changes. A known unchanged
-webhook from a retired episode is refused. Preexisting remote schedule enablement
+webhook from a retired episode is refused unless native provisioning or rotation
+confirmed its new binding. Aggregate and foreign due callers cannot consume it.
+A bound coordinator can reconstruct a damaged display receipt with explicit due,
+preserving old bytes and acknowledging only after a successful output flush. Preexisting remote schedule enablement
 and binding still require host-side inspection.
 
 External watchers should invoke `brain watch --once` on each pass to reconcile

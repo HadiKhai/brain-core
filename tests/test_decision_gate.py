@@ -968,7 +968,7 @@ print('fixture proof isolated; enclosing proof restored and still held')
                 inst.save_local()
                 folder = self.m.wake_directory(inst, child)
                 folder.mkdir(parents=True, exist_ok=True)
-                path = folder / (mode + '.pending')
+                path = folder / (self.m.wake_binding(mode) + '.pending')
                 bookkeeping = {'id': 'a' * 64, 'kind': 'merged-job'}
                 question = {'id': 'b' * 64, 'kind': 'inbox'}
                 refs = [bookkeeping]

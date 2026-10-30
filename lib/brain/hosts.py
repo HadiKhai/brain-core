@@ -525,6 +525,18 @@ def wake_ready_pending(inst, n, pending, split=True):
             if claimed is None:
                 claimed = _m_wake_turns.wake_terminal_claims(inst, n)
             ids, unknown = claimed
+            # A peer can finish consumption between actionable revalidation and
+            # this claim read. Its durable terminal receipt precedes consumed=true.
+            done = [i for i in refs if i['kind'] in WAKE_TERMINAL_KINDS and wake_terminal_delivered(inst, i['id'])]
+            if done:
+                refs = [i for i in refs if i not in done]
+                if not refs:
+                    if split:
+                        path.unlink(missing_ok=True)
+                    continue
+                if split:
+                    metadata = {**metadata, 'items': refs}
+                    _m_common.atomic_write(path, json.dumps(metadata) + '\n', private=True)
             held = [i for i in refs if i['kind'] in WAKE_TERMINAL_KINDS and (unknown or i['id'] in ids)]
             allowed = [i for i in refs if i not in held]
             if held:

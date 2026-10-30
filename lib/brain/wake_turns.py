@@ -34,13 +34,27 @@ def wake_turn_enabled(n):
     return True  # consumption fencing is mandatory, including legacy routes
 
 
-def wake_turn_caller(n):
+def wake_turn_session_binding(n):
+    sessions = n['local'].get('coordinator_sessions', [])
+    selected = sessions[-1] if isinstance(sessions, list) and sessions else ''
+    return _m_hosts.wake_binding(str(n['local'].get('coordinator', '')) + '\0' + selected)
+
+
+def wake_turn_caller(inst, n):
     """Only the bound coordinator or its selected runtime session can consume."""
     callers = {os.environ[key] for key in ('CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID') if os.environ.get(key)}
     sessions = n['local'].get('coordinator_sessions', [])
     allowed = {n['local'].get('coordinator')}
     if isinstance(sessions, list) and sessions:
-        allowed.add(sessions[-1])
+        bound = n['local'].get('coordinator_session_binding') == wake_turn_session_binding(n)
+        if not bound and 'coordinator_session_binding' not in n['local']:
+            from . import rotation
+            state = rotation.read_rotation(inst, n)
+            bound = bool(state and state.get('coordinator') == n['local'].get('coordinator') and
+                         sessions[-1] in state.get('coordinator_sessions', []) and
+                         not rotation.needs_session(state, n))
+        if bound:
+            allowed.add(sessions[-1])
     return bool(callers) and callers <= allowed
 
 
@@ -185,7 +199,7 @@ def wake_turn_consume(inst, n, consume=True, shown=None, recover=False):
     if consume or recover:
         fresh = _m_instance.Instance(inst.root)
         current = fresh.node(n['id'])
-        if (not wake_turn_caller(current) or wake_turn_binding(fresh, current) != wake_turn_binding(inst, n)
+        if (not wake_turn_caller(fresh, current) or wake_turn_binding(fresh, current) != wake_turn_binding(inst, n)
                 or _m_hosts.wake_route_disabled(fresh, current)):
             return None
         inst, n = fresh, current
@@ -230,8 +244,6 @@ def wake_turn_consume(inst, n, consume=True, shown=None, recover=False):
                     pass
             value = {**value, 'paths': [name for name in value['paths'] if name not in {p.name for p in blocked}],
                      'items': [i for i in value['items'] if i['id'] not in blocked_ids]}
-            if not value['paths']:
-                return None
             for pending in ([] if shown is not None else ready):
                 try:
                     metadata, refs = _m_hosts.wake_pending_value(pending)

@@ -1150,11 +1150,12 @@ def _due_tick(a, inst, nodes):
     if not a.quiet:
         for n in nodes:
             value = _m_wake_turns.wake_turn_consume(inst, n, consume=False,
-                                                  recover=a.id == n['id'] and _m_wake_turns.wake_turn_caller(n))
+                                                  recover=a.id == n['id'] and _m_wake_turns.wake_turn_caller(inst, n))
             if value:
                 wake_views.append((n, value))
-                consumed.append({'node': n['id'], 'kind': 'wake-reasons',
-                                 'text': _m_hosts.wake_reason_summary(value['items'])})
+                if value['paths'] or value['items']:
+                    consumed.append({'node': n['id'], 'kind': 'wake-reasons',
+                                     'text': _m_hosts.wake_reason_summary(value['items'])})
     state = _m_machine.machine_state(inst)
     items = coordinator_due_items(inst, nodes, include_handled=getattr(a, 'handled', False))
     from . import communication as _m_communication

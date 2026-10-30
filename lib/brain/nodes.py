@@ -633,6 +633,8 @@ def prepare_settings(inst, n, pairs, messages=None):
             # The most recently selected occurrence is current, even when resuming
             # an earlier session. ':=' replaces history; an empty value clears it.
             inst.local_of(n["id"])["coordinator_sessions"] = list(reversed(dict.fromkeys(reversed(ids))))
+            from . import wake_turns
+            inst.local_of(n['id'])['coordinator_session_binding'] = wake_turns.wake_turn_session_binding(inst.node(n['id']))
             fm.pop("coordinator_sessions", None)
             messages.append("  coordinator_sessions: this machine (.brain/local.json)")
         elif k == 'wake_enabled':

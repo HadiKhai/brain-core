@@ -318,6 +318,7 @@ class WatchExtension(Scenario):
         calls = []
         def send(command, reason=None):
             calls.append(command)
+            consume_fixture_wake(self.m, old_inst, root, required=True)
             if len(calls) == 1:
                 home, n, w, row = self.project()
                 self.signal(n, row)

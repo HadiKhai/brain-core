@@ -10,8 +10,7 @@ from unittest import mock
 import core_loader
 from scenario import Scenario
 
-class UnmockedTransport(BaseException):
-    pass
+UnmockedTransport = type('UnmockedTransport', (BaseException,), {})
 
 
 CORE = Path(os.environ.get('BRAIN_CORE') or Path(__file__).resolve().parent.parent)
@@ -146,8 +145,13 @@ class WakeConfirmation(Scenario):
         self.drain()
         # No host run timestamp is acknowledgement authority, even if newer.
         self.configure('status=active')
+        (self.r / '.brain/coordinator-runs.json').write_text(json.dumps({
+            'version': 1, 'observed_at': self.inst.now_dt().isoformat(),
+            'runs': [{'node': 'app', 'thread': 'fixture-current', 'run': 'fixture-unrelated-manual-run',
+                      'status': 'active', 'started_at': self.inst.now_dt().isoformat(), 'queued_wakes': []}]}))
         self.now += 121
         self.drain().assert_not_called()
+        self.due('app', 'fixture-unrelated')
         self.assertTrue(pending.exists())
         self.assertIn('UNKNOWN', self.m.wake_turn_stuck(self.inst, self.n))
 
@@ -427,3 +431,59 @@ class WakeConfirmation(Scenario):
             with self.assertRaises(SystemExit) as result:
                 self.m.cmd_wake(args)
         self.assertNotEqual(result.exception.code, 0)
+
+    def test_child_disabled_after_acceptance_does_not_hold_root_forever(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
+        self.configure('coordinator=', 'wake=')
+        root = self.inst.node('root')
+        self.m.request_wake(self.inst, self.n, 'fixture-child', items=[{'id': 'c' * 64, 'kind': 'inbox'}], explicit=True)
+        directory = self.m.wake_directory(self.inst, root)
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, root, once=True)
+            send.assert_called_once()
+        child_paths = list(directory.glob('*.pending'))
+        self.configure('wake_enabled=off')
+        self.due('root', 'fixture-root')
+        self.assertTrue(all(p.exists() and not p.with_suffix('.sent').exists() for p in child_paths))
+        root = self.inst.node('root')
+        self.m.request_wake(self.inst, root, 'fixture-independent', items=[{'id': 'e' * 64, 'kind': 'inbox'}], explicit=True)
+        self.now += 121
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, root, once=True)
+            send.assert_called_once()
+        self.assertEqual(self.m.wake_history(directory)[-1]['items'], [{'id': 'e' * 64, 'kind': 'inbox'}])
+        self.assertTrue(all(p.exists() for p in child_paths))
+
+    def test_old_selected_session_cannot_acknowledge_a_replacement_coordinator(self):
+        self.configure('coordinator_sessions=fixture-old-session')
+        self.configure('coordinator=fixture-next', 'wake=fixture-next-send')
+        pending = self.enqueue()
+        self.drain()
+        self.due('app', 'fixture-old-session')
+        self.assertTrue(pending.exists())
+        self.configure('coordinator_sessions=fixture-next-session')
+        self.due('app', 'fixture-next-session')
+        self.assertFalse(pending.exists())
+
+    def test_consumption_between_terminal_revalidation_and_peer_read_does_not_duplicate(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
+        self.refresh()
+        root = self.inst.node('root')
+        ref = {'id': 'f' * 64, 'kind': 'machine-exited'}
+        self.m.request_wake(self.inst, self.n, 'fixture-owner', items=[ref], explicit=True)
+        self.drain()
+        self.m.request_wake(self.inst, root, 'fixture-root', items=[ref], explicit=True)
+        original = self.m.wake_terminal_claims
+        reads = []
+        def claims(inst, node):
+            reads.append(True)
+            if len(reads) == 1:
+                return set(), False  # first observation precedes the peer reservation
+            self.assertIsNotNone(self.m.wake_turn_consume(self.inst, self.n))
+            return original(inst, node)
+        with mock.patch.object(self.m, 'wake_terminal_claims', side_effect=claims), \
+                mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, root, once=True)
+            send.assert_not_called()
+        self.assertGreaterEqual(len(reads), 2)
+        self.assertTrue(self.m.wake_terminal_delivered(self.inst, ref['id']))

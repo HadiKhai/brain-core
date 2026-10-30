@@ -634,6 +634,7 @@ class UnifiedHandbacks(Scenario):
         module = core_loader.SourceFileLoader("brain_handback_episode", str(CORE / "bin/brain")).load_module()
         inst = module.Instance(r)
         calls = self.tmp / "calls"
+        inst.local_of("root")["coordinator"] = "fixture-root"
         inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
         inst.save_local()
         args = argparse.Namespace(summary="Synthetic result", question="Synthetic choice?", id="a", branch="job", state="question", lessons="none: fixture",
@@ -656,6 +657,7 @@ class UnifiedHandbacks(Scenario):
         module = core_loader.SourceFileLoader("brain_blocked_episode", str(CORE / "bin/brain")).load_module()
         inst = module.Instance(r)
         calls = self.tmp / "calls"
+        inst.local_of("root")["coordinator"] = "fixture-root"
         inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
         inst.save_local()
         args = argparse.Namespace(summary="Synthetic result", id="a", branch="job", state="blocked", lessons="none: fixture",

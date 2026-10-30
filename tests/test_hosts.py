@@ -406,7 +406,7 @@ if projection:
         import fcntl
         r = self.copy_brain(self.init("fixture"))
         self.b(r, "new", "other", "--title", "Other")
-        self.b(r, "set", "root", "wake=exit 0")
+        self.b(r, "set", "root", "coordinator=fixture-root", "wake=exit 0")
         directory = r / ".brain/wake/root"
         directory.mkdir(parents=True)
         key = "a" * 64
@@ -466,7 +466,7 @@ if projection:
     def test_request_does_not_wait_for_either_lock(self):
         import fcntl
         r = self.init("fixture")
-        self.b(r, "set", "root", "wake=exit 0")
+        self.b(r, "set", "root", "coordinator=fixture-root", "wake=exit 0")
         directory = r / ".brain/wake/root"
         directory.mkdir(parents=True)
         with (r / ".brain/lock").open("a+") as instance, (directory / "lock").open("a+") as node:
@@ -557,7 +557,7 @@ class QuestionWake(Scenario):
         self.assertTrue(json.loads(self.calls.read_text())['reason'])
         self.assertEqual(json.loads(self.calls.read_text())['event'], 'brain-wake')
         self.assertEqual(set(json.loads(self.calls.read_text())), {'event', 'reason'})
-        self.assertRegex(json.loads(self.calls.read_text())['reason'], r'^new request [0-9a-f]{64}$')
+        self.assertRegex(json.loads(self.calls.read_text())['reason'], r'^[0-9]+ new request\(s\)$')
         self.assertEqual(self.enqueue("first question"), 0)
         self.assertEqual(self.enqueue("second question"), 1)
         self.drain()
@@ -612,7 +612,9 @@ class QuestionWake(Scenario):
                 mock.patch.object(self.module, "wake_schedule") as schedule:
             self.module.wake_drain(self.inst, self.n)
             consume_fixture_wake(self.module, self.inst, self.n)
-        schedule.assert_called_once_with(self.inst, self.n)
+        schedule.assert_called_once()
+        self.assertEqual(schedule.call_args.args[0].root, self.inst.root)
+        self.assertEqual(schedule.call_args.args[1]['id'], self.n['id'])
         clock.sleep.assert_not_called()
         self.assertEqual(len(list(directory.glob("*.pending"))), 1)
         self.assertFalse(self.calls.exists())
@@ -630,7 +632,7 @@ class QuestionWake(Scenario):
             self.assertFalse(list(directory.glob("*.sent")))
 
     def test_fallback_and_routing_up(self):
-        self.b(self.r, "set", "root", "wake=" + self.command)
+        self.b(self.r, "set", "root", "coordinator=fixture-root", "wake=" + self.command)
         self.inst = self.module.Instance(self.r)
         root = self.inst.node("root")
         self.assertEqual(self.enqueue("root reason", root), 1)
@@ -640,7 +642,7 @@ class QuestionWake(Scenario):
         self.assertEqual(self.enqueue("child reason", self.inst.node("a")), 1)
         directory = self.module.wake_directory(self.inst, root)
         self.assertEqual(len(list(directory.glob("*.pending"))), 1)
-        self.b(self.r, "set", "root", "wake=", "wake_default=" + self.command)
+        self.b(self.r, "set", "root", "coordinator=fixture-root", "wake=", "wake_default=" + self.command)
         self.inst = self.module.Instance(self.r)
         self.assertEqual(self.module.wake_target(self.inst, root)[1], self.command)
         node_text = (self.r / "node.md").read_text() + (self.r / "nodes/a/node.md").read_text()
@@ -713,7 +715,7 @@ class QuestionWake(Scenario):
             payload = json.loads(calls[0][2])
             self.assertEqual(set(payload), {'event', 'reason'})
             self.assertEqual(payload['event'], 'brain-wake')
-            self.assertRegex(payload['reason'], r'^new request [0-9a-f]{64}$')
+            self.assertRegex(payload['reason'], r'^[0-9]+ new request\(s\)$')
 
     def test_refused_drain_stays_pending_and_due_reports_code_once(self):
         with self.webhook(403) as (url, calls):
@@ -904,7 +906,7 @@ class QuestionWake(Scenario):
 
     def test_pending_wake_follows_coordinator_removal_to_root(self):
         self.enqueue("routed later")
-        self.b(self.r, "set", "root", "wake=" + self.command)
+        self.b(self.r, "set", "root", "coordinator=fixture-root", "wake=" + self.command)
         self.b(self.r, "set", "a", "coordinator=")
         with mock.patch.object(self.module, "wake_start") as start:
             self.drain()
@@ -1076,7 +1078,7 @@ class QuestionWake(Scenario):
 
     def test_retarget_hands_off_reason_published_after_old_folder_scan(self):
         self.enqueue("first")
-        self.b(self.r, "set", "root", "wake=" + self.command)
+        self.b(self.r, "set", "root", "coordinator=fixture-root", "wake=" + self.command)
         self.b(self.r, "set", "a", "coordinator=")
         directory = self.module.wake_directory(self.inst, self.n)
         replace, injected = Path.replace, []
@@ -2386,11 +2388,9 @@ class WakeIdentityTypes(Scenario):
                         mock.patch.object(m, 'wake_snapshot', return_value=[]):
                     with mock.patch.object(m, 'wake_send', return_value=False):
                         m.wake_drain(inst, node, once=True)
-                        consume_fixture_wake(m, inst, node)
                     self.assertEqual(pending.read_text(), raw)
                     with mock.patch.object(m, 'wake_send', return_value=True) as send:
                         m.wake_drain(inst, node, once=True)
-                        consume_fixture_wake(m, inst, node)
                     self.assertEqual(send.call_count, 1)
                     self.assertTrue(pending.exists())
                     consume_fixture_wake(m, inst, node)

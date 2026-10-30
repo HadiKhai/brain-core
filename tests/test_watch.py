@@ -3078,7 +3078,7 @@ class WakeNoise(Scenario):
                 consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, expected)
 
-    def test_delivered_wake_reason_names_opaque_item_and_cause(self):
+    def test_delivered_wake_reason_uses_fixed_counts_only(self):
         (self.root / 'inbox.md').write_text('- confidential fixture decision\n')
         root = self.inst.node('root')
         with mock.patch.object(self.m, 'changes_due', return_value=[]), \
@@ -3089,8 +3089,8 @@ class WakeNoise(Scenario):
             consume_fixture_wake(self.m, self.inst, root)
             reason = send.call_args.kwargs['reason']
             item = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]['items'][0]
-            self.assertIn(item['id'], reason)
-            self.assertIn('new', reason)
+            self.assertNotIn(item['id'], reason)
+            self.assertEqual(reason, '1 request')
             self.assertNotIn('confidential', reason)
 
     def test_due_escalation_receipt_is_an_exact_rehearsal_write(self):
@@ -3154,7 +3154,7 @@ class WakeNoise(Scenario):
                 self.m.wake_drain(self.inst, root, once=True)
                 consume_fixture_wake(self.m, self.inst, root)
                 self.assertEqual(send.call_count, 2)
-                self.assertIn('escalation tier item ', send.call_args.kwargs['reason'])
+                self.assertEqual(send.call_args.kwargs['reason'], '1 overdue question')
                 inbox.write_text(inbox.read_text() + '- a genuinely new decision\n')
                 self.watch(kinds=EXPLICIT_DELIVERY_KINDS)
                 self.m.wake_drain(self.inst, root, once=True)
