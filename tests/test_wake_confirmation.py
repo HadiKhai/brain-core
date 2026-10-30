@@ -566,12 +566,13 @@ class WakeConfirmation(Scenario):
                 if not self.fired:
                     self.fired = True
                     fixture.enqueue(2)
+                    fixture.starts_at_flush = fixture.m.wake_start.call_count
                 return super().flush()
         self.m.wake_start.reset_mock()
         self.due('app', output=ArrivalOutput())
         self.assertFalse(first.exists())
         self.assertEqual(len(list(self.directory.glob('*.pending'))), 1)
-        self.assertEqual(self.m.wake_start.call_count, 2)  # arrival's held start, then post-consumption continuation
+        self.assertEqual(self.m.wake_start.call_count, self.starts_at_flush + 1)
 
     def test_missing_transport_is_a_distinct_configuration_result(self):
         self.configure('wake=')

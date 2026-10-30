@@ -942,10 +942,11 @@ def wake_drain(inst, n, once=False):
     directory = wake_directory(inst, n)
     if not directory.is_dir() or _m_common.outward_links(inst.root):
         return
-    if not wake_ready_pending(inst, n, sorted(directory.glob('*.pending')), split=None):
-        return
-    from . import tasks as _m_tasks
-    _m_tasks.provider_pull_on_wake(inst, n)
+    if wake_ready_pending(inst, n, sorted(directory.glob('*.pending')), split=None):
+        from . import tasks as _m_tasks
+        _m_tasks.provider_pull_on_wake(inst, n)
+    # Even with no ready send, take the destination lock below to retire copies
+    # already covered by durable consumption. Held work never triggers a sync.
     lock = directory / "lock"
     _m_common.safe_target(lock)
     attempted, owned = set(), False
