@@ -727,8 +727,46 @@ def machine_terminal(inst, token, error=None, result=0):
         print('machine care: terminal wake pending; notice scan will retry', file=sys.stderr)
 
 
+def machine_job_owner(inst, node, job=None, cwd=None):
+    """Capture a ledger attempt, never treat a command label as job ownership."""
+    from . import jobs
+    try:
+        n = inst.node(node)
+        if cwd is not None or job is None:
+            path = Path(cwd or os.getcwd()).resolve()
+            matches = [branch for branch, w in n['local'].get('worktrees', {}).items()
+                       if w.get('path') and (Path(w['path']).resolve() == path or
+                                             Path(w['path']).resolve() in path.parents)]
+            if len(matches) != 1:
+                return {}
+            job = matches[0]
+        row = jobs.open_job(jobs.read_jobs(n) or [], job)
+        key = jobs.job_key(row) if row else None
+        return {'owner_job': key, 'owner_worker': n['local'].get('workers', {}).get(key)}
+    except (Exception, SystemExit):
+        return {}  # unknown ownership must retain the ordinary wake
+
+
+def machine_job_reader_live(inst, row):
+    """Only fresh bound worker evidence can replace a terminal coordinator wake."""
+    from . import jobs, spend
+    if not row.get('owner_job'):
+        return False
+    try:
+        fresh = _m_instance.Instance(inst.root)
+        n = fresh.node(row['node'])
+        if (not row.get('owner_worker') or
+                n['local'].get('workers', {}).get(row['owner_job']) != row['owner_worker']):
+            return False
+        job = next((r for r in jobs.read_jobs(n) or [] if jobs.job_key(r) == row['owner_job']), None)
+        return bool(job and not job['Ended'] and not jobs.job_signal(fresh, n, job, strict=True)
+                    and (n['id'], row['owner_job']) in spend.live_threads(fresh))
+    except (Exception, SystemExit):
+        return False  # unavailable liveness is a reason to wake, never to suppress
+
+
 @contextlib.contextmanager
-def machine_run(kind, inst, node, job=None, clock=None, close_success=True, release=True):
+def machine_run(kind, inst, node, job=None, clock=None, close_success=True, release=True, cwd=None):
     """Own admission through cleanup; all unsuccessful exits share one finalizer."""
     clock = clock or time
     token = MachineRun(clock)
@@ -737,6 +775,7 @@ def machine_run(kind, inst, node, job=None, clock=None, close_success=True, rele
                clears_when='admission checks complete', managed=True)
     if inst is not None and node is not None:
         row['scope'] = machine_scope(inst, node)
+        row.update(machine_job_owner(inst, node, job, cwd))
     with machine_signals():
         try:
             row['owner'][1] = process_stamp(os.getpid()) or 'unknown'
@@ -888,6 +927,11 @@ def machine_wait_notices(inst, now=None):
                     if created and event in ('exited', 'completed'):
                         _m_common.touch(n['dir'] / 'inbox.md')
                 except BlockingIOError:
+                    continue
+                if event in ('exited', 'completed') and machine_job_reader_live(inst, row):
+                    # Delivery to the live builder's inbox is the final receipt.
+                    # Its later completion must not turn this into a delayed wake.
+                    row['notified_' + event] = True
                     continue
                 # Enqueue is idempotent across an interrupted receipt publication.
                 reason = 'machine-wait:' + identity + (': ' + text if event in ('exited', 'completed') else '')
@@ -1756,7 +1800,7 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
     def stop(number, frame):
         stopped[0] = stopped[0] or number
     try:
-        with machine_run('verify', inst, node, label, release=False) as token:
+        with machine_run('verify', inst, node, label, release=False, cwd=cwd or os.getcwd()) as token:
             previous = {number: signal.signal(number, stop)
                         for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
             proc, control_read, control_write = None, None, None
@@ -1856,8 +1900,7 @@ def heavy_node_for_cwd(inst, cwd):
 def cmd_heavy_run(a):
     command = a.command[1:] if a.command[:1] == ['--'] else a.command
     inst = _m_nodes.load()
-    # A builder's verify run belongs to its own node, so its exit wakes that
-    # node's coordinator rather than root.
+    # A builder's verify run belongs to its own node, including its inbox report.
     node = inst.node(a.node or os.environ.get('BRAIN_GATE_NODE')
                      or heavy_node_for_cwd(inst, os.getcwd()) or 'root')
     try:

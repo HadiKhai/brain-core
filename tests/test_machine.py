@@ -2393,6 +2393,159 @@ class TerminalProducer(Scenario):
     def waits(self):
         return json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
 
+    def reader(self, status='running', ended=''):
+        n = self.inst.node('root')
+        job = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/fixture-reader',
+               'Started': '2026-01-01T00:00Z', 'Ended': ended}
+        self.m.write_jobs(self.inst, n, [job])
+        key = self.m.job_key(job)
+        self.inst.local_of('root').update(
+            home_project='fixture-project', workers={key: 'fixture-worker'},
+            worktrees={job['Job']: {'path': str(self.root / 'checkout')}})
+        self.inst.save_local()
+        bindings = self.m.host_bindings(self.inst)
+        snapshot = {'version': 1, 'observed_at': self.inst.now_dt().isoformat(),
+                    'bindings': self.m.digest(bindings),
+                    'records': [{**b, 'status': status, 'run': 'fixture-run', 'pending': []}
+                                for b in bindings]}
+        path = self.root / '.brain/host-observations.json'
+        path.write_text(json.dumps(snapshot))
+        return job, key, path
+
+    def reader_exit(self, job, label=None):
+        # The label is presentation; cwd, including a child directory, owns the run.
+        with self.m.machine_run('verify', self.inst, 'root', label, clock=self.clock,
+                                cwd=self.root / 'checkout' / 'src') as token:
+            token.result = 7
+        self.assertEqual(self.waits()[token]['owner_job'], self.m.job_key(job))
+        return token
+
+    def test_live_reader_gets_exit_inbox_without_wake_or_late_replay(self):
+        job, key, path = self.reader()
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            token = self.reader_exit(job, label='fixture command label')
+            row = self.waits()[token]
+            self.assertTrue(row['notified_exited'])
+            self.assertTrue(self.m.machine_wait_notice_line(
+                next(line for line in (self.root / 'inbox.md').read_text().splitlines()
+                     if 'machine-wait:' + token in line)))
+            path.unlink()  # losing the reader after receipt cannot request a late wake
+            self.m.machine_wait_notices(self.inst)
+            self.m.machine_wait_notices(self.inst)
+        wake.assert_not_called()
+        self.assertEqual((self.root / 'inbox.md').read_text().count('machine-wait:' + token), 1)
+
+    def test_heavy_command_captures_cwd_reader_independently_of_label(self):
+        job, key, _ = self.reader()
+        checkout = self.root / 'checkout'
+        checkout.mkdir()
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            code = self.m.machine_execute([sys.executable, '-c', 'raise SystemExit(7)'],
+                                          self.inst, 'root', 'fixture command label', cwd=checkout)
+        self.assertEqual(code, 7)
+        row, = self.waits().values()
+        self.assertEqual(row['owner_job'], key)
+        self.assertTrue(row['notified_exited'])
+        self.assertEqual((self.root / 'inbox.md').read_text().count('held step exited:'), 1)
+        wake.assert_not_called()
+
+    def test_terminal_or_unknown_reader_keeps_one_exit_wake(self):
+        for status in ('completed', 'failed', 'interrupted', 'cancelled', 'idle'):
+            with self.subTest(status=status):
+                job, _, _ = self.reader(status)
+                with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+                    token = self.reader_exit(job)
+                    self.m.machine_wait_notices(self.inst)
+                    self.m.machine_wait_notices(self.inst)
+                wake.assert_called_once()
+                self.assertEqual(wake.call_args.kwargs['items'][0]['kind'], 'machine-exited')
+                self.assertEqual((self.root / 'inbox.md').read_text().count('machine-wait:' + token), 1)
+
+    def test_finished_job_wakes_even_with_previously_live_worker(self):
+        job, _, _ = self.reader()
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            with self.m.machine_run('verify', self.inst, 'root', job['Job'], clock=self.clock) as token:
+                job['Ended'] = '2026-01-01T01:00Z'
+                self.m.write_jobs(self.inst, self.inst.node('root'), [job])
+                token.result = 7
+            self.m.machine_wait_notices(self.inst)
+        wake.assert_called_once()
+
+    def test_terminal_handback_wakes_even_with_live_worker_snapshot(self):
+        job, _, _ = self.reader()
+        path = self.m.handback_file(self.inst.node('root'), job)
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'job': job['Job'], 'started': job['Started'], 'state': 'done'}))
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            self.reader_exit(job)
+        wake.assert_called_once()
+
+    def test_missing_stale_or_unbound_reader_evidence_wakes(self):
+        for evidence in ('missing', 'stale', 'rebound', 'malformed'):
+            with self.subTest(evidence=evidence):
+                job, key, path = self.reader()
+                if evidence == 'missing':
+                    path.unlink()
+                elif evidence == 'rebound':
+                    self.inst.local_of('root')['workers'][key] = 'fixture-replacement'
+                    self.inst.save_local()
+                elif evidence == 'malformed':
+                    path.write_text('{')
+                else:
+                    value = json.loads(path.read_text())
+                    value['observed_at'] = '2020-01-01T00:00Z'
+                    path.write_text(json.dumps(value))
+                with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+                    self.reader_exit(job)
+                wake.assert_called_once()
+
+    def test_no_job_or_arbitrary_label_cannot_suppress_exit_wake(self):
+        job, _, _ = self.reader()
+        for label in (None, job['Job']):
+            with self.subTest(label=label), \
+                    mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+                with self.m.machine_run('verify', self.inst, 'root', label, clock=self.clock,
+                                        cwd=self.root / 'unregistered') as token:
+                    token.result = 7
+                self.assertIsNone(self.waits()[token].get('owner_job'))
+                self.m.machine_wait_notices(self.inst)
+            wake.assert_called_once()
+
+    def test_reader_liveness_error_keeps_exit_wake(self):
+        job, _, _ = self.reader()
+        with mock.patch.object(self.m, 'live_threads', side_effect=RuntimeError('fixture read error')), \
+                mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            self.reader_exit(job)
+        wake.assert_called_once()
+
+    def test_unknown_job_keeps_exit_wake(self):
+        job, _, _ = self.reader()
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            with self.m.machine_run('verify', self.inst, 'root', job['Job'], clock=self.clock) as token:
+                self.m.write_jobs(self.inst, self.inst.node('root'), [])
+                token.result = 7
+            self.m.machine_wait_notices(self.inst)
+        wake.assert_called_once()
+
+    def test_live_reader_exit_stays_visible_in_new_inbox_and_due(self):
+        self.clock.time = time.time
+        job, _, _ = self.reader()
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            token = self.reader_exit(job)
+        wake.assert_not_called()
+        n = self.inst.node('root')
+        self.assertTrue(any('machine-wait:' + token in i['text']
+                            for i in self.m.due_items(self.inst, n, include_stale=False)))
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_inbox(argparse.Namespace(id='root', json=True, new=True))
+        self.assertTrue(any('machine-wait:' + token in i['text'] for i in json.loads(output.getvalue())))
+        # Existing terminal-telemetry rules still expire the line after delivery.
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.cmd_inbox(argparse.Namespace(id='root', json=True, new=True))
+        self.assertFalse(any('machine-wait:' + token in i['text'] for i in json.loads(output.getvalue())))
+
     def test_success_returns_to_caller_without_coordinator_notice_or_replay(self):
         inbox = self.root / 'inbox.md'
         before = inbox.read_bytes()
