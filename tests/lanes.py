@@ -59,7 +59,7 @@ LANE_TESTS.update({
     'events': ('test_events.py', 'test_event_facts.py', 'test_event_review.py', 'test_delivery_metrics.py', 'test_event_records.py', 'test_managed_index.py', 'test_native_event_writes.py'),
     'introspection': ('test_advisories.py', 'test_introspection.py'),
     'tasks': ('test_tasks.py', 'test_task_dispatch.py'),
-    'hosts': ('test_hosts.py', 'test_launch_receipts.py', 'test_host_rpc.py', 'test_host_actions.py'),
+    'hosts': ('test_wake_confirmation.py', 'test_hosts.py', 'test_launch_receipts.py', 'test_host_rpc.py', 'test_host_actions.py'),
     'usage': ('test_usage.py', 'test_usage_cache.py', 'test_usage_rounds.py', 'test_model_fit.py'),
     'cli': ('test_cli.py', 'test_selftest_parallel.py'),
     'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py', 'test_train_automation.py', 'test_release.py', 'test_preview_upgrade.py', 'test_preview_stdio.py'),

@@ -1,0 +1,225 @@
+"""Mocked transport/consumption regressions; never contact a host or webhook."""
+import argparse
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+from unittest import mock
+
+import core_loader
+from scenario import Scenario
+
+CORE = Path(os.environ.get('BRAIN_CORE') or Path(__file__).resolve().parent.parent)
+
+
+class WakeConfirmation(Scenario):
+    fixture_templates = True
+    fixture_init_in_process = True
+
+    def setUp(self):
+        super().setUp()
+        environment = mock.patch.dict(os.environ, self.env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.m = core_loader.SourceFileLoader('wake_confirmed', str(CORE / 'bin/brain')).load_module()
+        self.r = self.init('fixture-owner')
+        self.b(self.r, 'new', 'app', '--title', 'Fixture app')
+        self.b(self.r, 'set', 'app', 'coordinator=fixture-current', 'wake=fixture-send')
+        self.refresh()
+        self.now = 1000000
+        clock = mock.Mock()
+        clock.time.side_effect = lambda: self.now
+        clock.monotonic.side_effect = lambda: self.now
+        for patch in (mock.patch.object(self.m, 'WAKE_CLOCK', clock),
+                      mock.patch.object(self.m, 'wake_start'),
+                      mock.patch.object(self.m, 'wake_schedule')):
+            patch.start()
+            self.addCleanup(patch.stop)
+        # Fail closed if any test accidentally reaches a real transport.
+        patch = mock.patch.object(self.m, 'wake_send', side_effect=AssertionError('unmocked transport'))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def refresh(self):
+        self.inst = self.m.Instance(self.r)
+        self.n = self.inst.node('app')
+        self.directory = self.m.wake_directory(self.inst, self.n)
+
+    def configure(self, *settings):
+        self.b(self.r, 'set', 'app', *settings)
+        self.refresh()
+
+    def enqueue(self, number=1):
+        self.assertTrue(self.m.request_wake(self.inst, self.n, 'fixture:' + str(number),
+                        items=[{'id': format(number, '064x'), 'kind': 'inbox'}], explicit=True))
+        return self.directory / (self.m.wake_request_key(self.inst, self.n, 'fixture:' + str(number)) + '.pending')
+
+    def drain(self, result=True):
+        with mock.patch.object(self.m, 'wake_send', return_value=result) as send:
+            self.m.wake_drain(self.inst, self.n, once=True)
+        return send
+
+    def test_known_noop_is_disabled_without_transport_or_acknowledgement(self):
+        for command in ('/usr/bin/true', '/bin/true', 'true', ':'):
+            with self.subTest(command=command):
+                self.configure('wake=' + command)
+                pending = self.enqueue()
+                send = self.drain()
+                send.assert_not_called()
+                self.assertTrue(pending.exists())
+                self.assertFalse(list(self.directory.glob('*.sent')))
+                self.assertFalse(list(self.directory.glob('shown-*.json')))
+                self.assertIn('disabled', self.m.wake_diagnostic(self.inst, self.n))
+
+    def test_disabled_route_keeps_new_requests_and_prevents_consumption_or_fallback(self):
+        pending = self.enqueue()
+        self.drain()
+        self.configure('wake_enabled=off')
+        later = self.enqueue(2)
+        self.now += 121
+        self.drain().assert_not_called()
+        self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n))
+        self.assertTrue(pending.exists())
+        self.assertTrue(later.exists())
+        self.assertIn('disabled', self.m.wake_diagnostic(self.inst, self.n))
+
+    def test_shell_exit_is_never_an_http_status(self):
+        pending = self.enqueue()
+        self.drain('shell exit 0')
+        record = json.loads((self.directory / 'delivery.json').read_text())
+        self.assertEqual(record['status'], 'shell exit 0')
+        self.assertTrue(pending.exists())
+        row = self.m.wake_history(self.directory)[-1]
+        self.assertEqual(row['transport_status'], 'shell exit 0')
+        self.assertNotIn('ack_binding', row)
+        self.assertEqual(row['start_state'], 'UNKNOWN')
+
+    def test_shell_legacy_synthetic_http_is_not_read_as_http_evidence(self):
+        self.m.wake_record(self.directory, 'fixture-send', 200)
+        self.assertIsNone(self.m.wake_read(self.directory, 'fixture-send'))
+
+    def test_real_shell_sender_returns_shell_outcome(self):
+        process = mock.Mock(returncode=0)
+        process.communicate.return_value = (None, None)
+        sender = core_loader.SourceFileLoader('wake_sender', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.object(sender._owners['wake_send'].subprocess, 'Popen', return_value=process):
+            self.assertEqual(sender.wake_send('fixture-send'), 'shell exit 0')
+
+    def test_http_acceptance_preserves_pending_until_consumption(self):
+        self.configure('wake=https://wake.invalid/fixture')
+        pending = self.enqueue()
+        self.drain(202)
+        self.assertTrue(pending.exists())
+        self.assertFalse(pending.with_suffix('.sent').exists())
+        self.assertFalse(self.m.wake_shown_evidence(self.inst, self.n)[0])
+        self.assertEqual(json.loads((self.directory / 'delivery.json').read_text())['status'], 202)
+        receipt = self.m.wake_turn_consume(self.inst, self.n)
+        self.assertIsNotNone(receipt)
+        self.assertFalse(pending.exists())
+        self.assertEqual(pending.with_suffix('.sent').read_text(), 'consumed\n')
+
+    def test_no_run_stalls_at_120_seconds_without_blind_retry(self):
+        pending = self.enqueue()
+        self.drain()
+        self.now += 119
+        self.assertIsNone(self.m.wake_turn_stuck(self.inst, self.n))
+        self.now += 1
+        notice = self.m.wake_turn_stuck(self.inst, self.n)
+        self.assertIn('UNKNOWN', notice)
+        self.assertIn('120 seconds', notice)
+        token = json.loads((self.directory / 'turn.json').read_text())['token']
+        for _ in range(3):
+            self.drain().assert_not_called()
+            self.assertEqual(self.m.wake_turn_stuck(self.inst, self.n), notice)
+        self.assertTrue(pending.exists())
+        self.assertEqual(json.loads((self.directory / 'turn.json').read_text())['token'], token)
+
+    def test_unrelated_manual_run_does_not_acknowledge_or_rearm(self):
+        pending = self.enqueue()
+        self.drain()
+        # No host run timestamp is acknowledgement authority, even if newer.
+        self.configure('status=active')
+        self.now += 121
+        self.drain().assert_not_called()
+        self.assertTrue(pending.exists())
+        self.assertIn('UNKNOWN', self.m.wake_turn_stuck(self.inst, self.n))
+
+    def test_busy_unknown_host_cannot_create_duplicate_on_later_request(self):
+        first = self.enqueue()
+        self.drain()
+        second = self.enqueue(2)
+        self.now += 121
+        self.drain().assert_not_called()
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+        self.assertEqual(len(self.m.wake_turn_consume(self.inst, self.n)['items']), 2)
+
+    def test_rotation_during_metadata_capture_never_sends_retired_binding(self):
+        pending = self.enqueue()
+        def rotate(*args):
+            self.configure('coordinator=fixture-next', 'wake=fixture-next-send')
+            return []
+        with mock.patch.object(self.m, 'wake_snapshot', side_effect=rotate):
+            self.drain().assert_not_called()
+        self.assertTrue(pending.exists())
+        self.assertFalse(list(self.directory.glob('*.sent')))
+
+    def test_old_receipt_does_not_confirm_replacement_binding(self):
+        pending = self.enqueue()
+        self.drain()
+        old = (self.directory / 'turn.json').read_bytes()
+        self.configure('coordinator=fixture-next', 'wake=fixture-next-send')
+        self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n))
+        self.now += 121
+        self.drain().assert_called_once()
+        self.assertTrue(pending.exists())
+        self.assertTrue(any(p.read_bytes() == old for p in self.directory.glob('turn-retired-*.json')))
+
+    def test_separate_consumed_rate_windows_keep_separate_history_episodes(self):
+        self.enqueue()
+        self.drain()
+        self.m.wake_turn_consume(self.inst, self.n)
+        self.now += 121
+        self.enqueue(2)
+        self.drain()
+        rows = self.m.wake_history(self.directory)
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]['episode'], rows[1]['episode'])
+        self.assertEqual([r['at'] for r in rows], [1000000, 1000121])
+
+    def test_failed_enqueue_does_not_become_recorded_progress(self):
+        with mock.patch.object(self.m, 'atomic_write', side_effect=OSError('fixture refusal')):
+            self.assertFalse(self.m.request_wake(self.inst, self.n, 'fixture:1', items=[
+                {'id': format(1, '064x'), 'kind': 'inbox'}], explicit=True))
+        self.assertFalse(self.m.wake_recorded(self.inst, self.n, 'fixture:1'))
+        self.assertFalse(list(self.directory.glob('*.sent')))
+
+    def test_disabled_notice_is_once_in_owner_and_root_due(self):
+        self.configure('wake=/usr/bin/true')
+        self.enqueue()
+        for node in ('app', 'root'):
+            with self.subTest(node=node), mock.patch.object(self.m, 'wake_start'):
+                out = io.StringIO()
+                args = argparse.Namespace(id=node, quiet=False, json=False, handled=False, machine=False)
+                with contextlib.redirect_stdout(out):
+                    self.m._due_tick(args, self.inst, [self.inst.node(node)])
+                self.assertEqual(out.getvalue().count('wake delivery explicitly disabled'), 1)
+
+    def test_stall_notice_is_once_in_owner_and_root_due(self):
+        self.enqueue()
+        self.drain()
+        self.now += 121
+        for node in ('app', 'root'):
+            with self.subTest(node=node), mock.patch.object(self.m, 'wake_start'):
+                out = io.StringIO()
+                args = argparse.Namespace(id=node, quiet=False, json=False, handled=False, machine=False)
+                with contextlib.redirect_stdout(out):
+                    self.m._due_tick(args, self.inst, [self.inst.node(node)])
+                self.assertEqual(out.getvalue().count('coordinator wake stalled'), 1)
+            # The owner's due consumes its receipt, so reserve another for the root view.
+            if node == 'app':
+                self.now += 121
+                self.enqueue(2)
+                self.drain()
+                self.now += 121
