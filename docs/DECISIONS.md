@@ -4365,7 +4365,9 @@ Supersedes D501's opt-in and legacy immediate-ack behavior. Every route reserves
 binding-fenced episode before transport. Real HTTP acceptance and shell success
 remain transport evidence only; pending reasons and shown/terminal acknowledgements
 remain untouched until an explicit due display by the bound coordinator (or its
-selected runtime session) flushes successfully. Aggregate due and unrelated callers
+selected runtime session) flushes successfully. The supplied native
+T3CODE_THREAD_ID is authoritative when present; provider runtime ids are distinct.
+Without native identity, selected session provenance must match the coordinator. Aggregate due and unrelated callers
 cannot acknowledge. Start state remains UNKNOWN; run timestamps are not correlation.
 
 Known shell no-ops and explicit off retain work without sending or fallback. Disabled

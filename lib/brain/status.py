@@ -1177,6 +1177,8 @@ def _due_tick(a, inst, nodes):
     wake_seen = set()
     for n in nodes:
         target, _ = _m_hosts.wake_target(inst, n)
+        if n['local'].get('wake_enabled') == 'off':
+            target = n
         diagnostic = _m_hosts.wake_diagnostic(inst, n)
         if diagnostic and target["id"] not in wake_seen:
             wake_seen.add(target["id"])
@@ -1192,6 +1194,8 @@ def _due_tick(a, inst, nodes):
             if n['archived']:
                 continue
             target, _ = _m_hosts.wake_target(inst, n)
+            if n['local'].get('wake_enabled') == 'off':
+                target = n
             if target['id'] in wake_seen:
                 continue
             text = _m_hosts.wake_diagnostic(inst, n)
@@ -1237,7 +1241,11 @@ def _due_tick(a, inst, nodes):
     sys.stdout.flush()
     for n, value in wake_views:
         if a.id == n['id']:
-            _m_wake_turns.wake_turn_consume(inst, n, shown=value)
+            acknowledged = _m_wake_turns.wake_turn_consume(inst, n, shown=value)
+            if acknowledged:
+                pending = sorted(_m_hosts.wake_directory(inst, n).glob('*.pending'))
+                if _m_hosts.wake_ready_pending(inst, n, pending, split=None):
+                    _m_hosts.wake_start(inst, n)
 
 
 @_m_command_reads.memo

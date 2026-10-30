@@ -626,7 +626,7 @@ class QuestionWake(Scenario):
             self.b(self.r, "set", "a", "wake=" + command)
             (directory / "last").unlink(missing_ok=True)
             start = time.monotonic()
-            self.drain()
+            self.module.wake_drain(self.inst, self.n, once=True)
             self.assertLess(time.monotonic() - start, 11)
             self.assertEqual(len(list(directory.glob("*.pending"))), 1)
             self.assertFalse(list(directory.glob("*.sent")))
@@ -1496,7 +1496,8 @@ class StopHook(Scenario):
         self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 2)
 
     def test_answered_question_can_be_asked_again_and_slow_wake_succeeds(self):
-        self.env["CODEX_THREAD_ID"] = "synthetic-thread"
+        self.env["T3CODE_THREAD_ID"] = "synthetic-thread"
+        self.env["CODEX_THREAD_ID"] = "fixture-provider-session"
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "Alpha")
         calls = self.tmp / "wake-calls"
@@ -1541,7 +1542,8 @@ class StopHook(Scenario):
         self.assertFalse(list(directory.glob("*.sent")))
 
     def test_captured_question_wakes_once_without_holding_stop(self):
-        self.env["CODEX_THREAD_ID"] = "synthetic-thread"
+        self.env["T3CODE_THREAD_ID"] = "synthetic-thread"
+        self.env["CODEX_THREAD_ID"] = "fixture-provider-session"
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "Alpha")
         calls = self.tmp / "wake-calls"
@@ -1790,7 +1792,8 @@ class WakeConsumption(Scenario):
         self.b(self.r, "set", "root", "coordinator=fixture-thread", "wake=fixture-send", "wake_coalesce=on")
         self.inst = self.m.Instance(self.r)
         self.n = self.inst.node("root")
-        os.environ["CODEX_THREAD_ID"] = "fixture-thread"
+        os.environ["T3CODE_THREAD_ID"] = "fixture-thread"
+        os.environ["CODEX_THREAD_ID"] = "fixture-provider-session"
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         self.now = 1000000
         self.clock = mock.Mock()

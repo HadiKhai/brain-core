@@ -234,8 +234,7 @@ def accept_rotation(inst, n, ticket, session_id, rpc=None):
                                 for task in observed.values()):
                     bound['local']['wake_verified_binding'] = wake_turns.wake_turn_binding(latest, bound)
                 sessions = bound['local'].setdefault('coordinator_sessions', [])
-                if session_id not in sessions:
-                    sessions.append(session_id)
+                sessions[:] = [value for value in sessions if value != session_id] + [session_id]
                 bound['local']['coordinator_session_binding'] = wake_turns.wake_turn_session_binding(bound)
                 latest.save_local()
                 state = _m_rotation.read_rotation(latest, bound)

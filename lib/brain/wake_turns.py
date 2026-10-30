@@ -42,6 +42,10 @@ def wake_turn_session_binding(n):
 
 def wake_turn_caller(inst, n):
     """Only the bound coordinator or its selected runtime session can consume."""
+    if 'T3CODE_THREAD_ID' in os.environ:
+        # T3's Claude SDK environment binds this host id independently of the
+        # provider runtime session. A foreign native id cannot fall back to one.
+        return bool(os.environ['T3CODE_THREAD_ID']) and os.environ['T3CODE_THREAD_ID'] == n['local'].get('coordinator')
     callers = {os.environ[key] for key in ('CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID') if os.environ.get(key)}
     sessions = n['local'].get('coordinator_sessions', [])
     allowed = {n['local'].get('coordinator')}
@@ -70,7 +74,7 @@ def wake_terminal_claims(inst, n):
     """Unreadable peers hold only terminal work, never independent questions."""
     claimed, unknown = set(), False
     for other in inst.nodes():
-        if other['id'] == n['id']:
+        if other['id'] == n['id'] or other['archived']:
             continue
         try:
             receipt = wake_turn_read(_m_hosts.wake_directory(inst, other) / 'turn.json',
@@ -214,11 +218,11 @@ def wake_turn_consume(inst, n, consume=True, shown=None, recover=False):
                 # A real coordinator can reconstruct a display receipt from the
                 # retained queue. This never sends or acknowledges anything.
                 pending = _m_hosts.wake_ready_pending(inst, n, sorted(directory.glob('*.pending')), split=False)
-                if not pending:
-                    return None
                 retired = path.with_name('turn-retired-' + os.urandom(8).hex() + '.json')
                 _m_common.safe_target(retired)
                 path.replace(retired)
+                if not pending:
+                    return None
                 opaque, known = wake_turn_pending_summary(pending)
                 value = {'version': 1, 'binding': wake_turn_binding(inst, n), 'token': os.urandom(16).hex(),
                          'sent': False, 'consumed': False, 'reminded': False, 'at': _m_hosts.WAKE_CLOCK.time(),
@@ -281,7 +285,9 @@ def wake_turn_stuck(inst, n):
         if value and not value['consumed'] and _m_hosts.WAKE_CLOCK.time() - value['at'] >= 120:
             return ('coordinator wake stalled: ' + ('transport accepted' if value['sent'] else 'transport outcome unknown') +
                     ', unconsumed for 120 seconds; '
-                    'start state UNKNOWN; inspect coordinator activity; automatic retry unavailable')
+                    'start state UNKNOWN; inspect coordinator activity; automatic retry unavailable; '
+                    'run brain due ' + n['id'] + ' from its bound coordinator; without native host identity, '
+                    'bind the actual current runtime session with brain set ' + n['id'] + ' coordinator_sessions=<actual-session-id>')
     except (OSError, ValueError, KeyError, TypeError):
         return ('coordinator wake receipt unavailable; start state UNKNOWN; pending work retained; '
                 'bound coordinator: run brain due ' + n['id'] + ' to reconstruct its display receipt')

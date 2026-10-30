@@ -30,7 +30,10 @@ host task id available for reconciliation and writes no invented wake URL.
 
 Wake transport acceptance does not prove that a coordinator queued or started a
 run. Every route retains a binding-fenced consumption episode until `brain due`
-renders its captured reasons successfully. Shell success is recorded as a shell
+renders its captured reasons successfully from the matching T3 host thread
+(`T3CODE_THREAD_ID`, when the host supplies it), or a runtime session explicitly
+bound to that coordinator. Host and runtime ids are distinct. A foreign native
+thread cannot fall back to a matching runtime session. Shell success is recorded as a shell
 outcome, never as an HTTP status. Explicit `wake_enabled=off` and known shell
 no-ops retain pending reasons and show a disabled notice in the owner/root due
 views. Disabling a route never activates a fallback.
@@ -71,3 +74,9 @@ Supported triggers are `hourly`, `every N minutes`, `daily HH:MM` and
 host clock matches the intended schedule. The host executes the automated agent
 brief. Repeating unchanged setup reuses its binding; changed records and unknown
 legacy bindings require reconciliation rather than creating duplicate tasks.
+
+`brain wake` returns exit 2 for an unconfigured transport (configure before
+retrying), and nonzero on failed queue publication. Explicitly disabled configured
+routes still retain their reasons locally. Reasons arriving during a successful
+display get a continuation drain after consumption; held sources never trigger
+provider sync merely because a watcher revisits them.

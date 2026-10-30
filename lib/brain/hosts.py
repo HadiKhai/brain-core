@@ -540,15 +540,16 @@ def wake_ready_pending(inst, n, pending, split=True):
             held = [i for i in refs if i['kind'] in WAKE_TERMINAL_KINDS and (unknown or i['id'] in ids)]
             allowed = [i for i in refs if i not in held]
             if held:
-                if not allowed or not split:
+                if not allowed or split is False:
                     continue
                 # Publish the retained portion first. A crash can duplicate local
                 # queue bytes, but cannot lose a terminal identity or send it twice.
-                key = wake_binding(path.stem + json.dumps(wake_log_refs(held), sort_keys=True))
-                retained = path.with_name(key + '.pending')
-                _m_common.safe_target(retained)
-                _m_common.atomic_write(retained, json.dumps({**metadata, 'items': held}) + '\n', private=True)
-                _m_common.atomic_write(path, json.dumps({**metadata, 'items': allowed}) + '\n', private=True)
+                if split is True:
+                    key = wake_binding(path.stem + json.dumps(wake_log_refs(held), sort_keys=True))
+                    retained = path.with_name(key + '.pending')
+                    _m_common.safe_target(retained)
+                    _m_common.atomic_write(retained, json.dumps({**metadata, 'items': held}) + '\n', private=True)
+                    _m_common.atomic_write(path, json.dumps({**metadata, 'items': allowed}) + '\n', private=True)
         ready.append(path)
     return ready
 
@@ -938,11 +939,13 @@ def wake_drain(inst, n, once=False):
         return  # retain capabilities, errors and queued work; explicit off never activates a fallback
     if _m_wake_turns.wake_turn_outstanding(inst, n):
         return  # no provider sync or revalidation scan for accepted/unknown episodes
-    from . import tasks as _m_tasks
-    _m_tasks.provider_pull_on_wake(inst, n)
     directory = wake_directory(inst, n)
     if not directory.is_dir() or _m_common.outward_links(inst.root):
         return
+    if not wake_ready_pending(inst, n, sorted(directory.glob('*.pending')), split=None):
+        return
+    from . import tasks as _m_tasks
+    _m_tasks.provider_pull_on_wake(inst, n)
     lock = directory / "lock"
     _m_common.safe_target(lock)
     attempted, owned = set(), False
@@ -1121,6 +1124,9 @@ def cmd_wake(a):
     elif a.retry:
         wake_retry(inst, n)
     elif a.reason is not None:
+        if not wake_configured_route(inst, n)[1]:
+            print('wake unavailable: no transport configured; no request queued; configure before retrying', file=sys.stderr)
+            sys.exit(2)
         if not request_wake(inst, n, a.reason):
             _m_common.die('wake request not queued; source work remains retryable')
     else:

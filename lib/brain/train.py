@@ -393,7 +393,7 @@ def cmd_land(a):
 
 def train_configuration(n):
     """Keep execution inputs while excluding thread routing from publication proof."""
-    routing = {'workers', 'coordinator', 'coordinator_sessions'}
+    routing = {'workers', 'coordinator', 'coordinator_sessions', 'coordinator_session_binding', 'wake_verified_binding'}
     return _m_jobs.digest([str(n['home_path']),
                           {k: v for k, v in n['fm'].items() if k not in routing},
                           {k: v for k, v in n['local'].items() if k not in routing}])

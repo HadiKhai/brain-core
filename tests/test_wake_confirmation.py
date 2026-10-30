@@ -30,7 +30,8 @@ class WakeConfirmation(Scenario):
         self.b(self.r, 'new', 'app', '--title', 'Fixture app')
         self.b(self.r, 'set', 'app', 'coordinator=fixture-current', 'wake=fixture-send')
         self.refresh()
-        os.environ['CODEX_THREAD_ID'] = 'fixture-current'
+        os.environ['T3CODE_THREAD_ID'] = 'fixture-current'
+        os.environ['CODEX_THREAD_ID'] = 'fixture-provider-session'
         os.environ.pop('CLAUDE_CODE_SESSION_ID', None)
         self.now = 1000000
         clock = mock.Mock()
@@ -303,12 +304,14 @@ class WakeConfirmation(Scenario):
             self.m._due_tick(args, self.inst, [self.inst.node('root')])
         self.assertEqual(out.getvalue().count('wake delivery explicitly disabled'), 1)
 
-    def due(self, node, caller='fixture-current', output=None):
+    def due(self, node, caller='fixture-current', output=None, host=True):
         args = argparse.Namespace(id=node, quiet=False, json=False, handled=False, machine=False)
         out = output or io.StringIO()
         with mock.patch.object(self.m, 'load', return_value=self.inst), \
-                mock.patch.dict(os.environ, {'CODEX_THREAD_ID': caller, 'CLAUDE_CODE_SESSION_ID': ''}), \
+                mock.patch.dict(os.environ, {'T3CODE_THREAD_ID': caller, 'CODEX_THREAD_ID': 'fixture-provider-session' if host else caller, 'CLAUDE_CODE_SESSION_ID': ''}), \
                 contextlib.redirect_stdout(out):
+            if not host:
+                os.environ.pop('T3CODE_THREAD_ID', None)
             self.m.cmd_due(args)
         return out
 
@@ -386,7 +389,7 @@ class WakeConfirmation(Scenario):
             self.m.wake_drain(self.inst, root, once=True)
             send.assert_not_called()
         self.assertTrue(list(directory.glob('*.pending')))
-        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'fixture-root', 'CLAUDE_CODE_SESSION_ID': ''}):
+        with mock.patch.dict(os.environ, {'T3CODE_THREAD_ID': 'fixture-root', 'CODEX_THREAD_ID': 'fixture-provider-session', 'CLAUDE_CODE_SESSION_ID': ''}):
             self.assertIsNone(self.m.wake_turn_consume(self.inst, root))
         self.assertTrue(list(directory.glob('*.pending')))
 
@@ -459,10 +462,10 @@ class WakeConfirmation(Scenario):
         self.configure('coordinator=fixture-next', 'wake=fixture-next-send')
         pending = self.enqueue()
         self.drain()
-        self.due('app', 'fixture-old-session')
+        self.due('app', 'fixture-old-session', host=False)
         self.assertTrue(pending.exists())
         self.configure('coordinator_sessions=fixture-next-session')
-        self.due('app', 'fixture-next-session')
+        self.due('app', 'fixture-next-session', host=False)
         self.assertFalse(pending.exists())
 
     def test_consumption_between_terminal_revalidation_and_peer_read_does_not_duplicate(self):
@@ -479,7 +482,8 @@ class WakeConfirmation(Scenario):
             reads.append(True)
             if len(reads) == 1:
                 return set(), False  # first observation precedes the peer reservation
-            self.assertIsNotNone(self.m.wake_turn_consume(self.inst, self.n))
+            with mock.patch.object(self.m, 'wake_terminal_claims', side_effect=original):
+                self.assertIsNotNone(self.m.wake_turn_consume(self.inst, self.n))
             return original(inst, node)
         with mock.patch.object(self.m, 'wake_terminal_claims', side_effect=claims), \
                 mock.patch.object(self.m, 'wake_send', return_value=True) as send:
@@ -487,3 +491,100 @@ class WakeConfirmation(Scenario):
             send.assert_not_called()
         self.assertGreaterEqual(len(reads), 2)
         self.assertTrue(self.m.wake_terminal_delivered(self.inst, ref['id']))
+
+    def test_native_host_identity_is_independent_of_runtime_and_legacy_session_state(self):
+        for number, recorded in enumerate((None, 'fixture-other-session', 'fixture-provider-session'), 1):
+            if recorded:
+                self.configure('coordinator_sessions=' + recorded)
+                self.inst.local_of('app').pop('coordinator_session_binding', None)
+                self.inst.save_local()
+                self.refresh()
+            pending = self.enqueue(number)
+            self.drain()
+            self.due('app')  # native host id matches; provider session deliberately differs
+            self.assertFalse(pending.exists())
+            self.now += 121
+
+    def test_foreign_native_host_cannot_fall_back_to_a_matching_runtime_session(self):
+        self.configure('coordinator_sessions=fixture-provider-session')
+        pending = self.enqueue()
+        self.drain()
+        self.due('app', 'fixture-foreign-host')
+        self.assertTrue(pending.exists())
+        self.due('app')
+        self.assertFalse(pending.exists())
+
+    def test_session_binding_is_independent_of_settings_argument_order(self):
+        self.configure('coordinator_sessions=fixture-next-session', 'coordinator=fixture-next', 'wake=fixture-next-send')
+        pending = self.enqueue()
+        self.drain()
+        self.due('app', 'fixture-next-session', host=False)
+        self.assertFalse(pending.exists())
+
+    def test_empty_corrupt_receipt_is_quarantined_by_bound_due(self):
+        self.enqueue()
+        self.drain()
+        self.due('app')
+        path = self.directory / 'turn.json'
+        path.write_bytes(b'{fixture-empty-corrupt')
+        self.due('app')
+        self.assertFalse(path.exists())
+        self.assertTrue(any(p.read_bytes() == b'{fixture-empty-corrupt' for p in self.directory.glob('turn-retired-*.json')))
+        self.assertFalse(self.m.wake_terminal_claims(self.inst, self.inst.node('root'))[1])
+
+    def test_archived_peer_receipt_does_not_hold_active_terminal_work(self):
+        with mock.patch.object(self.inst, 'nodes', return_value=[{'id': 'retired-fixture', 'archived': True}]), \
+                mock.patch.object(self.m, 'wake_turn_read', side_effect=AssertionError('archived peer read')):
+            self.assertEqual(self.m.wake_terminal_claims(self.inst, self.n), (set(), False))
+
+    def test_route_provenance_digests_do_not_change_train_execution_inputs(self):
+        before = self.m.train_configuration(self.n)
+        self.configure('coordinator_sessions=fixture-provider-session')
+        self.inst.local_of('app')['wake_verified_binding'] = 'e' * 64
+        self.inst.save_local()
+        self.refresh()
+        self.assertEqual(self.m.train_configuration(self.n), before)
+        self.configure('verify=fixture-changed-check')
+        self.assertNotEqual(self.m.train_configuration(self.n), before)
+
+    def test_held_disabled_source_does_not_pull_provider_on_each_pass(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
+        self.configure('coordinator=', 'wake=', 'wake_enabled=off')
+        self.m.request_wake(self.inst, self.n, 'fixture-held-source', items=[{'id': '9' * 64, 'kind': 'inbox'}], explicit=True)
+        with mock.patch.object(self.m, 'provider_pull_on_wake') as pull:
+            for _ in range(3):
+                self.m.wake_drain(self.inst, self.inst.node('root'), once=True)
+            pull.assert_not_called()
+
+    def test_arrival_during_flush_restarts_a_drain_after_consumption(self):
+        first = self.enqueue()
+        self.drain()
+        fixture = self
+        class ArrivalOutput(io.StringIO):
+            fired = False
+            def flush(self):
+                if not self.fired:
+                    self.fired = True
+                    fixture.enqueue(2)
+                return super().flush()
+        self.m.wake_start.reset_mock()
+        self.due('app', output=ArrivalOutput())
+        self.assertFalse(first.exists())
+        self.assertEqual(len(list(self.directory.glob('*.pending'))), 1)
+        self.assertEqual(self.m.wake_start.call_count, 2)  # arrival's held start, then post-consumption continuation
+
+    def test_missing_transport_is_a_distinct_configuration_result(self):
+        self.configure('wake=')
+        args = argparse.Namespace(id='app', drain=False, retry=False, reason='fixture')
+        with mock.patch.object(self.m, 'load', return_value=self.inst), contextlib.redirect_stderr(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as result:
+                self.m.cmd_wake(args)
+        self.assertEqual(result.exception.code, 2)
+        self.assertIn('configure before retrying', output.getvalue())
+
+    def test_disabled_inherited_source_notice_names_the_source(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
+        self.configure('coordinator=', 'wake=', 'wake_enabled=off')
+        out = self.due('root', 'fixture-root').getvalue()
+        self.assertIn('app: wake: wake delivery explicitly disabled', out)
+        self.assertNotIn('root: wake: wake delivery explicitly disabled', out)

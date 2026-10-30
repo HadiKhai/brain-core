@@ -533,8 +533,8 @@ def consume_fixture_wake(module, inst, node, required=False):
     except (OSError, ValueError, KeyError, TypeError):
         return None
     if receipt and not receipt['consumed']:
-        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': node['local'].get('coordinator', ''),
-                                         'CLAUDE_CODE_SESSION_ID': ''}):
+        with mock.patch.dict(os.environ, {'T3CODE_THREAD_ID': node['local'].get('coordinator', ''),
+                                         'CODEX_THREAD_ID': 'fixture-provider-session', 'CLAUDE_CODE_SESSION_ID': ''}):
             result = module.wake_turn_consume(inst, node, shown=receipt)
         if receipt['sent'] or required:
             assert result is not None, 'accepted fixture wake did not consume its receipt'

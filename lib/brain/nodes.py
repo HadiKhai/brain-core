@@ -569,6 +569,7 @@ def prepare_settings(inst, n, pairs, messages=None):
     _, body = _m_common.read_fm(n["dir"] / "node.md")
     fm = dict(n["fm"])
     messages = messages if messages is not None else []
+    selected_session = False
     for kv in pairs:
         if "=" not in kv:
             _m_common.die(f"expected key=value, got '{kv}'")
@@ -633,8 +634,7 @@ def prepare_settings(inst, n, pairs, messages=None):
             # The most recently selected occurrence is current, even when resuming
             # an earlier session. ':=' replaces history; an empty value clears it.
             inst.local_of(n["id"])["coordinator_sessions"] = list(reversed(dict.fromkeys(reversed(ids))))
-            from . import wake_turns
-            inst.local_of(n['id'])['coordinator_session_binding'] = wake_turns.wake_turn_session_binding(inst.node(n['id']))
+            selected_session = True
             fm.pop("coordinator_sessions", None)
             messages.append("  coordinator_sessions: this machine (.brain/local.json)")
         elif k == 'wake_enabled':
@@ -672,6 +672,9 @@ def prepare_settings(inst, n, pairs, messages=None):
                                              if fm["home"] == "external" else ""))
         else:
             fm[k] = v
+    if selected_session:
+        from . import wake_turns
+        inst.local_of(n['id'])['coordinator_session_binding'] = wake_turns.wake_turn_session_binding(inst.node(n['id']))
     return fm, body
 
 
