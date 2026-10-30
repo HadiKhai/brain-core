@@ -180,6 +180,8 @@ def provision_wake(inst, nid):
         if not isinstance(url, str) or not url.startswith('https://'):
             raise ValueError('enable T3 Connect remote access; host task retained without a wake URL')
         inst.local_of(nid)['wake'] = url
+        from . import wake_turns
+        inst.local_of(nid)['wake_verified_binding'] = wake_turns.wake_turn_binding(inst, inst.node(nid))
         inst.save_local()
     return sid
 

@@ -150,3 +150,29 @@ class RotationHost(Scenario):
             self.threads['child']['latestRunId'] = 'child-run'
             self.assertEqual(self.rotate()['state'], 'launched')
             self.assertEqual(registry['tasks']['registration']['parent_thread'], 'old')
+
+    def test_verified_rotation_reuses_webhook_without_stalling_next_wake(self):
+        import os
+        from scenario import consume_fixture_wake
+        self.inst.local_of('root')['wake'] = 'https://wake.invalid/fixture'
+        self.inst.save_local()
+        self.tasks[0]['webhookUrl'] = 'https://wake.invalid/fixture'
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('root')
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'WAKE_INTERVAL', 0), \
+                mock.patch.object(self.m, 'wake_send', return_value=202) as send:
+            self.assertTrue(self.m.request_wake(self.inst, self.n, 'fixture-old', items=[
+                {'id': '1' * 64, 'kind': 'inbox'}], explicit=True))
+            self.m.wake_drain(self.inst, self.n, once=True)
+            consume_fixture_wake(self.m, self.inst, self.n, required=True)
+            launch = self.rotate()
+            self.caller = 'new'
+            self.assertEqual(self.m.accept_rotation(self.inst, self.n, launch['ticket'], 'new-session', rpc=self.rpc)['state'], 'bound')
+            current = self.m.Instance(self.root)
+            node = current.node('root')
+            self.assertTrue(self.m.request_wake(current, node, 'fixture-new', items=[
+                {'id': '2' * 64, 'kind': 'inbox'}], explicit=True))
+            self.m.wake_drain(current, node, once=True)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual(current.local_of('root')['wake_verified_binding'], self.m.wake_turn_binding(current, node))

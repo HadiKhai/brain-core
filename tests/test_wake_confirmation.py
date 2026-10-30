@@ -10,6 +10,10 @@ from unittest import mock
 import core_loader
 from scenario import Scenario
 
+class UnmockedTransport(BaseException):
+    pass
+
+
 CORE = Path(os.environ.get('BRAIN_CORE') or Path(__file__).resolve().parent.parent)
 
 
@@ -27,6 +31,8 @@ class WakeConfirmation(Scenario):
         self.b(self.r, 'new', 'app', '--title', 'Fixture app')
         self.b(self.r, 'set', 'app', 'coordinator=fixture-current', 'wake=fixture-send')
         self.refresh()
+        os.environ['CODEX_THREAD_ID'] = 'fixture-current'
+        os.environ.pop('CLAUDE_CODE_SESSION_ID', None)
         self.now = 1000000
         clock = mock.Mock()
         clock.time.side_effect = lambda: self.now
@@ -37,7 +43,7 @@ class WakeConfirmation(Scenario):
             patch.start()
             self.addCleanup(patch.stop)
         # Fail closed if any test accidentally reaches a real transport.
-        patch = mock.patch.object(self.m, 'wake_send', side_effect=AssertionError('unmocked transport'))
+        patch = mock.patch.object(self.m, 'wake_send', side_effect=UnmockedTransport('unmocked transport'))
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -292,3 +298,132 @@ class WakeConfirmation(Scenario):
         with contextlib.redirect_stdout(out):
             self.m._due_tick(args, self.inst, [self.inst.node('root')])
         self.assertEqual(out.getvalue().count('wake delivery explicitly disabled'), 1)
+
+    def due(self, node, caller='fixture-current', output=None):
+        args = argparse.Namespace(id=node, quiet=False, json=False, handled=False, machine=False)
+        out = output or io.StringIO()
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.dict(os.environ, {'CODEX_THREAD_ID': caller, 'CLAUDE_CODE_SESSION_ID': ''}), \
+                contextlib.redirect_stdout(out):
+            self.m.cmd_due(args)
+        return out
+
+    def test_aggregate_and_foreign_due_never_acknowledge_coordinator_work(self):
+        pending = self.enqueue()
+        self.drain()
+        for node, caller in ((None, 'fixture-current'), ('app', 'fixture-unrelated'), ('app', '')):
+            self.due(node, caller)
+            self.assertTrue(pending.exists())
+            self.assertFalse(pending.with_suffix('.sent').exists())
+        self.due('app')
+        self.assertFalse(pending.exists())
+        self.assertEqual(pending.with_suffix('.sent').read_text(), 'consumed\n')
+
+    def test_due_output_failure_never_acknowledges(self):
+        class BrokenOutput(io.StringIO):
+            def flush(self):
+                raise OSError('fixture broken output')
+        pending = self.enqueue()
+        self.drain()
+        with self.assertRaises(OSError):
+            self.due('app', output=BrokenOutput())
+        self.assertTrue(pending.exists())
+        self.assertFalse(pending.with_suffix('.sent').exists())
+        self.due('app')
+        self.assertFalse(pending.exists())
+
+    def test_bound_due_reconstructs_damaged_receipt_without_resending(self):
+        pending = self.enqueue()
+        self.drain()
+        path = self.directory / 'turn.json'
+        path.write_bytes(b'{fixture-torn')
+        self.due('app', 'fixture-unrelated')
+        self.assertEqual(path.read_bytes(), b'{fixture-torn')
+        self.assertTrue(pending.exists())
+        self.due('app')
+        self.assertFalse(pending.exists())
+        self.assertTrue(any(p.read_bytes() == b'{fixture-torn' for p in self.directory.glob('turn-retired-*.json')))
+        self.drain().assert_not_called()
+
+    def test_definite_connection_failure_remains_retryable(self):
+        import urllib.error
+        sender = core_loader.SourceFileLoader('refused_sender', str(CORE / 'bin/brain')).load_module()
+        sender._owners['wake_send'].WakeNotStarted = self.m.WakeNotStarted
+        self.configure('wake=https://wake.invalid/fixture')
+        pending = self.enqueue()
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.URLError(ConnectionRefusedError('fixture refused'))
+        with mock.patch('urllib.request.build_opener', return_value=opener), \
+                mock.patch.object(self.m, 'wake_send', side_effect=sender.wake_send):
+            for _ in range(2):
+                self.m.wake_drain(self.inst, self.n, once=True)
+                self.now += 121
+        self.assertEqual(opener.open.call_count, 2)
+        self.assertTrue(pending.exists())
+        self.assertFalse((self.directory / 'turn.json').exists())
+
+    def test_pre_send_reason_failure_never_claims_an_unknown_send(self):
+        pending = self.enqueue()
+        with mock.patch.object(self.m, 'wake_reason_summary', side_effect=ValueError('fixture preflight')):
+            self.drain().assert_not_called()
+        self.assertTrue(pending.exists())
+        self.assertFalse((self.directory / 'turn.json').exists())
+        self.now += 121
+        self.drain().assert_called_once()
+
+    def test_disabled_child_cannot_leak_through_enabled_root(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
+        self.configure('coordinator=', 'wake=', 'wake_enabled=off')
+        root = self.inst.node('root')
+        self.assertTrue(self.m.request_wake(self.inst, self.n, 'fixture-child-off', items=[
+            {'id': 'e' * 64, 'kind': 'inbox'}], explicit=True))
+        directory = self.m.wake_directory(self.inst, root)
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, root, once=True)
+            send.assert_not_called()
+        self.assertTrue(list(directory.glob('*.pending')))
+        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'fixture-root', 'CLAUDE_CODE_SESSION_ID': ''}):
+            self.assertIsNone(self.m.wake_turn_consume(self.inst, root))
+        self.assertTrue(list(directory.glob('*.pending')))
+
+    def test_peer_terminal_claim_never_holds_an_independent_question(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
+        self.refresh()
+        root = self.inst.node('root')
+        terminal = {'id': 'a' * 64, 'kind': 'machine-exited'}
+        question = {'id': 'b' * 64, 'kind': 'inbox'}
+        self.m.request_wake(self.inst, self.n, 'fixture-owner-terminal', items=[terminal], explicit=True)
+        self.drain().assert_called_once()
+        self.m.request_wake(self.inst, root, 'fixture-root-mixed', items=[terminal, question], explicit=True)
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, root, once=True)
+            send.assert_called_once()
+        row = self.m.wake_history(self.m.wake_directory(self.inst, root))[-1]
+        self.assertEqual(row['items'], [question])
+        self.assertFalse(self.m.wake_terminal_delivered(self.inst, terminal['id']))
+
+    def test_transport_has_fixed_counts_without_local_exit_reason(self):
+        terminal = {'id': 'd' * 64, 'kind': 'machine-exited'}
+        self.m.request_wake(self.inst, self.n, 'fixture-private', items=[terminal], explicit=True)
+        with mock.patch.object(self.m, 'machine_exit_notice', return_value='PRIVATE-FIXTURE-EXIT'):
+            send = self.drain()
+        self.assertEqual(send.call_args.kwargs['reason'], '1 changed item')
+        self.assertNotIn('PRIVATE-FIXTURE-EXIT', (self.directory / 'history.json').read_text())
+
+    def test_outstanding_episode_prevents_provider_pull_and_revalidation(self):
+        self.enqueue()
+        self.drain()
+        self.now += 121
+        with mock.patch.object(self.m, 'provider_pull_on_wake') as pull, \
+                mock.patch.object(self.m, 'wake_actionable_pending') as scan:
+            self.drain().assert_not_called()
+            pull.assert_not_called()
+            scan.assert_not_called()
+
+    def test_wake_cli_reports_enqueue_failure(self):
+        args = argparse.Namespace(id='app', drain=False, retry=False, reason='fixture')
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                mock.patch.object(self.m, 'request_wake', return_value=False), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                self.m.cmd_wake(args)
+        self.assertNotEqual(result.exception.code, 0)

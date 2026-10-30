@@ -227,6 +227,12 @@ def accept_rotation(inst, n, ticket, session_id, rpc=None):
                     raise ValueError('coordinator changed before replacement binding')
                 _m_host_instances.set_owned_host_binding(latest, n['id'], 'coordinator',
                                                         bound['local'].get('coordinator'), new)
+                from . import wake_turns
+                bound = latest.node(n['id'])
+                wake = bound['local'].get('wake') or (bound['local'].get('wake_default') if n['id'] == 'root' else None)
+                if wake and any(task.get('webhookUrl') == wake and task.get('boundThreadId') == new
+                                for task in observed.values()):
+                    bound['local']['wake_verified_binding'] = wake_turns.wake_turn_binding(latest, bound)
                 sessions = bound['local'].setdefault('coordinator_sessions', [])
                 if session_id not in sessions:
                     sessions.append(session_id)

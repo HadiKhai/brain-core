@@ -390,7 +390,7 @@ if projection:
             self.assertEqual(json.loads(calls.read_text())['event'], 'brain-wake')
             self.assertEqual(set(json.loads(calls.read_text())), {'event', 'reason'})
             self.assertRegex(json.loads(calls.read_text())['reason'],
-                             r'^new request [0-9a-f]{64}(; new request [0-9a-f]{64})*$')
+                             r'^[0-9]+ new request\(s\)$')
             self.assertEqual(len(list(directory.glob("*.pending"))), 2)
             self.assertFalse(list(directory.glob("*.sent")))
             consume_fixture_wake(m, inst, inst.node("a"))
@@ -1494,6 +1494,7 @@ class StopHook(Scenario):
         self.assertEqual((d / "inbox.md").read_text().count("host-question:"), 2)
 
     def test_answered_question_can_be_asked_again_and_slow_wake_succeeds(self):
+        self.env["CODEX_THREAD_ID"] = "synthetic-thread"
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "Alpha")
         calls = self.tmp / "wake-calls"
@@ -1538,6 +1539,7 @@ class StopHook(Scenario):
         self.assertFalse(list(directory.glob("*.sent")))
 
     def test_captured_question_wakes_once_without_holding_stop(self):
+        self.env["CODEX_THREAD_ID"] = "synthetic-thread"
         r = self.init("alice")
         self.b(r, "new", "a", "--title", "Alpha")
         calls = self.tmp / "wake-calls"
@@ -1786,6 +1788,8 @@ class WakeConsumption(Scenario):
         self.b(self.r, "set", "root", "coordinator=fixture-thread", "wake=fixture-send", "wake_coalesce=on")
         self.inst = self.m.Instance(self.r)
         self.n = self.inst.node("root")
+        os.environ["CODEX_THREAD_ID"] = "fixture-thread"
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         self.now = 1000000
         self.clock = mock.Mock()
         self.clock.time.side_effect = lambda: self.now

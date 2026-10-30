@@ -7,6 +7,7 @@ import os
 import re
 
 from . import common as _m_common
+from . import instance as _m_instance
 
 _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 
@@ -31,6 +32,40 @@ def wake_turn_binding(inst, n):
 
 def wake_turn_enabled(n):
     return True  # consumption fencing is mandatory, including legacy routes
+
+
+def wake_turn_caller(n):
+    """Only the bound coordinator or its selected runtime session can consume."""
+    callers = {os.environ[key] for key in ('CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID') if os.environ.get(key)}
+    sessions = n['local'].get('coordinator_sessions', [])
+    allowed = {n['local'].get('coordinator')}
+    if isinstance(sessions, list) and sessions:
+        allowed.add(sessions[-1])
+    return bool(callers) and callers <= allowed
+
+
+def wake_turn_outstanding(inst, n):
+    try:
+        value = wake_turn_read(_m_hosts.wake_directory(inst, n) / 'turn.json', wake_turn_binding(inst, n))
+        return bool(value and not value['consumed'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def wake_terminal_claims(inst, n):
+    """Unreadable peers hold only terminal work, never independent questions."""
+    claimed, unknown = set(), False
+    for other in inst.nodes():
+        if other['id'] == n['id']:
+            continue
+        try:
+            receipt = wake_turn_read(_m_hosts.wake_directory(inst, other) / 'turn.json',
+                                     wake_turn_binding(inst, other))
+            if receipt and not receipt['consumed']:
+                claimed.update(i['id'] for i in receipt['items'] if i['kind'] in _m_hosts.WAKE_TERMINAL_KINDS)
+        except (OSError, ValueError, KeyError, TypeError):
+            unknown = True
+    return claimed, unknown
 
 
 def wake_turn_read(path, binding):
@@ -91,17 +126,6 @@ def wake_turn_prepare(inst, n, pending, refs):
         return 'hold', None
     directory = _m_hosts.wake_directory(inst, n)
     try:
-        # Terminal identities are instance-wide. Another route's episode owns
-        # its reasons until consumption, without certifying delivery.
-        terminal = {i['id'] for i in refs if i['kind'] in _m_hosts.WAKE_TERMINAL_KINDS}
-        if terminal:
-            for other in inst.nodes():
-                if other['id'] == n['id']:
-                    continue
-                receipt = wake_turn_read(_m_hosts.wake_directory(inst, other) / 'turn.json',
-                                         wake_turn_binding(inst, other))
-                if receipt and not receipt['consumed'] and terminal & {i['id'] for i in receipt['items']}:
-                    return 'hold', receipt['token']
         with wake_turn_lock(directory) as path:
             binding = wake_turn_binding(inst, n)
             value = wake_turn_read(path, binding)
@@ -109,7 +133,8 @@ def wake_turn_prepare(inst, n, pending, refs):
                 retired_value = json.loads(path.read_text())
                 command = _m_hosts.wake_configured_route(inst, n)[1]
                 if (command.startswith(('https://', 'http://')) and
-                        retired_value.get('route_binding') == _m_hosts.wake_binding(command)):
+                        retired_value.get('route_binding') == _m_hosts.wake_binding(command) and
+                        n['local'].get('wake_verified_binding') != binding):
                     return 'stale', None  # the same webhook may still target the retired coordinator
                 # A valid retired binding is not authority for this coordinator.
                 # Preserve its exact receipt before reserving the replacement.
@@ -153,14 +178,39 @@ def wake_turn_finish(inst, n, token, sent):
         pass  # successful transport is never repeated to repair bookkeeping
 
 
-def wake_turn_consume(inst, n, consume=True, shown=None):
+def wake_turn_consume(inst, n, consume=True, shown=None, recover=False):
     """Consume only this binding's captured reasons; later arrivals stay queued."""
     if _m_hosts.wake_route_disabled(inst, n):
         return None
+    if consume or recover:
+        fresh = _m_instance.Instance(inst.root)
+        current = fresh.node(n['id'])
+        if (not wake_turn_caller(current) or wake_turn_binding(fresh, current) != wake_turn_binding(inst, n)
+                or _m_hosts.wake_route_disabled(fresh, current)):
+            return None
+        inst, n = fresh, current
     directory = _m_hosts.wake_directory(inst, n)
     try:
         with wake_turn_lock(directory) as path:
-            value = wake_turn_read(path, wake_turn_binding(inst, n))
+            try:
+                value = wake_turn_read(path, wake_turn_binding(inst, n))
+            except (OSError, ValueError, KeyError, TypeError):
+                if not recover:
+                    raise
+                # A real coordinator can reconstruct a display receipt from the
+                # retained queue. This never sends or acknowledges anything.
+                pending = _m_hosts.wake_ready_pending(inst, n, sorted(directory.glob('*.pending')), split=False)
+                if not pending:
+                    return None
+                retired = path.with_name('turn-retired-' + os.urandom(8).hex() + '.json')
+                _m_common.safe_target(retired)
+                path.replace(retired)
+                opaque, known = wake_turn_pending_summary(pending)
+                value = {'version': 1, 'binding': wake_turn_binding(inst, n), 'token': os.urandom(16).hex(),
+                         'sent': False, 'consumed': False, 'reminded': False, 'at': _m_hosts.WAKE_CLOCK.time(),
+                         'items': _m_hosts.wake_delivery_items(inst, n, pending), 'paths': [p.name for p in pending],
+                         'opaque_paths': opaque, 'queue_known': known}
+                wake_turn_write(path, value)
             if not value or value['consumed']:
                 return None
             if shown is not None:
@@ -169,7 +219,20 @@ def wake_turn_consume(inst, n, consume=True, shown=None):
                 value = {**value, 'items': shown['items'], 'paths': shown['paths']}
             # A due command can arrive before a rate-limited drainer gathers a burst.
             # Capture only complete queue records owned by this exact binding.
-            for pending in ([] if shown is not None else directory.glob('*.pending')):
+            ready = _m_hosts.wake_ready_pending(inst, n, sorted(directory.glob('*.pending')), split=False)
+            ready_names = {p.name for p in ready}
+            blocked = [directory / name for name in value['paths'] if (directory / name).exists() and name not in ready_names]
+            blocked_ids = set()
+            for pending in blocked:
+                try:
+                    blocked_ids.update(i['id'] for i in _m_hosts.wake_pending_value(pending)[1])
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            value = {**value, 'paths': [name for name in value['paths'] if name not in {p.name for p in blocked}],
+                     'items': [i for i in value['items'] if i['id'] not in blocked_ids]}
+            if not value['paths']:
+                return None
+            for pending in ([] if shown is not None else ready):
                 try:
                     metadata, refs = _m_hosts.wake_pending_value(pending)
                     if metadata.get('binding') == value['binding']:
@@ -208,7 +271,8 @@ def wake_turn_stuck(inst, n):
                     ', unconsumed for 120 seconds; '
                     'start state UNKNOWN; inspect coordinator activity; automatic retry unavailable')
     except (OSError, ValueError, KeyError, TypeError):
-        return 'coordinator wake receipt unavailable; start state UNKNOWN; pending work retained'
+        return ('coordinator wake receipt unavailable; start state UNKNOWN; pending work retained; '
+                'bound coordinator: run brain due ' + n['id'] + ' to reconstruct its display receipt')
     return None
 
 

@@ -1149,7 +1149,8 @@ def _due_tick(a, inst, nodes):
     consumed, wake_views = [], []
     if not a.quiet:
         for n in nodes:
-            value = _m_wake_turns.wake_turn_consume(inst, n, consume=False)
+            value = _m_wake_turns.wake_turn_consume(inst, n, consume=False,
+                                                  recover=a.id == n['id'] and _m_wake_turns.wake_turn_caller(n))
             if value:
                 wake_views.append((n, value))
                 consumed.append({'node': n['id'], 'kind': 'wake-reasons',
@@ -1178,7 +1179,8 @@ def _due_tick(a, inst, nodes):
         diagnostic = _m_hosts.wake_diagnostic(inst, n)
         if diagnostic and target["id"] not in wake_seen:
             wake_seen.add(target["id"])
-            items.append({"node": target["id"], "kind": "wake", "text": diagnostic})
+            items.append({"node": target["id"], "kind": "wake", "text": diagnostic,
+                          'informational': _m_hosts.wake_disabled_notice(inst, n) is not None})
     if any(n['id'] == 'root' for n in nodes):
         from . import watch as _m_watch
         if _m_watch.watch_state_invalid(inst):
@@ -1194,7 +1196,8 @@ def _due_tick(a, inst, nodes):
             text = _m_hosts.wake_diagnostic(inst, n)
             if text:
                 wake_seen.add(target['id'])
-                items.append({'node': target['id'], 'kind': 'wake', 'text': text})
+                items.append({'node': target['id'], 'kind': 'wake', 'text': text,
+                              'informational': _m_hosts.wake_disabled_notice(inst, n) is not None})
     items += machine_due_items(inst, nodes, state, items)
     if not a.quiet and getattr(a, "machine", False):
         items = [i for i in items if i["kind"] != "machine"] + [
@@ -1232,7 +1235,8 @@ def _due_tick(a, inst, nodes):
     # A failed render/closed output never acknowledges reasons the coordinator did not see.
     sys.stdout.flush()
     for n, value in wake_views:
-        _m_wake_turns.wake_turn_consume(inst, n, shown=value)
+        if a.id == n['id']:
+            _m_wake_turns.wake_turn_consume(inst, n, shown=value)
 
 
 @_m_command_reads.memo

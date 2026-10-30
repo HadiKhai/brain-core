@@ -497,6 +497,50 @@ def wake_pending_value(path):
     return value, wake_item_refs(refs)
 
 
+def wake_pending_source_disabled(inst, path):
+    try:
+        value = json.loads(path.read_text())
+        source = value.get('source')
+        if source is None:
+            return False
+        origin = next((n for n in inst.nodes() if wake_binding(n['id']) == source), None)
+        return origin is None or origin['archived'] or wake_route_disabled(inst, origin)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False  # legacy opaque requests remain visible to their owner
+
+
+def wake_ready_pending(inst, n, pending, split=True):
+    """Hold disabled sources and peer-owned terminal refs, retaining independent work."""
+    claimed = None
+    ready = []
+    for path in pending:
+        if wake_pending_source_disabled(inst, path):
+            continue
+        try:
+            metadata, refs = wake_pending_value(path)
+        except (OSError, ValueError, KeyError, TypeError):
+            ready.append(path)
+            continue
+        if any(i['kind'] in WAKE_TERMINAL_KINDS for i in refs):
+            if claimed is None:
+                claimed = _m_wake_turns.wake_terminal_claims(inst, n)
+            ids, unknown = claimed
+            held = [i for i in refs if i['kind'] in WAKE_TERMINAL_KINDS and (unknown or i['id'] in ids)]
+            allowed = [i for i in refs if i not in held]
+            if held:
+                if not allowed or not split:
+                    continue
+                # Publish the retained portion first. A crash can duplicate local
+                # queue bytes, but cannot lose a terminal identity or send it twice.
+                key = wake_binding(path.stem + json.dumps(wake_log_refs(held), sort_keys=True))
+                retained = path.with_name(key + '.pending')
+                _m_common.safe_target(retained)
+                _m_common.atomic_write(retained, json.dumps({**metadata, 'items': held}) + '\n', private=True)
+                _m_common.atomic_write(path, json.dumps({**metadata, 'items': allowed}) + '\n', private=True)
+        ready.append(path)
+    return ready
+
+
 def wake_retire_due_pending(path, current):
     """A completed watcher scan can retire resolved due work before another enqueue."""
     try:
@@ -512,6 +556,8 @@ def wake_retire_due_pending(path, current):
 
 def wake_actionable_pending(inst, path, terminal_quarantine=False):
     """Retire identified old machine transitions without dropping unknown questions."""
+    if wake_pending_source_disabled(inst, path):
+        return False
     try:
         value, refs = wake_pending_value(path)
     except (OSError, ValueError, KeyError, TypeError):
@@ -626,7 +672,8 @@ def request_wake(inst, n, reason, items=None, explicit=False):
             if refs and not allowed:
                 return True
             refs = allowed
-            _m_common.atomic_write(pending, json.dumps({'items': refs, 'binding': _m_wake_turns.wake_turn_binding(inst, target),
+            _m_common.atomic_write(pending, json.dumps({'items': refs, 'source': wake_binding(n['id']),
+                              'binding': _m_wake_turns.wake_turn_binding(inst, target),
                               **({'explicit_kinds': True} if explicit else {})}) + '\n', private=True)
         if not disabled:
             wake_start(inst, target)
@@ -689,6 +736,15 @@ def wake_http_status(command, reason=None):
         code = error.code
         error.close()
         return code
+    except urllib.error.URLError as error:
+        import errno
+        import socket
+        reason = error.reason
+        if (isinstance(reason, (ConnectionRefusedError, socket.gaierror)) or
+                isinstance(reason, OSError) and reason.errno in
+                (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN, errno.EADDRNOTAVAIL)):
+            raise WakeNotStarted() from None
+        raise
 
 
 def wake_send(command, reason=None):
@@ -703,8 +759,11 @@ def wake_send(command, reason=None):
     if wake_noop(command):
         return False
     import signal
-    process = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        process = subprocess.Popen(command, shell=True, stdin=subprocess.PIPE,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        raise WakeNotStarted() from None
     try:
         process.communicate(payload, timeout=WAKE_TIMEOUT)
         return 'shell exit 0' if process.returncode == 0 else False
@@ -716,6 +775,10 @@ def wake_send(command, reason=None):
 
 class WakeRefused(Exception):
     pass
+
+
+class WakeNotStarted(Exception):
+    """Positive evidence that no transport request was sent."""
 
 
 def wake_binding(command):
@@ -857,8 +920,12 @@ def wake_drain(inst, n, once=False):
     Failed deliveries remain pending for the watcher's next start.
     """
     import fcntl
+    inst = _m_instance.Instance(inst.root)
+    n = inst.node(n['id'])
     if wake_route_disabled(inst, n):
         return  # retain capabilities, errors and queued work; explicit off never activates a fallback
+    if _m_wake_turns.wake_turn_outstanding(inst, n):
+        return  # no provider sync or revalidation scan for accepted/unknown episodes
     from . import tasks as _m_tasks
     _m_tasks.provider_pull_on_wake(inst, n)
     directory = wake_directory(inst, n)
@@ -889,6 +956,11 @@ def wake_drain(inst, n, once=False):
                         path.unlink(missing_ok=True)
                     else:
                         queued.append(path)
+                ready = wake_ready_pending(inst, n, queued)
+                attempted.update(path.name for path in queued if path not in ready)
+                queued = ready
+                if not queued:
+                    return
                 if not queued and not _m_wake_turns.wake_turn_stuck(inst, n):
                     return
                 # Check the window before any revalidation scan: a closed window
@@ -930,6 +1002,9 @@ def wake_drain(inst, n, once=False):
                         return
                     pending = [path for path in pending
                                if wake_actionable_pending(current, path, terminal_quarantine=True)]
+                    ready = wake_ready_pending(current, target, pending)
+                    attempted.update(path.name for path in pending if path not in ready)
+                    pending = ready
                     if not pending and not _m_wake_turns.wake_turn_stuck(current, target):
                         return
                     try:
@@ -966,13 +1041,20 @@ def wake_drain(inst, n, once=False):
                     except OSError:
                         pass  # comparison bookkeeping cannot suppress a question
                     try:
-                        reason = wake_delivery_reason(refs, pending, current)
+                        reason = wake_reason_summary(refs, pending)
+                    except Exception:
+                        _m_wake_turns.wake_turn_finish(current, target, turn_token, False)
+                        wake_record(directory, command, 'delivery failed')
+                        return
+                    try:
                         sent = wake_send(command, reason=reason)
                         status = (sent if type(sent) is int or isinstance(sent, str)
                                   else "transport accepted" if sent else
                                   "transport error" if sent is None else "delivery failed")
                     except WakeRefused as error:
                         sent, status = False, error.args[0]
+                    except WakeNotStarted:
+                        sent, status = False, 'transport error'
                     except Exception:
                         sent, status = None, "transport error"
                     _m_wake_turns.wake_turn_finish(current, target, turn_token, sent)
@@ -1027,7 +1109,8 @@ def cmd_wake(a):
     elif a.retry:
         wake_retry(inst, n)
     elif a.reason is not None:
-        request_wake(inst, n, a.reason)
+        if not request_wake(inst, n, a.reason):
+            _m_common.die('wake request not queued; source work remains retryable')
     else:
         _m_common.die('usage: brain wake <node> "<reason>"')
 

@@ -4357,3 +4357,29 @@ Dashboard inbox records may carry ISO timestamps with fractional seconds. The
 sender parser accepts that precision after the seconds field while retaining
 its anchored timestamp, inbox-kind check and bounded sender delimiter. Other
 record kinds continue to display their source rather than infer a sender from prose.
+
+
+## D40012: Wake acceptance requires coordinator consumption
+
+Supersedes D501's opt-in and legacy immediate-ack behavior. Every route reserves a
+binding-fenced episode before transport. Real HTTP acceptance and shell success
+remain transport evidence only; pending reasons and shown/terminal acknowledgements
+remain untouched until an explicit due display by the bound coordinator (or its
+selected runtime session) flushes successfully. Aggregate due and unrelated callers
+cannot acknowledge. Start state remains UNKNOWN; run timestamps are not correlation.
+
+Known shell no-ops and explicit off retain work without sending or fallback. Disabled
+notices are informational in due, including quiet views. Accepted or ambiguous sends
+never authorize a blind retry; definitely unsent failures remain retryable. A stable
+120-second stall appears in owner/root due. Automatic idempotent retry and remote
+schedule health need a verified host contract and remain outside this cut.
+
+A verified native schedule rebind records the new local wake binding; an unverified
+coordinator change cannot reuse an observed retired webhook. Corrupt receipts retain
+work and fail visibly. The bound coordinator's explicit due can quarantine corrupt
+bytes and reconstruct a display receipt from the retained queue without sending.
+Failed output or acknowledgement publication cannot authorize another transport.
+
+Bodies use fixed cause counts. Peer-owned terminal work and explicitly disabled
+sources remain held while independent questions can proceed. A same-binding
+outstanding episode is checked before provider sync and revalidation scans.
