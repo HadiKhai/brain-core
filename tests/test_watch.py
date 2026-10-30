@@ -3209,6 +3209,13 @@ class WakeVisibility(Scenario):
         self.inst.save_local()
         for nid in ('root', 'app', 'app/leaf'):
             (self.inst.node(nid)['dir'] / 'inbox.md').write_text('- Choose fixture ' + nid + '\n')
+        token = 'a' * 32
+        notice = ('- ' + self.inst.now_dt().isoformat() + ' from machine: held step exited: fixture failed; needs retry '
+                  '<!-- machine-wait:' + token + ':exited -->\n')
+        with (self.inst.node('app')['dir'] / 'inbox.md').open('a') as stream:
+            stream.write(notice)
+        with m.machine_hold_store(self.inst) as data:
+            data['quiet_waits'] = {token: 'app'}
         def key(i):
             text = i['text'].removeprefix('inbox: ')
             return i['node'], i['kind'], ' '.join(text.split())
@@ -3226,4 +3233,7 @@ class WakeVisibility(Scenario):
                                or x['id'].startswith(owner + '/')]
                     inbox, _ = m.inbox_items(self.inst, subtree, owner, readonly=True)
                     visible |= {key(i) for i in inbox if not i['reported']}
-                    self.assertEqual({key(i) for i in groups[owner]['items']}, visible)
+                    # Explicit inbox-only receipts remain visible to readers, outside the wake union.
+                    quiet = {i for i in visible if 'machine-wait:' + token in i[2]}
+                    self.assertEqual(bool(quiet), owner in ('root', 'app'))
+                    self.assertEqual({key(i) for i in groups[owner]['items']}, visible - quiet)

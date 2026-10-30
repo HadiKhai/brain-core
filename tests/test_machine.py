@@ -2527,6 +2527,55 @@ class TerminalProducer(Scenario):
             self.m.machine_wait_notices(self.inst)
         wake.assert_called_once()
 
+    def test_visible_watcher_honors_quiet_exit_receipt_and_unknown_owner_wakes(self):
+        self.clock.time = time.time
+        self.inst.local_of('root').update(wake_policy='visible', coordinator='fixture-coordinator',
+                                           wake='fixture-send', host_project='fixture-project')
+        for status in ('running', 'failed'):
+            with self.subTest(status=status):
+                job, _, _ = self.reader(status)
+                with mock.patch.object(self.m, 'request_wake', return_value=True) as wake, \
+                        mock.patch.object(self.m, 'wake_start'), mock.patch.object(self.m, 'watch_failures'):
+                    with self.assertRaisesRegex(OSError, 'fixture failed'):
+                        with self.m.machine_run('verify', self.inst, 'root', job['Job'], clock=self.clock) as token:
+                            raise OSError('fixture failed: needs retry')
+                    # Include request words to exercise the ordinary due route as well as rollup.
+                    with self.m.machine_hold_store(self.inst) as data:
+                        self.assertEqual(bool(data.get('quiet_waits', {}).get(token)), status == 'running')
+                    groups = self.m.watch_groups(self.inst)
+                    entries = [i for i in groups['root']['items'] if 'machine-wait:' + token in i['text']]
+                    self.assertEqual(bool(entries), status != 'running')
+                    self.m.watch_publish(self.inst, groups={
+                        'root': {**groups['root'], 'items': entries}})
+                self.assertEqual(bool(wake.call_count), status != 'running')
+
+    def test_quiet_exit_rows_retire_without_transport_receipts_or_replay(self):
+        job, _, _ = self.reader()
+        with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
+            token = self.reader_exit(job)
+            line = next(line for line in (self.root / 'inbox.md').read_text().splitlines()
+                        if 'machine-wait:' + token in line)
+            with self.m.machine_hold_store(self.inst) as data:
+                original = dict(data['waits'][token], updated_at=1)
+                data['waits'][token] = original
+                for i in range(1, 102):
+                    key = format(i, '032x')
+                    data['waits'][key] = {**original, 'token': key, 'updated_at': i + 1}
+                    data['quiet_waits'][key] = 'root'
+            extra = {**original, 'token': 'f' * 32, 'updated_at': 200,
+                     'state': 'completed', 'outcome': 'success', 'notified_completed': True}
+            self.m.machine_record_wait(self.inst, 'root', job['Job'], extra, 200)
+            self.assertEqual(len(self.waits()), 100)
+            self.assertNotIn(token, self.waits())
+            self.assertTrue(self.m.machine_wait_line_quiet(self.inst, 'root', line))
+            self.assertFalse(self.m.machine_wait_line_quiet(self.inst, 'other', line))
+            self.m.machine_record_wait(self.inst, 'root', job['Job'], original, 300)
+            self.m.machine_wait_notices(self.inst)
+            self.assertNotIn(token, self.waits())
+        wake.assert_not_called()
+        self.assertEqual((self.root / 'inbox.md').read_text().count('machine-wait:' + token), 1)
+        self.assertFalse(list((self.root / '.brain/wake').glob('terminal-*.sent')))
+
     def test_live_reader_exit_stays_visible_in_new_inbox_and_due(self):
         self.clock.time = time.time
         job, _, _ = self.reader()

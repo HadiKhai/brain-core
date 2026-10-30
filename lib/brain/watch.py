@@ -463,6 +463,8 @@ def watch_items(inst, n):
                                 include_ready=False, include_advice=visible and own) + _m_status.changes_due(inst, n)
     out = []
     for item in items:
+        if item['kind'] == 'inbox' and _m_machine.machine_wait_line_quiet(inst, n['id'], item['text']):
+            continue
         if (item['kind'] == 'machine' or item['kind'] == 'stale-status' and not visible) or (item['kind'] == 'inbox' and item.get('informational')):
             continue
         if item['kind'] == 'overdue-question':
@@ -890,7 +892,7 @@ def watch_groups(inst, nodes=None, episode_blocking=True, *, overdue_only=False)
 
 
 def watch_inbox_rollup(inst, group):
-    """Include every fresh printed inbox item without acknowledging the reporter.
+    """Include fresh printed inbox items, except receipted inbox-only exits.
 
     Reporter-scoped identities keep root's rollup independent of child delivery.
     Work already in the reporter's due queue retains its ordinary source episode.
@@ -904,6 +906,8 @@ def watch_inbox_rollup(inst, group):
     visible = {key(i) for i in group['items']}
     for item in items:
         if item['reported'] or item['kind'] in WATCH_PASSIVE_KINDS:
+            continue
+        if item['kind'] == 'inbox' and _m_machine.machine_wait_line_quiet(inst, item['node'], item['text']):
             continue
         n = inst.node(item['node'])
         text = item['text'].removeprefix('inbox: ') if item['kind'] == 'inbox' else item['text']

@@ -811,6 +811,8 @@ def machine_record_wait(inst, node, job, row, now):
     from . import hosts as _m_hosts
     with machine_hold_store(inst) as data:
         waits = data.setdefault('waits', {})
+        if row['token'] in data.get('retired_waits', []):
+            return
         previous = waits.get(row['token'], {})
         if previous.get('ended_at') is not None:
             return
@@ -821,8 +823,9 @@ def machine_record_wait(inst, node, job, row, now):
         closed = sorted((k for k, v in waits.items() if
                          ((v.get('outcome') == 'success' and v.get('notified_completed')) or
                           (v.get('notified_exited')
-                           and getattr(_m_hosts, 'wake_terminal_delivered', lambda *_: False)(inst, hashlib.sha256(
-                               (k + (':completed' if v.get('outcome') == 'success' else ':exited')).encode()).hexdigest())) or
+                           and (data.get('quiet_waits', {}).get(k) == v['node'] or
+                                getattr(_m_hosts, 'wake_terminal_delivered', lambda *_: False)(inst, hashlib.sha256(
+                                    (k + (':completed' if v.get('outcome') == 'success' else ':exited')).encode()).hexdigest()))) or
                           (not v.get('managed') and v['state'] == 'running' and
                            (v.get('resumed_at') is None or v.get('notified_resumed'))))),
                         key=lambda k: waits[k]['updated_at'])
@@ -931,6 +934,7 @@ def machine_wait_notices(inst, now=None):
                 if event in ('exited', 'completed') and machine_job_reader_live(inst, row):
                     # Delivery to the live builder's inbox is the final receipt.
                     # Its later completion must not turn this into a delayed wake.
+                    data.setdefault('quiet_waits', {})[token] = row['node']
                     row['notified_' + event] = True
                     continue
                 # Enqueue is idempotent across an interrupted receipt publication.
@@ -992,6 +996,22 @@ def machine_wait_line_retired(inst, line):
                 bool(row and (row.get('state') == 'running' or row.get('closed_at') is not None)))
     except (OSError, ValueError, TypeError, AttributeError):
         return False
+
+
+def machine_wait_line_quiet(inst, node, line):
+    """A private inbox-only receipt silences watcher routes, never inbox views."""
+    line = '- ' + line.removeprefix('inbox: ').removeprefix('- ')
+    if not machine_wait_notice_line(line):
+        return False
+    match = re.search(r'<!-- machine-wait:([0-9a-f]{32}):exited -->', line)
+    if not match:
+        return False
+    try:
+        path = inst.root / '.brain/wake/machine-holds.json'
+        _m_common.safe_target(path)
+        return machine_hold_read(path).get('quiet_waits', {}).get(match[1]) == node
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False  # unknown receipt cannot suppress a wake
 
 
 def machine_wait_items(inst, nodes, state, now=None):
@@ -1385,6 +1405,11 @@ def machine_hold_read(path):
     if (not isinstance(retired, list) or any(not isinstance(token, str) or
             not re.fullmatch(r'[0-9a-f]{32}', token) for token in retired)):
         raise ValueError('invalid retired machine waits')
+    quiet = data.get('quiet_waits', {})
+    if (not isinstance(quiet, dict) or any(not isinstance(token, str) or
+            not re.fullmatch(r'[0-9a-f]{32}', token) or not isinstance(node, str) or not node
+            for token, node in quiet.items())):
+        raise ValueError('invalid quiet machine receipts')
     return data
 
 
