@@ -223,3 +223,61 @@ class WakeConfirmation(Scenario):
                 self.enqueue(2)
                 self.drain()
                 self.now += 121
+
+    def test_unknown_transport_outcome_retains_episode_without_resend(self):
+        pending = self.enqueue()
+        self.drain(None)
+        self.now += 121
+        self.drain().assert_not_called()
+        self.assertTrue(pending.exists())
+        self.assertIn('transport outcome unknown', self.m.wake_turn_stuck(self.inst, self.n))
+
+    def test_failed_consumption_publication_does_not_authorize_resend(self):
+        pending = self.enqueue()
+        self.drain()
+        original = self.m.atomic_write
+        def refuse_shown(path, *args, **kwargs):
+            if path.name.startswith('shown-'):
+                raise OSError('fixture acknowledgement fault')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(self.m, 'atomic_write', side_effect=refuse_shown):
+            self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n))
+        self.assertTrue(pending.exists())
+        self.now += 121
+        self.drain().assert_not_called()
+        self.assertIsNotNone(self.m.wake_turn_consume(self.inst, self.n))
+        self.assertFalse(pending.exists())
+
+    def test_terminal_acceptance_has_cross_route_fence_until_consumed(self):
+        self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
+        self.refresh()
+        root = self.inst.node('root')
+        ref = {'id': 'a' * 64, 'kind': 'machine-exited'}
+        for node in (self.n, root):
+            self.assertTrue(self.m.request_wake(self.inst, node, 'fixture-terminal', items=[ref], explicit=True))
+        self.drain().assert_called_once()
+        self.assertFalse(self.m.wake_terminal_delivered(self.inst, ref['id']))
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, root, once=True)
+            send.assert_not_called()
+        self.assertTrue(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
+        self.m.wake_turn_consume(self.inst, self.n)
+        self.assertTrue(self.m.wake_terminal_delivered(self.inst, ref['id']))
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            self.m.wake_drain(self.inst, root, once=True)
+            send.assert_not_called()
+        self.assertFalse(list(self.m.wake_directory(self.inst, root).glob('*.pending')))
+
+    def test_known_retired_webhook_is_not_sent_after_rotation(self):
+        self.configure('wake=https://wake.invalid/fixture-old')
+        pending = self.enqueue()
+        self.drain(202)
+        self.configure('coordinator=fixture-next')
+        self.now += 121
+        self.drain(202).assert_not_called()
+        self.assertTrue(pending.exists())
+        self.assertIn('stale after coordinator rotation', self.m.wake_diagnostic(self.inst, self.n))
+        self.configure('wake=https://wake.invalid/fixture-next')
+        send = self.drain(202)
+        self.assertEqual(send.call_args.args[0], 'https://wake.invalid/fixture-next')
+        self.assertTrue(pending.exists())

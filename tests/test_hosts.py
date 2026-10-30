@@ -30,6 +30,15 @@ import test_verify as _test_verify
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+
+def consume_fixture_wake(module, inst, node):
+    """Simulate the fixture coordinator rendering its frozen receipt after transport."""
+    directory = module.wake_directory(inst, node)
+    receipt = module.wake_turn_read(directory / 'turn.json', module.wake_turn_binding(inst, node))
+    if receipt and not receipt['consumed']:
+        return module.wake_turn_consume(inst, node, shown=receipt)
+
+
 class LockHotfix(Scenario):
     job = _test_verify.WorkerReadyPackets.job
 
@@ -1749,7 +1758,7 @@ if __name__ == "__main__":
 
 
 class WakeConsumption(Scenario):
-    """Consumption-aware transports opt in; legacy delivery remains immediate."""
+    """Transport acceptance retains work until the coordinator consumes its receipt."""
     def setUp(self):
         super().setUp()
         environment = mock.patch.dict(os.environ, self.env, clear=True)
@@ -1790,23 +1799,25 @@ class WakeConsumption(Scenario):
         self.enqueue(21)
         self.assertEqual(self.send.call_count, 2)
 
-    def test_reminder_is_once_after_thirty_minutes(self):
+    def test_stall_is_visible_without_a_blind_reminder(self):
         self.enqueue(1)
-        self.now += 1800
+        self.now += 120
         self.m.wake_drain(self.inst, self.n, once=True)
-        self.assertEqual(self.send.call_count, 2)
-        self.now += 1800
-        self.m.wake_drain(self.inst, self.n, once=True)
-        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_count, 1)
         self.assertIn("unconsumed", self.m.wake_turn_stuck(self.inst, self.n))
+        self.now += 1800
+        self.m.wake_drain(self.inst, self.n, once=True)
+        self.assertEqual(self.send.call_count, 1)
 
-    def test_damaged_turn_never_suppresses_new_work(self):
+    def test_damaged_turn_retains_new_work_without_duplicate_transport(self):
         self.enqueue(1)
         directory = self.m.wake_directory(self.inst, self.n)
         (directory / "turn.json").write_text("{torn")
         self.enqueue(2)
-        self.assertEqual(self.send.call_count, 2)
+        self.assertEqual(self.send.call_count, 1)
         self.assertEqual((directory / "turn.json").read_text(), "{torn")
+        self.assertEqual(len(list(directory.glob('*.pending'))), 2)
+        self.assertIn('receipt unavailable', self.m.wake_turn_stuck(self.inst, self.n))
 
     def test_failed_transport_does_not_create_consumption_receipt(self):
         self.send.return_value = False
@@ -1830,11 +1841,11 @@ class WakeConsumption(Scenario):
         self.enqueue(2)
         self.assertEqual(self.send.call_count, 2)
 
-    def test_readonly_projection_counts_unconsumed_items_without_pending_files(self):
+    def test_readonly_projection_counts_unconsumed_items_with_retained_pending_files(self):
         refs = [{'id': format(i, '064x'), 'kind': 'inbox'} for i in range(1, 5)]
         self.m.request_wake(self.inst, self.n, 'fixture-batch', items=refs, explicit=True)
         self.m.wake_drain(self.inst, self.n, once=True)
-        self.assertFalse(list(self.m.wake_directory(self.inst, self.n).glob('*.pending')))
+        self.assertEqual(len(list(self.m.wake_directory(self.inst, self.n).glob('*.pending'))), 1)
         directory = self.m.wake_directory(self.inst, self.n)
         before = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
         view = self.m.wake_turn_queue(self.inst, self.n)
@@ -1843,7 +1854,7 @@ class WakeConsumption(Scenario):
         self.m.wake_turn_consume(self.inst, self.n)
         self.assertEqual(self.m.wake_turn_queue(self.inst, self.n)['item_count'], 0)
 
-    def test_invalid_or_future_turn_receipts_cannot_hold_new_requests(self):
+    def test_invalid_or_future_turn_receipts_cannot_authorize_duplicate_transport(self):
         self.enqueue(1)
         directory = self.m.wake_directory(self.inst, self.n)
         path = directory / 'turn.json'
@@ -1871,30 +1882,26 @@ class WakeConsumption(Scenario):
                 path.write_bytes(raw)
                 self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n))
                 self.m.wake_turn_finish(self.inst, self.n, baseline['token'], True)
-                self.assertIsNone(self.m.wake_turn_stuck(self.inst, self.n))
+                if name != 'other-binding':
+                    self.assertIn('receipt unavailable', self.m.wake_turn_stuck(self.inst, self.n))
                 self.assertEqual(path.read_bytes(), raw)
                 before = self.send.call_count
                 self.enqueue(index)
-                self.assertEqual(self.send.call_count, before + 1)
+                self.assertEqual(self.send.call_count, before + (name == 'other-binding'))
                 retained = [p.read_bytes() for p in directory.glob('turn*.json')]
                 self.assertIn(raw, retained, 'invalid or retired evidence must be preserved')
 
-    def test_clock_rollback_falls_back_within_one_existing_rate_window(self):
+    def test_clock_rollback_cannot_authorize_a_duplicate_transport(self):
         self.enqueue(1)
         path = self.m.wake_directory(self.inst, self.n) / 'turn.json'
         raw = path.read_bytes()
         self.now -= 3600
-        self.m.request_wake(self.inst, self.n, 'after-rollback',
-                            items=[{'id': 'f' * 64, 'kind': 'inbox'}], explicit=True)
-        with mock.patch.object(self.m, 'WAKE_INTERVAL', 120):
-            self.m.wake_drain(self.inst, self.n, once=True)
-            self.assertEqual(self.send.call_count, 1)
-            self.now += 121
-            self.m.wake_drain(self.inst, self.n, once=True)
-        self.assertEqual(self.send.call_count, 2)
+        self.enqueue(2)
+        self.assertEqual(self.send.call_count, 1)
         self.assertEqual(path.read_bytes(), raw)
+        self.assertIn('receipt unavailable', self.m.wake_turn_stuck(self.inst, self.n))
 
-    def test_damaged_turn_failed_transport_preserves_queue_until_success(self):
+    def test_damaged_turn_preserves_all_pending_until_receipt_repair(self):
         self.enqueue(1)
         directory = self.m.wake_directory(self.inst, self.n)
         path = directory / 'turn.json'
@@ -1904,13 +1911,10 @@ class WakeConsumption(Scenario):
         path.write_bytes(raw)
         self.send.return_value = False
         self.enqueue(2)
-        queued = {p.name: p.read_bytes() for p in directory.glob('*.pending')}
-        self.assertEqual(len(queued), 1)
-        self.assertEqual(path.read_bytes(), raw)
         self.send.return_value = True
         self.m.wake_drain(self.inst, self.n, once=True)
-        self.assertEqual(self.send.call_count, 3)
-        self.assertFalse(list(directory.glob('*.pending')))
+        self.assertEqual(self.send.call_count, 1)
+        self.assertEqual(len(list(directory.glob('*.pending'))), 2)
         self.assertEqual(path.read_bytes(), raw)
 
 
@@ -1948,16 +1952,20 @@ class AckAllShown(Scenario):
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             self.assertTrue(m.request_wake(self.inst, n, 'fixture first', items=refs[:1]))
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertTrue(m.request_wake(self.inst, n, 'fixture delivered again', items=refs[:1]))
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 1)  # the delivered ref is acknowledged
             # Displayed but undelivered work stays unacknowledged and causes the next wake.
             self.assertTrue(m.request_wake(self.inst, n, 'fixture later', items=refs[1:2]))
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 2)
             group['root']['items'] = refs
             self.assertTrue(m.request_wake(self.inst, n, 'fixture mixed', items=refs[1:]))
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 3)
             history = m.wake_history(m.wake_directory(self.inst, n))
             self.assertEqual(history[-1]['items'], refs[2:])
@@ -1970,9 +1978,11 @@ class AckAllShown(Scenario):
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
             with mock.patch.object(m, 'wake_send', return_value=False):
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             m.request_wake(self.inst, n, 'fixture second', items=refs[1:])
             with mock.patch.object(m, 'wake_send', return_value=True) as send:
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 1)
             self.assertEqual(m.wake_history(m.wake_directory(self.inst, n))[-1]['items'], refs)
 
@@ -1989,14 +1999,17 @@ class AckAllShown(Scenario):
                 return True
             with mock.patch.object(m, 'wake_send', side_effect=send):
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             with mock.patch.object(m, 'wake_send', return_value=True) as next_send:
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             self.assertEqual(next_send.call_count, 1)
             # Only the delivered ref was acknowledged; every undelivered one rides the next wake.
             self.assertEqual(m.wake_history(m.wake_directory(self.inst, n))[-1]['items'], refs[1:])
             self.assertTrue(m.request_wake(self.inst, n, 'fixture first again', items=refs[:1]))
             with mock.patch.object(m, 'wake_send', return_value=True) as last_send:
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             last_send.assert_not_called()
 
     def test_successful_snapshot_is_scoped_to_coordinator_and_transport(self):
@@ -2007,12 +2020,14 @@ class AckAllShown(Scenario):
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.b(self.root, 'set', 'root', 'coordinator=fixture-replacement', 'wake=fixture-other-send')
             self.inst = m.Instance(self.root)
             n = self.inst.node('root')
             # The ref delivered under the old binding is not acknowledged for the new one.
             m.request_wake(self.inst, n, 'fixture replacement', items=refs[:1])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 2)
 
     def test_snapshot_acknowledgement_retries_transient_history_write(self):
@@ -2030,12 +2045,15 @@ class AckAllShown(Scenario):
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
             with mock.patch.object(m, 'atomic_write', side_effect=write):
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             self.assertTrue(failed)
             m.request_wake(self.inst, n, 'fixture already delivered', items=refs[:1])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 1)  # the delivered ref stays acknowledged
             m.request_wake(self.inst, n, 'fixture displayed only', items=refs[1:])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 2)  # undelivered work causes the next wake
 
     def test_acknowledgement_outlives_display_history(self):
@@ -2046,14 +2064,17 @@ class AckAllShown(Scenario):
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             # Display history is bounded and is not an acknowledgement ledger.
             history = m.wake_directory(self.inst, n) / 'history.json'
             history.write_text(json.dumps({'version': 1, 'deliveries': []}))
             m.request_wake(self.inst, n, 'fixture already delivered', items=refs[:1])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 1)  # the delivered ref stays acknowledged
             m.request_wake(self.inst, n, 'fixture displayed only', items=refs[1:])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 2)  # undelivered work causes the next wake
 
     def test_many_resolved_deliveries_retain_one_complete_comparison_baseline(self):
@@ -2067,6 +2088,7 @@ class AckAllShown(Scenario):
                 ref = {'id': format(index, '064x'), 'kind': 'inbox'}
                 self.assertTrue(m.request_wake(self.inst, n, 'fixture:' + str(index), items=[ref], explicit=True))
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
                 delivered.append(ref)
         directory = m.wake_directory(self.inst, n)
         history = m.wake_history(directory)
@@ -2133,11 +2155,13 @@ class AckAllShown(Scenario):
             for index, ref in enumerate(refs):
                 self.assertTrue(m.request_wake(self.inst, n, 'kind:' + str(index), items=[ref]))
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
                 self.assertEqual(send.call_count, index + 1)
                 (directory / 'history.json').unlink()
             for index, ref in enumerate(refs):
                 self.assertTrue(m.request_wake(self.inst, n, 'retry:' + str(index), items=[ref]))
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 2, 'both actually delivered kinds stay acknowledged')
 
     def test_legacy_id_only_shown_receipt_does_not_certify_a_typed_need(self):
@@ -2151,10 +2175,12 @@ class AckAllShown(Scenario):
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             self.assertTrue(m.request_wake(self.inst, n, 'legacy kind unknown', items=[ref]))
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             send.assert_called_once()
             (path.parent / 'history.json').unlink()
             self.assertTrue(m.request_wake(self.inst, n, 'typed receipt now known', items=[ref]))
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 1)
 
     def test_shown_receipt_preserves_corrupt_bytes_and_retries_publication(self):
@@ -2175,14 +2201,17 @@ class AckAllShown(Scenario):
             m.request_wake(self.inst, n, 'fixture first', items=refs[:1])
             with mock.patch.object(m, 'atomic_write', side_effect=write):
                 m.wake_drain(self.inst, n, once=True)
+                consume_fixture_wake(m, self.inst, n)
             self.assertTrue(failed)
             self.assertEqual([p.read_bytes() for p in path.parent.glob('shown-invalid-*.json')], [b'\xfftorn'])
             (path.parent / 'history.json').write_text(json.dumps({'version': 1, 'deliveries': []}))
             m.request_wake(self.inst, n, 'fixture already delivered', items=refs[:1])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 1)  # the retried receipt alone acknowledges the delivered ref
             m.request_wake(self.inst, n, 'fixture displayed only', items=refs[1:])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 2)  # undelivered work causes the next wake
 
 
@@ -2209,6 +2238,7 @@ class AckAllShown(Scenario):
             m.request_wake(self.inst, root, 'fixture-root', items=[ref])
             m.request_wake(self.inst, owner, 'fixture-owner', items=[ref])
             m.wake_drain(self.inst, owner, once=True)
+            consume_fixture_wake(m, self.inst, owner)
             m.wake_drain(self.inst, root, once=True)
             self.assertEqual(calls, ['fixture-child-send'])
             self.assertTrue(faults)
@@ -2223,11 +2253,13 @@ class AckAllShown(Scenario):
                 mock.patch.object(m, 'wake_send', return_value=True) as send:
             m.request_wake(self.inst, n, 'fixture-same-reason', items=[ref])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.b(self.root, 'set', 'root', 'coordinator=fixture-new')
             self.inst = m.Instance(self.root)
             n = self.inst.node('root')
             m.request_wake(self.inst, n, 'fixture-same-reason', items=[ref])
             m.wake_drain(self.inst, n, once=True)
+            consume_fixture_wake(m, self.inst, n)
             self.assertEqual(send.call_count, 2)
 
 
@@ -2337,6 +2369,8 @@ class WakeIdentityTypes(Scenario):
                     with mock.patch.object(m, 'wake_send', return_value=True) as send:
                         m.wake_drain(inst, node, once=True)
                     self.assertEqual(send.call_count, 1)
+                    self.assertTrue(pending.exists())
+                    consume_fixture_wake(m, inst, node)
                     self.assertFalse(pending.exists())
                     self.assertNotIn('untrusted-identity', send.call_args.kwargs['reason'])
 
@@ -2419,7 +2453,7 @@ class DisabledWakeDiagnostics(Scenario):
             m.cmd_check(argparse.Namespace(fix=True, live=True))
             m.wake_drain(inst, n, once=True)
             self.assertEqual(m.wake_target(inst, n)[1], '')
-            self.assertFalse(m.request_wake(inst, n, 'fixture-question'))
+            self.assertTrue(m.request_wake(inst, n, 'fixture-question'))
             probe.assert_not_called()
             send.assert_not_called()
         self.assertIn('disabled', output.getvalue())

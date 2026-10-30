@@ -50,6 +50,8 @@ def wake_turn_read(path, binding):
     if len(value['paths']) != len(set(value['paths'])):
         raise ValueError('duplicate wake turn paths')
     if ('queue_known' in value and type(value['queue_known']) is not bool or
+            'route_binding' in value and (not isinstance(value['route_binding'], str) or
+                not re.fullmatch(r'[0-9a-f]{64}', value['route_binding'])) or
             'opaque_paths' in value and (not isinstance(value['opaque_paths'], list) or
                 any(not isinstance(p, str) or p not in value['paths'] for p in value['opaque_paths']) or
                 len(value['opaque_paths']) != len(set(value['opaque_paths'])))):
@@ -89,10 +91,26 @@ def wake_turn_prepare(inst, n, pending, refs):
         return 'hold', None
     directory = _m_hosts.wake_directory(inst, n)
     try:
+        # Terminal identities are instance-wide. Another route's episode owns
+        # its reasons until consumption, without certifying delivery.
+        terminal = {i['id'] for i in refs if i['kind'] in _m_hosts.WAKE_TERMINAL_KINDS}
+        if terminal:
+            for other in inst.nodes():
+                if other['id'] == n['id']:
+                    continue
+                receipt = wake_turn_read(_m_hosts.wake_directory(inst, other) / 'turn.json',
+                                         wake_turn_binding(inst, other))
+                if receipt and not receipt['consumed'] and terminal & {i['id'] for i in receipt['items']}:
+                    return 'hold', receipt['token']
         with wake_turn_lock(directory) as path:
             binding = wake_turn_binding(inst, n)
             value = wake_turn_read(path, binding)
             if value is None and path.exists():
+                retired_value = json.loads(path.read_text())
+                command = _m_hosts.wake_configured_route(inst, n)[1]
+                if (command.startswith(('https://', 'http://')) and
+                        retired_value.get('route_binding') == _m_hosts.wake_binding(command)):
+                    return 'stale', None  # the same webhook may still target the retired coordinator
                 # A valid retired binding is not authority for this coordinator.
                 # Preserve its exact receipt before reserving the replacement.
                 retired = path.with_name('turn-retired-' + os.urandom(8).hex() + '.json')
@@ -110,6 +128,7 @@ def wake_turn_prepare(inst, n, pending, refs):
                 return 'hold', None
             token = os.urandom(16).hex()
             value = {'version': 1, 'binding': binding, 'token': token, 'sent': False,
+                     'route_binding': _m_hosts.wake_binding(_m_hosts.wake_configured_route(inst, n)[1]),
                      'consumed': False, 'reminded': False, 'at': _m_hosts.WAKE_CLOCK.time(),
                      'items': refs, 'paths': [p.name for p in pending], 'opaque_paths': opaque, 'queue_known': known}
             wake_turn_write(path, value)
@@ -125,10 +144,10 @@ def wake_turn_finish(inst, n, token, sent):
         with wake_turn_lock(_m_hosts.wake_directory(inst, n)) as path:
             value = wake_turn_read(path, wake_turn_binding(inst, n))
             if value and value['token'] == token:
-                if not sent or value['consumed']:
+                if sent is False or value['consumed']:
                     path.unlink(missing_ok=True)
                 else:
-                    value['sent'] = True
+                    value['sent'] = bool(sent)  # None is an unknown outcome; never authorize a retry.
                     wake_turn_write(path, value)
     except (OSError, ValueError, KeyError, TypeError):
         pass  # successful transport is never repeated to repair bookkeeping
@@ -160,8 +179,6 @@ def wake_turn_consume(inst, n, consume=True, shown=None):
                     pass  # unknown queue bytes remain deliverable, never acknowledged
             if not consume:
                 return value
-            value['consumed'] = True
-            wake_turn_write(path, value)  # fence transport completion before acknowledging its queue
             for ref in value['items']:
                 if ref['kind'] in _m_hosts.WAKE_TERMINAL_KINDS:
                     _m_hosts.wake_accept_write(_m_hosts.wake_terminal_receipt(inst, ref['id']), 'delivered\n')
@@ -171,6 +188,11 @@ def wake_turn_consume(inst, n, consume=True, shown=None):
                 _m_common.safe_target(pending)
                 _m_common.atomic_write(pending.with_suffix('.sent'), 'consumed\n', private=True)
                 pending.unlink(missing_ok=True)
+            # The turn lock fences transport completion throughout publication.
+            # A failed acknowledgement leaves the episode unconsumed so due can
+            # retry bookkeeping without authorizing a duplicate transport.
+            value['consumed'] = True
+            wake_turn_write(path, value)
             return value
     except (OSError, ValueError, KeyError, TypeError):
         return None

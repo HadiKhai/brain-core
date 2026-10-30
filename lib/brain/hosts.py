@@ -711,7 +711,7 @@ def wake_send(command, reason=None):
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait()
-        return False
+        return None  # the shell may already have queued work before it timed out
 
 
 class WakeRefused(Exception):
@@ -736,7 +736,9 @@ def wake_read(directory, command, name="delivery.json"):
         if (record["binding"] == wake_binding(command)
                 and (type(status) is int and command.startswith(("https://", "http://")) and 100 <= status <= 599
                      or status in ("transport error", "delivery failed", "delivered; history write failed",
-                                   "shell exit 0", "transport accepted", "accepted; history write failed"))
+                                   "shell exit 0", "transport accepted", "accepted; history write failed",
+                                   "wake route stale after coordinator rotation; re-provision current binding; pending reasons retained",
+                                   "confirmation unavailable; pending reasons retained; start state UNKNOWN"))
                 and type(record["at"]) in (int, float) and math.isfinite(record["at"])):
             return record
     except (OSError, ValueError, KeyError, TypeError):
@@ -949,8 +951,13 @@ def wake_drain(inst, n, once=False):
                     if _m_instance.state_signature(latest, latest_target) != generation:
                         return  # preserve pending work for its current coordinator
                     action, turn_token = _m_wake_turns.wake_turn_prepare(current, target, pending, refs)
-                    if action == 'hold':
+                    if action in ('hold', 'stale'):
                         attempted.update(path.name for path in pending)
+                        if turn_token is None:
+                            wake_record(directory, command,
+                                        'wake route stale after coordinator rotation; re-provision current binding; pending reasons retained'
+                                        if action == 'stale' else
+                                        'confirmation unavailable; pending reasons retained; start state UNKNOWN')
                         return
                     _m_common.atomic_write(last, str(WAKE_CLOCK.time()), private=True)  # failures are rate-limited too
                     inflight = directory / 'inflight.json'
@@ -959,19 +966,17 @@ def wake_drain(inst, n, once=False):
                     except OSError:
                         pass  # comparison bookkeeping cannot suppress a question
                     try:
-                        reason = (wake_reason_summary(refs, pending) if turn_token else wake_delivery_reason(refs, pending, current))
-                        if action == 'reminder':
-                            reason = 'Coordinator wake remains unconsumed for 30 minutes.'
+                        reason = wake_delivery_reason(refs, pending, current)
                         sent = wake_send(command, reason=reason)
                         status = (sent if type(sent) is int or isinstance(sent, str)
-                                  else "transport accepted" if sent else "delivery failed")
+                                  else "transport accepted" if sent else
+                                  "transport error" if sent is None else "delivery failed")
                     except WakeRefused as error:
                         sent, status = False, error.args[0]
                     except Exception:
-                        sent, status = False, "transport error"
-                    if action != 'reminder':
-                        _m_wake_turns.wake_turn_finish(current, target, turn_token, sent)
-                    if sent and action != 'reminder':
+                        sent, status = None, "transport error"
+                    _m_wake_turns.wake_turn_finish(current, target, turn_token, sent)
+                    if sent:
                         # Acceptance is not consumption. Keep pending, terminal and shown
                         # acknowledgements untouched until due renders this binding's receipt.
                         # Logging cannot undo delivery and cause another model wake on retry.
