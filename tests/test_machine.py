@@ -55,6 +55,33 @@ class MachineCare(Scenario):
         with self.m.machine_queue() as queue:
             self.assertEqual(queue.rows, [])
 
+    def test_heavy_run_owner_node_follows_the_home_or_its_worktree_folder(self):
+        from types import SimpleNamespace
+        base = Path(tempfile.mkdtemp()) / 'homes'
+        (base / 'app-work' / 'worktrees' / 'job-x').mkdir(parents=True)
+        (base / 'app' / 'src').mkdir(parents=True)
+        inst = SimpleNamespace(nodes=lambda: [
+            {'id': 'root', 'home_path': base}, {'id': 'app', 'home_path': base / 'app'},
+            {'id': 'notes', 'home_path': None}])
+        find = self.m.heavy_node_for_cwd
+        self.assertEqual(find(inst, base / 'app-work' / 'worktrees' / 'job-x'), 'app')
+        self.assertEqual(find(inst, base / 'app' / 'src'), 'app')
+        self.assertIsNone(find(inst, base))
+
+    def test_heavy_run_owner_node_resolves_symlinked_home_and_worktree_folder(self):
+        from types import SimpleNamespace
+        base = self.tmp / 'routing'
+        home = base / 'repos' / 'app'
+        home.parent.mkdir(parents=True)
+        (base / 'actual-home' / 'src').mkdir(parents=True)
+        (base / 'actual-work' / 'worktrees' / 'job-x').mkdir(parents=True)
+        home.symlink_to(base / 'actual-home', target_is_directory=True)
+        home.with_name('app-work').symlink_to(base / 'actual-work', target_is_directory=True)
+        inst = SimpleNamespace(nodes=lambda: [{'id': 'app', 'home_path': home}])
+        find = self.m.heavy_node_for_cwd
+        self.assertEqual(find(inst, base / 'actual-home' / 'src'), 'app')
+        self.assertEqual(find(inst, base / 'actual-work' / 'worktrees' / 'job-x'), 'app')
+
     def test_heavy_run_shares_fifo_verify_slots_without_changing_admit_only(self):
         m = self.m
         from types import SimpleNamespace

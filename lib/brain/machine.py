@@ -1837,10 +1837,29 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
         return 128 + error.number
 
 
+def heavy_node_for_cwd(inst, cwd):
+    """The node whose external home (or its `<home>-work` worktree folder) holds `cwd`."""
+    cwd = Path(cwd).resolve()
+    best, depth = None, -1
+    for n in inst.nodes():
+        home = n.get('home_path')
+        if n['id'] == 'root' or not home:
+            continue
+        home = Path(home)
+        for place in (home, home.parent / (home.name + '-work')):
+            place = place.resolve()
+            if (place == cwd or place in cwd.parents) and len(place.parts) > depth:
+                best, depth = n['id'], len(place.parts)
+    return best
+
+
 def cmd_heavy_run(a):
     command = a.command[1:] if a.command[:1] == ['--'] else a.command
     inst = _m_nodes.load()
-    node = inst.node(a.node or 'root')
+    # A builder's verify run belongs to its own node, so its exit wakes that
+    # node's coordinator rather than root.
+    node = inst.node(a.node or os.environ.get('BRAIN_GATE_NODE')
+                     or heavy_node_for_cwd(inst, os.getcwd()) or 'root')
     try:
         code = machine_execute(command, inst, node['id'], a.label)
     except OSError as error:
