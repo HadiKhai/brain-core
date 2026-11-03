@@ -27,6 +27,7 @@ from pathlib import Path
 from . import common as _m_common
 
 REAP_SECONDS = 10
+SETTLE_SECONDS = 2
 GIT_SECONDS = 10
 WORKERS = 4
 TERMINAL_RUNS = ('completed', 'cancelled', 'failed', 'interrupted', 'rolled_back')
@@ -73,7 +74,7 @@ def live_directories():
     """Working directories of running processes; None when they cannot be listed."""
     try:
         result = subprocess.run(['lsof', '-nP', '-w', '-a', '-d', 'cwd', '-Fn'], capture_output=True,
-                                text=True, timeout=GIT_SECONDS, cwd='/')
+                                text=True, timeout=_timeout(), cwd='/')
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode not in (0, 1) or not result.stdout:
@@ -81,11 +82,20 @@ def live_directories():
     return {_real(line[1:]) for line in result.stdout.splitlines() if line.startswith('n/')}
 
 
-def _git(args, cwd=None, git_dir=None):
+_deadline = [None]  # the running pass's monotonic deadline; every subprocess stays inside it
+
+
+def _timeout():
+    if _deadline[0] is None:
+        return GIT_SECONDS
+    return max(0.05, min(GIT_SECONDS, _deadline[0] - time.monotonic()))
+
+
+def _git(args, cwd=None, git_dir=None, stdin=None):
     prefix = ['git'] + (['--git-dir', git_dir] if git_dir else []) + (['-C', cwd] if cwd else [])
     env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0', 'LC_ALL': 'C'}
-    return subprocess.run(prefix + args, capture_output=True, text=True, timeout=GIT_SECONDS,
-                          env=env, cwd='/')
+    return subprocess.run(prefix + args, capture_output=True, text=True, timeout=_timeout(),
+                          env=env, cwd='/', input=stdin)
 
 
 def instance_repository(root):
@@ -230,8 +240,9 @@ def unique_commits(entry):
 def reachable_commits(common, checked_out):
     """(commits reachable from every branch, remote branch and tag except ``checked_out``, ref tips); None if unknown.
 
-    One walk serves the whole sweep. A HEAD inside it is on some other ref; a HEAD
-    outside it gets the exact per-worktree check.
+    One walk classifies the whole sweep. A HEAD inside it is on some other ref; a
+    HEAD outside it gets the exact per-worktree check. Removal never relies on it:
+    the check just before each removal is always the exact one.
     """
     refs = _git(['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', 'refs/remotes', 'refs/tags'],
                 git_dir=common)
@@ -242,9 +253,7 @@ def reachable_commits(common, checked_out):
         sha, _, ref = line.partition(' ')
         tips[ref] = sha
     others = sorted({sha for ref, sha in tips.items() if ref not in checked_out})
-    env = {**os.environ, 'GIT_OPTIONAL_LOCKS': '0', 'LC_ALL': 'C'}
-    walk = subprocess.run(['git', '--git-dir', common, 'rev-list', '--stdin'], input='\n'.join(others) + '\n',
-                          capture_output=True, text=True, timeout=GIT_SECONDS, env=env, cwd='/')
+    walk = _git(['rev-list', '--stdin'], git_dir=common, stdin='\n'.join(others) + '\n')
     if walk.returncode:
         return None
     return set(walk.stdout.split()), tips
@@ -269,6 +278,8 @@ def judge(entry, repository, threads, live, keep, wanted=None, shared=None):
     ids = sorted(r['thread'] for r in records)
     if wanted is not None and not set(ids) & wanted:
         return 'skip', 'not a selected thread', ids
+    if keep is None:
+        return 'keep', 'keep setting unreadable', ids
     if entry.name in keep or path in keep:
         return 'keep', 'kept by setting', ids
     linked = linked_admin(entry)
@@ -327,18 +338,25 @@ def populated_submodules(entry, admin):
     return False
 
 
-def remove(entry, common, recheck):
-    """git worktree remove; True only once Git and the folder agree it is gone.
+def remove(entry, common, admin):
+    """git worktree remove, never forced; True only once Git and the folder agree it is gone.
 
-    Git also refuses any worktree whose admin entry has a modules folder, even an
-    empty one. Only then, and only after ``recheck`` proves it clean again with no
-    submodule checked out, a single --force repeats the removal (a locked
-    worktree still needs two and stays).
+    Git refuses any worktree whose admin entry has a modules folder, even an empty
+    one (Git itself calls that a possible false positive). Only an empty one is
+    removed (rmdir fails on anything else) and the same unforced removal repeats,
+    so Git's own refusal of changed, untracked, locked or submodule worktrees holds.
     """
     path = _real(entry)
     result = _git(['worktree', 'remove', path], git_dir=common)
-    if result.returncode and 'containing submodules' in result.stderr and recheck():
-        result = _git(['worktree', 'remove', '--force', path], git_dir=common)
+    if result.returncode and 'containing submodules' in result.stderr:
+        modules = Path(admin) / 'modules'
+        if modules.is_symlink():
+            return False
+        try:
+            os.rmdir(modules)
+        except OSError:
+            return False
+        result = _git(['worktree', 'remove', path], git_dir=common)
     if result.returncode or os.path.lexists(path):
         return False
     listed = _git(['worktree', 'list', '--porcelain'], git_dir=common)
@@ -346,31 +364,48 @@ def remove(entry, common, recheck):
 
 
 def keep_setting(inst):
+    """Folder names and paths never removed; None when the setting cannot be read (nothing is removed)."""
     try:
         value = inst.node('root')['fm'].get('t3_worktree_keep', '')
-    except (KeyError, OSError, ValueError, SystemExit):
-        return set()
+    except (KeyError, OSError, ValueError, TypeError, SystemExit):
+        return None
     if not isinstance(value, str):
-        return set()
+        return None
     return {_real(v.strip()) if v.strip().startswith('/') else v.strip() for v in value.split(',') if v.strip()}
 
 
 def reap(root, home=None, apply=False, threads_wanted=None, keep=(), deadline=None, sizes=True, others=False):
-    """Judge every T3 worktree; remove settled clean ones when apply. Never raises for one entry."""
+    """Judge T3 worktrees; when apply, remove the settled clean ones. Never raises for one entry.
+
+    With ``threads_wanted`` only those threads' worktrees are judged (the settle
+    path). ``deadline`` bounds every subprocess and defers what is left.
+    """
     home = Path(home) if home else t3_home()
     started = time.monotonic()
+    previous, _deadline[0] = _deadline[0], deadline
+    try:
+        return _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, started)
+    finally:
+        _deadline[0] = previous
+
+
+def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, started):
     entries = inventory(home)
-    if not entries:
-        return {'rows': [], 'removed': [], 'errors': [], 'store': True, 'live': True, 'repository': True,
-                'freed': 0, 'seconds': round(time.monotonic() - started, 3)}
-    repository = instance_repository(root)
-    threads = host_threads(home)
-    live = live_directories()
+    threads = host_threads(home) if entries else {}
     wanted = set(threads_wanted) if threads_wanted is not None else None
-    keep = set(keep)
-    rows = []
+    if wanted is not None:
+        paths = {path for path, records in (threads or {}).items() if any(r['thread'] in wanted for r in records)}
+        entries = [item for item in entries if _real(item[1]) in paths]
+    result = {'rows': [], 'removed': [], 'errors': [], 'store': threads is not None, 'live': True,
+              'repository': True, 'freed': 0}
+    if not entries:
+        result['seconds'] = round(time.monotonic() - started, 3)
+        return result
+    repository = instance_repository(root)
+    live = live_directories()
+    keep = set(keep) if keep is not None else None
     shared = None
-    if repository is not None:
+    if repository is not None and wanted is None:
         checked_out = set()
         for _, entry in entries:
             linked = linked_admin(entry)
@@ -400,44 +435,33 @@ def reap(root, home=None, apply=False, threads_wanted=None, keep=(), deadline=No
                 row['size'] = {'listed': 0, 'private': 0, 'shared': {}}
         return row
 
+    rows = []
     if repository is not None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
             rows = [row for row in pool.map(one, entries) if row['verdict'] != 'skip']
-    result = {'rows': rows, 'removed': [], 'errors': [], 'store': threads is not None,
-              'live': live is not None, 'repository': repository is not None}
-    if apply:
-        facts = {'at': time.monotonic(), 'threads': threads, 'live': live}
-
-        def fresh():
-            # Thread state and live directories change; reread them at most once a second.
-            if time.monotonic() - facts['at'] >= 1:
-                facts.update(at=time.monotonic(), threads=host_threads(home), live=live_directories())
-            return facts['threads'], facts['live']
-        for row in rows:
-            if row['verdict'] != 'remove':
-                continue
-            if deadline is not None and time.monotonic() > deadline:
-                row['verdict'], row['reason'] = 'keep', 'time budget spent; next pass'
-                continue
+    result.update(rows=rows, store=threads is not None, live=live is not None, repository=repository is not None)
+    for row in rows if apply else ():
+        if row['verdict'] != 'remove':
+            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            row['verdict'], row['reason'] = 'keep', 'time budget spent; next pass'
+            continue
+        try:
+            # Fresh thread and process state and the exact commit check, right before removal.
+            again = judge(row['path'], repository, host_threads(home), live_directories(), keep, wanted)
             linked = linked_admin(row['path'])
-            # Re-read the facts that can change between the check and the removal.
-            again = judge(row['path'], repository, *fresh(), keep, wanted, shared)
-            if linked is None or again[0] != 'remove':
+            if again[0] != 'remove' or linked is None:
                 row['verdict'], row['reason'] = 'keep', again[1] if again[0] != 'remove' else 'admin entry changed'
                 continue
-            def recheck(path=row['path']):
-                # Exact commit check, not the shared walk: this precedes a forced removal.
-                return judge(path, repository, *fresh(), keep, wanted)[0] == 'remove'
-            try:
-                done = remove(row['path'], linked[1], recheck)
-            except (OSError, subprocess.SubprocessError):
-                done = False
-            if done:
-                row['verdict'] = 'removed'
-                result['removed'].append(row['path'])
-            else:
-                row['verdict'], row['reason'] = 'keep', 'git worktree remove refused'
-                result['errors'].append(row['path'])
+            done = remove(row['path'], linked[1], linked[0])
+        except (OSError, ValueError, subprocess.SubprocessError):
+            done = False
+        if done:
+            row['verdict'] = 'removed'
+            result['removed'].append(row['path'])
+        else:
+            row['verdict'], row['reason'] = 'keep', 'git worktree remove refused'
+            result['errors'].append(row['path'])
     chosen = [r['size'] for r in rows if r['verdict'] in ('remove', 'removed') and 'size' in r]
     result['freed'] = freed(chosen)
     result['seconds'] = round(time.monotonic() - started, 3)
@@ -484,10 +508,14 @@ def report(result, apply):
 
 
 def reap_settled(inst, thread_ids=None):
-    """Settle-path hook: remove worktrees of settled threads; bounded, never raises."""
+    """Settle-path hook: remove worktrees of settled threads; bounded, never raises.
+
+    Selected threads get SETTLE_SECONDS each; a whole due-tick pass gets REAP_SECONDS.
+    """
+    seconds = REAP_SECONDS if thread_ids is None else SETTLE_SECONDS * max(1, len(thread_ids))
     try:
         result = reap(inst.root, apply=True, threads_wanted=thread_ids, keep=keep_setting(inst),
-                      deadline=time.monotonic() + REAP_SECONDS, sizes=True)
+                      deadline=time.monotonic() + seconds, sizes=False)
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError,
             subprocess.SubprocessError, sqlite3.Error) as error:
         return {'rows': [], 'removed': [], 'errors': [type(error).__name__], 'freed': 0}

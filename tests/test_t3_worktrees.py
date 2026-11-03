@@ -188,6 +188,72 @@ class T3Worktrees(unittest.TestCase):
         self.assertEqual(result['errors'], [str(path)])
         self.assertTrue(path.exists())
 
+    def test_state_is_reread_right_before_each_removal(self):
+        resumed = self.worktree('t3-0020')
+        advanced = self.worktree('t3-0021')
+        self.store()
+        real = self.m.host_threads
+        calls = []
+        def changing(home):
+            calls.append(home)
+            if len(calls) == 2:
+                # After classification: one thread resumes, another branch gains a unique commit.
+                (advanced / 'late.md').write_text('late\n')
+                self.git('add', '.', cwd=advanced)
+                self.git('commit', '-qm', 'late', cwd=advanced)
+                self.threads[0] = ('thread-t3-0020', str(resumed), False, 'running')
+                self.store()
+            return real(home)
+        with mock.patch.object(self.m, 'host_threads', side_effect=changing):
+            result = self.m.reap(self.repo, home=self.home, apply=True)
+        self.assertEqual(self.verdicts(result), {
+            't3-0020': ('keep', 'thread unsettled'), 't3-0021': ('keep', 'commits only here')})
+        self.assertTrue(resumed.exists() and advanced.exists())
+
+    def test_unreadable_keep_setting_removes_nothing(self):
+        path = self.worktree('t3-0022')
+        result = self.reap(apply=True, keep=None)
+        self.assertEqual(self.verdicts(result), {'t3-0022': ('keep', 'keep setting unreadable')})
+        self.assertTrue(path.exists())
+        class Broken:
+            def node(self, _):
+                raise SystemExit('unreadable')
+        self.assertIsNone(self.m.keep_setting(Broken()))
+
+    def test_spent_deadline_defers_removal(self):
+        path = self.worktree('t3-0023')
+        self.store()
+        result = self.m.reap(self.repo, home=self.home, apply=True, deadline=0)
+        self.assertEqual(self.verdicts(result)['t3-0023'][0], 'keep')
+        self.assertTrue(path.exists())
+
+    def test_settle_path_judges_only_the_selected_worktree_without_sizes(self):
+        self.worktree('t3-0024')
+        chosen = self.worktree('t3-0025')
+        self.store()
+        with mock.patch.object(self.m, 'reachable_commits') as walk, \
+                mock.patch.object(self.m, 'measure') as measure:
+            result = self.m.reap(self.repo, home=self.home, apply=True, threads_wanted=['thread-t3-0025'],
+                                 sizes=False, deadline=self.m.time.monotonic() + 2)
+        walk.assert_not_called()
+        measure.assert_not_called()
+        self.assertEqual(result['removed'], [str(chosen)])
+        self.assertEqual(len(result['rows']), 1)
+
+    def test_removal_is_never_forced(self):
+        path = self.worktree('t3-0026')
+        self.store()
+        real = self.m._git
+        commands = []
+        def recording(args, *a, **kw):
+            commands.append(args)
+            return real(args, *a, **kw)
+        with mock.patch.object(self.m, '_git', side_effect=recording):
+            (self.repo / '.git' / 'worktrees' / 't3-0026' / 'modules').mkdir()
+            self.m.reap(self.repo, home=self.home, apply=True)
+        self.assertFalse(path.exists())
+        self.assertFalse(any('--force' in c or '-f' in c for c in commands))
+
     def test_clone_families_count_only_when_every_sharer_goes(self):
         one = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
         two = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
