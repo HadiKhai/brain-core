@@ -318,37 +318,57 @@ def judge(entry, repository, threads, live, keep, wanted=None, shared=None):
         return 'keep', 'live processes unknown', ids
     if any(d == path or d.startswith(path + os.sep) for d in live):
         return 'keep', 'a process works inside it', ids
+    reason = tree_reason(path, linked[0], shared)
+    if reason:
+        return 'keep', reason, ids
+    return 'remove', 'settled and clean', ids
+
+
+def tree_reason(path, admin, shared=None):
+    """Why this worktree's content must stay, or None when nothing in it would be lost."""
     try:
         status = _git(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=traditional',
                        '--ignore-submodules=none'], cwd=path)
         if status.returncode:
-            return 'keep', 'git status failed', ids
+            return 'git status failed'
         lines = [line for line in status.stdout.splitlines() if line]
         if any(not line.startswith('!! ') for line in lines):
-            return 'keep', 'uncommitted or untracked changes', ids
+            return 'uncommitted or untracked changes'
         if any(not DISPOSABLE.fullmatch(line[3:]) for line in lines):
-            return 'keep', 'ignored files', ids
+            return 'ignored files'
         # Status, and Git's own removal check, trust assume-unchanged and
         # skip-worktree entries; edits behind them would be lost.
         flags = _git(['ls-files', '-v'], cwd=path)
         if flags.returncode:
-            return 'keep', 'git index check failed', ids
+            return 'git index check failed'
         if any(line[:1].islower() or line[:2] == 'S ' for line in flags.stdout.splitlines()):
-            return 'keep', 'index hides changes (assume-unchanged or skip-worktree)', ids
-        head = admin_head(linked[0], shared[1]) if shared else None
+            return 'index hides changes (assume-unchanged or skip-worktree)'
+        head = admin_head(admin, shared[1]) if shared else None
         unique = False if head is not None and head in shared[0] else unique_commits(path)
     except (OSError, subprocess.SubprocessError):
-        return 'keep', 'git check failed', ids
+        return 'git check failed'
     if unique is None:
-        return 'keep', 'commit check failed', ids
+        return 'commit check failed'
     if unique:
-        return 'keep', 'commits only here', ids
-    populated = populated_submodules(path, linked[0])
+        return 'commits only here'
+    populated = populated_submodules(path, admin)
     if populated is None:
-        return 'keep', 'submodule check failed', ids
+        return 'submodule check failed'
     if populated:
-        return 'keep', 'a submodule is checked out', ids
-    return 'remove', 'settled and clean', ids
+        return 'a submodule is checked out'
+    return None
+
+
+def open_inside(path):
+    """True when any process has a file or directory open under path; None if unknown."""
+    try:
+        result = subprocess.run(['lsof', '-nP', '-w', '+D', path, '-Fn'], capture_output=True, text=True,
+                                timeout=_timeout(), cwd='/')
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode == 1 and not result.stdout.strip():
+        return False
+    return True if result.returncode == 0 and result.stdout.strip() else None
 
 
 def populated_submodules(entry, admin):
@@ -370,27 +390,48 @@ def populated_submodules(entry, admin):
     return False
 
 
-def remove(entry, common, admin):
-    """git worktree remove, never forced; True only once Git and the folder agree it is gone.
+def _git_unblocked(args, common, admin):
+    """Run a worktree move/remove; repeat once after removing an empty admin modules folder.
 
     Git refuses any worktree whose admin entry has a modules folder, even an empty
-    one (Git itself calls that a possible false positive). Only an empty one is
-    removed (rmdir fails on anything else) and the same unforced removal repeats,
-    so Git's own refusal of changed, untracked, locked or submodule worktrees holds.
+    one (Git itself calls that a possible false positive). Only an empty one goes
+    (rmdir fails on anything else); nothing is ever forced.
     """
-    path = _real(entry)
-    result = _git(['worktree', 'remove', path], git_dir=common)
+    result = _git(args, git_dir=common)
     if result.returncode and 'containing submodules' in result.stderr:
         modules = Path(admin) / 'modules'
         if modules.is_symlink():
-            return False
+            return result
         try:
             os.rmdir(modules)
         except OSError:
-            return False
-        result = _git(['worktree', 'remove', path], git_dir=common)
-    if result.returncode or os.path.lexists(path):
+            return result
+        result = _git(args, git_dir=common)
+    return result
+
+
+def remove(entry, common, admin):
+    """Remove a checked worktree; True only once Git and the folder agree it is gone.
+
+    Git's unforced removal still deletes ignored files, so the worktree is first
+    moved (one rename; Git updates its records) to a hidden sibling the old path
+    no longer reaches. Only if nothing is open inside it and its content still
+    passes every check is it removed; otherwise it is moved back and kept.
+    """
+    path = _real(entry)
+    hold = os.path.join(os.path.dirname(path), '.' + os.path.basename(path) + '.removing')
+    if os.path.lexists(hold):
         return False
+    moved = _git_unblocked(['worktree', 'move', path, hold], common, admin)
+    if moved.returncode or os.path.lexists(path) or not os.path.isdir(hold):
+        return False
+    if open_inside(hold) is not False or tree_reason(hold, admin) is not None:
+        _git(['worktree', 'move', hold, path], git_dir=common)
+        return False
+    result = _git(['worktree', 'remove', hold], git_dir=common)
+    if result.returncode or os.path.lexists(hold):
+        return False
+    path = hold
     listed = _git(['worktree', 'list', '--porcelain'], git_dir=common)
     return listed.returncode == 0 and ('worktree ' + path) not in listed.stdout.splitlines()
 

@@ -334,6 +334,28 @@ class T3Worktrees(unittest.TestCase):
         self.assertEqual(self.verdicts(result)['t3-0034'], ('keep', 'kept by setting'))
         self.assertTrue(second.exists())
 
+    def test_late_files_or_open_handles_move_the_worktree_back(self):
+        (self.repo / '.gitignore').write_text('*.env\n')
+        self.git('add', '.gitignore', cwd=self.repo)
+        self.git('commit', '-qm', 'ignore', cwd=self.repo)
+        late = self.worktree('t3-0035')
+        held = self.worktree('t3-0036')
+        def inspect(hold):
+            # Written after the final check, once the old path no longer reaches the tree.
+            if hold.endswith('.t3-0035.removing'):
+                (Path(hold) / 'late.env').write_text('demo-value\n')
+                return False
+            return True
+        with mock.patch.object(self.m, 'open_inside', side_effect=inspect):
+            result = self.reap(apply=True)
+        self.assertEqual(result['removed'], [])
+        self.assertEqual(sorted(result['errors']), [str(late), str(held)])
+        self.assertTrue((late / 'late.env').exists())
+        self.assertTrue(held.exists())
+        for path in (late, held):
+            self.assertIn('worktree ' + str(path), self.listed().splitlines())
+        self.assertEqual(sorted(p.name for p in late.parent.iterdir()), ['t3-0035', 't3-0036'])
+
     def test_clone_families_count_only_when_every_sharer_goes(self):
         one = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
         two = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}

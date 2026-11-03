@@ -31,8 +31,14 @@ Removal is `git worktree remove`, never forced, so Git's admin entry goes with
 the folder, the branch and its commits stay, and Git's own refusal of changed,
 untracked, locked or submodule worktrees still holds. Just before each removal
 the thread state, running processes and the exact commit check are read again.
+Git's removal still deletes ignored files, so the worktree is first moved with
+`git worktree move` to a hidden sibling (`.<name>.removing`) that its old path
+no longer reaches; only if no process has anything open inside it and every
+content check still passes is it removed, otherwise it is moved back and kept.
 Git also refuses a worktree whose admin entry has an empty `modules` folder;
-only that empty folder is removed and the same removal repeats. After removal T3 keeps the thread's record, including
+only that empty folder is removed and the same move or removal repeats. A
+`.<name>.removing` folder left by an interrupted pass is listed as kept; move it
+back with `git worktree move`. After removal T3 keeps the thread's record, including
 the old path; do not resume such a thread, start a fresh one.
 
 Settings on the root node:
