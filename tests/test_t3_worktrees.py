@@ -224,7 +224,7 @@ class T3Worktrees(unittest.TestCase):
         path = self.worktree('t3-0023')
         self.store()
         result = self.m.reap(self.repo, home=self.home, apply=True, deadline=0)
-        self.assertEqual(self.verdicts(result)['t3-0023'][0], 'keep')
+        self.assertEqual(self.verdicts(result)['t3-0023'], ('keep', 'time budget spent; next pass'))
         self.assertTrue(path.exists())
 
     def test_settle_path_judges_only_the_selected_worktree_without_sizes(self):
@@ -253,6 +253,54 @@ class T3Worktrees(unittest.TestCase):
             self.m.reap(self.repo, home=self.home, apply=True)
         self.assertFalse(path.exists())
         self.assertFalse(any('--force' in c or '-f' in c for c in commands))
+
+    def test_ignored_files_and_hidden_index_edits_keep_the_worktree(self):
+        (self.repo / '.gitignore').write_text('*.env\n')
+        self.git('add', '.gitignore', cwd=self.repo)
+        self.git('commit', '-qm', 'ignore', cwd=self.repo)
+        ignored = self.worktree('t3-0027')
+        (ignored / 'local.env').write_text('demo-value\n')
+        assumed = self.worktree('t3-0028')
+        self.git('update-index', '--assume-unchanged', 'notes.md', cwd=assumed)
+        (assumed / 'notes.md').write_text('edited behind the flag\n')
+        skipped = self.worktree('t3-0029')
+        self.git('update-index', '--skip-worktree', 'notes.md', cwd=skipped)
+        (skipped / 'notes.md').write_text('edited behind the flag\n')
+        (self.repo / '.gitignore').write_text('*.env\n.brain/\n')
+        self.git('commit', '-qam', 'ignore local state', cwd=self.repo)
+        bookkeeping = self.worktree('t3-0030')
+        (bookkeeping / '.brain').mkdir()
+        (bookkeeping / '.brain' / 'hooks.json').write_text('{}\n')
+        (bookkeeping / '.brain' / 'hooks.log').write_text('demo\n')
+        state = self.worktree('t3-0031')
+        (state / '.brain').mkdir()
+        (state / '.brain' / 'hooks.json').write_text('{}\n')
+        (state / '.brain' / 'local.json').write_text('{}\n')
+        result = self.reap(apply=True)
+        hidden = 'index hides changes (assume-unchanged or skip-worktree)'
+        self.assertEqual(self.verdicts(result), {
+            't3-0027': ('keep', 'ignored files'), 't3-0028': ('keep', hidden), 't3-0029': ('keep', hidden),
+            't3-0030': ('removed', 'settled and clean'), 't3-0031': ('keep', 'ignored files')})
+        for path in (ignored, assumed, skipped, state):
+            self.assertTrue(path.exists())
+        self.assertFalse(bookkeeping.exists())
+
+    def test_expired_deadline_stops_checking_queued_worktrees(self):
+        for index in range(6):
+            self.worktree('t3-01%02d' % index)
+        self.store()
+        real, checked = self.m.judge, []
+        def slow(entry, *args, **kw):
+            checked.append(entry)
+            self.m._deadline[0] = self.m.time.monotonic() - 1  # the first check spends the budget
+            return real(entry, *args, **kw)
+        with mock.patch.object(self.m, 'judge', side_effect=slow):
+            result = self.m.reap(self.repo, home=self.home, apply=True, sizes=False,
+                                 deadline=self.m.time.monotonic() + 60)
+        self.assertLessEqual(len(checked), self.m.WORKERS)
+        self.assertEqual(result['removed'], [])
+        self.assertTrue(all(r['verdict'] == 'keep' for r in result['rows']))
+        self.assertIn('time budget spent; next pass', {r['reason'] for r in result['rows']})
 
     def test_clone_families_count_only_when_every_sharer_goes(self):
         one = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}

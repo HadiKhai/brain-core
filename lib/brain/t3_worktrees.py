@@ -17,6 +17,7 @@ import concurrent.futures
 import ctypes
 import json
 import os
+import re
 import sqlite3
 import struct
 import subprocess
@@ -31,6 +32,9 @@ SETTLE_SECONDS = 2
 GIT_SECONDS = 10
 WORKERS = 4
 TERMINAL_RUNS = ('completed', 'cancelled', 'failed', 'interrupted', 'rolled_back')
+# Core's own stop-hook bookkeeping (reminder spacing and its log), written into any
+# instance root a session runs in. Every other ignored file keeps the worktree.
+DISPOSABLE = re.compile(r'\.brain/(?:hooks\.json|hooks\.log|\.hooks\.[A-Za-z0-9_]+\.json)')
 _STORE_QUERY = (
     "select t.thread_id, json_extract(t.payload_json, '$.worktreePath'),"
     " json_extract(t.payload_json, '$.settledAt'), json_extract(t.payload_json, '$.settledOverride'),"
@@ -56,6 +60,7 @@ def host_threads(home):
     try:
         con = sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)
         try:
+            con.set_progress_handler(lambda: 1 if _expired() else 0, 10000)
             rows = con.execute(_STORE_QUERY).fetchall()
         finally:
             con.close()
@@ -85,10 +90,18 @@ def live_directories():
 _deadline = [None]  # the running pass's monotonic deadline; every subprocess stays inside it
 
 
+def _expired():
+    return _deadline[0] is not None and time.monotonic() >= _deadline[0]
+
+
 def _timeout():
+    """Seconds left for one subprocess; past the deadline nothing new starts."""
     if _deadline[0] is None:
         return GIT_SECONDS
-    return max(0.05, min(GIT_SECONDS, _deadline[0] - time.monotonic()))
+    remaining = _deadline[0] - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired('t3 worktree pass', 0)
+    return min(GIT_SECONDS, remaining)
 
 
 def _git(args, cwd=None, git_dir=None, stdin=None):
@@ -187,6 +200,8 @@ def measure(entry):
     listed = private = 0
     shared, inodes = {}, {}
     for folder, _, files in os.walk(entry):
+        if _expired():
+            raise OSError('time budget spent')
         for name in files:
             path = os.path.join(folder, name)
             try:
@@ -300,11 +315,22 @@ def judge(entry, repository, threads, live, keep, wanted=None, shared=None):
     if any(d == path or d.startswith(path + os.sep) for d in live):
         return 'keep', 'a process works inside it', ids
     try:
-        status = _git(['status', '--porcelain=v1', '--untracked-files=all', '--ignore-submodules=none'], cwd=path)
+        status = _git(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=traditional',
+                       '--ignore-submodules=none'], cwd=path)
         if status.returncode:
             return 'keep', 'git status failed', ids
-        if status.stdout.strip():
+        lines = [line for line in status.stdout.splitlines() if line]
+        if any(not line.startswith('!! ') for line in lines):
             return 'keep', 'uncommitted or untracked changes', ids
+        if any(not DISPOSABLE.fullmatch(line[3:]) for line in lines):
+            return 'keep', 'ignored files', ids
+        # Status, and Git's own removal check, trust assume-unchanged and
+        # skip-worktree entries; edits behind them would be lost.
+        flags = _git(['ls-files', '-v'], cwd=path)
+        if flags.returncode:
+            return 'keep', 'git index check failed', ids
+        if any(line[:1].islower() or line[:2] == 'S ' for line in flags.stdout.splitlines()):
+            return 'keep', 'index hides changes (assume-unchanged or skip-worktree)', ids
         head = admin_head(linked[0], shared[1]) if shared else None
         unique = False if head is not None and head in shared[0] else unique_commits(path)
     except (OSError, subprocess.SubprocessError):
@@ -329,6 +355,8 @@ def populated_submodules(entry, admin):
             return True
         failed = []
         for folder, dirs, files in os.walk(entry, onerror=failed.append):
+            if _expired():
+                return None
             if folder != entry and ('.git' in dirs or '.git' in files):
                 return True
         if failed:
@@ -401,7 +429,13 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
     if not entries:
         result['seconds'] = round(time.monotonic() - started, 3)
         return result
-    repository = instance_repository(root)
+    try:
+        repository = instance_repository(root)
+    except subprocess.TimeoutExpired:
+        result['rows'] = [{'project': project, 'path': str(entry), 'verdict': 'keep',
+                           'reason': 'time budget spent; next pass', 'threads': []} for project, entry in entries]
+        result['seconds'] = round(time.monotonic() - started, 3)
+        return result
     live = live_directories()
     keep = set(keep) if keep is not None else None
     shared = None
@@ -423,10 +457,13 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
 
     def one(item):
         project, entry = item
+        if _expired():
+            return {'project': project, 'path': str(entry), 'verdict': 'keep',
+                    'reason': 'time budget spent; next pass', 'threads': []}
         try:
             verdict, reason, ids = judge(entry, repository, threads, live, keep, wanted, shared)
         except (OSError, ValueError, subprocess.SubprocessError):
-            verdict, reason, ids = 'keep', 'check failed', []
+            verdict, reason, ids = 'keep', 'time budget spent; next pass' if _expired() else 'check failed', []
         row = {'project': project, 'path': str(entry), 'verdict': verdict, 'reason': reason, 'threads': ids}
         if sizes and verdict != 'skip' and (others or verdict != 'other'):
             try:
@@ -455,6 +492,9 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
                 continue
             done = remove(row['path'], linked[1], linked[0])
         except (OSError, ValueError, subprocess.SubprocessError):
+            if _expired() and os.path.lexists(row['path']):
+                row['verdict'], row['reason'] = 'keep', 'time budget spent; next pass'
+                continue
             done = False
         if done:
             row['verdict'] = 'removed'

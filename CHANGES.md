@@ -12,7 +12,8 @@ removes it. `brain t3-worktrees` lists the instance repository's T3 worktrees
 with their clone-aware sizes and what removing them would free; it is a dry run
 unless `--apply`. `--thread <id>` limits it to one thread's worktree. Only a
 worktree whose every recorded thread is settled with no active run, with no
-process inside it, no uncommitted or untracked change, no commit missing from
+process inside it, no uncommitted, untracked or ignored file (core's own hook
+bookkeeping aside), no assume-unchanged or skip-worktree entry, no commit missing from
 every other branch, remote branch and tag, and no submodule checkout is removed,
 through `git worktree remove`. Everything else is kept and listed. Worktrees of
 other repositories are reported only. Recording a settlement with
