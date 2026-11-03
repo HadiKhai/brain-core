@@ -202,9 +202,9 @@ def measure(entry):
     listed = private = 0
     shared, inodes = {}, {}
     for folder, _, files in os.walk(entry):
-        if _expired():
-            raise OSError('time budget spent')
         for name in files:
+            if _expired():
+                raise OSError('time budget spent')
             path = os.path.join(folder, name)
             try:
                 info = os.lstat(path)
@@ -379,10 +379,10 @@ def populated_submodules(entry, admin):
             return True
         failed = []
         for folder, dirs, files in os.walk(entry, onerror=failed.append):
-            if _expired():
-                return None
             if folder != entry and ('.git' in dirs or '.git' in files):
                 return True
+            if _expired():
+                return None
         if failed:
             return None
     except OSError:
@@ -410,6 +410,10 @@ def _git_unblocked(args, common, admin):
     return result
 
 
+def hold_path(path):
+    return os.path.join(os.path.dirname(path), '.' + os.path.basename(path) + '.removing')
+
+
 def remove(entry, common, admin):
     """Remove a checked worktree; True only once Git and the folder agree it is gone.
 
@@ -419,7 +423,7 @@ def remove(entry, common, admin):
     passes every check is it removed; otherwise it is moved back and kept.
     """
     path = _real(entry)
-    hold = os.path.join(os.path.dirname(path), '.' + os.path.basename(path) + '.removing')
+    hold = hold_path(path)
     if os.path.lexists(hold):
         return False
     moved = _git_unblocked(['worktree', 'move', path, hold], common, admin)
@@ -532,6 +536,8 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
                 row['size'] = measure(entry)
             except OSError:
                 row['size'] = {'listed': 0, 'private': 0, 'shared': {}}
+                if _expired() and verdict == 'remove':
+                    row['verdict'], row['reason'] = 'keep', 'time budget spent; next pass'
         return row
 
     rows = []
@@ -562,8 +568,12 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
             row['verdict'] = 'removed'
             result['removed'].append(row['path'])
         else:
-            row['verdict'], row['reason'] = 'keep', 'git worktree remove refused'
-            result['errors'].append(row['path'])
+            hold = hold_path(_real(row['path']))
+            stranded = os.path.lexists(hold) and not os.path.lexists(row['path'])
+            row['verdict'], row['reason'] = 'keep', (
+                'left at ' + hold + '; move it back with git worktree move' if stranded
+                else 'git worktree remove refused')
+            result['errors'].append(hold if stranded else row['path'])
     chosen = [r['size'] for r in rows if r['verdict'] in ('remove', 'removed') and 'size' in r]
     result['freed'] = freed(chosen)
     result['seconds'] = round(time.monotonic() - started, 3)

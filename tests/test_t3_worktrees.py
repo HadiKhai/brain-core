@@ -356,6 +356,33 @@ class T3Worktrees(unittest.TestCase):
             self.assertIn('worktree ' + str(path), self.listed().splitlines())
         self.assertEqual(sorted(p.name for p in late.parent.iterdir()), ['t3-0035', 't3-0036'])
 
+    def test_failed_move_back_reports_where_the_worktree_was_left(self):
+        path = self.worktree('t3-0037')
+        self.store()
+        real = self.m._git
+        def no_move_back(args, *a, **kw):
+            if args[:2] == ['worktree', 'move'] and args[2].endswith('.removing'):
+                return subprocess.CompletedProcess(args, 1, '', 'refused')
+            return real(args, *a, **kw)
+        with mock.patch.object(self.m, 'open_inside', return_value=True), \
+                mock.patch.object(self.m, '_git', side_effect=no_move_back):
+            result = self.m.reap(self.repo, home=self.home, apply=True)
+        hold = self.m.hold_path(str(path))
+        self.assertTrue(Path(hold).is_dir())
+        self.assertEqual(result['errors'], [hold])
+        self.assertIn('left at ' + hold, self.verdicts(result)['t3-0037'][1])
+
+    def test_size_walk_stops_at_the_deadline(self):
+        path = self.worktree('t3-0038')
+        for index in range(50):
+            (path / ('file%d.txt' % index)).write_text('x')
+        self.m._deadline[0] = self.m.time.monotonic() - 1
+        try:
+            with self.assertRaises(OSError):
+                self.m.measure(path)
+        finally:
+            self.m._deadline[0] = None
+
     def test_clone_families_count_only_when_every_sharer_goes(self):
         one = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
         two = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
