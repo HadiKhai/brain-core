@@ -370,6 +370,26 @@ class T3Worktrees(unittest.TestCase):
         for path in (orig, private, busy, stashed, unknown):
             self.assertTrue(path.exists())
 
+    def test_linked_folders_inside_the_admin_entry_keep_it(self):
+        path = self.worktree('t3-0045')
+        (path / 'saved.md').write_text('only behind a linked ref folder\n')
+        self.git('add', '.', cwd=path)
+        self.git('commit', '-qm', 'saved', cwd=path)
+        saved = self.git('rev-parse', 'HEAD', cwd=path).strip()
+        self.git('reset', '-q', '--hard', 'main', cwd=path)
+        admin = self.repo / '.git' / 'worktrees' / 't3-0045'
+        (admin / 'logs' / 'HEAD').unlink()
+        (admin / 'ORIG_HEAD').unlink()
+        elsewhere = self.tmp / 'linked-refs'
+        elsewhere.mkdir()
+        (elsewhere / 'saved').write_text(saved + '\n')
+        (admin / 'refs').mkdir(exist_ok=True)
+        (admin / 'refs' / 'worktree').symlink_to(elsewhere)
+        self.assertIsNone(self.m.admin_roots(admin))
+        result = self.reap(apply=True)
+        self.assertEqual(self.verdicts(result), {'t3-0045': ('keep', 'commit check failed')})
+        self.assertTrue(path.exists())
+
     def test_keep_added_during_a_pass_protects_later_removals(self):
         first = self.worktree('t3-0033')
         second = self.worktree('t3-0034')

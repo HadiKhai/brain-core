@@ -273,7 +273,10 @@ def admin_roots(admin):
                 files.append(item)
         for folder in ('refs', 'logs'):
             if (root / folder).is_dir():
-                for dirpath, _, names in os.walk(root / folder, onerror=_raise):
+                for dirpath, dirs, names in os.walk(root / folder, onerror=_raise):
+                    # A link at any depth may point at refs this walk would not see.
+                    if any(os.path.islink(os.path.join(dirpath, name)) for name in dirs + names):
+                        return None
                     files += [Path(dirpath) / name for name in names]
         for path in files:
             for line in path.read_text().splitlines():
