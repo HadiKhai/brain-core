@@ -5,6 +5,25 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-03: Remove T3 worktrees of settled threads
+
+T3 gives a thread its own worktree under `~/.t3/worktrees/<project>/` and never
+removes it. `brain t3-worktrees` lists the instance repository's T3 worktrees
+with their clone-aware sizes and what removing them would free; it is a dry run
+unless `--apply`. `--thread <id>` limits it to one thread's worktree. Only a
+worktree whose every recorded thread is settled with no active run, with no
+process inside it, no uncommitted or untracked change, no commit missing from
+every other branch, remote branch and tag, and no submodule checkout is removed,
+through `git worktree remove`. Everything else is kept and listed. Worktrees of
+other repositories are reported only. Recording a settlement with
+`brain jobs <node> --branch <branch> --settled --attestation-file <export.json> --thread <id>`
+now also removes the attested threads' clean T3 worktrees.
+
+After upgrading: dry-run `brain t3-worktrees` first. To keep a worktree, list its
+folder name in the root node's `t3_worktree_keep` (comma-separated). To remove
+worktrees of threads T3 settles by itself (scheduled runs), set
+`t3_worktree_reap: on` on the root node; each due tick then removes what it can
+in 10 seconds. See docs/t3-worktrees.md.
 ## 2026-10-28: Restart at the third compaction; budgets stay soft
 
 Due and the dashboard retain one blocking restart item per running-job episode

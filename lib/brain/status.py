@@ -20,6 +20,7 @@ from . import timings as _m_timings
 _m_briefs = _m_common.LazyModule(__package__, 'briefs')
 _m_check = _m_common.LazyModule(__package__, 'check')
 _m_docker_cleanup = _m_common.LazyModule(__package__, 'docker_cleanup')
+_m_t3_worktrees = _m_common.LazyModule(__package__, 't3_worktrees')
 _m_conversation_answers = _m_common.LazyModule(__package__, 'conversation_answers')
 _m_docker_leftovers = _m_common.LazyModule(__package__, 'docker_leftovers')
 _m_guard = _m_common.LazyModule(__package__, 'guard')
@@ -1122,6 +1123,8 @@ def _due_tick(a, inst, nodes):
     # watcher scan, and are shared by all nodes selected for this tick.
     _m_docker_cleanup.docker_cleanup_nodes(inst, nodes)
     _m_docker_leftovers.docker_leftover_nodes(inst, nodes)
+    # Opt-in: worktrees T3 keeps for threads it has since settled (bounded, never raises).
+    _m_t3_worktrees.reap_due(inst)
     # Root's explicit tick also sees descendant escalations, without exposing their text.
     escalation_nodes = inst.nodes() if a.id == "root" else nodes
     from . import watch as _m_watch

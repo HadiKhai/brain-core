@@ -25,6 +25,7 @@ _m_review = _m_common.LazyModule(__package__, 'review')
 _m_spend = _m_common.LazyModule(__package__, 'spend')
 _m_status = _m_common.LazyModule(__package__, 'status')
 _m_sync = _m_common.LazyModule(__package__, 'sync')
+_m_t3_worktrees = _m_common.LazyModule(__package__, 't3_worktrees')
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_ui = _m_common.LazyModule(__package__, 'ui')
 _m_tasks = _m_common.LazyModule(__package__, 'tasks')
@@ -931,6 +932,20 @@ def print_job_handback(n, branch):
 def closed_job(row):
     """Only explicit terminal ledger outcomes qualify; a host idle state is never closure."""
     return bool(row.get("Ended") and row.get("Outcome") in ("merged", "abandoned", "studied", "closed"))
+
+
+def settled_worktrees(inst, n, threads):
+    """After a recorded settlement, remove the settled threads' clean T3 worktrees; keep and list the rest."""
+    if not threads:
+        return
+    result = _m_t3_worktrees.reap_settled(inst, threads)
+    lines = [f"{n['id']}: removed T3 worktree {Path(path).name}" for path in result['removed']]
+    lines += [f"{n['id']}: kept T3 worktree {Path(row['path']).name}: {row['reason']}"
+              for row in result['rows'] if row['verdict'] == 'keep']
+    if result['errors'] and not result['rows']:
+        lines.append(f"{n['id']}: T3 worktrees not checked: {result['errors'][0]}")
+    if lines:
+        print(_m_guard.redact('\n'.join(lines), _m_guard.never_terms(n)))
 
 
 def unsettled_jobs(rows):
@@ -1861,6 +1876,7 @@ def cmd_jobs(a):
         n = inst.node(a.id)
         evidence_file = getattr(a, 'attestation_file', None)
         from . import settlement as _m_settlement
+        attested_threads = []
         def attest(targets):
             if not evidence_file:
                 _m_common.die('--settled requires --attestation-file with fresh exhaustive per-thread evidence')
@@ -1887,6 +1903,7 @@ def cmd_jobs(a):
                 _m_common.touch(path)
             for identity in identities:
                 print('t3_thread_organize ' + json.dumps({'action': 'settle', 'threadId': identity}, sort_keys=True))
+            attested_threads.extend(identities)
         with _m_instance.brain_lock(inst):
             rows = ledger_rows(n)
             if a.all_closed:
@@ -1903,24 +1920,28 @@ def cmd_jobs(a):
                     write_jobs(inst, n, rows)
                     inst.commit([], f"{n['id']}: closed job thread sweep recorded")
                 print(f"{n['id']}: {len(targets)} closed job(s) recorded settled (coordinator-supplied evidence; no independent live host verification)")
-                return
-            matches = [r for r in rows or [] if r["Job"] == a.branch and
-                       (not a.job_key or job_key(r) == a.job_key)]
-            if len(matches) > 1 and not a.job_key:
-                _m_common.die("branch has multiple jobs; select the printed --job-key")
-            row = matches[-1] if matches else None
-            if a.job_key and not row:
-                _m_common.die("no job with that --job-key on that branch")
-            if not row or not closed_job(row):
-                _m_common.die("--settled requires a merged or closed ledger job")
-            if open_job(rows, a.branch):
-                _m_common.die("--settled refused: another job on that branch is open; leave unsettled until it closes")
-            attest([row])
-            if not row.get("Settled"):
-                row["Settled"] = stamp(inst)
-                write_jobs(inst, n, rows)
-                inst.commit([], f"{n['id']}: job threads settled")
+            else:
+                matches = [r for r in rows or [] if r["Job"] == a.branch and
+                           (not a.job_key or job_key(r) == a.job_key)]
+                if len(matches) > 1 and not a.job_key:
+                    _m_common.die("branch has multiple jobs; select the printed --job-key")
+                row = matches[-1] if matches else None
+                if a.job_key and not row:
+                    _m_common.die("no job with that --job-key on that branch")
+                if not row or not closed_job(row):
+                    _m_common.die("--settled requires a merged or closed ledger job")
+                if open_job(rows, a.branch):
+                    _m_common.die("--settled refused: another job on that branch is open; leave unsettled until it closes")
+                attest([row])
+                if not row.get("Settled"):
+                    row["Settled"] = stamp(inst)
+                    write_jobs(inst, n, rows)
+                    inst.commit([], f"{n['id']}: job threads settled")
+        if a.all_closed:
+            settled_worktrees(inst, n, attested_threads)
+            return
         print(_m_guard.redact(f"{n['id']}: threads for {a.branch} recorded settled (coordinator-supplied evidence; no independent live host verification)", _m_guard.never_terms(n)))
+        settled_worktrees(inst, n, attested_threads)
         return
     if a.branch and not a.id:
         _m_common.die("--branch needs a node: brain jobs <node> --branch <branch>")

@@ -455,6 +455,12 @@ def _main():
             "wins over what transcripts show"))
     cmd("settle", _Command("settlement", "cmd_settle"), "print exact host calls for a closed job; never calls the host", "id",
         opt("--job", required=True, help="exact ledger job key printed by brain jobs"))
+    cmd("t3-worktrees", _Command("t3_worktrees", "cmd_t3_worktrees"),
+        "list T3 worktrees of settled threads with their real sizes; --apply removes the clean ones",
+        opt("--apply", action="store_true", help="remove settled clean worktrees with git worktree remove (default: dry run)"),
+        opt("--thread", action="append", help="only this host thread's worktree; repeat for several"),
+        opt("--others", action="store_true", help="also measure worktrees of other repositories (report only)"),
+        opt("--json", action="store_true", help="print the full result as JSON"))
     cmd("lifecycle", _Command("host_lifecycle", "cmd_lifecycle"), "execute a native host lifecycle action with fresh ownership checks",
         opt("action", choices=("settle", "launch", "restart", "maintain", "rotate", "accept-rotation")), "id",
         opt("--job-key", help="restart only this exact open ledger job"),
