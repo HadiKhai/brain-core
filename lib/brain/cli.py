@@ -460,6 +460,7 @@ def _main():
         opt("--apply", action="store_true", help="remove settled clean worktrees with git worktree remove (default: dry run)"),
         opt("--thread", action="append", help="only this host thread's worktree; repeat for several"),
         opt("--others", action="store_true", help="also measure worktrees of other repositories (report only)"),
+        opt("--seconds", type=float, help="time budget for the whole pass; what is left waits (default: 10 for a dry run, none with --apply)"),
         opt("--json", action="store_true", help="print the full result as JSON"))
     cmd("lifecycle", _Command("host_lifecycle", "cmd_lifecycle"), "execute a native host lifecycle action with fresh ownership checks",
         opt("action", choices=("settle", "launch", "restart", "maintain", "rotate", "accept-rotation")), "id",

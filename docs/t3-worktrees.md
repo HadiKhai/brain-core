@@ -18,6 +18,7 @@ or the running processes cannot be listed, everything is kept.
 
 ```
 brain t3-worktrees                       # dry run: every worktree, its size, the total that would be freed
+                                         # (10 seconds; --seconds N for more; unchecked ones say so)
 brain t3-worktrees --others              # also measure other repositories' worktrees (slower)
 brain t3-worktrees --thread <id> --apply # remove one settled thread's worktree
 brain t3-worktrees --apply               # remove every removable worktree

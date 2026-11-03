@@ -218,7 +218,16 @@ class T3Worktrees(unittest.TestCase):
         class Broken:
             def node(self, _):
                 raise SystemExit('unreadable')
-        self.assertIsNone(self.m.keep_setting(Broken()))
+        self.assertIsNone(self.m.keep_setting(Broken())())
+        node = self.tmp / 'root-node.md'
+        node.write_text('---\nid: root\nt3_worktree_keep: t3-0000aaaa, /demo/path\n---\n')
+        class Root:
+            def node(self, _):
+                return {'dir': node.parent, 'fm': {}}
+        node.rename(self.tmp / 'node.md')
+        self.assertEqual(self.m.keep_setting(Root())(), {'t3-0000aaaa', '/demo/path'})
+        (self.tmp / 'node.md').unlink()
+        self.assertIsNone(self.m.keep_setting(Root())())
 
     def test_spent_deadline_defers_removal(self):
         path = self.worktree('t3-0023')
@@ -302,6 +311,29 @@ class T3Worktrees(unittest.TestCase):
         self.assertTrue(all(r['verdict'] == 'keep' for r in result['rows']))
         self.assertIn('time budget spent; next pass', {r['reason'] for r in result['rows']})
 
+    def test_a_tag_sharing_the_branch_name_does_not_hide_unique_commits(self):
+        path = self.worktree('t3-0032')
+        (path / 'only.md').write_text('only here\n')
+        self.git('add', '.', cwd=path)
+        self.git('commit', '-qm', 'only here', cwd=path)
+        self.git('tag', 't3/t3-0032', 'main', cwd=self.repo)
+        self.assertTrue(self.m.unique_commits(path))
+        result = self.reap(apply=True)
+        self.assertEqual(self.verdicts(result), {'t3-0032': ('keep', 'commits only here')})
+        self.assertTrue(path.exists())
+
+    def test_keep_added_during_a_pass_protects_later_removals(self):
+        first = self.worktree('t3-0033')
+        second = self.worktree('t3-0034')
+        reads = []
+        def keep():
+            reads.append(1)
+            return set() if len(reads) <= 2 else {second.name}
+        result = self.reap(apply=True, keep=keep)
+        self.assertEqual(result['removed'], [str(first)])
+        self.assertEqual(self.verdicts(result)['t3-0034'], ('keep', 'kept by setting'))
+        self.assertTrue(second.exists())
+
     def test_clone_families_count_only_when_every_sharer_goes(self):
         one = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
         two = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
@@ -327,10 +359,13 @@ class T3Worktrees(unittest.TestCase):
         (dirty / 'draft.md').write_text('new\n')
         self.store()
         jobs = core_loader.SourceFileLoader('t3_settle_fixture', str(CORE / 'bin/brain')).load_module()._owners['settled_worktrees']
+        root_node = self.tmp / 'root-node'
+        root_node.mkdir()
+        (root_node / 'node.md').write_text('---\nid: root\n---\n')
         class Instance:
             root = self.repo
             def node(self, _):
-                return {'fm': {}}
+                return {'dir': root_node, 'fm': {}}
         with mock.patch.dict(os.environ, {'BRAIN_T3_HOME': str(self.home)}), \
                 mock.patch.object(jobs, '_m_t3_worktrees', self.m), \
                 mock.patch.object(jobs, '_m_guard') as guard, mock.patch('builtins.print') as printed:

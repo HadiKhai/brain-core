@@ -29,6 +29,7 @@ from . import common as _m_common
 
 REAP_SECONDS = 10
 SETTLE_SECONDS = 2
+SWEEP_SECONDS = 10
 GIT_SECONDS = 10
 WORKERS = 4
 TERMINAL_RUNS = ('completed', 'cancelled', 'failed', 'interrupted', 'rolled_back')
@@ -55,10 +56,11 @@ def _real(path):
 def host_threads(home):
     """{worktree path: [thread facts]} from T3's store, read-only; None when unknown."""
     db = Path(home) / 'userdata' / 'statev2.sqlite'
-    if not db.is_file():
+    if not db.is_file() or _expired():
         return None
+    wait = 2 if _deadline[0] is None else max(0.0, min(2, _deadline[0] - time.monotonic()))
     try:
-        con = sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)
+        con = sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True, timeout=wait)
         try:
             con.set_progress_handler(lambda: 1 if _expired() else 0, 10000)
             rows = con.execute(_STORE_QUERY).fetchall()
@@ -241,12 +243,14 @@ def freed(sizes):
 
 def unique_commits(entry):
     """True when HEAD has commits on no other branch, remote branch or tag; None if unknown."""
-    head = _git(['symbolic-ref', '-q', '--short', 'HEAD'], cwd=str(entry))
+    head = _git(['symbolic-ref', '-q', 'HEAD'], cwd=str(entry))
     branch = head.stdout.strip() if head.returncode == 0 else ''
-    args = ['rev-list', '-n', '1', 'HEAD', '--not']
-    if branch:
-        args.append('--exclude=' + branch)
-    result = _git(args + ['--branches', '--remotes', '--tags'], cwd=str(entry))
+    refs = _git(['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes', 'refs/tags'], cwd=str(entry))
+    if refs.returncode:
+        return None
+    # Full ref names: a tag or remote sharing the branch's short name must not hide it.
+    others = ''.join('^' + ref + '\n' for ref in refs.stdout.splitlines() if ref and ref != branch)
+    result = _git(['rev-list', '-n', '1', 'HEAD', '--stdin'], cwd=str(entry), stdin=others)
     if result.returncode:
         return None
     return bool(result.stdout.strip())
@@ -392,10 +396,22 @@ def remove(entry, common, admin):
 
 
 def keep_setting(inst):
-    """Folder names and paths never removed; None when the setting cannot be read (nothing is removed)."""
+    """A reader of the folder names and paths never removed; it gives None when unreadable (nothing is removed).
+
+    Each call rereads the root node file, so a keep added during a pass protects
+    every removal after it.
+    """
     try:
-        value = inst.node('root')['fm'].get('t3_worktree_keep', '')
+        path = inst.node('root')['dir'] / 'node.md'
     except (KeyError, OSError, ValueError, TypeError, SystemExit):
+        return lambda: None
+    return lambda: _keep_values(path)
+
+
+def _keep_values(path):
+    try:
+        value = _m_common.read_fm(path)[0].get('t3_worktree_keep', '')
+    except (OSError, ValueError, TypeError, UnicodeError):
         return None
     if not isinstance(value, str):
         return None
@@ -437,7 +453,12 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
         result['seconds'] = round(time.monotonic() - started, 3)
         return result
     live = live_directories()
-    keep = set(keep) if keep is not None else None
+    read_keep = keep if callable(keep) else (lambda: keep)
+
+    def keeping():
+        value = read_keep()
+        return set(value) if value is not None else None
+    keep = keeping()
     shared = None
     if repository is not None and wanted is None:
         checked_out = set()
@@ -485,7 +506,7 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
             continue
         try:
             # Fresh thread and process state and the exact commit check, right before removal.
-            again = judge(row['path'], repository, host_threads(home), live_directories(), keep, wanted)
+            again = judge(row['path'], repository, host_threads(home), live_directories(), keeping(), wanted)
             linked = linked_admin(row['path'])
             if again[0] != 'remove' or linked is None:
                 row['verdict'], row['reason'] = 'keep', again[1] if again[0] != 'remove' else 'admin entry changed'
@@ -574,7 +595,9 @@ def reap_due(inst):
 def cmd_t3_worktrees(a):
     from . import nodes as _m_nodes
     inst = _m_nodes.load()
-    result = reap(inst.root, apply=a.apply, threads_wanted=a.thread, keep=keep_setting(inst), others=a.others)
+    seconds = a.seconds if a.seconds is not None else (None if a.apply else SWEEP_SECONDS)
+    result = reap(inst.root, apply=a.apply, threads_wanted=a.thread, keep=keep_setting(inst), others=a.others,
+                  deadline=time.monotonic() + seconds if seconds else None)
     if a.json:
         for row in result['rows']:
             if 'size' in row:
