@@ -354,11 +354,20 @@ class T3Worktrees(unittest.TestCase):
         (self.repo / '.git' / 'worktrees' / 't3-0041' / 'logs' / 'HEAD').unlink()
         busy = self.worktree('t3-0042')
         (self.repo / '.git' / 'worktrees' / 't3-0042' / 'rebase-merge').mkdir()
+        # A merge interrupted after --autostash: clean status, no MERGE_HEAD, the stash only here.
+        stashed = self.worktree('t3-0043')
+        (stashed / 'notes.md').write_text('draft\n')
+        stash = self.git('stash', 'create', cwd=stashed).strip()
+        self.git('checkout', '-q', '--', 'notes.md', cwd=stashed)
+        (self.repo / '.git' / 'worktrees' / 't3-0043' / 'MERGE_AUTOSTASH').write_text(stash + '\n')
+        unknown = self.worktree('t3-0044')
+        (self.repo / '.git' / 'worktrees' / 't3-0044' / 'SOME_FUTURE_STATE').write_text(stash + '\n')
         result = self.reap(apply=True)
         self.assertEqual(self.verdicts(result), {
             't3-0040': ('keep', 'commits only here'), 't3-0041': ('keep', 'commits only here'),
-            't3-0042': ('keep', 'a git operation is in progress')})
-        for path in (orig, private, busy):
+            't3-0042': ('keep', 'a git operation is in progress'),
+            't3-0043': ('keep', 'a git operation is in progress'), 't3-0044': ('keep', 'commits only here')})
+        for path in (orig, private, busy, stashed, unknown):
             self.assertTrue(path.exists())
 
     def test_keep_added_during_a_pass_protects_later_removals(self):

@@ -241,8 +241,12 @@ def freed(sizes):
     return private + sum(extra for refs, seen, extra in families.values() if seen >= refs)
 
 
-_IN_PROGRESS = ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'BISECT_LOG',
-                'rebase-merge', 'rebase-apply', 'sequencer')
+_IN_PROGRESS = ('MERGE_HEAD', 'MERGE_AUTOSTASH', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD',
+                'BISECT_LOG', 'rebase-merge', 'rebase-apply', 'sequencer')
+# Admin entry contents that never name a commit; every other file is read for commit ids,
+# and any other folder keeps the worktree.
+_ADMIN_PLAIN = ('index', 'gitdir', 'commondir')
+_ADMIN_FOLDERS = ('refs', 'logs', 'modules')
 _SHA = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
 
 
@@ -251,14 +255,22 @@ def _raise(error):
 
 
 def admin_roots(admin):
-    """Commits only the admin entry points at: its pseudorefs (ORIG_HEAD, FETCH_HEAD...), private refs
-    and every reflog. They go with the worktree. None when unreadable or an operation is in progress."""
+    """Commits only the admin entry points at: every pseudoref-like file (ORIG_HEAD, FETCH_HEAD,
+    AUTO_MERGE...), private refs and every reflog. They go with the worktree. None when anything is
+    unreadable or unknown, or an operation is in progress."""
     root = Path(admin)
     try:
         if any((root / name).exists() for name in _IN_PROGRESS) or (root / 'reftable').exists():
             return None
-        found = set()
-        files = [f for f in root.iterdir() if f.name.endswith('HEAD') and f.is_file()]
+        found, files = set(), []
+        for item in root.iterdir():
+            if item.is_symlink():
+                return None
+            if item.is_dir():
+                if item.name not in _ADMIN_FOLDERS:
+                    return None
+            elif item.name not in _ADMIN_PLAIN:
+                files.append(item)
         for folder in ('refs', 'logs'):
             if (root / folder).is_dir():
                 for dirpath, _, names in os.walk(root / folder, onerror=_raise):
