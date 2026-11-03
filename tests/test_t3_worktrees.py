@@ -322,6 +322,18 @@ class T3Worktrees(unittest.TestCase):
         self.assertEqual(self.verdicts(result), {'t3-0032': ('keep', 'commits only here')})
         self.assertTrue(path.exists())
 
+    def test_a_commit_left_only_in_the_worktree_reflog_keeps_it(self):
+        path = self.worktree('t3-0039')
+        self.git('checkout', '-q', '--detach', cwd=path)
+        (path / 'valuable.md').write_text('only in the reflog\n')
+        self.git('add', '.', cwd=path)
+        self.git('commit', '-qm', 'valuable', cwd=path)
+        self.git('reset', '-q', '--hard', 'main', cwd=path)
+        self.assertTrue(self.m.unique_commits(path))
+        result = self.reap(apply=True)
+        self.assertEqual(self.verdicts(result), {'t3-0039': ('keep', 'commits only here')})
+        self.assertTrue(path.exists())
+
     def test_keep_added_during_a_pass_protects_later_removals(self):
         first = self.worktree('t3-0033')
         second = self.worktree('t3-0034')

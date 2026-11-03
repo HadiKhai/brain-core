@@ -241,8 +241,32 @@ def freed(sizes):
     return private + sum(extra for refs, seen, extra in families.values() if seen >= refs)
 
 
-def unique_commits(entry):
-    """True when HEAD has commits on no other branch, remote branch or tag; None if unknown."""
+def admin_reflog(admin):
+    """Commits the worktree's own HEAD reflog names; it lives in the admin entry and goes with it. None if unreadable."""
+    try:
+        text = (Path(admin) / 'logs' / 'HEAD').read_text()
+    except FileNotFoundError:
+        return set()
+    except (OSError, UnicodeError):
+        return None
+    found = set()
+    for line in text.splitlines():
+        for sha in line.split(' ', 2)[:2]:
+            if len(sha) in (40, 64) and sha.strip('0'):
+                found.add(sha)
+    return found
+
+
+def unique_commits(entry, admin=None):
+    """True when HEAD or its own reflog has commits on no other branch, remote branch or tag; None if unknown."""
+    if admin is None:
+        linked = linked_admin(entry)
+        if linked is None:
+            return None
+        admin = linked[0]
+    reflog = admin_reflog(admin)
+    if reflog is None:
+        return None
     head = _git(['symbolic-ref', '-q', 'HEAD'], cwd=str(entry))
     branch = head.stdout.strip() if head.returncode == 0 else ''
     refs = _git(['for-each-ref', '--format=%(refname)', 'refs/heads', 'refs/remotes', 'refs/tags'], cwd=str(entry))
@@ -250,7 +274,10 @@ def unique_commits(entry):
         return None
     # Full ref names: a tag or remote sharing the branch's short name must not hide it.
     others = ''.join('^' + ref + '\n' for ref in refs.stdout.splitlines() if ref and ref != branch)
-    result = _git(['rev-list', '-n', '1', 'HEAD', '--stdin'], cwd=str(entry), stdin=others)
+    # Reflog commits since pruned are gone already; every other one must be on another ref.
+    roots = ''.join(sha + '\n' for sha in sorted(reflog))
+    result = _git(['rev-list', '-n', '1', '--ignore-missing', 'HEAD', '--stdin'], cwd=str(entry),
+                  stdin=roots + others)
     if result.returncode:
         return None
     return bool(result.stdout.strip())
@@ -344,7 +371,9 @@ def tree_reason(path, admin, shared=None):
         if any(line[:1].islower() or line[:2] == 'S ' for line in flags.stdout.splitlines()):
             return 'index hides changes (assume-unchanged or skip-worktree)'
         head = admin_head(admin, shared[1]) if shared else None
-        unique = False if head is not None and head in shared[0] else unique_commits(path)
+        reflog = admin_reflog(admin) if shared else None
+        covered = head is not None and reflog is not None and head in shared[0] and reflog <= shared[0]
+        unique = False if covered else unique_commits(path, admin)
     except (OSError, subprocess.SubprocessError):
         return 'git check failed'
     if unique is None:
