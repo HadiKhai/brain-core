@@ -479,13 +479,14 @@ def hold_path(path):
     return os.path.join(os.path.dirname(path), '.' + os.path.basename(path) + '.removing')
 
 
-def remove(entry, common, admin):
+def remove(entry, common, admin, protected=lambda: False):
     """Remove a checked worktree; True only once Git and the folder agree it is gone.
 
     Git's unforced removal still deletes ignored files, so the worktree is first
     moved (one rename; Git updates its records) to a hidden sibling the old path
-    no longer reaches. Only if nothing is open inside it and its content still
-    passes every check is it removed; otherwise it is moved back and kept.
+    no longer reaches. Only if nothing is open inside it, its content still
+    passes every check and ``protected()`` (thread state and keep, reread last)
+    is false is it removed; otherwise it is moved back and kept.
     """
     path = _real(entry)
     hold = hold_path(path)
@@ -494,7 +495,7 @@ def remove(entry, common, admin):
     moved = _git_unblocked(['worktree', 'move', path, hold], common, admin)
     if moved.returncode or os.path.lexists(path) or not os.path.isdir(hold):
         return False
-    if open_inside(hold) is not False or tree_reason(hold, admin) is not None:
+    if open_inside(hold) is not False or tree_reason(hold, admin) is not None or protected():
         _git(['worktree', 'move', hold, path], git_dir=common)
         return False
     result = _git(['worktree', 'remove', hold], git_dir=common)
@@ -623,15 +624,25 @@ def _reap(root, home, apply, threads_wanted, keep, deadline, sizes, others, star
             if again[0] != 'remove' or linked is None:
                 row['verdict'], row['reason'] = 'keep', again[1] if again[0] != 'remove' else 'admin entry changed'
                 continue
-            done = remove(row['path'], linked[1], linked[0])
+            def protected(entry=Path(row['path']), row=row):
+                # The last reads before deletion: a resumed thread or a new keep wins.
+                kept, records = keeping(), (host_threads(home) or {}).get(_real(entry))
+                row['late'] = (kept is None or entry.name in kept or _real(entry) in kept or not records
+                               or not all(r['settled'] and not r['active'] for r in records))
+                return row['late']
+            done = remove(row['path'], linked[1], linked[0], protected)
         except (OSError, ValueError, subprocess.SubprocessError):
             if _expired() and os.path.lexists(row['path']):
+                row.pop('late', None)
                 row['verdict'], row['reason'] = 'keep', 'time budget spent; next pass'
                 continue
             done = False
+        late = row.pop('late', False)
         if done:
             row['verdict'] = 'removed'
             result['removed'].append(row['path'])
+        elif late and os.path.isdir(row['path']):
+            row['verdict'], row['reason'] = 'keep', 'thread resumed or kept during removal'
         else:
             hold = hold_path(_real(row['path']))
             stranded = os.path.lexists(hold) and not os.path.lexists(row['path'])

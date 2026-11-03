@@ -34,7 +34,8 @@ the thread state, running processes and the exact commit check are read again.
 Git's removal still deletes ignored files, so the worktree is first moved with
 `git worktree move` to a hidden sibling (`.<name>.removing`) that its old path
 no longer reaches; only if no process has anything open inside it and every
-content check still passes is it removed, otherwise it is moved back and kept.
+content check still passes, and a last read of the thread state and the keep
+setting still allows it, is it removed; otherwise it is moved back and kept.
 Git also refuses a worktree whose admin entry has an empty `modules` folder;
 only that empty folder is removed and the same move or removal repeats. A
 `.<name>.removing` folder left by an interrupted pass is listed as kept; move it

@@ -451,6 +451,26 @@ class T3Worktrees(unittest.TestCase):
         finally:
             self.m._deadline[0] = None
 
+    def test_resume_or_keep_during_the_final_checks_moves_it_back(self):
+        resumed = self.worktree('t3-0046')
+        kept = self.worktree('t3-0047')
+        self.store()
+        late_keep = set()
+        def inspect(hold):
+            if hold.endswith('.t3-0046.removing'):
+                self.threads[0] = ('thread-t3-0046', str(resumed), True, 'running')
+                self.store()
+            else:
+                late_keep.add(kept.name)
+            return False
+        with mock.patch.object(self.m, 'open_inside', side_effect=inspect):
+            result = self.m.reap(self.repo, home=self.home, apply=True, keep=lambda: set(late_keep))
+        self.assertEqual(result['removed'], [])
+        self.assertEqual(result['errors'], [])
+        for path in (resumed, kept):
+            self.assertTrue(path.exists())
+            self.assertIn('worktree ' + str(path), self.listed().splitlines())
+
     def test_clone_families_count_only_when_every_sharer_goes(self):
         one = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
         two = {'listed': 10, 'private': 2, 'shared': {7: [2, 1, 8]}}
