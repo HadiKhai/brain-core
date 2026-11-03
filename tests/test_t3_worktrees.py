@@ -334,6 +334,33 @@ class T3Worktrees(unittest.TestCase):
         self.assertEqual(self.verdicts(result), {'t3-0039': ('keep', 'commits only here')})
         self.assertTrue(path.exists())
 
+    def test_orig_head_private_refs_and_operations_in_progress_keep_it(self):
+        orig = self.worktree('t3-0040')
+        self.git('checkout', '-q', '--detach', cwd=orig)
+        (orig / 'valuable.md').write_text('only behind ORIG_HEAD\n')
+        self.git('add', '.', cwd=orig)
+        self.git('commit', '-qm', 'valuable', cwd=orig)
+        self.git('reset', '-q', '--hard', 'main', cwd=orig)
+        admin = self.repo / '.git' / 'worktrees' / 't3-0040'
+        (admin / 'logs' / 'HEAD').unlink()  # the reflog expired; ORIG_HEAD still names the commit
+        self.assertTrue((admin / 'ORIG_HEAD').exists())
+        private = self.worktree('t3-0041')
+        (private / 'bisect.md').write_text('only behind a private ref\n')
+        self.git('add', '.', cwd=private)
+        self.git('commit', '-qm', 'private', cwd=private)
+        self.git('update-ref', 'refs/worktree/saved', 'HEAD', cwd=private)
+        self.git('reset', '-q', '--hard', 'main', cwd=private)
+        self.git('update-ref', 'refs/heads/t3/t3-0041', 'main', cwd=private)
+        (self.repo / '.git' / 'worktrees' / 't3-0041' / 'logs' / 'HEAD').unlink()
+        busy = self.worktree('t3-0042')
+        (self.repo / '.git' / 'worktrees' / 't3-0042' / 'rebase-merge').mkdir()
+        result = self.reap(apply=True)
+        self.assertEqual(self.verdicts(result), {
+            't3-0040': ('keep', 'commits only here'), 't3-0041': ('keep', 'commits only here'),
+            't3-0042': ('keep', 'a git operation is in progress')})
+        for path in (orig, private, busy):
+            self.assertTrue(path.exists())
+
     def test_keep_added_during_a_pass_protects_later_removals(self):
         first = self.worktree('t3-0033')
         second = self.worktree('t3-0034')

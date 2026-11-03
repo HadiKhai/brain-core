@@ -9,7 +9,7 @@ removes the folder, not when the thread settles and not when it is deleted.
 
 | verdict | when |
 | --- | --- |
-| `remove` | the worktree belongs to the instance repository, every host thread that records it is settled with no active run, no process has its working directory inside it, `git status` (untracked and ignored files and submodules included) is empty apart from core's own `.brain/hooks.json` and `.brain/hooks.log`, no index entry is marked assume-unchanged or skip-worktree, HEAD and every commit in the worktree's own HEAD reflog are on another branch, remote branch or tag, and no submodule or nested repository is checked out |
+| `remove` | the worktree belongs to the instance repository, every host thread that records it is settled with no active run, no process has its working directory inside it, `git status` (untracked and ignored files and submodules included) is empty apart from core's own `.brain/hooks.json` and `.brain/hooks.log`, no index entry is marked assume-unchanged or skip-worktree, HEAD and every commit only its admin entry points at (pseudorefs such as `ORIG_HEAD`, private refs, every reflog) are on another branch, remote branch or tag, no merge, rebase, cherry-pick, revert or bisect is in progress, and no submodule or nested repository is checked out |
 | `keep` | anything else, with the reason: kept by setting, unsettled, running, a process inside, changes, ignored files, index flags hiding edits, commits only here, a submodule checkout, no host record, the time budget, or state that could not be read |
 | `other` | a worktree of another repository (a node home, another checkout): counted, never changed |
 

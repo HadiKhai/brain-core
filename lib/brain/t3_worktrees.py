@@ -241,30 +241,49 @@ def freed(sizes):
     return private + sum(extra for refs, seen, extra in families.values() if seen >= refs)
 
 
-def admin_reflog(admin):
-    """Commits the worktree's own HEAD reflog names; it lives in the admin entry and goes with it. None if unreadable."""
+_IN_PROGRESS = ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'BISECT_LOG',
+                'rebase-merge', 'rebase-apply', 'sequencer')
+_SHA = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?')
+
+
+def _raise(error):
+    raise error
+
+
+def admin_roots(admin):
+    """Commits only the admin entry points at: its pseudorefs (ORIG_HEAD, FETCH_HEAD...), private refs
+    and every reflog. They go with the worktree. None when unreadable or an operation is in progress."""
+    root = Path(admin)
     try:
-        text = (Path(admin) / 'logs' / 'HEAD').read_text()
-    except FileNotFoundError:
-        return set()
+        if any((root / name).exists() for name in _IN_PROGRESS) or (root / 'reftable').exists():
+            return None
+        found = set()
+        files = [f for f in root.iterdir() if f.name.endswith('HEAD') and f.is_file()]
+        for folder in ('refs', 'logs'):
+            if (root / folder).is_dir():
+                for dirpath, _, names in os.walk(root / folder, onerror=_raise):
+                    files += [Path(dirpath) / name for name in names]
+        for path in files:
+            for line in path.read_text().splitlines():
+                # Ref files and FETCH_HEAD lead with a commit; reflog lines name old and new.
+                reflog = path.parts[len(root.parts)] == 'logs'
+                for token in line.split(None, 2)[:2] if reflog else line.split(None, 1)[:1]:
+                    if _SHA.fullmatch(token) and token.strip('0'):
+                        found.add(token)
     except (OSError, UnicodeError):
         return None
-    found = set()
-    for line in text.splitlines():
-        for sha in line.split(' ', 2)[:2]:
-            if len(sha) in (40, 64) and sha.strip('0'):
-                found.add(sha)
     return found
 
 
 def unique_commits(entry, admin=None):
-    """True when HEAD or its own reflog has commits on no other branch, remote branch or tag; None if unknown."""
+    """True when HEAD or anything only its admin entry points at has commits on no other branch,
+    remote branch or tag; None if unknown."""
     if admin is None:
         linked = linked_admin(entry)
         if linked is None:
             return None
         admin = linked[0]
-    reflog = admin_reflog(admin)
+    reflog = admin_roots(admin)
     if reflog is None:
         return None
     head = _git(['symbolic-ref', '-q', 'HEAD'], cwd=str(entry))
@@ -274,7 +293,7 @@ def unique_commits(entry, admin=None):
         return None
     # Full ref names: a tag or remote sharing the branch's short name must not hide it.
     others = ''.join('^' + ref + '\n' for ref in refs.stdout.splitlines() if ref and ref != branch)
-    # Reflog commits since pruned are gone already; every other one must be on another ref.
+    # Commits since pruned are gone already; every other one must be on another ref.
     roots = ''.join(sha + '\n' for sha in sorted(reflog))
     result = _git(['rev-list', '-n', '1', '--ignore-missing', 'HEAD', '--stdin'], cwd=str(entry),
                   stdin=roots + others)
@@ -354,6 +373,8 @@ def judge(entry, repository, threads, live, keep, wanted=None, shared=None):
 def tree_reason(path, admin, shared=None):
     """Why this worktree's content must stay, or None when nothing in it would be lost."""
     try:
+        if any((Path(admin) / name).exists() for name in _IN_PROGRESS):
+            return 'a git operation is in progress'
         status = _git(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=traditional',
                        '--ignore-submodules=none'], cwd=path)
         if status.returncode:
@@ -371,7 +392,7 @@ def tree_reason(path, admin, shared=None):
         if any(line[:1].islower() or line[:2] == 'S ' for line in flags.stdout.splitlines()):
             return 'index hides changes (assume-unchanged or skip-worktree)'
         head = admin_head(admin, shared[1]) if shared else None
-        reflog = admin_reflog(admin) if shared else None
+        reflog = admin_roots(admin) if shared else None
         covered = head is not None and reflog is not None and head in shared[0] and reflog <= shared[0]
         unique = False if covered else unique_commits(path, admin)
     except (OSError, subprocess.SubprocessError):
