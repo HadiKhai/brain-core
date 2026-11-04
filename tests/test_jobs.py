@@ -530,7 +530,7 @@ class UnifiedHandbacks(Scenario):
         module = core_loader.SourceFileLoader("brain_handback_wake", str(CORE / "bin/brain")).load_module()
         inst = module.Instance(r)
         args = argparse.Namespace(summary="Synthetic result", question="Choose blue", id="a", branch="job", state="question", lessons="none: fixture",
-                                  report=None, reviews=None, need_human="Choose blue")
+                                  report=None, reviews=None, need_human="Choose blue", dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(module, "load", return_value=inst), \
                 mock.patch.object(module, "wake_start"), contextlib.redirect_stdout(io.StringIO()):
@@ -551,7 +551,7 @@ class UnifiedHandbacks(Scenario):
         inst.local_of("root")["wake"] = "exit 0"
         inst.save_local()
         args = argparse.Namespace(summary="Synthetic result", question="Choose blue", id="a", branch="job", state="question",
-                                  lessons="none: fixture", report=None, reviews=None, need_human=None)
+                                  lessons="none: fixture", report=None, reviews=None, need_human=None, dissection=str(self.dissection_report()))
         directory = module.wake_directory(inst, inst.node("root"))
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(module, "load", return_value=inst), \
@@ -605,7 +605,7 @@ class UnifiedHandbacks(Scenario):
         inst.local_of("root")["wake"] = "exit 0"
         inst.save_local()
         args = argparse.Namespace(summary="Synthetic result", id="a", branch="job", state="blocked", lessons="none: fixture",
-                                  report=None, reviews=None, need_human="Grant fixture access")
+                                  report=None, reviews=None, need_human="Grant fixture access", dissection=str(self.dissection_report()))
         directory = module.wake_directory(inst, inst.node("root"))
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(module, "load", return_value=inst), \
@@ -638,7 +638,7 @@ class UnifiedHandbacks(Scenario):
         inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
         inst.save_local()
         args = argparse.Namespace(summary="Synthetic result", question="Synthetic choice?", id="a", branch="job", state="question", lessons="none: fixture",
-                                  report="report.md", reviews=None, need_human=None)
+                                  report="report.md", reviews=None, need_human=None, dissection=str(self.dissection_report()))
         directory = module.wake_directory(inst, inst.node("root"))
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(module, "load", return_value=inst), \
@@ -661,7 +661,7 @@ class UnifiedHandbacks(Scenario):
         inst.local_of("root")["wake"] = "echo called >> " + shlex_quote(str(calls))
         inst.save_local()
         args = argparse.Namespace(summary="Synthetic result", id="a", branch="job", state="blocked", lessons="none: fixture",
-                                  report="report.md", reviews=None, need_human=None)
+                                  report="report.md", reviews=None, need_human=None, dissection=str(self.dissection_report()))
         directory = module.wake_directory(inst, inst.node("root"))
         with mock.patch.dict(os.environ, self.env, clear=True), \
                 mock.patch.object(module, "load", return_value=inst), \
@@ -685,7 +685,7 @@ class UnifiedHandbacks(Scenario):
             if what == "the inbox question":
                 module.inbox_append(n["dir"], "- synthetic runtime question\n")
         args = argparse.Namespace(summary="Synthetic result", question="Choose a colour", id="a", branch="job", state="question", lessons="none: fixture",
-                                  report=None, reviews=None, need_human="Choose a colour")
+                                  report=None, reviews=None, need_human="Choose a colour", dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(module, "load", return_value=inst), \
                 mock.patch.object(module, "no_terms_in", side_effect=concurrent_append), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -733,7 +733,7 @@ class UnifiedHandbacks(Scenario):
         self.assertEqual(self.b(r, "ready", "a", "--branch", "job").strip(), "ready")
         for state in ("blocked", "question"):
             self.b(r, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job", "--state", state,
-                   "--report", "Need a choice.", "--lessons", "none: job incomplete")
+                   "--report", "Need a choice.", "--lessons", "none: job incomplete", '--dissection', str(self.dissection_report()))
             self.assertIn("hand-back is " + state, self.b(r, "ready", "a", "--branch", "job", ok=False))
             self.assertEqual(json.loads(path.read_text())["ready"], None)
             self.assertEqual(next(i for i in self.due(r) if i["kind"] == "handback")["state"], state)

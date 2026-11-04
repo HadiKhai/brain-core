@@ -92,7 +92,7 @@ class WorkerMessages(Scenario):
         root, _ = self.job()
         for state, kind in (("blocked", "blocked"), ("question", "question"), ("failed", "blocked")):
             out = self.b(root, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job/sample", "--state", state,
-                         "--report", "~/reports/sample.md", "--lessons", "none: made-up fixture")
+                         "--report", "~/reports/sample.md", "--lessons", "none: made-up fixture", '--dissection', str(self.dissection_report()))
             self.assertIn(kind + ": coordinator can see it with brain due [branch: job/sample; report: ~/reports/sample.md]", out)
 
 

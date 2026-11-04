@@ -420,7 +420,7 @@ class ImportAutonomy(Scenario):
             for state in ("blocked", "question", "done"):
                 self.b(r, "handback", "--summary", "Synthetic result", "source", "--branch", job, "--state", state, *reviews,
                        *(("--question", "Synthetic choice?") if state == "question" else ()),
-                       "--report", "sources/study.md", "--lessons", "bounded")
+                       "--report", "sources/study.md", "--lessons", "bounded", '--dissection', str(self.dissection_report()))
                 due = json.loads(self.b(r, "due", "source", "--json"))
                 signal = next(i for i in due if i["kind"] == "handback")
                 self.assertEqual(signal["state"], state)

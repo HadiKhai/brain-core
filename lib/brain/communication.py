@@ -95,10 +95,22 @@ def communication_record(inst, n, kind, text, key, question=None):
     if kind not in COMMUNICATION_KINDS or not isinstance(key, str) or not key.strip() or not isinstance(text, str) or not text.strip():
         raise ValueError('notification requires a known kind, stable key and text')
     typed = communication_question(inst, question) if kind == 'question' else {}
+    if kind == 'question':
+        from . import dissection
+        measured = dissection.measurement(question.get('result'), question.get('target'),
+                                          question.get('target_direction', 'at-least'))
+        evidence = (dissection.parse(question.get('dissection', ''))
+                    if 'dissection' in question or dissection.required(question.get('state'), text + ' ' + str(question.get('summary', '')), measured)
+                    else None)
+        if measured is not None:
+            typed['measurement'] = measured
+        if evidence is not None:
+            typed['dissection'] = evidence
     terms = _m_guard.never_terms(n)
     text = _m_nodes.import_text(text.strip(), terms)
     if typed:
         typed = {**typed, 'options': [{**o, 'label': _m_nodes.import_text(o['label'], terms)} for o in typed['options']]}
+        _m_guard.no_terms_in(n, json.dumps(typed), 'question evidence')
     identity = _m_hosts.wake_binding(json.dumps([n['id'], kind, key]))
     record = {'id': identity, 'node': n['id'], 'kind': kind, 'text': text, 'at': inst.now(), **typed}
     from . import communication_policy
@@ -108,7 +120,7 @@ def communication_record(inst, n, kind, text, key, question=None):
         records = data['questions'] if typed else data['notices']
         previous = records.get(identity)
         if previous:
-            fields = ('text', 'options', 'recommendation', 'default', 'deadline') if typed else ('text',)
+            fields = ('text', 'options', 'recommendation', 'default', 'deadline', 'measurement', 'dissection') if typed else ('text',)
             if any(previous.get(k) != record.get(k) for k in fields):
                 raise ValueError('stable notification key already names different content')
             record = previous

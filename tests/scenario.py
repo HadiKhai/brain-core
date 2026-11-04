@@ -467,6 +467,15 @@ class Scenario(unittest.TestCase):
     def b(self, root, *args, ok=True):
         return self.run_(list(args), cwd=root, ok=ok)
 
+    def dissection_report(self):
+        """Explicit evidence input for legacy handback scenarios, never auto-injected."""
+        path = self.tmp / 'fixture-dissection.md'
+        path.write_text('## Dissection\nCause: Synthetic fixture input.\nItems covered: 3\n'
+                        '### Cases\n1. Ref: fixture-a; First input.\n2. Ref: fixture-b; Second input.\n'
+                        '3. Ref: fixture-c; Third input.\n### Fixes\n1. Apply fixture repair.\n'
+                        '2. Retain fixture evidence.\nRecommendation: 1\n')
+        return path
+
     def repo(self, path, files=None):
         files = files or {'README.md': 'hello\n'}
         key = self._fixture_key(tuple(sorted(files.items())))

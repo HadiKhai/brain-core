@@ -273,6 +273,10 @@ def queueable_command(cmd, name):
         opt('--request-id', help='retry a queued handback using the same payload-bound ID'),
         opt('--record', action='store_true', help='with done --reviews N: record native readiness'),
         opt("--report"), opt("--lessons", help="proposed lessons, or none: <reason>"),
+        opt('--dissection', help='Markdown dissection file (defaults to --report)'),
+        opt('--result', type=float, help='measured result; requires --target'),
+        opt('--target', type=float, help='acceptance target; requires --result'),
+        opt('--target-direction', choices=['at-least', 'at-most'], default='at-least'),
         opt("--restart", choices=["compactions"], help="request a fresh brief resuming this job (blocked only)"),
         opt("--need-human", help="question or blocked need to append to the node inbox"),
         opt("--reviews", type=int, help="completed review rounds; runs verify for done (or reuses a green run that "
@@ -496,6 +500,10 @@ def _main():
         "id", opt("kind", choices=_m_common.COMMUNICATION_KINDS), "text",
         opt("--key", required=True, help="stable idempotency key"), opt("--question-file"))
     cmd("question-answer", _Command("communication", "cmd_question_answer"), "answer one typed question", "id", "choice")
+    cmd('ledger', _Command('failure_ledger', 'cmd_ledger'), 'append a dated failure diagnosis',
+        opt('action', choices=['add']), opt('--failed', required=True),
+        opt('--first-explanation', required=True), opt('--cause', required=True),
+        opt('--found-by', choices=['hadi', 'agent'], required=True), opt('--fix', required=True))
     cmd('morning-brief', _Command("communication_policy", "cmd_morning_brief"), 'publish a retained quiet-hours inbox brief; never wakes', 'id',
         opt('--operator', action='store_true', help='root only: aggregate retained notices once per local delivery day'))
     cmd("msg", _Command("messages", "cmd_msg"), "format start/done/blocked/question for a coordinator (does not send)",

@@ -1269,7 +1269,7 @@ class SmallFixes(Scenario):
         shutil.rmtree(hb, ignore_errors=True)
         hb.symlink_to(home)
         out = self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", "--report", "r.md",
-                     "--lessons", "none: none", ok=False)
+                     "--lessons", "none: none", '--dissection', str(self.dissection_report()), ok=False)
         self.assertIn("out of the brain", out)
         self.assertEqual([p.name for p in home.iterdir() if p.suffix == ".json"], [])
         hb.unlink()
@@ -1278,7 +1278,7 @@ class SmallFixes(Scenario):
         inbox.symlink_to(home / "calc.py")
         before = (home / "calc.py").read_text()
         self.b(r, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job", "--state", "question", "--report", "r.md",
-               "--lessons", "none: none", ok=False)
+               "--lessons", "none: none", '--dissection', str(self.dissection_report()), ok=False)
         self.assertEqual((home / "calc.py").read_text(), before)
 
     def test_a_brain_with_a_link_leading_out_refuses_every_change(self):

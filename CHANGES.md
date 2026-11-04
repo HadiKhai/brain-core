@@ -5,6 +5,16 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Require diagnosis for failure handbacks and questions
+
+Failure handbacks and typed question files require `## Dissection`: three cases
+with stored-record references, a cause, counted coverage, ranked fixes and a
+recommendation. A missed `--result`/`--target` also requires it, even for done.
+The blocked compaction-restart path exempts only the state trigger. Use the
+report or `--dissection PATH`; question files carry the Markdown in `dissection`.
+`brain ledger add` appends a dated diagnosis to the instance's failure ledger.
+See [the format and command examples](docs/dissection.md) before handing back.
+
 ## 2026-11-03: Remove T3 worktrees of settled threads
 
 T3 gives a thread its own worktree under `~/.t3/worktrees/<project>/` and never

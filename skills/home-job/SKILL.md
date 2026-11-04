@@ -142,6 +142,15 @@ stated; never run a polling loop in an agent.
    the change affects; leave the full verify to this one command.
    No separate packet command, host message or Lessons section is required. Blockers/questions
    use the same command with `--state blocked`/`question` and no --reviews; the report states why.
+   Blocked/failed states, failure wording and missed measured targets require the
+   [Dissection format](../../docs/dissection.md) in the report or `--dissection <file>`:
+   three numbered cases with `Ref:`, a `Cause:` line, integer `Items covered:`,
+   two or three ranked fixes and `Recommendation: <rank>`. Record numerical results
+   with `--result`, `--target`, and `--target-direction at-least|at-most`. The
+   `blocked --restart compactions` rotation is exempt only from the state trigger.
+   Failure wording and missed targets still require evidence. Typed question files
+   use the same format in their JSON `dissection` string. Add diagnosed failures
+   explicitly with `brain ledger add`; it never runs automatically.
    Questions also append to inbox; a blocked human need adds `--need-human "<need>"`.
    `ready` and handback use cached `origin/HEAD` when origin exists, otherwise local `main`.
    Neither fetches. The coordinator explicitly runs `brain sync <id>` (or `git fetch origin`)

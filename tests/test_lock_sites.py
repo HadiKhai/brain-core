@@ -205,7 +205,7 @@ class _LockSiteScenario(Scenario):
             self.b(self.r, "jobs", "app", "--branch", branch, "--start")
             command = ["jobs", "app", "--branch", branch, "--close"]
         elif site == "handback_accounting":
-            command = ["handback", "app", "--branch", "job-one", "--state", "blocked", "--summary", "Fixture result", "--lessons", "none: fixture"]
+            command = ["handback", "app", "--branch", "job-one", "--state", "blocked", "--summary", "Fixture result", "--lessons", "none: fixture", '--dissection', str(self.dissection_report())]
         elif site.startswith("spend_"):
             command = ["spend", "--machine"] if site == "spend_machine" else ["spend", "app"]
         elif site == "history_out":
@@ -706,7 +706,7 @@ class ReviewReadSets(_LockSiteScenario):
             self.b(self.r, "wt", "add", "app", "job-two", "--base", "main")
         proc = self.start(site, command, gated=True, broad=mutant)
         if site == "rm_accounting":
-            self.b(self.r, "handback", "app", "--branch", "job-two", "--state", "blocked", "--summary", "Fixture result", "--lessons", "none: fixture")
+            self.b(self.r, "handback", "app", "--branch", "job-two", "--state", "blocked", "--summary", "Fixture result", "--lessons", "none: fixture", '--dissection', str(self.dissection_report()))
             target = self.r / "nodes/app/inbox.md"
             target.write_text(target.read_text() + "\nUnrelated inbox message.\n")
             records = list((self.r / "nodes/app/job-handbacks").glob("*.json"))

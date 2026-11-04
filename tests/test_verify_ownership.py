@@ -61,7 +61,7 @@ class NativeVerifierLifecycle(Scenario):
         setup = self.runner()
         m, inst, n = setup[:3]
         row = m.open_job(m.read_jobs(n), 'job')
-        args = argparse.Namespace(id='a', branch='job', state='blocked', summary='Fixture only')
+        args = argparse.Namespace(id='a', branch='job', state='blocked', summary='Fixture only', dissection=str(self.dissection_report()))
         with mock.patch.object(m, 'request_wake', return_value=True), \
                 mock.patch.object(m, 'docker_cleanup_nodes', return_value={'stopped': [], 'removed': [], 'errors': []}):
             request = m.enqueue_handback(inst, n, row, args)

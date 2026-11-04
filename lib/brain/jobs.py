@@ -288,6 +288,11 @@ def validate_handback_options(a, row=None):
         _m_common.die('--lessons needs proposed lessons, or none: <reason>')
     if getattr(a, 'report', None) is not None and not one_line(a.report):
         _m_common.die('--report requires a nonempty one-line path')
+    from . import dissection
+    try:
+        dissection.handback(a)
+    except (OSError, ValueError) as error:
+        _m_common.die(str(error))
 
 
 def cmd_handback(a):
@@ -301,8 +306,12 @@ def cmd_handback(a):
     row = open_job(read_jobs(n) or [], a.branch)
     if not row:
         _m_common.die('no open job for handback')
+    if getattr(a, '_dissection_consumed', False):
+        a._dissection_snapshot = None  # a reused library Namespace is a new authoring call
+        a._dissection_consumed = False
     validate_handback_options(a, row=row)
     _m_guard.no_terms_in(n, a.summary, 'handback summary')
+    _m_guard.no_terms_in(n, json.dumps(a._dissection_snapshot), 'handback dissection')
     if getattr(a, 'question', None):
         _m_guard.no_terms_in(n, a.question, 'handback question')
     if getattr(a, 'enqueue', False):
@@ -311,6 +320,7 @@ def cmd_handback(a):
         except (OSError, ValueError) as error:
             _m_common.die(_m_guard.redact(str(error), _m_guard.never_terms(n)))
         print(request['id'])
+        a._dissection_consumed = True
         return
     if not getattr(a, '_intent_request', None) and not getattr(a, '_queue_request', None):
         _m_queue.refuse_overtaking(inst, n, row)  # before any attempt or verification
@@ -350,6 +360,7 @@ def cmd_handback(a):
             pass  # unreadable/ambiguous evidence stays unknown; never overwrite it
         finally:
             _m_attempts.ATTEMPT_CONTEXT.reset(context_token)
+            a._dissection_consumed = True
 
 
 def publish_handback(a):
@@ -443,6 +454,11 @@ def publish_handback(a):
                 "at": inst.now(), "report": _m_common.tilde(a.report) if a.report is not None else previous.get("report", ""),
                 "lessons": lessons, "ready": packet, "ready_reasons": reasons,
                 "verify_runs": count("verify_runs") + fresh, "verify_reused": count("verify_reused") + reused}
+        snapshot = getattr(a, '_dissection_snapshot', None) or {}
+        if snapshot.get('measurement') is not None:
+            data['measurement'] = snapshot['measurement']
+        if snapshot.get('evidence') is not None:
+            data['dissection'] = snapshot['evidence']
         if request:
             data['queue_publication'] = {'request': request['id'], 'lease': request['lease']}
         if intent:

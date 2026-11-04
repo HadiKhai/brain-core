@@ -33,6 +33,13 @@ You were started for one job. If your brief names no role, you are a worker for 
   For a blocker or question, use the same command with `--state blocked` or `--state question`,
   omit --reviews, and put the issue in the report. Every publication needs --summary;
   questions also require `--question '<one-line choice>'` and reach inbox. Add
+  a [Dissection](../docs/dissection.md) for blocked/failed states, failure wording
+  (including parked, refused or two strikes), or a measured result below its target.
+  Use `--dissection <file>` or the report's `## Dissection`: three numbered cases
+  with `Ref:`, one `Cause:`, integer `Items covered:`, two or three ranked fixes,
+  and `Recommendation: <rank>`. Record measurements with `--result`, `--target`
+  and optionally `--target-direction at-most`. Compaction rotation is exempt only
+  from the blocked-state trigger, not failure wording or a missed target. Add
   `--need-human "<need>"` for a blocked human need. Legacy `failed` is accepted too.
   End your turn after recording; a host message may link the record but is optional.
   Do not repeat Lessons in another message or report. Report paths are workbench-relative or

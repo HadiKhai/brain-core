@@ -315,7 +315,7 @@ class AutonomyDue(AutonomyProject):
 
     def test_legacy_and_missing_worktrees_and_failed_handback(self):
         r, home, wt = self.project()
-        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'failed')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'failed', '--dissection', str(self.dissection_report()))
         self.assertEqual([i['state'] for i in self.due(r) if i['kind'] == 'handback'], ['failed'])
         self.git('worktree', 'remove', str(wt), cwd=home)
         self.assertIn('missing-worktree', [i['kind'] for i in self.due(r)])
@@ -336,7 +336,7 @@ class AutonomyDue(AutonomyProject):
         # The status-only commit must not create a self-sustaining due loop.
         self.git('add', 'nodes/app/status.md', cwd=r); self.git('commit', '-qm', 'app: refresh', cwd=r)
         self.assertEqual(self.due(r), [])
-        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--report', 'report.md')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--report', 'report.md', '--dissection', str(self.dissection_report()))
         with (r / '.brain/write-queue/applier.lease').open('r') as lease:
             fcntl.flock(lease, fcntl.LOCK_EX)
         self.assertNotIn('stale-status', [i['kind'] for i in self.due(r)])
@@ -363,7 +363,7 @@ class AutonomyDue(AutonomyProject):
         self.b(r, 'wt', 'rm', 'app', 'job-a', '--cause', 'restart')
         self.b(r, 'wt', 'add', 'app', 'job-a')
         self.assertNotIn('handback', [i['kind'] for i in self.due(r)])
-        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--dissection', str(self.dissection_report()))
         self.assertEqual(len(list((r / 'nodes/app/job-handbacks').glob('*.json'))), 1)
 
     def test_corrupt_worker_signal_is_due_rather_than_a_crash(self):

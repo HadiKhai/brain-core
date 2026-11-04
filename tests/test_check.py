@@ -99,7 +99,7 @@ runpy.run_path(brain, run_name='__main__')
         self.b(r, 'status', 'app', '--refresh')
         self.assertIn('<!-- /brain:facts -->', status.read_text())
         self.assertEqual(status.stat().st_mode & 0o777, 0o640)
-        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
+        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--dissection', str(self.dissection_report()))
         signal = next((r / 'nodes/app/job-handbacks').glob('*.json'))
         self.failed_replace(r, signal, ['handback', '--summary', 'Synthetic result', 'app', '--branch', 'job-a', '--state', 'done'])
         self.assertEqual(json.loads(signal.read_text())['state'], 'blocked')
@@ -205,7 +205,7 @@ m.main()
                         (node / 'inbox.md').write_text('- 2035-01-01 00:00 +00:00 from worker: Pending crash input.\n')
                         dest, args = node / 'status.md', ['status', 'app', '--refresh']
                     elif command == 'handback':
-                        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked')
+                        self.b(r, 'handback', "--summary", "Synthetic result", 'app', '--branch', 'job-a', '--state', 'blocked', '--dissection', str(self.dissection_report()))
                         dest = next((node / 'job-handbacks').glob('*.json'))
                         args = ['handback', '--summary', 'Synthetic result', '--question', 'Synthetic choice?', 'app', '--branch', 'job-a', '--state', 'question']
                     elif command == 'inbox':
@@ -398,7 +398,7 @@ class RoundTwo(AutonomyProject):
             self.m.attempt_path(n, row).unlink()
         f.write_text(json.dumps({"checked_at": row["Started"]}))
         self.assertIn("handback", [i["kind"] for i in self.due(r)])
-        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked")
+        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", '--dissection', str(self.dissection_report()))
         self.b(r, "wt", "rm", "app", "job-a", "--cause", "restart")
         self.assertFalse(f.exists())
         self.assertFalse(self.m.handback_file(n, row).exists())
@@ -465,17 +465,17 @@ class RoundTwo(AutonomyProject):
     def test_questions_and_blocked_human_needs_reach_inbox_once(self):
         r, home, wt = self.project()
         path = r / "nodes/app/inbox.md"
-        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", "--report", "report.md")
+        self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", "--report", "report.md", '--dissection', str(self.dissection_report()))
         self.assertNotIn("worker job-a", path.read_text())
         for _ in range(2):
-            self.b(r, "handback", "--summary", "Synthetic result", "--question", "Choose the port", "app", "--branch", "job-a", "--state", "question", "--need-human", "Choose the port")
+            self.b(r, "handback", "--summary", "Synthetic result", "--question", "Choose the port", "app", "--branch", "job-a", "--state", "question", "--need-human", "Choose the port", '--dissection', str(self.dissection_report()))
         self.assertEqual(path.read_text().count("Choose the port"), 1)
         items = json.loads(self.b(r, "inbox", "root", "--json"))
         self.assertTrue(any("Choose the port" in item["text"] for item in items))
         for _ in range(2):
-            self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", "--need-human", "Grant access")
+            self.b(r, "handback", "--summary", "Synthetic result", "app", "--branch", "job-a", "--state", "blocked", "--need-human", "Grant access", '--dissection', str(self.dissection_report()))
         self.assertEqual(path.read_text().count("Grant access"), 1)
-        self.b(r, "handback", "--summary", "Synthetic result", "--question", "See report report.md", "app", "--branch", "job-a", "--state", "question", "--report", "report.md")
+        self.b(r, "handback", "--summary", "Synthetic result", "--question", "See report report.md", "app", "--branch", "job-a", "--state", "question", "--report", "report.md", '--dissection', str(self.dissection_report()))
         self.assertIn("See report report.md", path.read_text())
 
     def test_facts_header_migration_caps_times_forecasts_preview(self):

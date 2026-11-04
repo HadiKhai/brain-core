@@ -613,6 +613,8 @@ You mostly talk to coordinators, and they run `brain` for you. By hand:
 | `brain handback <id> ... [--wait SECONDS]` | an unchecked hand-back that would wait on a busy writer or queue is queued: waits up to 4 s for the receipt and prints its result, else `queued; applies shortly: <id>`; checked and uncontended hand-backs run in place |
 | `brain handback <id> ... --direct` | always the in-process hand-back, without the write queue |
 | `brain handback <id> ... --enqueue` | enqueue a hand-back; print a request ID without waiting for verification |
+| `brain handback <id> ... [--dissection P] [--result N --target N --target-direction at-least]` | failure results and missed targets require [stored-case diagnosis](docs/dissection.md); compaction rotation exempts only the state trigger |
+| `brain ledger add --failed F --first-explanation E --cause C --found-by agent --fix X` | append a diagnosis under today's heading in the instance's failure ledger |
 | `brain queue wait <request-id> [--timeout SECONDS]` | read a durable result; checked handbacks exit 0 ready, 1 not ready; timeout stays pending |
 | `brain queue run <id> --once [--request-id ID]` | run one request through the native verifier; `--request-id ID --recover` explicitly reconciles proven local ownership |
 | `brain jobs <id> --live` | read-only JSON joining ledger, hand-back, active attempt, recorded queue position/owner and next action; host activity unknown |

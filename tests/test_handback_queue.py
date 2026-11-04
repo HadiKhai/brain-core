@@ -979,7 +979,7 @@ class HandbackLifecycle(Scenario):
                 args.fields = fields
                 self.assertFalse(m.fast_intent(args, inst.root), fields)
             handback = argparse.Namespace(f=m.cmd_handback, id='root', branch=row['Job'], state='done',
-                         summary='Checked result', question=None, lessons=None, report=None, reviews=1, enqueue=True)
+                         summary='Checked result', question=None, lessons=None, report=None, reviews=1, enqueue=True, dissection=str(self.dissection_report()))
             self.assertTrue(m.fast_intent(handback, inst.root))
             handback.reviews, handback.state = None, 'blocked'
             self.assertTrue(m.fast_intent(handback, inst.root))
@@ -988,7 +988,7 @@ class HandbackLifecycle(Scenario):
     def checked_request(self, m, inst, row):
         args = dict(id='root', branch=row['Job'], state='done', summary='Checked fixture', question=None,
                     lessons='none: fixture', report=None, reviews=1, need_human=None,
-                    restart=None, reverify=False, full_receipt=None, record=True)
+                    restart=None, reverify=False, full_receipt=None, record=True, dissection=str(self.dissection_report()))
         return m.submit_intent(inst, dict(kind='handback', node='root', job_key=m.job_key(row), args=args), start=False)
 
     def test_checked_receipts_preserve_native_verdict_and_wait_exit(self):
@@ -1103,7 +1103,7 @@ class HandbackLifecycle(Scenario):
             # An unchecked handback recovered after publication reprints its message.
             args = dict(id='root', branch=row['Job'], state='blocked', summary='Recovered message', question=None,
                         lessons='none: fixture', report=None, reviews=None, need_human=None,
-                        restart=None, reverify=False, full_receipt=None, record=None)
+                        restart=None, reverify=False, full_receipt=None, record=None, dissection=str(self.dissection_report()))
             unchecked = m.submit_intent(inst, dict(kind='handback', node='root', job_key=m.job_key(row),
                                                    args=args, sessions=[], carry_ready=True), start=False)
             with mock.patch.object(m, 'intent_store', side_effect=no_receipt), \
@@ -1198,7 +1198,7 @@ class HandbackLifecycle(Scenario):
         m.write_jobs(inst, n, [row])
         args = dict(id='root', branch=row['Job'], state='failed', summary='Fixture failure', question=None,
                     lessons='none: fixture', report=None, reviews=None, need_human=None,
-                    restart=None, reverify=False, full_receipt=None)
+                    restart=None, reverify=False, full_receipt=None, dissection=str(self.dissection_report()))
         request = m.submit_intent(inst, dict(kind='handback', node='root', job_key=m.job_key(row), args=args), start=False)
         write = m.write_record
         def killed(*values, **kwargs):
@@ -1261,7 +1261,8 @@ class HandbackLifecycle(Scenario):
         self.addCleanup(host.stop)
         inst = m.Instance(root)
         inst.commit = mock.Mock()
-        inst.now_dt = lambda: datetime.datetime(2026,10,24,4,0,tzinfo=datetime.timezone.utc)
+        # Fresh Instances and CLI children share the real clock. Freezing just
+        # this object in an older month oscillates journal rotation backwards.
         n = inst.node('root')
         row = dict.fromkeys(m.JOB_COLS, '')
         row.update(Job='job/example', Started='2026-01-01T00:00Z')
@@ -1379,7 +1380,7 @@ class HandbackLifecycle(Scenario):
         initial = dict(head='a', base='b', inputs='before', integration_base='b', verify_command='true',
                        input_selection='original selection', port_reservation='4100/1')
         args = argparse.Namespace(id='root', branch=row['Job'], state='done', summary='Synthetic result',
-                                  question=None, lessons='none: fixture', report=None, reviews=1)
+                                  question=None, lessons='none: fixture', report=None, reviews=1, dissection=str(self.dissection_report()))
         cases = [('negative inputs', {'inputs': 'after'}, None, True),
                  ('stale packet', {'inputs': 'after'}, {'version': 1, 'verify_result': 0}, False),
                  ('head', {'inputs': 'after', 'head': 'changed'}, None, False),
@@ -1459,7 +1460,7 @@ class HandbackLifecycle(Scenario):
     def test_p6_enqueue_claim_and_terminal_are_single_owner(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Needs a decision',
-                                  question=None, lessons='none: fixture', report=None, reviews=None)
+                                  question=None, lessons='none: fixture', report=None, reviews=None, dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
             self.assertEqual(m.job_projection(inst, n, row)['queue']['position'], 1)
@@ -1496,7 +1497,7 @@ class HandbackLifecycle(Scenario):
         """Dispatch for real, then revoke authority at the final writer boundary."""
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result',
-                                  question=None, lessons='none: fixture', report=None, reviews=None)
+                                  question=None, lessons='none: fixture', report=None, reviews=None, dissection=str(self.dissection_report()))
         binding = {'head': 'a', 'base': 'b', 'inputs': 'c'}
         captured = {}
         original_publish, original_dispatch = m.publish_handback, m.queue_dispatch
@@ -1633,7 +1634,7 @@ class HandbackLifecycle(Scenario):
     def test_crash_recovery_is_explicit_and_fenced_before_dispatch(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result',
-                                  question=None, lessons='none: fixture', report=None, reviews=None)
+                                  question=None, lessons='none: fixture', report=None, reviews=None, dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
             with m.claim_handback(inst, n, request['id']) as first:
@@ -1653,7 +1654,7 @@ class HandbackLifecycle(Scenario):
 
     def test_dispatched_crash_and_legacy_owner_are_never_adopted(self):
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
             with m.claim_handback(inst, n, request['id']) as claimed:
@@ -1674,7 +1675,7 @@ class HandbackLifecycle(Scenario):
 
     def test_copied_lease_cannot_dispatch_or_stamp_without_owned_descriptor(self):
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
                 m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
@@ -1688,7 +1689,7 @@ class HandbackLifecycle(Scenario):
 
     def test_replaced_lease_inode_cannot_launch_or_publish(self):
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
                 m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
@@ -1704,7 +1705,7 @@ class HandbackLifecycle(Scenario):
 
     def test_foreign_boot_never_probes_local_pid_or_recovers_lease(self):
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
                 m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
@@ -1724,7 +1725,7 @@ class HandbackLifecycle(Scenario):
 
     def test_unknown_host_cannot_claim_or_publish_a_queue_run(self):
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
                 m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
@@ -1742,7 +1743,7 @@ class HandbackLifecycle(Scenario):
 
     def test_exact_terminal_publication_reconciles_without_second_writer(self):
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}):
             request = m.enqueue_handback(inst, n, row, args)
             with m.claim_handback(inst, n, request['id']) as claimed:
@@ -1827,11 +1828,11 @@ from brain.jobs import read_jobs
 from brain.handback_queue import enqueue_handback
 i=Instance(Path(sys.argv[1])); n=i.node('root'); r=read_jobs(n)[0]
 print('barrier',flush=True); sys.stdin.readline()
-a=argparse.Namespace(id='root',branch=r['Job'],state='blocked',summary='Synthetic result',question=None)
+a=argparse.Namespace(id='root',branch=r['Job'],state='blocked',summary='Synthetic result',question=None,dissection=sys.argv[2])
 print(enqueue_handback(i,n,r,a)['id'],flush=True)
 """
         env = {**self.env, 'PYTHONPATH': str(CORE / 'lib')}
-        children = [subprocess.Popen([sys.executable, '-c', script, str(inst.root)], env=env,
+        children = [subprocess.Popen([sys.executable, '-c', script, str(inst.root), str(self.dissection_report())], env=env,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
         try:
             self.assertEqual([p.stdout.readline().strip() for p in children], ['barrier', 'barrier'])
@@ -1875,11 +1876,11 @@ def binding(n,r):
     print('binding',flush=True); sys.stdin.readline()
     return value
 job_attempts.attempt_binding=binding
-a=argparse.Namespace(id='root',branch=r['Job'],state='blocked',summary='Synthetic result',question=None)
+a=argparse.Namespace(id='root',branch=r['Job'],state='blocked',summary='Synthetic result',question=None,dissection=sys.argv[2])
 print(enqueue_handback(i,n,r,a)['id'],flush=True)
 """
         env = {**self.env, 'PYTHONPATH': str(CORE / 'lib')}
-        children = [subprocess.Popen([sys.executable, '-B', '-c', script, str(inst.root)], env=env,
+        children = [subprocess.Popen([sys.executable, '-B', '-c', script, str(inst.root), str(self.dissection_report())], env=env,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
         try:
             # Both signatures precede either publication. Finish the first
@@ -1919,7 +1920,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                         inst.save_local()
                     return value
                 args = argparse.Namespace(id='root', branch=row['Job'], state='blocked',
-                                          summary='Synthetic result', question=None)
+                                          summary='Synthetic result', question=None, dissection=str(self.dissection_report()))
                 with mock.patch.dict(os.environ, self.env, clear=True), \
                         mock.patch.object(m, 'attempt_binding', side_effect=changed):
                     with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
@@ -1961,7 +1962,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
     def test_p6_foreground_runner_uses_native_reservation_and_publishes_once(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='done', summary='Synthetic result',
-                                  question=None, lessons='none: fixture', report=None, reviews=1)
+                                  question=None, lessons='none: fixture', report=None, reviews=1, dissection=str(self.dissection_report()))
         phases = []
         def admission(*args, **kwargs):
             phases.append(m.current_attempt(n, row)['state'])
@@ -1994,7 +1995,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
     def test_p6_stale_foreground_request_does_not_publish(self):
         m, inst, n, row = self.fixture()
         args = argparse.Namespace(id='root', branch=row['Job'], state='done', summary='Synthetic result',
-                                  question=None, lessons='none: fixture', report=None, reviews=1)
+                                  question=None, lessons='none: fixture', report=None, reviews=1, dissection=str(self.dissection_report()))
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(m, 'attempt_binding') as binding:
             binding.return_value={'head':'a','base':'b','inputs':'c'}
             request = m.enqueue_handback(inst, n, row, args)
@@ -2131,7 +2132,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         fd = m.intent_lease(inst)
         try:
             identity=cli('handback','root','--branch',row['Job'],'--state','blocked','--summary','New result',
-                         '--lessons','none: fixture','--enqueue').strip()
+                         '--lessons','none: fixture','--enqueue', '--dissection', str(self.dissection_report())).strip()
             self.assertIsNone(m.intent_receipt(inst, identity))
             self.assertEqual(m.read_handback(n, row)['summary'], 'Historical result')
             self.assertEqual([d['id'] for _, d in m.intent_index(inst)].index(identity) + 1, 1)
@@ -2167,7 +2168,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                 events.reconcile(inst)
             with mock.patch.object(sys, 'argv', [str(CORE / 'bin/brain'), 'handback', 'root',
                                                 '--branch', row['Job'], '--state', 'blocked',
-                                                '--summary', 'Synchronous result']):
+                                                '--summary', 'Synchronous result', '--dissection', str(self.dissection_report())]):
                 m.main()
             kick.assert_not_called()
             commit = events.read(inst)[-1]
@@ -2181,7 +2182,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
     def test_default_handback_runs_in_place_uncontended_and_queues_behind_a_writer(self):
         m, inst, n, row = self.fixture()
         cli = self.default_cli(inst)
-        base = ('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--lessons', 'none: fixture')
+        base = ('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--lessons', 'none: fixture', '--dissection', str(self.dissection_report()))
         # Nothing to wait on: the plain form runs here exactly as --direct does.
         plain = cli(*base, '--summary', 'Uncontended result')
         self.assertEqual(m.intent_index(inst), [])
@@ -2224,7 +2225,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         def route(**changes):
             a = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Route', question=None,
                                    lessons=None, report=None, reviews=None, need_human=None, restart=None,
-                                   reverify=False, full_receipt=None, record=False, request_id=None)
+                                   reverify=False, full_receipt=None, record=False, request_id=None, dissection=str(self.dissection_report()))
             vars(a).update(changes)
             return m.default_queue(inst, n, row, a, {key: getattr(a, key, None) for key in m.QUEUE_ARGS})
         self.assertFalse(route())  # uncontended: in place
@@ -2257,7 +2258,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         fd = m.intent_lease(inst)
         try:
             queued = cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--summary', 'Earlier',
-                         '--lessons', 'none: fixture', '--wait', '0')
+                         '--lessons', 'none: fixture', '--wait', '0', '--dissection', str(self.dissection_report()))
             [(_, request)] = m.intent_index(inst)
             self.assertIn(request['id'], queued.stdout)
             # Checked (always in place) and --direct both refuse before any attempt.
@@ -2274,14 +2275,14 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
                     contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(SystemExit, 'fenced'):
                 m.cmd_handback(argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Later',
                                                   question=None, lessons='none: fixture', report=None, reviews=None,
-                                                  need_human=None, restart=None, direct=True))
+                                                  need_human=None, restart=None, direct=True, dissection=str(self.dissection_report())))
             self.assertEqual(fence.call_count, 2)
             self.assertIsNone(m.read_handback(n, row))
         finally:
             os.close(fd)
         cli('queue', 'drain')
         cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--summary', 'Later',
-            '--lessons', 'none: fixture', '--direct')
+            '--lessons', 'none: fixture', '--direct', '--dissection', str(self.dissection_report()))
         self.assertEqual(m.read_handback(n, row)['summary'], 'Later')
 
     def test_default_handback_past_its_deadline_reports_the_queued_id_honestly(self):
@@ -2292,7 +2293,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         try:
             # A busy applier: admission returns within the bound, nothing applied.
             result = cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked',
-                         '--summary', 'Pending result', '--lessons', 'none: fixture', '--wait', '0.2')
+                         '--summary', 'Pending result', '--lessons', 'none: fixture', '--wait', '0.2', '--dissection', str(self.dissection_report()))
             [(_, request)] = m.intent_index(inst)
             self.assertEqual(result.stdout.strip(), 'queued; applies shortly: ' + request['id'] +
                              ' (brain queue wait ' + request['id'] + ' shows its result)')
@@ -2321,13 +2322,13 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         cli = self.default_cli(inst)
         # Submit-time: no open job is refused before any request exists.
         refused = cli('handback', 'root', '--branch', 'job/missing', '--state', 'blocked',
-                      '--summary', 'No job', '--lessons', 'none: fixture', ok=False)
+                      '--summary', 'No job', '--lessons', 'none: fixture', '--dissection', str(self.dissection_report()), ok=False)
         self.assertIn('no open job for handback', refused.stderr)
         self.assertEqual(m.intent_index(inst), [])
         # Apply-time: the job fence refuses and the rejected receipt says so.
         args = dict(id='root', branch=row['Job'], state='blocked', summary='Stale job', question=None,
                     lessons='none: fixture', report=None, reviews=None, need_human=None,
-                    restart=None, reverify=False, full_receipt=None, record=None)
+                    restart=None, reverify=False, full_receipt=None, record=None, dissection=str(self.dissection_report()))
         request = m.submit_intent(inst, dict(kind='handback', node='root', job_key='0' * 16, args=args,
                                              sessions=[]), start=False)
         with mock.patch.dict(os.environ, self.env, clear=True), contextlib.redirect_stdout(io.StringIO()):
@@ -2345,7 +2346,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
         fd = m.intent_lease(inst)
         try:
             cli('handback', 'root', '--branch', row['Job'], '--state', 'blocked', '--summary', 'Session result',
-                '--lessons', 'none: fixture', '--wait', '0', env={**self.env, 'CLAUDE_CODE_SESSION_ID': 'caller-session-1'})
+                '--lessons', 'none: fixture', '--wait', '0', '--dissection', str(self.dissection_report()), env={**self.env, 'CLAUDE_CODE_SESSION_ID': 'caller-session-1'})
         finally:
             os.close(fd)
         [(_, request)] = m.intent_index(inst)
@@ -2418,7 +2419,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
     @contextlib.contextmanager
     def owned_takeover_fixture(self):
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         stamps = {os.getpid(): 'controller', 12345: 'owner', 12346: 'child'}
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(
                 m, 'attempt_binding', return_value={'head':'a', 'base':'b', 'inputs':'c'}), \
@@ -2545,7 +2546,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
     def test_owned_takeover_registration_refuses_foreign_child(self):
         with self.owned_takeover_fixture() as (m, inst, n, row, identity, stamps):
             request = m.enqueue_handback(inst, n, row, argparse.Namespace(
-                id='root', branch=row['Job'], state='blocked', summary='Fixture result'))
+                id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report())))
             with m.claim_handback(inst, n, request['id']) as claimed:
                 m.queue_dispatch(inst, n, claimed)
                 with mock.patch.object(m, 'owned_process_parent', return_value=999):
@@ -2572,7 +2573,7 @@ print(enqueue_handback(i,n,r,a)['id'],flush=True)
     def test_owned_takeover_real_crash_child_and_foreign_process(self):
         """Real OS processes and inherited flock; only fabricated instance data."""
         m, inst, n, row = self.fixture()
-        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result')
+        args = argparse.Namespace(id='root', branch=row['Job'], state='blocked', summary='Fixture result', dissection=str(self.dissection_report()))
         # The helper is the original Brain runner. Its direct child inherits the
         # lease; runner os._exit simulates a crash without closing that child's FD.
         script = '''import os,sys,json,subprocess
@@ -2734,7 +2735,7 @@ with q.claim_handback(inst,n,sys.argv[3]) as request:
             second = {**row, 'Job': 'job/second', 'Started': '2026-01-02T00:00Z'}
             m.write_jobs(inst, n, [row, second])
             queued = m.enqueue_handback(inst, n, second, argparse.Namespace(
-                id='root', branch=second['Job'], state='blocked', summary='Second fixture result'))
+                id='root', branch=second['Job'], state='blocked', summary='Second fixture result', dissection=str(self.dissection_report())))
             before = audit_path.read_bytes()
             for strict in (False, True):
                 projection = m.queue_projection(n, queued['id'], strict=strict)

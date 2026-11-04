@@ -14,7 +14,7 @@ class EventRecords(Scenario):
         self.b(root, 'new', 'app', '--title', 'App', '--home', str(home))
         self.b(root, 'wt', 'add', 'app', 'job-one', '--no-setup')
         self.b(root, 'handback', 'app', '--branch', 'job-one', '--state', 'blocked',
-               '--summary', 'PRIVATE-SUMMARY', '--lessons', 'none: PRIVATE-LESSON')
+               '--summary', 'PRIVATE-SUMMARY', '--lessons', 'none: PRIVATE-LESSON', '--dissection', str(self.dissection_report()))
         inst = instance.Instance(root)
         n = inst.node('app')
         row = jobs.read_jobs(n)[0]

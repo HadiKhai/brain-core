@@ -154,7 +154,7 @@ class ReviewRegressions(Scenario):
         self.git('commit', '--allow-empty', '-qm', 'worker', cwd=wt)
         self.git('merge', '-q', 'job-one', cwd=home)
         self.assertTrue(self.compare(root)['equal'])
-        self.b(root, 'handback', 'app', '--branch', 'job-one', '--state', 'question', '--summary', 'PRIVATE-SUMMARY', '--question', 'PRIVATE-QUESTION')
+        self.b(root, 'handback', 'app', '--branch', 'job-one', '--state', 'question', '--summary', 'PRIVATE-SUMMARY', '--question', 'PRIVATE-QUESTION', '--dissection', str(self.dissection_report()))
         inst = instance.Instance(root)
         future = inst.now_dt() + datetime.timedelta(days=2)
         with mock.patch.object(inst, 'now_dt', return_value=future):

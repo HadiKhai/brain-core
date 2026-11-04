@@ -1244,7 +1244,7 @@ class EventViews(Scenario):
         archive = (r / 'nodes/app/status-archive.md').read_text()
         for i in range(30, 35):
             self.assertIn('- note %d\n' % i, archive)
-        self.b(r, 'handback', 'app', '--branch', 'job-one', '--state', 'blocked', '--summary', 'PRIVATE-SUMMARY', '--lessons', 'none: PRIVATE-BODY')
+        self.b(r, 'handback', 'app', '--branch', 'job-one', '--state', 'blocked', '--summary', 'PRIVATE-SUMMARY', '--lessons', 'none: PRIVATE-BODY', '--dissection', str(self.dissection_report()))
         # The command publishes the handback before its generated table. Join
         # this fixture's independent lease before inspecting that projection.
         with (r / '.brain/write-queue/applier.lease').open('r') as lease:

@@ -376,7 +376,7 @@ class JobForecasts(Scenario):
         self.assertIn('slow verify', output)
         self.assertIn('not ready:', output)
         # A later unverified hand-back keeps the recorded duration but never reprints it as its own.
-        output = self.b(self.root, 'handback', 'app', '--branch', 'job/sample', '--summary', 'Fixture blocked', '--state', 'blocked')
+        output = self.b(self.root, 'handback', 'app', '--branch', 'job/sample', '--summary', 'Fixture blocked', '--state', 'blocked', '--dissection', str(self.dissection_report()))
         self.assertNotIn('verify duration', output)
         self.assertIsNotNone(self.m.read_handback(n, row)['verify_duration'])
 

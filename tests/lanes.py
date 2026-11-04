@@ -75,6 +75,7 @@ LANE_TESTS.update({
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
     'messages': ('test_messages.py', 'test_worker_message_guard.py', 'test_communication_policy.py'),
+    'dissection': ('test_dissection.py', 'test_failure_ledger.py'),
     'rotation': ('test_rotation.py', 'test_rotation_host.py'),
     'diagnostics': ('test_diagnostics.py', 'test_write_queue_proof.py'),
     'scorecard': ('test_scorecard.py',),
@@ -94,6 +95,7 @@ EXTRA_INPUTS = {'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
+    'lib/brain/failure_ledger.py',
     'lib/brain/rehearse_external.py', 'lib/brain/rehearse_transactions.py',
     'lib/brain/launch_receipts.py',
     'lib/brain/events.py',

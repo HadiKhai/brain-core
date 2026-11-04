@@ -35,6 +35,11 @@ This command publishes locally and does not contact an operator or configure a
 schedule. Node-only briefs retain their existing snapshot-date semantics.
 
 Typed questions retain their immediate question path during quiet hours.
+Questions reporting blocked/failed/parked/refused/two-strikes results or a missed
+numeric target must include the [Dissection format](dissection.md) in their
+question-file JSON `dissection` string before any receipt or inbox publication.
+Ordinary questions keep their existing format; historical questions are not
+retroactively rejected during reads or deadline reconciliation.
 There is no urgency override for an untyped notice. Routine deadline defaults
 remain distinct from authority to execute outward or destructive actions.
 Morning briefs never wake root; root's wake channel remains question-only.

@@ -30,7 +30,8 @@ _m_spend = _m_common.LazyModule(__package__, 'spend')
 
 
 QUEUE_ARGS = ('id', 'branch', 'state', 'summary', 'question', 'lessons', 'report', 'reviews',
-              'need_human', 'restart', 'reverify', 'full_receipt', 'record')
+              'need_human', 'restart', 'reverify', 'full_receipt', 'record',
+              'result', 'target', 'target_direction', 'dissection', '_dissection_snapshot')
 QUEUE_LEASE = contextvars.ContextVar('brain_queue_lease', default=None)
 
 # v2 transport binds handback verification at application. Existing v1 requests

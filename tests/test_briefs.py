@@ -355,7 +355,7 @@ class BriefLimits(Scenario):
         self.assertIn("restart", str(due))
         self.assertIn("brain brief a --branch job", str(due))
         self.assertIn("## Resume existing work", self.b(r, "brief", "a", "--branch", "job"))
-        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked")
+        self.b(r, "handback", "--summary", "Synthetic result", "a", "--branch", "job", "--state", "blocked", '--dissection', str(self.dissection_report()))
         self.assertNotIn('"kind": "restart"', self.b(r, "due", "a", "--json"))
 
     def test_restart_replays_exact_inputs_and_acknowledges_each_signal(self):
