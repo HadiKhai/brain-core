@@ -311,7 +311,7 @@ def cmd_handback(a):
         a._dissection_consumed = False
     validate_handback_options(a, row=row)
     _m_guard.no_terms_in(n, a.summary, 'handback summary')
-    _m_guard.no_terms_in(n, json.dumps(a._dissection_snapshot), 'handback dissection')
+    _m_guard.no_terms_in(n, json.dumps(a._dissection_snapshot, ensure_ascii=False), 'handback dissection')
     if getattr(a, 'question', None):
         _m_guard.no_terms_in(n, a.question, 'handback question')
     if getattr(a, 'enqueue', False):

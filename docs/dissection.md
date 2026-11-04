@@ -17,7 +17,9 @@ measurement taken by core, and are retained in the handback's `measurement` fiel
 Put this format in the file named by `--report`, or supply a separate Markdown
 file with `--dissection PATH`. Reports are UTF-8 regular files up to 512 KiB.
 Each labelled field takes one line. Cases must be numbered 1-3, and each starts
-with `Ref:` followed by a stored-record path, id or URL. Fixes are numbered in
+with `Ref:` followed by a stored-record path, id or URL.
+Placeholder references such as `none`, `n/a`, `todo`, `unknown` or punctuation
+alone are refused. Fixes are numbered in
 preference order, with two or three entries; the recommendation names one rank.
 
 ```markdown

@@ -346,7 +346,7 @@ def fast_intent(a, root):
         args = {key: getattr(a, key, None) for key in QUEUE_ARGS}
         if name == 'cmd_handback' and not getattr(a, 'enqueue', False) and not default_queue(inst, n, row, a, args):
             return False  # the plain form stays synchronous unless queueing is safe and needed
-        guard.no_terms_in(n, json.dumps(args), 'handback request')
+        guard.no_terms_in(n, json.dumps(args, ensure_ascii=False), 'handback request')
         # The applier may serve many callers; spend belongs to this one.
         payload = dict(kind='handback', node=n['id'], job_key=_m_jobs.job_key(row), args=args,
                        sessions=_m_spend.spend_session_ids())
@@ -396,7 +396,7 @@ def default_queue(inst, n, row, a, args):
         return False
     if getattr(a, 'request_id', None):
         return True  # a retry reuses its queued identity; never publish a second, different handback
-    if _m_common.outward_links(inst.root) or guard.find_terms(json.dumps(args), guard.never_terms(n)):
+    if _m_common.outward_links(inst.root) or guard.find_terms(json.dumps(args, ensure_ascii=False), guard.never_terms(n)):
         return False
     if _m_instance.brain_lock(inst).owner_is_running_us():
         return False  # nested under our own holder: its lock is ours, an applier would wait on it

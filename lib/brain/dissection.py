@@ -74,7 +74,10 @@ def parse(text):
     if [n for n, _ in cases] != [1, 2, 3]:
         missing.append('### Cases with exactly 3 numbered cases (1-3)')
     for rank, case in cases:
-        if not re.match(r'Ref:\s*\S+', case):
+        ref = re.match(r'Ref:\s*([^\s;,]+)', case)
+        token = ref[1].strip('`\'"') if ref else ''
+        if (not any(c.isalnum() for c in token) or
+                token.casefold() in ('none', 'n/a', 'na', 'tbd', 'todo', 'unknown')):
             missing.append('case ' + str(rank) + ' stored-record Ref: (path, id or URL)')
     if [n for n, _ in fixes] not in ([1, 2], [1, 2, 3]):
         missing.append('### Fixes with 2-3 ranked fixes (1-2 or 1-3)')

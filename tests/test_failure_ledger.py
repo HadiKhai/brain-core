@@ -66,6 +66,13 @@ class FailureLedger(Scenario):
         self.assertTrue(self.path.read_text().startswith(before))
         self.assertIn('| 1 | Fixture failed', self.path.read_text())
 
+    def test_append_stays_in_recognised_table_when_another_table_follows(self):
+        before = '# Failure ledger\n\n## 2030-02-03\n\n' + failure_ledger.HEADER + '| 4 | Old | Guess | Cause | agent | Fix |\n'
+        after = '\nOther table:\n\n| # | Sample |\n|---|---|\n| 99 | Retain |\n'
+        self.path.write_text(before + after)
+        self.add()
+        self.assertEqual(self.path.read_text(), before + '| 5 | Fixture failed | Initial guess | Wrong slot | agent | Correct slot |\n' + after)
+
     def test_outside_link_is_refused_without_changing_target(self):
         outside = self.tmp / 'outside.md'
         outside.write_text('Retain this evidence\n')

@@ -17,20 +17,26 @@ def add(inst, failed, first, cause, found_by, fix):
               .replace('\r', ' ').replace('\n', '<br>') for v in values]
     path = inst.root / 'library/failure-ledger.md'
     common.safe_target(path)
-    text = path.read_text() if path.exists() else '# Failure ledger\n'
+    text = path.read_text(encoding='utf-8') if path.exists() else '# Failure ledger\n'
     date = inst.now_dt().date().isoformat()
     heading = re.search(r'^## ' + date + r'(?:[ \t][^\n]*)?(?:\n|$)', text, re.M)
     if heading:
         end = re.search(r'^## ', text[heading.end():], re.M)
         end = heading.end() + end.start() if end else len(text)
         body = text[heading.end():end]
-        rows = list(re.finditer(r'^\|\s*(\d+)\s*\|[^\n]*\n?', body, re.M))
         table = re.search(r'^\|\s*#\s*\|[^\n]*\n\|[-| :]+\n', body, re.M)
         if not table or [cell.strip() for cell in table[0].splitlines()[0].split('|')[1:-1]] != [
                 '#', 'What failed', 'First explanation (ours)', 'Real cause', 'Found by', 'Fix']:
             raise ValueError('dated failure ledger table is missing or unrecognised; retained unchanged')
-        number = max((int(row[1]) for row in rows), default=0) + 1
-        at = heading.end() + (rows[-1].end() if rows else table.end())
+        rows, cursor = [], table.end()
+        for line in body[cursor:].splitlines(keepends=True):
+            row = re.fullmatch(r'\|\s*(\d+)\s*\|[^\n]*\n?', line)
+            if not row:
+                break
+            rows.append(int(row[1]))
+            cursor += len(line)
+        number = max(rows, default=0) + 1
+        at = heading.end() + cursor
         row = '| ' + str(number) + ' | ' + ' | '.join(values) + ' |\n'
         text = text[:at].rstrip('\n') + '\n' + row + text[at:]
     else:

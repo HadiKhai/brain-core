@@ -61,6 +61,11 @@ class DissectionFormat(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'finite result and target'):
                 dissection.measurement(result, target, direction)
 
+    def test_placeholder_references_do_not_count_as_stored_records(self):
+        for placeholder in (';', '-', 'none', 'n/a', 'NA', 'TBD', 'todo', 'unknown', '`none`', '...'):
+            with self.subTest(placeholder=placeholder), self.assertRaisesRegex(ValueError, 'case 1 stored-record Ref:'):
+                dissection.parse(VALID.replace('records/a.json', placeholder))
+
     def test_fenced_examples_are_not_a_report_section(self):
         with self.assertRaisesRegex(ValueError, '## Dissection section'):
             dissection.parse('```markdown\n' + VALID + '```\n')
@@ -148,6 +153,18 @@ class HandbackDissection(Scenario):
             with self.assertRaisesRegex(SystemExit, 'dissection required'):
                 module.cmd_handback(args)
 
+    def test_unicode_never_term_refuses_direct_and_queued_diagnoses_before_publication(self):
+        root, _, _ = self.job()
+        (root / 'nodes/a/never-name.txt').write_text('Café\n')
+        report = self.dissection_report()
+        report.write_text(report.read_text().replace('Synthetic fixture input.', 'Café fixture input.'))
+        for mode in ('--direct', '--enqueue'):
+            out = self.b(root, 'handback', 'a', '--branch', 'job', '--state', 'blocked', '--summary', 'Fixture',
+                         '--dissection', str(report), mode, ok=False)
+            self.assertIn('never-name', out)
+            self.assertFalse(list((root / 'nodes/a/job-handbacks').glob('*.json')))
+            self.assertFalse(list((root / '.brain/write-queue').glob('*.request')))
+
 
 class QuestionDissection(Scenario):
     def setUp(self):
@@ -182,3 +199,10 @@ class QuestionDissection(Scenario):
         out = self.send('Fixture failed', {**diagnosed, 'dissection': VALID.replace('Items covered: 3', 'Items covered: 4')},
                         'failure', ok=False)
         self.assertIn('different content', out)
+
+    def test_unicode_never_term_in_question_diagnosis_is_rejected(self):
+        (self.root / 'never-name.txt').write_text('Café\n')
+        out = self.send('Fixture failed', {**self.spec, 'dissection': VALID.replace('Fixture parser', 'Café parser')},
+                        'private', ok=False)
+        self.assertIn('never-name', out)
+        self.assertFalse((self.root / '.brain/communications.json').exists())
