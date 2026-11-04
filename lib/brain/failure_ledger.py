@@ -29,12 +29,13 @@ def add(inst, failed, first, cause, found_by, fix):
                 '#', 'What failed', 'First explanation (ours)', 'Real cause', 'Found by', 'Fix']:
             raise ValueError('dated failure ledger table is missing or unrecognised; retained unchanged')
         rows, cursor = [], table.end()
-        for line in body[cursor:].splitlines(keepends=True):
-            row = re.fullmatch(r'\|\s*(\d+)\s*\|[^\n]*\n?', line)
+        row_pattern = re.compile(r'\|[ \t]*(\d+)[ \t]*\|[^\n]*(?:\n|\Z)')
+        while True:
+            row = row_pattern.match(body, cursor)
             if not row:
                 break
             rows.append(int(row[1]))
-            cursor += len(line)
+            cursor = row.end()
         number = max(rows, default=0) + 1
         at = heading.end() + cursor
         row = '| ' + str(number) + ' | ' + ' | '.join(values) + ' |\n'

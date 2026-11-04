@@ -22,6 +22,7 @@ def measurement(result=None, target=None, direction='at-least'):
 
 
 def required(state, summary, measured=None, restart=None):
+    state = re.sub(r'[\s_-]+', '-', state.strip().casefold()) if isinstance(state, str) else None
     rotation = state == 'blocked' and restart == 'compactions'
     return (state in ('blocked', 'failed', 'parked', 'refused', 'two-strikes') and not rotation
             or bool(FAILURE.search(NEGATED.sub('', summary or '')))

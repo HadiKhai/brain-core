@@ -23,7 +23,7 @@ VALID = ('## Dissection\nCause: Fixture parser used the wrong slot.\nItems cover
 
 class DissectionFormat(unittest.TestCase):
     def test_required_states_words_and_measurements(self):
-        for state in ('blocked', 'failed', 'parked', 'refused', 'two-strikes'):
+        for state in ('blocked', 'failed', 'parked', 'refused', 'two-strikes', 'two strikes', 'two_strikes', 'BLOCKED'):
             self.assertTrue(dissection.required(state, 'Fixture'))
         for word in ('blocked', 'FAILED', 'parked', 'two strikes', 'two-strikes', 'refused'):
             self.assertTrue(dissection.required('question', 'Fixture ' + word))
@@ -181,6 +181,7 @@ class QuestionDissection(Scenario):
 
     def test_failure_state_summary_and_measurement_use_same_gate_then_valid_file_passes(self):
         for spec, text in [(self.spec, 'Fixture failed'), ({**self.spec, 'state': 'blocked'}, 'Choose'),
+                           ({**self.spec, 'state': 'two strikes'}, 'Choose'),
                            ({**self.spec, 'summary': 'Fixture parked'}, 'Choose'),
                            ({**self.spec, 'result': 6, 'target': 7}, 'Choose')]:
             with self.subTest(spec=spec):

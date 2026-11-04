@@ -73,6 +73,15 @@ class FailureLedger(Scenario):
         self.add()
         self.assertEqual(self.path.read_text(), before + '| 5 | Fixture failed | Initial guess | Wrong slot | agent | Correct slot |\n' + after)
 
+    def test_second_append_preserves_rows_with_non_lf_separators(self):
+        for separator in ('\u2028', '\u2029', '\x85', '\x0c', '\x0b', '\x1c', '\x1d', '\x1e'):
+            with self.subTest(separator=repr(separator)):
+                self.path.write_text('# Failure ledger\n')
+                self.add(failed='one' + separator + 'tail')
+                before = self.path.read_text()
+                self.add(failed='two')
+                self.assertEqual(self.path.read_text(), before + '| 2 | two | Initial guess | Wrong slot | agent | Correct slot |\n')
+
     def test_outside_link_is_refused_without_changing_target(self):
         outside = self.tmp / 'outside.md'
         outside.write_text('Retain this evidence\n')
