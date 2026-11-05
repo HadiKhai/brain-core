@@ -61,7 +61,9 @@ a fresh exact-head rule-table receipt before readiness can pass.
 `Gate:` and `Applies:` metadata. Missing annotations and test declarations fail
 with the rule ID. An explicit `Gate: none (reason)` remains valid. New rule IDs
 open one ready sweep task per applicable node home, with the rule verbatim;
-repeated checks preserve existing tasks. Plain check now writes these tasks,
+each test reference names its owning home as `home-node:path::test`, separately
+from applicability. The first check baselines existing IDs without tasks;
+later additions open sweeps and repeated checks preserve existing tasks. Plain check writes these tasks,
 while passive status reads only validate. After upgrading, annotate the existing
 rules; see [the format and checkpoint behavior](docs/rule-registry.md).
 

@@ -15,6 +15,7 @@ from . import instance
 
 MARKER = re.compile(r'^<!-- rule:([A-Za-z0-9][A-Za-z0-9_-]*) -->$', re.M)
 NODE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]*(?:/[A-Za-z0-9][A-Za-z0-9_-]*)*')
+JS_IDENTIFIER = re.compile(r'[A-Za-z_$][A-Za-z0-9_$]*')
 STATE_VERSION = 1
 
 
@@ -130,13 +131,15 @@ def gate_references(value):
         return []
     refs = []
     for entry in value.split('; '):
-        path, sep, selector = entry.partition('::')
+        location, sep, selector = entry.partition('::')
+        owner, owner_sep, path = location.partition(':')
         relative = Path(path)
-        if (not sep or not path or relative.is_absolute() or '..' in relative.parts
+        if (not sep or not owner_sep or not NODE_ID.fullmatch(owner) or not path
+                or ':' in path or relative.is_absolute() or '..' in relative.parts
                 or '\\' in path or '\x00' in entry or not selector
                 or selector != selector.strip() or any(ord(char) < 32 for char in selector)):
-            raise ValueError('malformed Gate: use path::test or none (reason)')
-        refs.append((path, selector))
+            raise ValueError('malformed Gate: use home-node:path::test or none (reason)')
+        refs.append((owner, path, selector))
     return refs
 
 
@@ -195,14 +198,10 @@ def _javascript_tests(text):
             if end >= len(text):
                 return set()
             raw = text[offset:end + 1]
-            try:
-                value = ast.literal_eval(raw) if char != '`' else None
-            except (ValueError, SyntaxError):
-                value = None
-            tokens.append(('string', value))
+            tokens.append(('string', raw if char != '`' else None))
             offset = end + 1
             continue
-        word = re.match(r'[A-Za-z_$][A-Za-z0-9_$]*', text[offset:])
+        word = JS_IDENTIFIER.match(text, offset)
         if word:
             tokens.append(('name', word[0]))
             offset += len(word[0])
@@ -222,7 +221,12 @@ def _javascript_tests(text):
         if (end + 2 < len(tokens) and tokens[end] == ('punct', '(')
                 and tokens[end + 1][0] == 'string' and isinstance(tokens[end + 1][1], str)
                 and tokens[end + 2] == ('punct', ',')):
-            names.add(tokens[end + 1][1])
+            try:
+                name = ast.literal_eval(tokens[end + 1][1])
+            except (ValueError, SyntaxError):
+                continue
+            if isinstance(name, str):
+                names.add(name)
     return names
 
 
@@ -306,10 +310,14 @@ def _validated_rules(rules, nodes):
                     problems.append(f"rule {label}: sweep ID collision with {other_label} in {node['id']}")
                     invalid.update((index, other))
                 sweep_ids[task_key] = (index, label)
-                for path, test in refs:
-                    if not _test_exists(node['home_path'], path, test, cache):
-                        problems.append(f"rule {label}: {node['id']}: missing Gate test {path}::{test}")
-                        invalid.add(index)
+            for owner, path, test in refs:
+                node = nodes.get(owner)
+                if node is None or not node.get('home_path'):
+                    problems.append(f'rule {label}: unknown or unbound Gate home {owner}')
+                    invalid.add(index)
+                elif not _test_exists(node['home_path'], path, test, cache):
+                    problems.append(f"rule {label}: {owner}: missing Gate test {path}::{test}")
+                    invalid.add(index)
         except ValueError as error:
             problems.append(f'rule {label}: {error}')
             invalid.add(index)
@@ -339,7 +347,13 @@ def sync_sweeps(inst):
         valid, problems = _validated_rules(rules, nodes)
         path = inst.root / '.brain/rule-registry.json'
         common.safe_target(path)
-        saved = json.loads(path.read_text()) if path.exists() else {'version': STATE_VERSION, 'rules': []}
+        if not path.exists():
+            # Installation takes a baseline; the existing-rule audit is a
+            # separate activity. Only additions after this checkpoint sweep.
+            keys = [json.dumps([rule['node_id'], rule['id']]) for rule in rules]
+            common.atomic_write(path, json.dumps({'version': STATE_VERSION, 'rules': keys}, indent=2) + '\n', private=True)
+            return problems
+        saved = json.loads(path.read_text())
         if (not isinstance(saved, dict) or saved.get('version') != STATE_VERSION
                 or not isinstance(saved.get('rules'), list)
                 or any(not isinstance(key, str) for key in saved['rules'])):

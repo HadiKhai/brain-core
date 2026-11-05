@@ -6,13 +6,14 @@ Each section of `library/instance-rules.md` starts with a unique marker, such as
 ```markdown
 <!-- rule:R01 -->
 - Keep source receipts with every result.
-Gate: tests/test_receipts.py::ReceiptChecks::test_source_is_required
+Gate: app:tests/test_receipts.py::ReceiptChecks::test_source_is_required
 Applies: app
 ```
 
 `Gate: none (manual source inspection)` records a rule without an automated
 gate. A blank reason is invalid. Multiple test references use `; ` separators.
-Paths are relative to each applicable node's bound home. Tests must exist there;
+Each reference names the node whose bound home owns the test, independently of
+the rule's applicability. Paths are relative to that home. Tests must exist there;
 outward symlinks and parent traversal fail. Python function and class-method
 declarations are checked without importing or executing the file. A bare test
 method name works when unique; class-qualified names use `Class::test_method`.
@@ -34,8 +35,8 @@ and HTML comments do not supply metadata.
 
 `brain check` validates this registry and opens `SWEEP-<rule-id>` tasks with
 status `ready` and the verbatim rule text, once for each applicable node home.
-The first check opens sweeps for all previously unrecorded rules, including rules
-that predate installation. Invalid rules keep diagnostics and remain unacknowledged;
+The first check records existing IDs as the baseline without opening tasks. Only
+later additions open sweeps. Invalid additions keep diagnostics and remain unacknowledged;
 valid rules still open their sweeps. A task ownership collision stops publication.
 Unlike passive status/dashboard reads, **plain check can now write tasks**.
 It uses the instance writer lock and native task validation. It never contacts

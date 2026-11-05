@@ -35,17 +35,19 @@ class RuleRegistryParsing(unittest.TestCase):
         self.m = registry_module()
 
     def test_metadata_and_verbatim_sections(self):
-        text = '# Rules\n\n' + rule() + '\n' + rule('R02', 'tests/check.py::Checks::test_receipt; tests/check.py::test_one')
+        text = '# Rules\n\n' + rule() + '\n' + rule('R02', 'app:tests/check.py::Checks::test_receipt; app:tests/check.py::test_one')
         rows = self.m.parse_instance_rules(text)
         self.assertEqual([r['id'] for r in rows], ['R01', 'R02'])
         self.assertEqual(''.join(r['text'] for r in rows), text[text.index('<!--'):])
         self.assertEqual(rows[0]['line'], 3)
         self.assertEqual(self.m.gate_references(rows[1]['gate']), [
-            ('tests/check.py', 'Checks::test_receipt'), ('tests/check.py', 'test_one')])
+            ('app', 'tests/check.py', 'Checks::test_receipt'), ('app', 'tests/check.py', 'test_one')])
 
     def test_missing_empty_duplicate_and_malformed_gate_refuse(self):
         for value in (None, '', 'none ()', 'none ( )', 'tests/check.py', '../check.py::test_a',
-                      '/tmp/check.py::test_a', 'check.py::', 'check.py::a; nonsense'):
+                      '/tmp/check.py::test_a', 'check.py::', 'check.py::a; nonsense',
+                      'app:../check.py::test_a', 'app:/tmp/check.py::test_a',
+                      'app:checks.py::', 'unknown:bad:path.py::test_a'):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.m.gate_references(value)
         parsed = self.m.parse_instance_rules(rule() + 'Gate: none (duplicate)\n')[0]
@@ -102,8 +104,8 @@ class RuleRegistryParsing(unittest.TestCase):
                 'matcher.test("member example", () => {});\n'
                 '/* it("block example", () => {}); */\n')
             for selector in ('keeps source evidence', "keeps 'quoted' evidence"):
-                self.assertEqual(self.m.gate_references('checks.test.ts::' + selector),
-                                 [('checks.test.ts', selector)])
+                self.assertEqual(self.m.gate_references('app:checks.test.ts::' + selector),
+                                 [('app', 'checks.test.ts', selector)])
                 self.assertTrue(self.m._test_exists(home, 'checks.test.ts', selector, {}))
             for selector in ('commented test', 'string example', 'regex example', 'member example', 'block example', 'missing'):
                 self.assertFalse(self.m._test_exists(home, 'checks.test.ts', selector, {}))
@@ -118,7 +120,7 @@ class RuleRegistryParsing(unittest.TestCase):
                 node_home.mkdir()
                 (node_home / 'checks.py').write_text('def test_receipt(): pass\n')
                 nodes['app-' + str(i)] = {'id': 'app-' + str(i), 'home_path': node_home}
-            rows = self.m.parse_instance_rules(''.join(rule('R' + str(i), 'checks.py::test_receipt')
+            rows = self.m.parse_instance_rules(''.join(rule('R' + str(i), 'app-' + str(i) + ':checks.py::test_receipt')
                                                        for i in range(92)))
             start = time.monotonic()
             self.assertEqual(self.m.validate_registry(None, (rows, nodes)), [])
@@ -130,12 +132,14 @@ class RuleRegistryChecks(Scenario):
               'source_ref: fabricated\nlearned_at: 2026-01-01\nsource_owners: alice\n'
               'scope: alice\nstatus: active\n---\n')
 
-    def fixture(self):
+    def fixture(self, baseline=True):
         root = self.init('alice')
         self.b(root, 'new', 'app', '--title', 'App')
         self.b(root, 'new', 'excluded', '--title', 'Excluded')
         library = root / 'library/instance-rules.md'
         library.parent.mkdir(exist_ok=True)
+        if baseline:
+            self.b(root, 'check')
         return root, library
 
     def test_check_missing_gate_fails_and_none_reason_passes(self):
@@ -150,10 +154,30 @@ class RuleRegistryChecks(Scenario):
 
     def test_missing_test_and_unknown_applies_fail_with_rule_id(self):
         root, library = self.fixture()
-        library.write_text(self.header + rule(gate='tests/checks.py::test_missing', applies='app'))
+        library.write_text(self.header + rule(gate='app:tests/checks.py::test_missing', applies='app'))
         self.assertIn('R01: app: missing Gate test', self.b(root, 'check', ok=False))
         library.write_text(self.header + rule(applies='unknown'))
         self.assertIn('rule R01: Applies', self.b(root, 'check', ok=False))
+
+    def test_first_check_baselines_existing_rules_and_only_later_additions_sweep(self):
+        root, library = self.fixture(baseline=False)
+        library.write_text(self.header + rule(applies='app'))
+        self.b(root, 'check')
+        self.assertFalse((root / 'nodes/app/tasks/SWEEP-R01.md').exists())
+        library.write_text(library.read_text() + rule('R02', applies='app, excluded'))
+        self.b(root, 'check')
+        self.assertTrue((root / 'nodes/app/tasks/SWEEP-R02.md').exists())
+        self.assertTrue((root / 'nodes/excluded/tasks/SWEEP-R02.md').exists())
+        self.assertFalse((root / 'nodes/app/tasks/SWEEP-R01.md').exists())
+
+    def test_gate_owner_is_independent_of_rule_scope_and_unknown_owner_fails(self):
+        root, library = self.fixture()
+        (root / 'nodes/app/checks.py').write_text('def test_receipt(): pass\n')
+        library.write_text(self.header + rule(gate='app:checks.py::test_receipt', applies='all'))
+        self.b(root, 'check')
+        self.assertTrue((root / 'nodes/excluded/tasks/SWEEP-R01.md').exists())
+        library.write_text(self.header + rule(gate='unknown:checks.py::test_receipt', applies='all'))
+        self.assertIn('rule R01: unknown or unbound Gate home unknown', self.b(root, 'check', ok=False))
 
     def test_overlapping_instance_and_node_ids_fail_before_any_sweep_is_written(self):
         root, library = self.fixture()
@@ -167,7 +191,7 @@ class RuleRegistryChecks(Scenario):
             self.assertFalse((root / 'nodes/app/tasks/SWEEP-R01.md').exists())
 
     def test_rehearsal_read_validates_without_sweeps_or_checkpoint(self):
-        root, library = self.fixture()
+        root, library = self.fixture(baseline=False)
         library.write_text(self.header + rule(applies='app'))
         self.env['BRAIN_REHEARSAL_READ'] = '1'
         self.assertIn('all checks pass', self.b(root, 'check'))
