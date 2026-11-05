@@ -425,7 +425,7 @@ class WorkerReadyPackets(Scenario):
             log.write_text(result.stdout + result.stderr)
             return result.returncode, str(log)
 
-        def execute_lane(inst, n, branch, w, env, lane):
+        def execute_lane(inst, n, branch, w, env, lane, **kwargs):
             result, output = execute(inst, n, branch, lane['command'], w, env)
             return result, output, 0.0
 

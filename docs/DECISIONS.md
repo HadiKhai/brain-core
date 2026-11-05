@@ -17,6 +17,11 @@ budget and execute exclusively, with that reason in scheduler code. Dependencies
 must pass before a lane runs or reuses prior evidence. Explicit `serial_reason`
 also makes a lane exclusive. Cleanup shares the resource lease and waits for all
 lane children to exit. Cheap checks remain a prerequisite of full admission.
+The parent copies its native queue lease context into each scheduling thread,
+records each gated helper before sending its payload, and carries the lease FD
+through the actual verify command. Cancellation stops and joins all active
+helpers before shared cleanup. Cleanup is intentionally once per shared node
+resource lease, including exclusive lanes; every cleanup action is attempted.
 
 ## Queue batches select one immutable FIFO prefix
 

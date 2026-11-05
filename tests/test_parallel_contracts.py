@@ -26,6 +26,11 @@ class ParallelContracts(unittest.TestCase):
             (valid.replace('concurrency: 8', 'concurrency: 2.5'), 'integer'),
             (valid + 'concurrency: 8\n', 'duplicate'),
             ('Paid run with synthetic inputs.', 'concurrency:'),
+            ('## Stop when\n- 2 hours elapsed', 'concurrency:'),
+            ('Budget: 3 h of agent time', 'sum:'),
+            ('cost cap 5 USD', 'concurrency:'),
+            ('time box: 30 min', 'sum:'),
+            ('ETA 20 min per call, 40 calls', 'concurrency:'),
             ('## Budget\n30M tokens, 2.5 h\n', 'concurrency:'),
             ('target: 1s\n', 'sum:'),
             ('No timed work.', None),
@@ -96,6 +101,7 @@ class ParallelLaunchCommands(Scenario):
         source.write_text(valid)
         self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(source))
         self.assertIn('Contract for this job', self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Synthetic work.'))
+        self.assertIn('Contract for this job', self.b(root, 'brief', 'a', '--branch', 'job', '--task', valid))
         self.assertIn('Contract for this job', self.b(root, 'hire', 'tester', 'a', '--branch', 'job', '--task', 'Synthetic work.'))
         self.b(root, 'jobs', 'a', '--branch', 'job')
         self.assertIn('Role: import worker', self.b(root, 'brief', 'a', '--import', '--task', valid))

@@ -1038,7 +1038,7 @@ def run_verify(inst, n, branch, verify, w, env):
             return result
 
 
-def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
+def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None, inherited_fds=()):
     """Drain the combined pipe, exporting the grant and clamping literal pytest workers.
     Only redacted text reaches disk or failure tails. Memory holds at most 15 bounded
     lines per named lane, plus an overall tail and the scrubber's protected suffix.
@@ -1132,7 +1132,7 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                                         cwd=w["path"], env=env, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, pass_fds=(gate_read,) +
                                         ((node_gate_fd,) if node_gate_fd is not None else ()) +
-                                        ((queue_fd,) if queue_fd is not None else ()))
+                                        ((queue_fd,) if queue_fd is not None else ()) + inherited_fds)
                 os.close(gate_read)
                 gate_read = None
                 _m_machine.machine_child(token, proc.pid)
@@ -1282,21 +1282,37 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
                 runnable.append(lane)
             rows.append(row)
         if runnable:
+            import threading
             width = max(1, _m_machine.machine_policy()['worker_budget'])
             by_name = {row['name']: row for row in rows}
+            cancelled = threading.Event()
+            if any(not row['reused'] for row in rows):
+                from . import job_attempts as _m_attempts
+                _m_attempts.attempt_phase('verifying')
             def execute(lane):
                 row = by_name[lane['name']]
                 if row['reused']:
                     return row['result'], row['log'], row['duration']
-                return _m_lanes.execute_lane(inst, n, branch, w, env, lane)
-            try:
-                results = _m_lanes.schedule_lanes(runnable, execute, width, results)
-            finally:
-                # serial_reason: cleanup shares the node's resource lease and
-                # must run only after every independent lane has exited.
-                queued_attempt_phase()
-                verify_cleanup(inst, n)
-                _m_docker_leftovers.docker_leftover_nodes(inst, [n])
+                return _m_lanes.execute_lane(inst, n, branch, w, env, lane,
+                                             cancelled=cancelled, log_keep=VERIFY_LOG_KEEP)
+            with _m_machine.machine_signals():
+                try:
+                    results = _m_lanes.schedule_lanes(runnable, execute, width, results, cancelled=cancelled)
+                finally:
+                    # serial_reason: cleanup shares the node's resource lease,
+                    # including exclusive lanes; it waits for every helper.
+                    primary, errors = sys.exc_info()[1], []
+                    for action in (queued_attempt_phase, lambda: verify_cleanup(inst, n),
+                                   lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])):
+                        try:
+                            action()
+                        except BaseException as error:
+                            errors.append(error)
+                    if errors:
+                        if primary is None:
+                            raise errors[0]
+                        print(_m_guard.redact('verify lane cleanup errors: ' + '; '.join(str(e) for e in errors),
+                                             _m_guard.never_terms(n)), file=sys.stderr)
         for row in rows:
             result, log, duration = results[row['name']]
             if not row['reused'] or result is None:

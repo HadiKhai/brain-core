@@ -43,7 +43,7 @@ JOB_COLS += ["Files", "Lines", "Forecast", "Actual", "Meter %", "Verify s", "Ver
 JOB_COLS += ["Lessons", "Lesson check", "Switches", "Settled"]
 JOB_COLS += ["Land check"]
 JOB_COLS += ["Active h", "Agent h", "Fresh in", "Cache read", "Cache write", "Output", "Reasoning", "Tool calls",
-             "Compactions", "Sub-agents", "Sub share", "Models", "Budget", "Usage"]
+             "Compactions", "Sub-agents", "Sub share", "Models", "Budget", "Parallel policy", "Usage"]
 
 
 def cell(v):
@@ -854,7 +854,9 @@ def validate_job_parallel(n, row, task=''):
         from .parallel_contracts import parallel_problems
         path = contract_file(n, row) if row else None
         text = path.read_text() if path and path.is_file() else ''
-        problems = parallel_problems(text + '\n' + task)
+        problems = parallel_problems(text)
+        if task:
+            problems += parallel_problems(task, defaults=text)
         if problems:
             _m_common.die('contract: ' + '; '.join(problems))
 

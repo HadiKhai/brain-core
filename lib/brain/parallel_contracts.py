@@ -11,19 +11,26 @@ def seconds(number, unit):
     return Decimal(number) * (3600 if unit.startswith('h') else 60 if unit.startswith('m') else 1)
 
 
-def parallel_problems(text):
+def parallel_problems(text, defaults=''):
     """Require declarations for timed/paid work; check declared sums exactly.
 
     Labels between numbers are permitted (``6 cheap lanes x 60 s``).
     Rounding tolerance is half the last displayed decimal place of the total.
     """
     fields = {}
-    for name, value in re.findall(r'^\s*(?:[-*]\s+)?(concurrency|sum|serial_reason)\s*:[ \t]*([^\n]*)', text, re.I | re.M):
+    for name, value in re.findall(r'^[ \t]*(?:[-*][ \t]+)?(concurrency|sum|serial_reason)[ \t]*:[ \t]*([^\n]*)', text, re.I | re.M):
         fields.setdefault(name.lower(), []).append(value.strip())
-    timed = re.search(r'\b(?:time target|(?:target|deadline)[ \t]*:)|\b(?:target|deadline|within|under|at most|no more than|finish in|takes?)\b[^\n]*\b' + NUMBER + r'\s*' + UNIT + r'\b', text, re.I)
-    budget = re.search(r'^##\s+(?:Budget|Forecast|Estimate)\s*$[\s\S]*?' + NUMBER + r'\s*' + UNIT + r'\b', text, re.I | re.M)
-    paid = re.search(r'\bpaid\b|\b(?:USD|dollars?)\s*' + NUMBER + r'|\$\s*' + NUMBER, text, re.I)
-    if not fields and not (timed or budget or paid):
+    fallback = {}
+    for name, value in re.findall(r'^[ \t]*(?:[-*][ \t]+)?(concurrency|sum|serial_reason)[ \t]*:[ \t]*([^\n]*)', defaults, re.I | re.M):
+        fallback.setdefault(name.lower(), []).append(value.strip())
+    for name, values in fallback.items():
+        fields.setdefault(name, values)
+    timed = re.search(r'\b(?:ETA|deadline|time[ -]?(?:target|box|limit))\b|\btarget[ \t]*:|\b(?:by|before|at)\s+[0-9]{1,2}:[0-9]{2}\b', text, re.I)
+    duration = re.search(r'(?<![\w.])' + NUMBER + r'\s*(?:' + UNIT + r'|days?|weeks?)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|half|an?)\s+(?:seconds?|minutes?|hours?|days?|weeks?)\b', text, re.I)
+    currency = r'(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?)'
+    paid = re.search(r'\bpaid\b|\b' + currency + r'\s*' + NUMBER + r'|(?<![\w.])' + NUMBER
+                     + r'\s*' + currency + r'\b|[$€£¥]\s*' + NUMBER, text, re.I)
+    if not fields and not (timed or duration or paid):
         return []
     errors = []
     def error(message):
