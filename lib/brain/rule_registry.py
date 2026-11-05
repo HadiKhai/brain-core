@@ -5,16 +5,15 @@ node rules are top-level Markdown bullets in ``Rules for this node``. Unmarked
 bullets receive a content ID, excluding their Gate/Applies annotations.
 """
 import ast
-import hashlib
 import json
 import re
 from pathlib import Path
 
 from . import common
 from . import instance
+from .rule_syntax import NODE_ID, gate_references, node_rule_id
 
 MARKER = re.compile(r'^<!-- rule:([A-Za-z0-9][A-Za-z0-9_-]*) -->$', re.M)
-NODE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]*(?:/[A-Za-z0-9][A-Za-z0-9_-]*)*')
 JS_IDENTIFIER = re.compile(r'[A-Za-z_$][A-Za-z0-9_$]*')
 STATE_VERSION = 1
 
@@ -95,8 +94,7 @@ def parse_node_rules(text, node_id):
                 raise ValueError(node_id + ': rule marker has no bullet')
             pending = (marker[1], offset)
             continue
-        identity_text = re.split(r'[ \t]+(?:Gate|Applies):', body, maxsplit=1)[0].strip()
-        ident = pending[0] if pending else 'N-' + hashlib.sha256(identity_text.encode()).hexdigest()[:16]
+        ident = node_rule_id(body, pending[0] if pending else None)
         offset = pending[1] if pending else offset
         rules.append(_rule(ident, text[offset:finish], text.count('\n', 0, offset) + 1, node_id))
         pending = None
@@ -122,25 +120,6 @@ def targets(rule, nodes):
         selected = [rule['node_id']]
     return [nodes[key] for key in selected if nodes[key].get('home_path')
             and not nodes[key].get('archived')]
-
-
-def gate_references(value):
-    if not value:
-        raise ValueError('missing or duplicate Gate: metadata')
-    if re.fullmatch(r'none \(\S(?:[^\n]*\S)?\)', value):
-        return []
-    refs = []
-    for entry in value.split('; '):
-        location, sep, selector = entry.partition('::')
-        owner, owner_sep, path = location.partition(':')
-        relative = Path(path)
-        if (not sep or not owner_sep or not NODE_ID.fullmatch(owner) or not path
-                or ':' in path or relative.is_absolute() or '..' in relative.parts
-                or '\\' in path or '\x00' in entry or not selector
-                or selector != selector.strip() or any(ord(char) < 32 for char in selector)):
-            raise ValueError('malformed Gate: use home-node:path::test or none (reason)')
-        refs.append((owner, path, selector))
-    return refs
 
 
 def _javascript_tests(text):
@@ -311,6 +290,16 @@ def _validated_rules(rules, nodes):
                     invalid.update((index, other))
                 sweep_ids[task_key] = (index, label)
             for owner, path, test in refs:
+                if owner is None:
+                    # Preserve capture's stored unqualified references. A local
+                    # rule supplies its owner; instance refs can live in any
+                    # bound home, independently of the rule's Applies scope.
+                    candidates = ([nodes[rule['node_id']]] if rule['node_id'] else nodes.values())
+                    if not any(node.get('home_path') and
+                               _test_exists(node['home_path'], path, test, cache) for node in candidates):
+                        problems.append(f'rule {label}: missing Gate test {path}::{test} in owning home')
+                        invalid.add(index)
+                    continue
                 node = nodes.get(owner)
                 if node is None or not node.get('home_path'):
                     problems.append(f'rule {label}: unknown or unbound Gate home {owner}')
@@ -366,18 +355,21 @@ def sync_sweeps(inst):
                 continue
             if rule not in valid:
                 continue
+            description = ('Read-only sweep. Report findings or no change; do not rebuild or merge.\n\n'
+                           + rule['text'].strip())
             for node in targets(rule, nodes):
                 ident = 'SWEEP-' + rule['id']
                 task_paths.append(tasks.record_path(node, ident))
                 provenance = ['rule-registry:' + key]
                 rows = tasks.read_records(node, ident=ident)
                 if ident in rows:
-                    if rows[ident].get('provenance') != provenance or rows[ident].get('description') != rule['text'].strip():
+                    if rows[ident].get('provenance') != provenance or rows[ident].get('description') != description:
                         raise ValueError(rule['id'] + ': sweep task collision in ' + node['id'])
                     continue
                 row, _ = tasks.prepare_mutation(current, node, ident, {
                     'title': 'Sweep existing work against rule ' + rule['id'],
-                    'status': 'ready', 'source': 'local', 'description': rule['text'],
+                    'status': 'ready', 'source': 'local', 'description': description,
+                    'kind': 'research', 'completion_kind': 'report',
                     'provenance': provenance}, create=True)
                 tasks.save_record(node, row)
                 changed = True

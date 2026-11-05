@@ -12,8 +12,12 @@ Applies: app
 
 `Gate: none (manual source inspection)` records a rule without an automated
 gate. A blank reason is invalid. Multiple test references use `; ` separators.
-Each reference names the node whose bound home owns the test, independently of
-the rule's applicability. Paths are relative to that home. Tests must exist there;
+An optional owner prefix names the node whose bound home owns the test,
+independently of the rule's applicability. The capture-compatible bare
+`path::test` form remains valid: node rules resolve it in the declaring node's
+home, and instance rules require the declaration in at least one bound home.
+Use an explicit prefix to identify a particular owner. Both capture and the
+registry use the same structural Gate parser. Paths are relative to that home. Tests must exist there;
 outward symlinks and parent traversal fail. Python function and class-method
 declarations are checked without importing or executing the file. A bare test
 method name works when unique; class-qualified names use `Class::test_method`.
@@ -30,11 +34,17 @@ IDs fail. Rules in a node's `AGENTS.md` are top-level Markdown bullets under
 These rules stay local: `Applies: all` means that node, and an explicit list may
 only name that node. A preceding `<!-- rule:LOCAL-1 -->` gives a stable ID;
 otherwise the ID is `N-` plus a digest of the bullet without its annotations.
+The shared normalizer preserves the landed contracts IDs: comments and fenced
+examples do not contribute, and whitespace wrapping is collapsed.
 Changing an unmarked bullet's wording creates a new identity. Fenced examples
 and HTML comments do not supply metadata.
 
 `brain check` validates this registry and opens `SWEEP-<rule-id>` tasks with
-status `ready` and the verbatim rule text, once for each applicable node home.
+status `ready`, kind `research`, completion kind `report` and the verbatim rule
+text, once for each applicable node home. Each description explicitly requires
+a read-only sweep: report findings or no change; a sweep never authorizes a
+rebuild or merge. Completion uses the normal digest-bound report artifact receipt,
+including for a no-change report; code delivery evidence is not required.
 The first check records existing IDs as the baseline without opening tasks. Only
 later additions open sweeps. Invalid additions keep diagnostics and remain unacknowledged;
 valid rules still open their sweeps. A task ownership collision stops publication.

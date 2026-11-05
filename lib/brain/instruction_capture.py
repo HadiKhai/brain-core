@@ -217,19 +217,15 @@ def classifications(messages):
 
 
 def gate_line(text):
-    """Temporary structural reader until the shared rule registry is integrated."""
-    for line in text.splitlines():
-        if 'Gate: ' not in line:
+    """Recognize Gate metadata with the same syntax as the rule registry."""
+    from .rule_syntax import gate_references
+    for value in re.findall(r'(?:^|[ \t])Gate:[ \t]*([^\n]*?)(?=[ \t]+Applies:|$)', text, re.M):
+        try:
+            gate_references(value.strip())
+        except ValueError:
             continue
-        value = line.split('Gate: ', 1)[1].strip()
-        if re.fullmatch(r'none \([^\n()]*\S[^\n()]*\)', value):
-            return True
-        if all(re.fullmatch(r'[A-Za-z0-9_./-]+::[A-Za-z0-9_:.-]+', part)
-               and not part.startswith('/') and '..' not in part.split('::', 1)[0].split('/')
-               for part in value.split('; ')):
-            return True
+        return True
     return False
-
 
 def rule_sections(text, library=False):
     if library:

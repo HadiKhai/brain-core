@@ -3,6 +3,7 @@ import importlib
 import argparse
 import contextlib
 import io
+import hashlib
 import json
 import os
 import subprocess
@@ -73,6 +74,44 @@ class RuleRegistryParsing(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1]['id'], 'LOCAL-1')
         self.assertEqual(rows[1]['text'].splitlines()[0], '<!-- rule:LOCAL-1 -->')
+
+    def test_capture_and_registry_share_legacy_and_owned_gate_syntax(self):
+        capture = importlib.import_module(self.m.__package__ + '.instruction_capture')
+        syntax = importlib.import_module(self.m.__package__ + '.rule_syntax')
+        self.assertIs(self.m.gate_references, syntax.gate_references)
+        for value in ('checks.py::test_receipt', 'app:checks.py::test_receipt',
+                      'checks.py::Checks::test_receipt; app:checks.py::test_one',
+                      'none (manual inspection)'):
+            with self.subTest(value=value):
+                self.assertTrue(capture.gate_line('- Keep evidence. Gate: ' + value + ' Applies: all'))
+                self.m.gate_references(value)
+        for value in ('../checks.py::test_receipt', 'app:/checks.py::test_receipt', 'none ()'):
+            with self.subTest(value=value):
+                self.assertFalse(capture.gate_line('Gate: ' + value))
+                with self.assertRaises(ValueError):
+                    self.m.gate_references(value)
+
+    def test_node_ids_match_contracts_across_wrapping_comments_and_annotations(self):
+        contracts = importlib.import_module(self.m.__package__ + '.rule_contracts')
+        self.assertIs(self.m.node_rule_id, contracts.node_rule_id)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'AGENTS.md'
+            variants = ('- Preserve source evidence.\n',
+                        '- Preserve source\n  evidence.\n',
+                        '- Preserve <!-- note --> source evidence.\n',
+                        '- Preserve source evidence.\n  Gate: none (manual) Applies: all\n')
+            ids = []
+            for bullet in variants:
+                text = '## Rules for this node\n' + bullet
+                path.write_text(text)
+                registry_id = self.m.parse_node_rules(text, 'app')[0]['id']
+                contract_id = contracts.applicable_rules({'id': 'app', 'dir': Path(folder)})[0]['id']
+                self.assertEqual(contract_id, 'node:app:' + registry_id)
+                ids.append(registry_id)
+            self.assertEqual(len(set(ids)), 1)
+            path.write_text('## Rules for this node\n<!-- rule:LOCAL-1 -->\n' + variants[1])
+            self.assertEqual(contracts.applicable_rules({'id': 'app', 'dir': Path(folder)})[0]['id'],
+                             'node:app:LOCAL-1')
 
     def test_inline_comments_cannot_hide_a_node_rule_and_long_fences_stay_closed(self):
         rows = self.m.parse_node_rules('## Rules for this node\n- Keep <!-- note --> receipts.\n', 'app')
@@ -178,6 +217,46 @@ class RuleRegistryChecks(Scenario):
         self.assertTrue((root / 'nodes/excluded/tasks/SWEEP-R01.md').exists())
         library.write_text(self.header + rule(gate='unknown:checks.py::test_receipt', applies='all'))
         self.assertIn('rule R01: unknown or unbound Gate home unknown', self.b(root, 'check', ok=False))
+
+    def test_capture_legacy_gate_validates_outside_applies_home(self):
+        root, library = self.fixture()
+        (root / 'nodes/app/checks.py').write_text('def test_receipt(): pass\n')
+        capture = importlib.import_module(registry_module().__package__ + '.instruction_capture')
+        gate = 'checks.py::test_receipt'
+        self.assertTrue(capture.gate_line('Gate: ' + gate))
+        library.write_text(self.header + rule(gate=gate, applies='excluded'))
+        self.assertIn('all checks pass', self.b(root, 'check'))
+        self.assertTrue((root / 'nodes/excluded/tasks/SWEEP-R01.md').exists())
+        library.write_text(self.header + rule(gate='checks.py::test_missing', applies='excluded'))
+        self.assertIn('missing Gate test', self.b(root, 'check', ok=False))
+
+    def test_sweep_is_read_only_report_and_no_change_report_completes(self):
+        root, library = self.fixture()
+        library.write_text(self.header + rule(applies='app'))
+        self.b(root, 'check')
+        m = registry_module()
+        tasks = importlib.import_module(m.__package__ + '.tasks')
+        flow = importlib.import_module(m.__package__ + '.task_flow')
+        inst = m.instance.Instance(root)
+        node = inst.node('app')
+        row = tasks.read_records(node)['SWEEP-R01']
+        self.assertEqual((row['kind'], row['completion_kind']), ('research', 'report'))
+        self.assertIn('Read-only sweep.', row['description'])
+        self.assertIn('Report findings or no change', row['description'])
+        artifact = node['dir'] / 'sweep-report.md'
+        artifact.write_text('Reviewed existing work: no change needed.\n')
+        receipt = {'ref': 'sweep-report.md', 'scope': 'R01', 'result': 'passed', 'at': inst.now(),
+                   'artifact': artifact.name, 'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                   'version': 1}
+        tasks.mutate(inst, node, 'SWEEP-R01', {'status': 'done', 'evidence': ['Read-only audit report'],
+                                           'completion_receipt': receipt})
+        completed = tasks.read_records(node)['SWEEP-R01']
+        self.assertEqual(completed['status'], 'done')
+        self.assertFalse(completed.get('merge_sha'))
+        flow.completion(node, completed)
+        artifact.write_text('Changed after completion.\n')
+        with self.assertRaisesRegex(ValueError, 'exact artifact digest'):
+            flow.completion(node, completed)
 
     def test_overlapping_instance_and_node_ids_fail_before_any_sweep_is_written(self):
         root, library = self.fixture()

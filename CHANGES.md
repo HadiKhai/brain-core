@@ -5,6 +5,14 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Share capture and registry rule syntax
+
+Capture and registry Gate readers now share a parser accepting both existing
+`path::test` references and explicit `owner:path::test` references. Registry node
+IDs use the landed contracts normalizer, preserving IDs across comments and line
+wrapping. New rule sweeps are read-only research/report tasks; a no-change report
+completes with a digest-bound artifact receipt, without a delivering merge.
+
 ## 2026-11-05: Capture coordinator standing instructions at stop
 
 Bound coordinator sessions now classify new operator messages with Haiku and

@@ -7,6 +7,8 @@ import hashlib
 import json
 import re
 
+from .rule_syntax import markdown_structure as _structure, node_rule_id
+
 RULES_START = '<!-- brain:applicable-rules -->'
 RULES_END = '<!-- brain:applicable-rules:end -->'
 
@@ -35,38 +37,6 @@ def rule_input_paths(n):
 def _read(path):
     # Preserve source bytes, including CRLF and indentation, in generated briefs.
     return path.read_bytes().decode('utf-8') if path.exists() else ''
-
-
-def _structure(text):
-    """Ignore examples/comments when locating Markdown rule declarations."""
-    out, fence, comment = [], None, False
-    for line in text.splitlines(keepends=True):
-        stripped = line.lstrip()
-        marker = re.fullmatch(r'<!-- rule:[A-Za-z0-9_-]+ -->', stripped.strip())
-        if stripped.startswith(('```', '~~~')) and not comment:
-            token = stripped[0]
-            fence = token if fence is None else None if fence == token else fence
-            out.append(''.join(c if c in '\r\n' else ' ' for c in line))
-            continue
-        if fence:
-            out.append(''.join(c if c in '\r\n' else ' ' for c in line))
-            continue
-        visible, pos = list(line), 0
-        while pos < len(line):
-            if comment:
-                end = line.find('-->', pos)
-                stop = len(line) if end < 0 else end + 3
-                for i in range(pos, stop):
-                    if visible[i] not in '\r\n':
-                        visible[i] = ' '
-                comment, pos = end < 0, stop
-            else:
-                begin = line.find('<!--', pos)
-                if begin < 0 or marker:
-                    break
-                comment, pos = True, begin
-        out.append(''.join(visible))
-    return ''.join(out)
 
 
 def _applies(text, node_id):
@@ -108,10 +78,8 @@ def applicable_rules(n):
             if RULES_START in body or RULES_END in body:
                 raise ValueError('rule text contains reserved generated-block marker')
             numbered = re.match(r'^[-*+] (R[0-9]+)\b', body)
-            identity = re.split(r'[ \t]+(?:Gate|Applies):', _structure(body), maxsplit=1)[0].strip()
-            identity = ' '.join(identity.split())
             key = numbered.group(1) if numbered else 'node:' + source['id'] + ':' + (
-                current_id or 'N-' + hashlib.sha256(identity.encode()).hexdigest()[:16])
+                node_rule_id(body, current_id))
             metadata = blocks.get(key, body)
             if _applies(metadata, n['id']):
                 rules.append({'id': key, 'text': body,
