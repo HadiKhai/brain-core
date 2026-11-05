@@ -54,6 +54,7 @@ MODULE_LANES = (
 )
 LANE_TESTS = {name: ('test_' + name + '.py',) for name in MODULE_LANES}
 LANE_TESTS.update({
+    'check': ('test_check.py', 'test_rule_index.py'),
     'operation_timings': ('test_operation_timings.py',),
     'machine': ('test_machine.py', 'test_machine_durability.py'),
     'events': ('test_events.py', 'test_event_facts.py', 'test_event_review.py', 'test_delivery_metrics.py', 'test_event_records.py', 'test_managed_index.py', 'test_native_event_writes.py'),
@@ -91,7 +92,7 @@ SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'tempdirs.py', 'lanes
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
-EXTRA_INPUTS = {'watch': ('tools/watcher_approval.py', 'tools/check_watcher_approval.py'), 'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py')}
+EXTRA_INPUTS = {'check': ('tools/check_rule_index.py',), 'watch': ('tools/watcher_approval.py', 'tools/check_watcher_approval.py'), 'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py')}
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
