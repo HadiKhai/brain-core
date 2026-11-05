@@ -1547,11 +1547,16 @@ def hook_notice_unread(path, last_message=None):
         text = blocks if isinstance(blocks, str) else "\n".join(
             b.get("text", "") for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str)
         ) if isinstance(blocks, list) else ""
-        if rec.get("type") == "user" and hook_operator_message(rec):
-            notifications = re.findall(r"<task-notification>(.*?)</task-notification>", text, re.S)
+        notice_text = text if rec.get("type") == "user" and hook_operator_message(rec) else None
+        attachment = rec.get("attachment")
+        if (rec.get("type") == "attachment" and isinstance(attachment, dict)
+                and attachment.get("type") == "queued_command" and isinstance(attachment.get("prompt"), str)):
+            notice_text = attachment["prompt"]
+        if notice_text is not None:
+            notifications = re.findall(r"<task-notification>(.*?)</task-notification>", notice_text, re.S)
             if not notifications and re.search(
-                    r"\bbackground (?:command|task)\b[^\n]*(?:completed|finished|failed|exited|killed)", text, re.I):
-                notifications = [text]
+                    r"\bbackground (?:command|task)\b[^\n]*(?:completed|finished|failed|exited|killed)", notice_text, re.I):
+                notifications = [notice_text]
             for notice in notifications:
                 identifiers = re.findall(r"<(?:output-file|task-id)>([^<]+)</(?:output-file|task-id)>", notice)
                 if not identifiers:
@@ -1565,7 +1570,7 @@ def hook_notice_unread(path, last_message=None):
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             name = str(block.get("name", "")).lower().split("__")[-1].split(".")[-1]
-            if name not in ("read", "read_file", "bash", "bashoutput", "taskoutput", "exec_command",
+            if name not in ("read", "read_file", "grep", "bash", "bashoutput", "taskoutput", "exec_command",
                             "shell", "shell_command", "execute", "exec"):
                 continue
             tool_input = json.dumps(block.get("input", {}), ensure_ascii=False)

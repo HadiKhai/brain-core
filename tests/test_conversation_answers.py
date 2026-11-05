@@ -157,7 +157,8 @@ class StopNoticeGuard(Scenario):
         self.assertTrue(self.unread(self.notice, self.tool(value='/tmp/other.output')))
 
     def test_notice_read_and_bash_or_task_output_pass(self):
-        for name, value in (('Read', '/tmp/task-17.output'), ('Bash', 'cat /tmp/task-17.output'),
+        for name, value in (('Read', '/tmp/task-17.output'), ('Grep', '/tmp/task-17.output'),
+                            ('Bash', 'cat /tmp/task-17.output'),
                             ('Bash', 'tail -n 40 /tmp/task-17.output'), ('TaskOutput', 'task-17'),
                             ('BashOutput', 'task-17')):
             with self.subTest(name=name, value=value):
@@ -176,6 +177,25 @@ class StopNoticeGuard(Scenario):
     def test_read_before_notice_and_partial_task_id_do_not_count(self):
         self.assertTrue(self.unread(self.tool(), self.notice, self.assistant('Done.')))
         self.assertTrue(self.unread(self.notice, self.tool('TaskOutput', 'task-170')))
+
+    def test_queued_attachment_notices_require_a_later_read(self):
+        notice = {'type': 'attachment', 'attachment': {'type': 'queued_command',
+                  'commandMode': 'task-notification', 'prompt': self.notice['message']['content']}}
+        operator = {'type': 'user', 'message': {'content': 'Run the fixture task.'}}
+        result = {'type': 'user', 'message': {'content': [
+                  {'type': 'tool_result', 'tool_use_id': 'read-17', 'content': 'Earlier output.'}]}}
+        prefix = [operator, self.tool(), result, notice]
+        self.assertTrue(self.unread(*prefix, self.assistant('Done.')))
+        self.assertTrue(self.unread(*prefix, self.assistant('No response requested.')))
+        self.assertFalse(self.unread(*prefix, self.tool(), self.assistant('Fixed.')))
+        second = {'type': 'attachment', 'attachment': {'type': 'queued_command',
+                  'prompt': self.notice['message']['content'].replace('task-17', 'task-18')}}
+        self.assertTrue(self.unread(*prefix, self.tool(), second, self.assistant('Done.')))
+        self.assertFalse(self.unread(*prefix, self.tool(), second,
+                                    self.tool(value='/tmp/task-18.output'), self.assistant('Fixed.')))
+        self.assertFalse(self.unread(*prefix, operator, self.assistant('Done.')))
+        notice['attachment']['type'] = 'file'
+        self.assertFalse(self.unread(operator, notice, self.assistant('Done.')))
 
     def test_list_content_multiple_notices_require_every_output(self):
         text = self.notice['message']['content']
