@@ -1502,7 +1502,7 @@ class Workflow(Scenario):
         for row in rows:
             f = m.contract_file(node, row)
             f.parent.mkdir(exist_ok=True)
-            f.write_text("## Inputs\n- src/calc.py\n")
+            f.write_text("mode: untimed\n## Inputs\n- src/calc.py\n")
         # Old open jobs still count after forty newer completed entries.
         history = [{**rows[0], "Job": "closed-" + str(i), "Ended": rows[0]["Started"],
                     "Outcome": "abandoned", "Hours": "1"} for i in range(40)]
