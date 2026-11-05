@@ -2,11 +2,13 @@
 """Check a compact rule index against its complete, independently retained rules."""
 import argparse
 from collections import Counter
+import json
 from pathlib import Path
 import re
 
 
-def check(index, rules, budget=4000, baseline_rules=None, baseline_index=None):
+def check(index, rules, budget=4000, baseline_rules=None, baseline_index=None,
+          summary_map=None):
     section = index.split('## Instance rules\n', 1)[1]
     entries = re.findall(r'^- (R\d+) (\S.*)$', section, re.M)
     anchors = re.findall(r'^<!-- rule:(R\d+) -->$', rules, re.M)
@@ -37,6 +39,17 @@ def check(index, rules, budget=4000, baseline_rules=None, baseline_index=None):
         operator = baseline_index.split('## About the operator\n', 1)[1].split('## Instance rules\n', 1)[0]
         if operator != index.split('## About the operator\n', 1)[1].split('## Instance rules\n', 1)[0]:
             errors.append('operator block changed')
+        if summary_map is not None:
+            by_id = dict(zip(anchors, blocks))
+            if set(summary_map) != set(old_entries):
+                errors.append('summary map must cover exactly the original requirements')
+            for line, targets in summary_map.items():
+                if (not isinstance(targets, list) or not targets or
+                        any(key not in by_id or line not in by_id[key] for key in targets)):
+                    errors.append('original requirement missing from its mapped rule')
+                    break
+    elif summary_map is not None:
+        errors.append('summary map requires a baseline index')
     return {'rules': len(anchors), 'index_chars': len(section),
             'total_chars': len(index), 'errors': errors}
 
@@ -48,11 +61,13 @@ def main():
     parser.add_argument('--budget', type=int, default=4000)
     parser.add_argument('--baseline-rules', type=Path)
     parser.add_argument('--baseline-index', type=Path)
+    parser.add_argument('--summary-map', type=Path,
+                        help='JSON mapping each original requirement line to its rule IDs')
     args = parser.parse_args()
     result = check(args.index.read_text(), args.rules.read_text(), args.budget,
                    args.baseline_rules.read_text() if args.baseline_rules else None,
-                   args.baseline_index.read_text() if args.baseline_index else None)
-    import json
+                   args.baseline_index.read_text() if args.baseline_index else None,
+                   json.loads(args.summary_map.read_text()) if args.summary_map else None)
     print(json.dumps(result, indent=2))
     return bool(result['errors'])
 

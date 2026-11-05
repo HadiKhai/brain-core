@@ -23,13 +23,18 @@ Run the standalone check with paths to the proposed files and their saved bases:
 
 ```sh
 python3 tools/check_rule_index.py proposed/AGENTS.md proposed/library/instance-rules.md \
-  --baseline-index base/AGENTS.md --baseline-rules base/library/instance-rules.md
+  --baseline-index base/AGENTS.md --baseline-rules base/library/instance-rules.md \
+  --summary-map summary-map.json
 ```
 
 It checks matching rule IDs, duplicate or empty entries, the index's 4,000 Unicode
 character budget, retention of all original full-rule lines and original index
 requirements, and the unchanged operator block. A reviewer must also check that
 each trigger identifies the right rule and that instruction pointers remain.
+The optional summary map assigns each original requirement line to its rule IDs;
+the check then requires that wording inside every assigned rule's block. Put
+current requirements and explicit override references beside historical text so
+an agent reading only that block cannot revive an obsolete instruction.
 This is a retention check, not a semantic equivalence proof or token measurement.
 
 Keep instance-specific text and settings patches outside the public core
