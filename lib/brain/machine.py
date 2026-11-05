@@ -2069,7 +2069,7 @@ def machine_thermal_recovered(samples):
 def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter=print, cancelled=None, workers=None):
     """A live queued process owns its continuation; no replay of arbitrary commands."""
     clock = clock or time
-    token.clock = clock
+    token.clock, token.kind = clock, kind
     read = read or (lambda: machine_reading(inst))
     pause = pause or clock.sleep
     owner = [os.getpid(), process_stamp(os.getpid())]
@@ -2105,8 +2105,9 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
             row = next((r for r in queue.rows if r["token"] == token), None)
             if row is None:
                 row = {"token": token, "owner": owner, "kind": kind, "state": "queued",
-                       "priority": priority, "expected_seconds": expected, "queued_at": clock.time(),
-                       "requested_workers": workers or policy["worker_budget"]}
+                       "priority": priority, "expected_seconds": expected, "queued_at": clock.time()}
+                if workers is not None:
+                    row["requested_workers"] = workers
                 if boot is not None:
                     row["boot"] = boot
                 if inst is not None and node is not None:
@@ -2118,7 +2119,8 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
             budget = policy['worker_budget']
             # Legacy/undeclared reservations own the entire budget. Never infer
             # their parallelism or shrink a grant after the child has started.
-            used = sum(r.get('workers', budget) for r in running_rows)
+            used = sum(r.get('workers', budget) if 'requested_workers' in r else budget
+                       for r in running_rows)
             grant = 1 if reduced else min(row.get('requested_workers', budget), budget)
             position = waiting.index(row) + 1
             limit = 1 if reduced else machine_limit(policy)
@@ -2174,7 +2176,7 @@ def machine_environment(token, env):
             row = next((r for r in queue.rows if r['token'] == token), None)
             if row is None:
                 _m_common.die('machine care: reservation disappeared; no command started')
-            workers = row.get('workers', machine_policy()['worker_budget'])
+            workers = row['workers'] if 'workers' in row else machine_policy()['worker_budget']
             reduced = row.get('reduced', False)
     out = {**env, 'BRAIN_TEST_WORKERS': str(workers)}
     if reduced:

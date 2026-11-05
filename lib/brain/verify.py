@@ -886,7 +886,7 @@ def literal_pytest_workers(command):
     Return the effective request and the exact worker-value spans. Unsupported
     shell syntax stays opaque and therefore reserves the whole machine budget.
     """
-    if any(c in command for c in '\r\n$`;&|<>(){}*?~#'):
+    if any(c in command for c in '\r\n$`;&|<>(){}*?~#[]'):
         return None
     words = list(re.finditer(r"(?:[^ \t'\"\\]+|'[^']*'|\"[^\"\\]*\"|\\[^\r\n])+", command))
     previous, args = 0, []
@@ -910,6 +910,9 @@ def literal_pytest_workers(command):
         offset = 3
     else:
         return None
+    if any(arg.startswith('@') or arg in ('--tx', '-d') or arg.startswith('--tx=')
+           for arg in args[offset:]):
+        return None
     values, requested, i = [], None, offset
     while i < len(args):
         arg, prefix = args[i], ''
@@ -925,11 +928,17 @@ def literal_pytest_workers(command):
         elif arg.startswith('-n') and len(arg) > 2:
             prefix, value = '-n', arg[2:]
         else:
+            # argparse permits clusters such as -xn32; never guess their effect.
+            if arg.startswith('-') and not arg.startswith('--') and len(arg) > 2:
+                return None
             i += 1
             continue
         if value not in ('auto', 'logical') and not re.fullmatch(r'[0-9]+', value):
             return None
-        requested = None if value in ('auto', 'logical') else max(1, int(value))
+        if value not in ('auto', 'logical') and int(value) == 0:
+            # -n0 can leave configured --tx workers active; keep it opaque.
+            return None
+        requested = None if value in ('auto', 'logical') else int(value)
         # Replace the option/value word only. Every other original byte remains.
         values.append((words[i].start(), words[i].end(), prefix, value))
         i += 1
@@ -946,6 +955,15 @@ def verify_worker_command(command, workers):
     return command
 
 
+def verify_worker_execution(command, env, token):
+    # This stream also serves admission-only cheap/fitness/spec commands. Their
+    # receipts and argv must retain their original semantics and bytes.
+    if getattr(token, 'kind', None) != 'verify':
+        return command, env
+    env = _m_machine.machine_environment(token, env)
+    return verify_worker_command(command, int(env['BRAIN_TEST_WORKERS'])), env
+
+
 @contextlib.contextmanager
 def command_reservation(inst, n, branch=None, kind='verify', command=None):
     """One producer context spans native admission, execution and every cleanup."""
@@ -955,7 +973,7 @@ def command_reservation(inst, n, branch=None, kind='verify', command=None):
         token = run
         try:
             parsed = literal_pytest_workers(command) if kind == 'verify' and command else None
-            admission = {'workers': parsed[0], 'reduction_ready': bool(parsed[1])} if parsed is not None else {}
+            admission = {'workers': parsed[0]} if parsed is not None else {}
             token = (_m_machine.machine_wait(kind, inst, n['id'], job=branch, token=run, **admission)
                      if managed else _m_machine.machine_wait(kind, inst, n['id']))
             if kind == 'verify':
@@ -1022,8 +1040,7 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
     Only redacted text reaches disk or failure tails. Memory holds at most 15 bounded
     lines per named lane, plus an overall tail and the scrubber's protected suffix.
     """
-    env = _m_machine.machine_environment(token, env)
-    verify = verify_worker_command(verify, int(env['BRAIN_TEST_WORKERS']))
+    verify, env = verify_worker_execution(verify, env, token)
     import codecs
     import io
     import selectors

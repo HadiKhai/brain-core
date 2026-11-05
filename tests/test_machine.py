@@ -56,7 +56,7 @@ class WorkerAdmission(unittest.TestCase):
         self.assertEqual((token.workers, self.rows()[0]['workers']), (16, 16))
         with self.m.machine_queue() as queue:
             queue.rows[0].pop('workers')
-            queue.rows[0].pop('requested_workers')
+            queue.rows[0].pop('requested_workers', None)
         attempts = []
         def release(_):
             attempts.append(self.rows())
@@ -117,6 +117,54 @@ class WorkerAdmission(unittest.TestCase):
                 self.assertFalse(self.m.machine_queue.valid(dict(row, **{field: value})))
         self.m.machine_release(token)
 
+    def test_queued_undeclared_request_tracks_a_changed_budget(self):
+        first = self.admit(workers=8)
+        pauses = []
+        def advance(_):
+            pauses.append(self.rows())
+            self.assertNotIn('requested_workers', pauses[-1][-1])
+            if len(pauses) == 1:
+                (self.folder / 'machine-care.json').write_text(json.dumps({'worker_budget': 32}))
+            else:
+                self.assertEqual(len(pauses), 2)
+                self.m.machine_release(first)
+        opaque = self.admit(pause=advance)
+        self.assertEqual(len(pauses), 2)
+        self.assertEqual(opaque.workers, 32)
+        # Raising the budget cannot make an already running opaque owner share.
+        (self.folder / 'machine-care.json').write_text(json.dumps({'worker_budget': 64}))
+        def release(_):
+            self.assertEqual(self.rows()[1]['state'], 'queued')
+            self.assertEqual(opaque.workers, 32)  # its child grant stays immutable
+            self.m.machine_release(opaque)
+        second = self.admit(workers=8, pause=release)
+        self.m.machine_release(second)
+
+    def test_real_night_policy_limits_two_half_budget_requests_to_one_run(self):
+        self.patches[4].stop()
+        limiter = self.m.machine_limit
+        policy = dict(verify_day=2, verify_night=1, night_start=22, night_end=8)
+        (self.folder / 'machine-care.json').write_text(json.dumps(policy))
+        released = []
+        with mock.patch.object(self.m, 'machine_limit', side_effect=lambda p: limiter(p, 23)):
+            first = self.admit(workers=8)
+            def release(_):
+                released.append(True)
+                self.assertEqual([r['state'] for r in self.rows()], ['running', 'queued'])
+                self.m.machine_release(first)
+            second = self.admit(workers=8, pause=release)
+            self.assertEqual(released, [True])
+            self.m.machine_release(second)
+
+    def test_admission_only_stream_commands_keep_their_bytes_and_environment(self):
+        env = {'OTHER': 'kept'}
+        token = argparse.Namespace(kind='heavy', workers=4)
+        with mock.patch.object(self.m, 'machine_environment', side_effect=AssertionError('not a worker reservation')):
+            for command in ('pytest -n auto', 'pytest -n8 tests', 'true'):
+                actual, actual_env = self.m.verify_worker_execution(command, env, token)
+                self.assertEqual(actual, command)
+                self.assertIs(actual_env, env)
+
     def test_admission_uses_one_queue_transaction(self):
         factory = self.m.machine_queue
         with mock.patch.object(self.m, 'machine_queue', wraps=factory) as queue:
@@ -135,14 +183,17 @@ class WorkerAdmission(unittest.TestCase):
         self.assertEqual(parse('pytest -n16 -n8')[0], 8)
         self.assertEqual(clamp('pytest -n16 -n8', 8), 'pytest -n8 -n8')
         self.assertEqual(clamp('pytest -n auto', 8), 'pytest -n 8')
-        self.assertEqual(parse('pytest -n0')[0], 1)
+        self.assertIsNone(parse('pytest -n0'))
         self.assertEqual(clamp('pytest -n0', 8), 'pytest -n0')
         self.assertEqual(parse('pytest -- -n8')[0], None)
         for command in ('env pytest -n8', 'sh -c "pytest -n8"', 'pytest -n8; true',
                         'pytest -n8 && true', 'pytest -n8 | cat', 'pytest -n8 # -n1',
                         'pytest -n "$COUNT"', 'pytest -n8\ntrue', 'pytest -n8 > out',
                         'pytest -n8 $(true)', 'bun run verify', 'python3 -m py_compile x.py',
-                        "pytest -n '8", 'pytest -n invalid', 'pytest -n'):
+                        "pytest -n '8", 'pytest -n invalid', 'pytest -n',
+                        'pytest -n4 -xn32', 'pytest -n4 @args.txt',
+                        'pytest -n0 --tx popen --dist load', 'pytest -n4 --tx=popen',
+                        'pytest -n4 tests/test_[ab].py', 'pytest -n4 -vv'):
             with self.subTest(command=command):
                 self.assertIsNone(parse(command))
                 self.assertEqual(clamp(command, 8), command)
@@ -225,6 +276,19 @@ class MachineCare(Scenario):
                 self.assertEqual([r['state'] for r in queue.rows], ['running', 'running'])
                 self.assertEqual([r['requested_workers'] for r in queue.rows], [8, 8])
             self.assertEqual([token.workers for token in tokens], [8, 8])
+        with self.m.machine_queue() as queue:
+            self.assertEqual(queue.rows, [])
+
+    def test_native_literal_reservation_keeps_cpu_pressure_refusal(self):
+        root = self.init('oak')
+        policy = self.m.machine_dir() / 'machine-care.json'
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        policy.write_text(json.dumps({'worker_budget': 16, 'max_hold_minutes': 0}))
+        inst = self.m.Instance(root)
+        with mock.patch.object(self.m, 'machine_reading', return_value={'cpu_idle_pct': 0}):
+            with self.assertRaisesRegex(SystemExit, 'cannot enforce reduced parallelism'):
+                with self.m.verify_reservation(inst, inst.node('root'), 'fixture', command='pytest -n8'):
+                    self.fail('CPU pressure must still refuse native execution')
         with self.m.machine_queue() as queue:
             self.assertEqual(queue.rows, [])
 

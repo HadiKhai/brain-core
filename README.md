@@ -553,8 +553,8 @@ opaque and legacy reservations take the full budget, so opaque verifies serializ
 Native verification recognizes a single literal `pytest` or `python -m pytest` command,
 including numeric `-n`/`--numprocesses` forms. It counts the requested workers and clamps
 only those worker arguments to the grant; `auto`/`logical` reserve the full budget and
-become the granted count. Shell wrappers, compound commands and unsupported syntax stay
-opaque. Every verify child receives `BRAIN_TEST_WORKERS` with its immutable grant; opaque
+become the granted count. Shell wrappers, compound commands, argument files, short-option clusters, `-n0`,
+explicit xdist transports and unsupported syntax stay opaque. Every verify child receives `BRAIN_TEST_WORKERS` with its immutable grant; opaque
 commands retain their command bytes and can use this variable when their owners add support.
 For a cooperating `brain heavy run` child, declare its worker request with
 `BRAIN_HEAVY_WORKERS=8 brain heavy run -- <command...>` and make the child honor
