@@ -4,11 +4,6 @@ from pathlib import Path
 import unittest
 
 
-spec = importlib.util.spec_from_file_location(
-    'check_rule_index', Path(__file__).parents[1] / 'tools/check_rule_index.py')
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-
 INDEX = ('## About the operator\n\nKeep answers brief.\n\n'
          '## Instance rules\n\n- R01 Before publishing.\n- R02 Before deleting.\n')
 RULES = ('<!-- rule:R01 -->\n- **Publish:** ask first.\n\n'
@@ -16,40 +11,47 @@ RULES = ('<!-- rule:R01 -->\n- **Publish:** ask first.\n\n'
 
 
 class RuleIndex(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            'check_rule_index', Path(__file__).parents[1] / 'tools/check_rule_index.py')
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
     def test_complete_index_retains_original_requirements(self):
         baseline = INDEX.split('## Instance rules')[0] + '## Instance rules\n\n- **Publish:** ask first.\n'
-        self.assertEqual(module.check(INDEX, RULES, baseline_rules=RULES,
+        self.assertEqual(self.module.check(INDEX, RULES, baseline_rules=RULES,
                                       baseline_index=baseline)['errors'], [])
 
 
     def test_missing_duplicate_or_unbacked_index_entry_refuses(self):
         for changed in (INDEX.replace('- R02 Before deleting.\n', ''),
                         INDEX + '- R01 Duplicate.\n', INDEX + '- R03 Unknown.\n'):
-            self.assertTrue(module.check(changed, RULES)['errors'])
+            self.assertTrue(self.module.check(changed, RULES)['errors'])
 
 
     def test_rule_rewrite_and_missing_original_summary_refuse(self):
         changed = RULES.replace('ask first', 'proceed freely')
-        self.assertTrue(module.check(INDEX, changed, baseline_rules=RULES)['errors'])
+        self.assertTrue(self.module.check(INDEX, changed, baseline_rules=RULES)['errors'])
         baseline = INDEX.split('## Instance rules')[0] + '## Instance rules\n\n- **Missing:** keep this.\n'
-        self.assertTrue(module.check(INDEX, RULES, baseline_index=baseline)['errors'])
+        self.assertTrue(self.module.check(INDEX, RULES, baseline_index=baseline)['errors'])
 
 
     def test_budget_operator_change_and_empty_rule_refuse(self):
-        self.assertTrue(module.check(INDEX, RULES, budget=10)['errors'])
-        self.assertTrue(module.check(INDEX.replace('brief', 'long'), RULES,
+        self.assertTrue(self.module.check(INDEX, RULES, budget=10)['errors'])
+        self.assertTrue(self.module.check(INDEX.replace('brief', 'long'), RULES,
                                      baseline_index=INDEX)['errors'])
-        self.assertTrue(module.check(INDEX, RULES.replace('- **Delete:** preserve real data.', ''))['errors'])
+        self.assertTrue(self.module.check(INDEX, RULES.replace('- **Delete:** preserve real data.', ''))['errors'])
 
 
     def test_original_summary_must_be_attached_to_its_mapped_rule(self):
         line = '- **Publish:** ask first.'
         baseline = INDEX.split('## Instance rules')[0] + '## Instance rules\n\n' + line + '\n'
         mapping = {line: ['R01']}
-        self.assertEqual(module.check(INDEX, RULES, baseline_index=baseline,
+        self.assertEqual(self.module.check(INDEX, RULES, baseline_index=baseline,
                                       summary_map=mapping)['errors'], [])
         misplaced = RULES.replace(line, '- **Publish:** historical wording.') + '\n  ' + line + '\n'
-        self.assertTrue(module.check(INDEX, misplaced, baseline_index=baseline,
+        self.assertTrue(self.module.check(INDEX, misplaced, baseline_index=baseline,
                                      summary_map=mapping)['errors'])
-        self.assertTrue(module.check(INDEX, RULES, baseline_index=baseline,
+        self.assertTrue(self.module.check(INDEX, RULES, baseline_index=baseline,
                                      summary_map={})['errors'])
