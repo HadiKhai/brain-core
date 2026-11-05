@@ -68,6 +68,14 @@ class RotationHost(Scenario):
                 mock.patch.object(owner, 'rotation_packet', return_value='Preserve every open and parked task.'):
             return self.m.rotate_coordinator(self.inst, self.n, rpc=self.rpc)
 
+    def test_launch_references_handover_without_loading_its_body(self):
+        result = self.rotate()
+        self.assertEqual(result['state'], 'launched')
+        message = next(args['message'] for name, args in self.calls if name == 't3_thread_launch')
+        self.assertIn('Short coordinator turns', message)
+        self.assertIn('handover.md', message)
+        self.assertNotIn('Preserve every open and parked task.', message)
+
     def test_live_children_are_listed_first_and_preserved_without_launch(self):
         self.threads['child'] = self.thread('child', 'running', 'child-run', 'old')
         self.assertEqual(self.rotate()['state'], 'pending')

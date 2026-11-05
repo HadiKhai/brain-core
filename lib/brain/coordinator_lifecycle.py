@@ -140,7 +140,7 @@ def rotate_coordinator(inst, n, rpc=None):
             wake = current['local'].get('wake') or (current['local'].get('wake_default') if current['id'] == 'root' else None)
             if wake and not any(tasks[key].get('webhookUrl') == wake for key in owned):
                 raise ValueError('rotation cannot rebind an unrecognized wake transport; old coordinator retained')
-            packet = rotation_packet(fresh, current)
+            rotation_packet(fresh, current)
             workspace = old_thread.get('worktreePath')
             if not isinstance(workspace, str) or not Path(workspace).is_dir() or Path(workspace).is_symlink():
                 raise ValueError('rotation requires the observed existing coordinator workspace')
@@ -154,7 +154,8 @@ def rotate_coordinator(inst, n, rpc=None):
             if latest['local'].get('coordinator') != old:
                 raise ValueError('coordinator changed before launch; intent retained')
             _m_worker.restart_children(latest, old, rpc)
-            message = ('native-rotation: ' + ticket + '\n\n' + packet + '\n\n'
+            message = ('native-rotation: ' + ticket + '\n\n' + _m_rotation.COORDINATOR_STARTUP +
+                '\nHandover reference (read the relevant section on demand): ' + str(current['dir'] / 'handover.md') + '\n\n'
                 'Before coordinating, run `brain lifecycle accept-rotation ' + n['id'] + ' --ticket ' + ticket +
                 '` from this new thread. Supply --session-id only with this runtime\'s actual session identity '
                 'if its native environment does not provide one. This command rebinds schedules from this '

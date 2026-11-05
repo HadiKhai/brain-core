@@ -34,6 +34,9 @@ class HostActions(unittest.TestCase):
         self.assertEqual([x[0] for x in calls], ['t3_project_create', 't3_thread_launch', 't3_thread_organize', 't3_thread_organize'])
         launch = calls[1][1]
         self.assertEqual(launch['workspaceStrategy'], {'type':'root'})
+        self.assertIn('Short coordinator turns', launch['message'])
+        self.assertIn('before acting on rule X in detail', launch['message'])
+        self.assertNotIn('every file in this node', launch['message'])
         self.assertEqual(launch['projectId'], 'project-1')
         self.assertEqual(self.inst.local_of('root')['coordinator'], 'thread-1')
         self.assertEqual(calls[2][1], {'threadId':'thread-1','action':'pin'})

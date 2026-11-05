@@ -3,7 +3,9 @@
 This folder is a Brain instance: a tree of nodes, coordinated by AI agents on any runtime.
 Every agent working anywhere under it reads this file first.
 
-- **The rules:** `core/MODEL.md`. Read it once per session, and obey the axioms.
+- **The rules:** `core/MODEL.md`. Obey the axioms. Coordinators start with this rule index
+  and the role file's Start of every session and Short coordinator turns sections; read the
+  full relevant rule before acting on it in detail. Other roles read MODEL.md once per session.
 - **This instance's specifics:** `instance.md` (operator, principals, runtimes, host, labels).
 - **Your role** comes from your launch brief:
   - coordinator: follow `core/roles/coordinator.md`;

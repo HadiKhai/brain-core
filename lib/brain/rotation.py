@@ -4,6 +4,7 @@ import re
 import urllib.parse
 
 from . import common as _m_common
+from .briefs import COORDINATOR_STARTUP
 
 _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
@@ -87,7 +88,7 @@ def cmd_rotate(a):
         bindings["pending_session"] = ids[-1] if ids else None
     inbox = _m_status.inbox_lines(n)  # includes queued asks even when inbox.md is busy
     lines = [f"# Coordinator handover: {n['id']}", "", f"Prepared: {inst.now()}", "",
-             "Start from these files. Read node.md, brief.md and the coordinator role before acting.",
+             COORDINATOR_STARTUP,
              "The old thread must stay available until host tasks and pending requests have been reconciled.", ""]
     from . import tasks as _m_tasks
     lines += _m_tasks.brief_index(inst, n)

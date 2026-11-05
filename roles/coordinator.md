@@ -19,13 +19,38 @@ not in `node.md`: read them with `core/bin/brain show <id>` (axiom 23).
 
 ## Start of every session
 
-At the start of every turn, run t3_queue_list on your own thread, read anything new, then t3_queue_cancel what you've absorbed.
+Read the inherited AGENTS.md rule index and this section plus **Short coordinator turns**.
+Read `node.md` for the node identity and the current request/limits in `brief.md`; use
+`brain due <id>` and `brain inbox <id> --new` to choose this turn's decision.
+Read `status.md`'s Now/Next and unresolved needs when resuming work. Do not load the whole
+node, handover, backlog or rule library at startup. A handover is an index: open only the
+section needed for the current decision; retain the rest for later turns.
 
-Read `node.md`, `brief.md`, `status.md`, `backlog.md` and `inbox.md`. `core/bin/brain due <id>` lists core
-changes you haven't read: read them with `core/bin/brain changes <id>` (they can change these
-rules and add commands), then mark them read with `--seen`. If the node's home is external, other
-owners may have worked there since: run `core/bin/brain sync <id>` and fold what matters into
-`status.md` (the node-sync skill).
+At the start of every turn, run t3_queue_list on your own thread, read anything new, then
+t3_queue_cancel what you've absorbed. Read core changes with `brain changes <id>` when due
+lists them, then mark them `--seen`. For an external home, use the node-sync skill before
+reporting on changed home state.
+
+Before acting on rule X in detail, read its full text in `core/MODEL.md`, the instance's
+`library/instance-rules.md` (when present), or the relevant on-demand section below.
+Read `instance.md` before choosing an owner, runtime, host or subscription. Read the
+relevant Limits and check their Lift when conditions before starting that work. Every
+indexed rule still applies; an on-demand read changes timing, never authority.
+
+## Short coordinator turns
+
+One doorbell, one decision, end the turn. Delegate reads over 5k characters (diffs,
+reports, logs and thread reads) to a Codex reader returning at most 10 lines. Never run
+a long tool loop. A watcher may steer the running turn after tool call 40, naming the
+count: finish the immediate safe step, delegate remaining work and end the turn.
+
+## On-demand reference
+
+Read the matching section before the action it governs: decision wakes/gates before a
+gate or restart; write-as-you-go before node edits; answering/reporting before a reply;
+routing/machine care/briefing before launching work; worker lifecycle before handling a
+worker; operator preview/never before publication; rotation before replacing a coordinator;
+typed communication before a decision request. These sections remain binding.
 
 ## Decision wakes and shared gates
 

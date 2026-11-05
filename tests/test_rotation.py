@@ -158,6 +158,8 @@ class Rotation(Scenario):
                 'text': 'TRANSCRIPT MUST NOT BE COPIED'}]}}])
         out = self.b(self.r, 'rotate', 'app')
         text = (self.node / 'handover.md').read_text()
+        self.assertIn('Short coordinator turns', text)
+        self.assertIn('before acting on rule X in detail', text)
         for value in ('fixture ask', 'fixture decision', 'deferred fixture item', 'unanswered fixture ask',
                       'job/a', 'job/b', 'fixture report', 'fixture need', 'fixture tick', 'Pending wakes: 1'):
             self.assertIn(value, text)

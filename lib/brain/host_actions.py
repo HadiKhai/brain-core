@@ -12,6 +12,7 @@ import subprocess
 
 from . import common as _m_common
 from . import instance as _m_instance
+from .briefs import COORDINATOR_STARTUP
 
 _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 _m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
@@ -114,8 +115,7 @@ def provision_coordinator(inst, nid, selection, require_no_auto_settle=False):
             if not isinstance(project.get('id'), str) or not project['id']:
                 raise ValueError('home project creation returned no id; inspect the pending operation')
             _bind(inst, nid, home_project=project['id'])
-        message = (AUTOMATED + '\nRole: coordinator of node ' + nid + '. Read the instance instructions, '
-                   'core/roles/coordinator.md and every file in this node. Continue the request in brief.md. '
+        message = (AUTOMATED + '\nRole: coordinator of node ' + nid + '. ' + COORDINATOR_STARTUP + ' '
                    'Run brain host wake-setup ' + nid + ' from this coordinator to provision its wake binding.')
         launched = host_action_call(inst, nid, 't3_thread_launch', {'title':n['fm'].get('title', nid) + ' · coordinator',
             'projectId':inst.local_of(nid)['host_project'], 'workspaceStrategy':{'type':'root'},
