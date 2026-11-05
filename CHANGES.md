@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Validate parallel contracts and schedule independent lanes together
+
+New timed or paid contracts require `concurrency:` and a checked `sum:`;
+concurrency one also requires `serial_reason:`. Registration, worker/specialist
+briefs, native task launches/plans and launch forecasts share the refusal.
+Existing open jobs retain their prior contracts. A new contract registration
+always checks the new fields, including arithmetic and displayed rounding.
+
+Verify lanes with declared `workers` run concurrently through native admission;
+dependencies, explicit `serial_reason`, and opaque undeclared worker counts stay
+ordered. Each lane keeps its own private log and native execution record. Shared
+resource cleanup runs after the lanes finish. Repository lane commands declare
+one worker; full gates retain their admitted parallel pytest worker count.
+
 ## 2026-11-05: Check compact instance rule indexes
 
 `tools/check_rule_index.py` checks that a shortened startup index retains every

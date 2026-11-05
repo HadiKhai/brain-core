@@ -87,7 +87,9 @@ def pytest_xdist_make_scheduler(config, log):
             Path(arg.split('::', 1)[0]).name == 'test_brain.py' for arg in config.args)):
         return None
     from xdist.scheduler.load import LoadScheduling
-    from lanes import SERIAL_CLASSES, SERIAL_TESTS
+    from lanes import SERIAL_CLASSES, SERIAL_TESTS, SERIAL_REASONS
+    if set(SERIAL_REASONS) != set(SERIAL_CLASSES + SERIAL_TESTS) or not all(SERIAL_REASONS.values()):
+        raise pytest.UsageError('every serial test needs a serial_reason')
 
     class SerialAfterParallel(LoadScheduling):
         def __init__(self, config, log):

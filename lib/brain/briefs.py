@@ -297,6 +297,7 @@ def cmd_brief(a):
     if task_path:
         _m_guard.no_terms_in(n, str(task_path), "task file path")
     task_input = task_path.read_text() if task_path else (a.task or "")
+    _m_jobs.validate_job_parallel(n, row, task_input)
     task = task_input or "<!-- the task, what done means, where outputs go -->"
     inputs += [("Task", task_input), ("Why separate", a.why_separate or ""),
                ("Limits", "\n".join(_m_knowledge.limits_of(n)))]

@@ -385,7 +385,8 @@ class Spend(Scenario):
                           f"| job | {row['Started']} |  |  |  | 0 |  |  |  |  |  |\n")
         contract = self.tmp / "contract.md"
         contract.write_text("## Outcome\nFix it.\n\n## Authorized\nAll of it.\n\n## Discretion\nAny.\n\n## Stop when\nDone.\n\n"
-                            "## Needs consent\nNothing.\n\n## Done means\nGreen.\n\n## Budget\n30k tokens, 3 h\n")
+                            "## Needs consent\nNothing.\n\n## Done means\nGreen.\n\n## Budget\n30k tokens, 3 h\n"
+                            "concurrency: 3\nsum: 3 x 10800 s / 3 = 10800 s\n")
         self.b(self.r, "jobs", "app", "--branch", "job", "--contract-file", str(contract))
         self.assertIn("Its budget is 30k tokens · 3 h. `brain jobs app --branch job` shows what this job has spent",
                       self.b(self.r, "brief", "app", "--branch", "job", "--task", "Fix it"))

@@ -576,6 +576,7 @@ def cmd_hire(a):
                *(inst.node(nid)["dir"] / "specialists" / a.specialist / "role.md" for nid in chain),
                *([Path(a.out).expanduser()] if a.out else [])])
     row = _m_jobs.open_job(_m_jobs.read_jobs(target) or [], a.branch)
+    _m_jobs.validate_job_parallel(target, row, a.task)
     forecast = _m_jobs.launch_forecast(inst, target, row, a.job_class, runtime, a.model)
     head = _m_worktrees.job_run_line(where, w, a.branch, runtime, a.model, tilde_home=False)
     head = head.replace(f"  ·  runtime: {runtime}", f"  ·  runtime: {runtime}  ·  class: {a.job_class}", 1)

@@ -7,7 +7,7 @@ from . import task_flow, tasks
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 
 
-def contract_authority(n, row):
+def contract_authority(n, row, parallel=True):
     if not re.fullmatch(r'(?:repo:D[0-9]+|private:D-[A-Za-z0-9-]+)', row.get('authority', '')):
         raise ValueError('task launch requires its explicit decision authority')
     from pathlib import Path
@@ -17,8 +17,9 @@ def contract_authority(n, row):
             path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(n['dir'].resolve())):
         raise ValueError('task launch requires its node-local contract file')
     text = path.read_text()
-    if _m_jobs.contract_problems(text):
-        raise ValueError('task launch contract is incomplete')
+    problems = _m_jobs.contract_problems(text, parallel=parallel)
+    if problems:
+        raise ValueError('task launch contract is incomplete: ' + '; '.join(problems))
     from . import ui
     sections = {k.lower(): v for k, v in ui.md_sections(text).items()}
     reason = sections.get('why separate', '').strip()
@@ -31,6 +32,7 @@ def contract_authority(n, row):
 
 
 def validate_launch_job(inst, n, job):
+    _m_jobs.validate_job_parallel(n, job)
     ident = job.get('Task')
     if not ident:
         if tasks.read_records(n):
@@ -43,7 +45,7 @@ def validate_launch_job(inst, n, job):
         raise ValueError('native launch requires its exact active task/job binding')
     if task_flow.holds(inst, n, row, exclude_task=ident) or row.get('unresolved_dependencies') or task_flow.blockers(n, row, rows):
         raise ValueError('task dispatch is held or dependencies are unfinished')
-    text, _ = contract_authority(n, row)
+    text, _ = contract_authority(n, row, parallel=bool(job.get('Parallel policy')))
     path = _m_jobs.contract_file(n, job)
     if path.is_symlink() or not path.is_file() or path.read_text() != text:
         raise ValueError('prepared native job contract differs from current task contract')

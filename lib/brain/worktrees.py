@@ -65,7 +65,7 @@ def rebind_job(inst, node, branch):
         if not linked and any(old['Job'] == branch for old in rows):
             _m_common.die('rebind refused: historical job binding exists; use a new branch')
         row = {'Job': branch, 'Started': inst.now_dt().isoformat(), 'Reviews': '0',
-               'Runtime': n['fm'].get('runtime', ''), 'Rebound': inst.now()}
+               'Runtime': n['fm'].get('runtime', ''), 'Rebound': inst.now(), 'Parallel policy': '1'}
         if linked:
             task = linked[0]
             attempts = [attempt for attempt in task.get('attempts', [])

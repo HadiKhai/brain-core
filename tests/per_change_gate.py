@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import check_lanes
 import lanes
@@ -16,6 +17,16 @@ import lanes
 # Reuse the audited import closure and startup rules of the repository lane map.
 # No timestamp cache: each invocation reads the current source and Git diff.
 ROOT = Path(__file__).resolve().parent.parent
+
+# serial_reason: cheap failures must prevent admission of the expensive full gate.
+CHEAP_BEFORE_TESTS = 'Cheap checks must pass before test workers start.'
+
+
+def worker_limit(requested):
+    grant = os.environ.get('BRAIN_TEST_WORKERS')
+    if grant is not None and (not grant.isdigit() or int(grant) < 1):
+        raise ValueError('BRAIN_TEST_WORKERS must be a positive integer')
+    return min(requested, int(grant)) if grant is not None else requested
 
 
 def git(root, *args):
@@ -104,10 +115,17 @@ def run(plan, root, jobs, execute=subprocess.run):
         commands.append([sys.executable, '-B', '-m', 'pytest', '-q', '-p', 'no:cacheprovider',
                          '-n', str(jobs), '--max-worker-restart=0', '--serial-after-parallel',
                          *plan['targets']])
-    for command in commands:
-        result = execute(command, cwd=root, pass_fds=pass_fds, env=env)
-        if result.returncode:
-            return result.returncode
+    jobs = worker_limit(jobs)
+    def run_command(command):
+        return execute(command, cwd=root, pass_fds=pass_fds, env=env).returncode
+    with ThreadPoolExecutor(max_workers=min(2, jobs)) as pool:
+        results = list(pool.map(run_command, commands[:2]))
+    if any(results):
+        return next(result for result in results if result)
+    if len(commands) > 2:
+        # Replace the requested width with the immutable native grant.
+        commands[2][commands[2].index('-n') + 1] = str(jobs)
+        return run_command(commands[2])
     return 0
 
 
@@ -122,6 +140,13 @@ def main(argv=None):
     if not 1 <= args.jobs <= min(32, os.cpu_count() or 1):
         parser.error('--jobs must fit available CPUs (1..32)')
     plan = select(base=args.base, full=args.train or args.nightly or os.environ.get('BRAIN_VERIFY_SCOPE') == 'full')
+    try:
+        jobs = worker_limit(args.jobs)
+    except ValueError as error:
+        parser.error(str(error))
+    plan['execution'] = [dict(phase='cheap', lanes=['coverage', 'guard'], concurrency=min(2, jobs)),
+                         dict(phase='tests', concurrency=jobs, serial_reason=CHEAP_BEFORE_TESTS),
+                         dict(phase='serial_tail', concurrency=1, serial_reason=lanes.SERIAL_REASONS)]
     print(json.dumps(plan, sort_keys=True), flush=True)
     return 0 if args.plan else run(plan, ROOT, args.jobs)
 

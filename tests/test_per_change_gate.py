@@ -156,7 +156,28 @@ class ChangeSelection(unittest.TestCase):
             with self.assertRaises(ValueError):
                 per_change_gate.changed_paths(root, base)
 
-    def test_execution_orders_cheap_guard_and_selected_tests_and_stops_on_failure(self):
+    def test_cheap_overlap_and_native_worker_grant(self):
+        import threading
+        env = {'NODE': 'fixture', 'BRAIN_ROOT': '/fixture', 'BRAIN_TEST_WORKERS': '2'}
+        barrier = threading.Barrier(2, timeout=3)
+        calls = []
+        def execute(argv, **kwargs):
+            if '-m' not in argv:
+                barrier.wait()
+            else:
+                self.assertEqual(argv[argv.index('-n') + 1], '2')
+            calls.append(argv)
+            return mock.Mock(returncode=0)
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(per_change_gate.run(dict(targets=['tests/test_train.py::MergeTrain']), CORE, 16, execute), 0)
+            self.assertEqual(len(calls), 3)
+            os.environ['BRAIN_TEST_WORKERS'] = '1'
+            self.assertEqual(per_change_gate.worker_limit(16), 1)
+            os.environ['BRAIN_TEST_WORKERS'] = '0'
+            with self.assertRaises(ValueError):
+                per_change_gate.worker_limit(16)
+
+    def test_execution_parallelizes_cheap_checks_then_runs_tests_only_on_success(self):
         plan = dict(targets=['tests/test_train.py::MergeTrain'])
         env = {'NODE': 'fixture', 'BRAIN_ROOT': '/fixture'}
         with mock.patch.dict(os.environ, env, clear=True):
@@ -166,12 +187,12 @@ class ChangeSelection(unittest.TestCase):
                     calls.append(argv)
                     self.assertEqual(kwargs['env']['BRAIN_CORE'], str(CORE))
                     self.assertEqual(kwargs['env']['BRAIN_NO_REEXEC'], '1')
-                    return mock.Mock(returncode=7 if len(calls) - 1 == failed else 0)
+                    index = 0 if argv[-1].endswith('check_lanes.py') else 1 if 'guard' in argv else 2
+                    return mock.Mock(returncode=7 if index == failed else 0)
                 self.assertEqual(per_change_gate.run(plan, CORE, 2, execute), 0 if failed is None else 7)
-                self.assertEqual(len(calls), 3 if failed is None else failed + 1)
-                self.assertTrue(calls[0][-1].endswith('check_lanes.py'))
-                if len(calls) > 1:
-                    self.assertIn('guard', calls[1])
+                self.assertEqual(len(calls), 2 if failed in (0, 1) else 3)
+                self.assertTrue(any(call[-1].endswith('check_lanes.py') for call in calls[:2]))
+                self.assertTrue(any('guard' in call for call in calls[:2]))
                 if len(calls) > 2:
                     self.assertIn('--serial-after-parallel', calls[2])
                     self.assertEqual(calls[2][-1], plan['targets'][0])

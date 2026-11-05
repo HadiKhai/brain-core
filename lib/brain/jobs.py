@@ -689,7 +689,8 @@ def job_started(inst, n, branch, runtime, task_id=None):
                 _m_tasks._prepare_start(n, task_id, branch)
             except ValueError as error:
                 _m_common.die(str(error))
-            rows.append({"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0", "Runtime": runtime})
+            rows.append({"Job": branch, "Started": inst.now_dt().isoformat(), "Reviews": "0", "Runtime": runtime,
+                         "Parallel policy": "1"})
             if task_id:
                 rows[-1]["Task"] = task_id
             write_jobs(inst, n, rows)
@@ -839,10 +840,23 @@ def contract_file(n, row):
     return n["dir"] / "job-contracts" / (job_key(row) + ".md")
 
 
-def contract_problems(text):
+def contract_problems(text, parallel=True):
     """Fields missing or empty in a contract: each `## <field>` needs at least one line under it."""
     sections = {k.lower(): v for k, v in _m_ui.md_sections(text).items()}
-    return [f for f in CONTRACT_FIELDS if not sections.get(f.lower(), "").strip()]
+    from .parallel_contracts import parallel_problems
+    return ([f for f in CONTRACT_FIELDS if not sections.get(f.lower(), "").strip()]
+            + (parallel_problems(text) if parallel else []))
+
+
+def validate_job_parallel(n, row, task=''):
+    """Old open jobs retain their contract; new jobs check it at every launch."""
+    if row is None or row.get('Parallel policy'):
+        from .parallel_contracts import parallel_problems
+        path = contract_file(n, row) if row else None
+        text = path.read_text() if path and path.is_file() else ''
+        problems = parallel_problems(text + '\n' + task)
+        if problems:
+            _m_common.die('contract: ' + '; '.join(problems))
 
 
 @_m_command_reads.memo
@@ -1621,6 +1635,7 @@ def estimate_line(estimate):
 
 def launch_forecast(inst, n, row, kind, runtime, model=None, rows=None):
     """Both launch paths retain one estimate until the selected route changes."""
+    validate_job_parallel(n, row)
     model = model if model and model != "runtime default" else None
     saved = saved_forecast((row or {}).get("Forecast"))
     if saved and (saved["class"], saved["runtime"], saved.get("model")) == (kind, runtime, model):
@@ -1975,7 +1990,7 @@ def cmd_jobs(a):
         text = Path(a.contract_file).read_text().strip() + "\n"
         missing = contract_problems(text)
         if missing:
-            _m_common.die("the contract needs a line under each of: " + ", ".join(f"## {f}" for f in missing))
+            _m_common.die("the contract needs: " + "; ".join('## ' + f if f in CONTRACT_FIELDS else f for f in missing))
         _m_guard.no_terms_in(n, text, "the contract")
         if _m_nodes.SECRET_LINE.search(text):
             _m_common.die("unsafe contract text")
@@ -2051,6 +2066,8 @@ def cmd_jobs(a):
     for n in inst.nodes():
         if a.id and n["id"] != a.id:
             continue
+        if a.branch:
+            validate_job_parallel(n, open_job(read_jobs(n) or [], a.branch))
         if getattr(a, '_reconcile_landings', False):
             reconcile_manual_landings(inst, n, a.branch)
         j = jobs_summary(inst, n)

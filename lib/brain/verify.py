@@ -965,7 +965,7 @@ def verify_worker_execution(command, env, token):
 
 
 @contextlib.contextmanager
-def command_reservation(inst, n, branch=None, kind='verify', command=None):
+def command_reservation(inst, n, branch=None, kind='verify', command=None, workers=None, cleanup=True):
     """One producer context spans native admission, execution and every cleanup."""
     managed = getattr(_m_machine, 'machine_run', None)
     with managed(kind, inst, n['id'], branch, release=False) if managed else contextlib.nullcontext(None) as run:
@@ -974,6 +974,8 @@ def command_reservation(inst, n, branch=None, kind='verify', command=None):
         try:
             parsed = literal_pytest_workers(command) if kind == 'verify' and command else None
             admission = {'workers': parsed[0]} if parsed is not None else {}
+            if workers is not None:
+                admission = {'workers': workers}
             token = (_m_machine.machine_wait(kind, inst, n['id'], job=branch, token=run, **admission)
                      if managed else _m_machine.machine_wait(kind, inst, n['id']))
             if kind == 'verify':
@@ -987,10 +989,11 @@ def command_reservation(inst, n, branch=None, kind='verify', command=None):
             actions = []
             if token is not None:
                 actions.append(lambda: _m_machine.machine_release(token))
-            if kind == 'verify':
+            if kind == 'verify' and cleanup:
                 actions.append(queued_attempt_phase)
-            actions.extend([lambda: verify_cleanup(inst, n),
-                            lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])])
+            if cleanup:
+                actions.extend([lambda: verify_cleanup(inst, n),
+                                lambda: _m_docker_leftovers.docker_leftover_nodes(inst, [n])])
             if managed:
                 finish = getattr(_m_machine, 'machine_finish_intent', None)
                 if finish is not None:
@@ -1256,6 +1259,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
                 start = time.monotonic()
                 result, log = run_verify_stream(inst, n, branch, command, w, env, token, lane='fitness')
                 check = dict(command=command, result=result, duration=time.monotonic()-start, log=log)
+        runnable = []
         for lane in snap['lanes']:
             if lane['schedule'] == 'nightly':
                 continue
@@ -1269,21 +1273,38 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
                      and not lane['always'] and not any(_m_lanes.matches(p, lane['strict_inputs']) for p in changed))
             row = dict(name=name, command=lane['command'], input_hash=snap['hashes'][name],
                        result=None, duration=0, log=None, reused=False, verified_head=head, status='skipped')
-            if check and check['result'] or any(results.get(req) != 0 for req in lane['requires']):
-                pass
+            if check and check['result']:
+                results[name] = (None, None, 0)
             elif reuse:
                 row.update(previous_lane, reused=True)
+                runnable.append(lane)
             else:
-                with verify_reservation(inst, n, branch, command=lane['command']) as token:
-                    print('verify lane: ' + name, flush=True)
-                    start = time.monotonic()
-                    result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)
-                    row.update(result=result, log=log, duration=time.monotonic()-start,
-                               status='passed' if result == 0 else 'failed')
-            if row['result'] == 0:
-                old[name] = dict(row)
+                runnable.append(lane)
             rows.append(row)
-            results[name] = row['result']
+        if runnable:
+            width = max(1, _m_machine.machine_policy()['worker_budget'])
+            by_name = {row['name']: row for row in rows}
+            def execute(lane):
+                row = by_name[lane['name']]
+                if row['reused']:
+                    return row['result'], row['log'], row['duration']
+                return _m_lanes.execute_lane(inst, n, branch, w, env, lane)
+            try:
+                results = _m_lanes.schedule_lanes(runnable, execute, width, results)
+            finally:
+                # serial_reason: cleanup shares the node's resource lease and
+                # must run only after every independent lane has exited.
+                queued_attempt_phase()
+                verify_cleanup(inst, n)
+                _m_docker_leftovers.docker_leftover_nodes(inst, [n])
+        for row in rows:
+            result, log, duration = results[row['name']]
+            if not row['reused'] or result is None:
+                row.update(result=result, log=log, duration=duration,
+                           reused=False,
+                           status='skipped' if result is None else 'passed' if result == 0 else 'failed')
+            if row['result'] == 0:
+                old[row['name']] = dict(row)
         result = next((r['result'] or 1 for r in rows if r['result'] != 0), 0)
         if check and check['result']:
             result = check['result']

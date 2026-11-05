@@ -46,6 +46,10 @@ SERIAL_TESTS = (
     'FrozenInputs::test_unversioned_core_links_round_trip_through_evidence',
     'OwnedCopyLifecycle::test_kill_recovery_covers_live_child_staging_and_preserves_refusals',
 )
+# serial_reason: these OS lock/deadline probes need quiescent test workers;
+# running them during worker teardown changes the property under observation.
+SERIAL_REASONS = {name: 'OS lock/deadline probe requires quiescent test workers.'
+                  for name in SERIAL_CLASSES + SERIAL_TESTS}
 MODULE_LANES = (
     'briefs', 'check', 'cli', 'connect', 'guard', 'history', 'hosts', 'jobs',
     'knowledge', 'machine', 'messages', 'nodes', 'rehearse', 'rotation',
@@ -73,6 +77,8 @@ LANE_TESTS.update({
     'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py', 'test_digest.py', 'test_ui_fill.py'),
     'watch': ('test_watch.py', 'test_watch_extension.py', 'test_decision_gate.py', 'test_watcher_approval.py'),
     'verify': ('test_verify.py', 'test_preview_evidence.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py', 'test_ready_policies.py', 'test_verify_ownership.py', 'test_per_change_gate.py'),
+    'parallel_contracts': ('test_parallel_contracts.py',),
+    'verify_lanes': ('test_verify_lanes.py', 'test_parallel_lanes.py'),
     'review': ('test_review_discipline.py',),
     'catch-all': ('test_repo_lanes.py',),
     'messages': ('test_messages.py', 'test_worker_message_guard.py', 'test_communication_policy.py'),
@@ -270,7 +276,7 @@ def lane_map(root=ROOT):
                           command='python3 -B -m pytest -q -p no:cacheprovider '
                                   + ' '.join(test_targets(root, files))
                                   + ' # startup:' + startup,
-                          inputs=sorted(inputs)))
+                          inputs=sorted(inputs), workers=1))
     return lanes
 
 

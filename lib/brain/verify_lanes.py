@@ -9,6 +9,8 @@ import shutil
 import shlex
 import subprocess
 import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from functools import lru_cache
 from pathlib import Path
 
@@ -20,6 +22,65 @@ VERIFY_LANE_MAP_TIMEOUT = 5
 LANE_ENV_KEYS = {'VIRTUAL_ENV', 'JAVA_HOME', 'RUSTUP_TOOLCHAIN', 'NODE_OPTIONS',
                  'PYTHONPATH', 'CC', 'CXX', 'CFLAGS', 'CXXFLAGS', 'LDFLAGS',
                  'PORT', 'PORTS', 'PORT_LAST'}
+
+
+def schedule_lanes(lanes, execute, width, results=None):
+    """DAG scheduling with exclusive serial lanes and deterministic result order."""
+    results = dict(results or {})
+    pending = [lane for lane in lanes if lane['name'] not in results]
+    active = {}
+    with ThreadPoolExecutor(max_workers=width) as pool:
+        while pending or active:
+            for lane in list(pending):
+                if len(active) >= width:
+                    break
+                if not all(req in results for req in lane['requires']):
+                    continue
+                if any(results[req][0] != 0 for req in lane['requires']):
+                    results[lane['name']] = (None, None, 0)
+                    pending.remove(lane)
+                    continue
+                # serial_reason: undeclared shell worker counts and explicit
+                # stateful lanes require exclusive execution, never guessed capacity.
+                serial = lane.get('serial_reason') or 'workers' not in lane
+                if active and (serial or any(x.get('serial_reason') or 'workers' not in x for x in active.values())):
+                    break
+                active[pool.submit(execute, lane)] = lane
+                pending.remove(lane)
+                if serial:
+                    break
+            if active:
+                finished, _ = wait(active, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    lane = active.pop(future)
+                    results[lane['name']] = future.result()
+            elif pending:
+                raise ValueError('lane dependencies cannot be scheduled')
+    return results
+
+
+def execute_lane(inst, n, branch, w, env, lane):
+    """A separate interpreter owns every lane's locks, admission and receipts."""
+    import time
+    from . import gate_lock, handback_queue, lane_worker
+    started = time.monotonic()
+    inherited = gate_lock.gate_inherited_fd(inst.root, env, n['id'])
+    queue_fd = handback_queue.queue_descendant_fd()
+    descriptors = tuple(fd for fd in (inherited, queue_fd) if fd is not None)
+    with tempfile.TemporaryDirectory(prefix='brain-lane-') as temporary:
+        result_path = Path(temporary) / 'result.json'
+        payload = dict(root=str(inst.root), node=n['id'], branch=branch, worktree=w, env=env, lane=lane)
+        # The import path and result destination use argv, never shell interpolation.
+        bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from brain.lane_worker import main; main()"
+        worker_lib = str(Path(lane_worker.__file__).resolve().parents[1])
+        proc = subprocess.run([sys.executable, '-B', '-c', bootstrap, worker_lib, str(result_path)],
+                              input=json.dumps(payload), text=True, env=env, pass_fds=descriptors)
+        if proc.returncode or not result_path.is_file():
+            raise ValueError('native verify lane did not publish a result: ' + lane['name'])
+        result, log = json.loads(result_path.read_text())
+        if type(result) is not int or not isinstance(log, str) or not Path(log).is_file():
+            raise ValueError('native verify lane result is invalid')
+        return result, log, time.monotonic() - started
 
 
 def lane_environment(env):
@@ -136,7 +197,7 @@ def lane_map(n, w, env):
         raise ValueError('lane map must be a nonempty JSON array')
     lanes, names = [], set()
     for item in data:
-        if not isinstance(item, dict) or set(item) - {'name', 'command', 'inputs', 'requires', 'strict_inputs', 'always', 'schedule'}:
+        if not isinstance(item, dict) or set(item) - {'name', 'command', 'inputs', 'requires', 'strict_inputs', 'always', 'schedule', 'workers', 'serial_reason'}:
             raise ValueError('invalid lane map entry')
         name, command = item.get('name'), item.get('command')
         if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}', name) or name in names:
@@ -146,6 +207,14 @@ def lane_map(n, w, env):
         lane = dict(name=name, command=command, inputs=item.get('inputs', []),
                     strict_inputs=item.get('strict_inputs', []), requires=item.get('requires', []),
                     always=item.get('always', False), schedule=item.get('schedule', 'job'))
+        if 'workers' in item:
+            if type(item['workers']) is not int or item['workers'] < 1:
+                raise ValueError('lane workers must be a positive integer')
+            lane['workers'] = item['workers']
+        if 'serial_reason' in item:
+            if not isinstance(item['serial_reason'], str) or not item['serial_reason'].strip():
+                raise ValueError('lane serial_reason must be nonempty')
+            lane['serial_reason'] = item['serial_reason']
         for field in ('inputs', 'strict_inputs', 'requires'):
             if not isinstance(lane[field], list) or not all(isinstance(x, str) for x in lane[field]):
                 raise ValueError('lane ' + field + ' must be a list of strings')
