@@ -1,5 +1,6 @@
 """Pure, shared validation of concurrency and forecast arithmetic."""
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation
 
 EXAMPLE = 'concurrency: 8\nsum: 40 x 6 s / 8 = 30 s'
@@ -28,9 +29,9 @@ def parallel_problems(text, defaults=''):
     # Presence of a unit is enough: don't guess whether a number/phrase is
     # historical, approximate, hyphenated or spelled out. Ambiguity fails closed.
     timed = re.search(r'\b(?:ETA|deadline|time[ _-]?(?:target|box|limit|budget))\b|\b(?:target|budget|forecast|estimate)[ \t]*:|\b(?:by|before|at)\s+[0-9]{1,2}:[0-9]{2}\b', text, re.I)
-    duration = re.search(r'\b(?:ms|msecs?|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\b|(?<![\w.])'
-                         + NUMBER + r'[-\s]*(?:' + UNIT + r'|days?|weeks?|months?|years?)(?=\d|\b)', text, re.I)
-    paid = re.search(r'\b(?:paid|cost|spend|payment|price|USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?)\b|[$€£¥]', text, re.I)
+    duration = re.search(r'\b(?:ms|msecs?|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|fortnights?|months?|years?)\b|(?<![\w.])[0-9]+(?:\.[0-9]+)?[-\s]*[A-Za-zµμ][A-Za-z0-9µμ]*', text, re.I)
+    paid = (re.search(r'\b(?:paid|cost|spend|payment|price|USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?)\b', text, re.I)
+            or any(unicodedata.category(char) == 'Sc' for char in text))
     if not fields and not (timed or duration or paid):
         return []
     errors = []
