@@ -788,6 +788,9 @@ class VerifyLogs(Scenario):
         self.assertIn('unique-early-detail', output)
         self.assertIn('separate-detail', output)
         self.assertNotIn('later-success 1\n', output)
+        record, = json.loads((setup[1].root / '.brain/wake/machine-holds.json').read_text())['waits'].values()
+        self.assertEqual((record.get('exit_code'), record.get('log_path'), record.get('stderr_log_path')),
+                         (7, str(path), str(path)))
 
     def test_redaction_at_every_split_and_casefold_boundary(self):
         m, inst, n, home, wt = setup = self.runner()

@@ -1059,6 +1059,7 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dfd)
         with os.fdopen(fd, "w+", encoding="utf-8") as log:
             os.fchmod(log.fileno(), 0o600)
+            _m_machine.machine_record_output(inst, token, log, log, log_path=str(folder / name))
             say("verify log: " + str(folder / name))
             # Never touch arbitrary entries or another job's logs. Unlinking a link never follows it.
             old = sorted(x for x in os.listdir(dfd) if x != name and
@@ -1176,6 +1177,7 @@ def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
                 say("\n".join(overall))
             if hasattr(token, 'result'):
                 token.result = proc.returncode
+                token.exit_code = _m_machine.machine_exit_code(proc.returncode)
             return proc.returncode, str(folder / name)
     finally:
         if proc is not None:

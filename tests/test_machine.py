@@ -2631,6 +2631,75 @@ class TerminalProducer(Scenario):
     def waits(self):
         return json.loads((self.root / '.brain/wake/machine-holds.json').read_text())['waits']
 
+    def test_executed_command_binds_existing_logs_and_numeric_exit_without_changing_bytes(self):
+        stdout, stderr = self.tmp / 'stdout.log', self.tmp / 'stderr.log'
+        code = "import os; os.write(1,b'out\\x00\\xff\\r\\n'); os.write(2,b'err\\x00\\xfe'); raise SystemExit(7)"
+        with stdout.open('wb') as out, stderr.open('wb') as err, \
+                mock.patch.object(self.m, 'request_wake', return_value=True):
+            self.assertEqual(self.m.machine_execute([sys.executable, '-c', code], self.inst,
+                                                    'root', 'sample command', stdout=out, stderr=err), 7)
+        row, = self.waits().values()
+        self.assertEqual(row.get('exit_code'), 7)
+        self.assertEqual(row['log_path'], str(stdout))
+        self.assertEqual(row['stderr_log_path'], str(stderr))
+        self.assertTrue(row['command'])
+        self.assertEqual(stdout.read_bytes(), b'out\x00\xff\r\n')
+        self.assertEqual(stderr.read_bytes(), b'err\x00\xfe')
+
+    def test_inherited_streams_have_explicit_unknown_paths_and_success_is_numeric(self):
+        with mock.patch.object(self.m, 'request_wake') as wake:
+            self.assertEqual(self.m.machine_execute([sys.executable, '-c', 'pass'], self.inst,
+                                                    'root', 'sample command'), 0)
+        row, = self.waits().values()
+        self.assertEqual(row['exit_code'], 0)
+        self.assertEqual(row['log_path'], 'unknown')
+        self.assertEqual(row['stderr_log_path'], 'unknown')
+        wake.assert_not_called()
+
+    def test_merged_stderr_uses_the_same_existing_log_destination(self):
+        path = self.tmp / 'combined.log'
+        with path.open('wb') as output, mock.patch.object(self.m, 'request_wake', return_value=True):
+            result = self.m.machine_execute([sys.executable, '-c',
+                "import os; os.write(1,b'out'); os.write(2,b'err'); raise SystemExit(3)"],
+                self.inst, 'root', 'sample combined', stdout=output, stderr=subprocess.STDOUT)
+        row, = self.waits().values()
+        self.assertEqual(result, 3)
+        self.assertEqual((row['exit_code'], row['log_path'], row['stderr_log_path']),
+                         (3, str(path), str(path)))
+        self.assertEqual(path.read_bytes(), b'outerr')
+
+    def test_open_descriptor_needs_matching_path_and_terminal_evidence_is_immutable(self):
+        path = self.tmp / 'stream.log'
+        with path.open('wb') as stream:
+            self.assertEqual(self.m.machine_output_path(stream), str(path))
+            self.assertEqual(self.m.machine_output_path(stream, self.tmp / 'missing'), 'unknown')
+            path.unlink()
+            path.write_bytes(b'replacement')
+            self.assertEqual(self.m.machine_output_path(stream), 'unknown')
+        row = {'ended_at': 1, 'outcome': 'success'}  # legacy terminal history stays byte-for-byte intact
+        before = dict(row)
+        self.assertFalse(self.m.machine_terminal_row(row, 2, 'failed', 'later guess', 7))
+        self.assertEqual(row, before)
+        self.assertEqual(self.m.machine_exit_code(-9), 137)
+        self.assertEqual(self.m.machine_exit_code(True), 'unknown')
+
+    def test_recovery_keeps_known_failure_exit_but_unknown_owner_has_no_invented_code(self):
+        for known in (True, False):
+            with mock.patch.object(self.m, 'request_wake', return_value=True):
+                with self.m.machine_run('verify', self.inst, 'root', clock=self.clock) as token:
+                    pass
+                with self.m.machine_hold_store(self.inst) as data:
+                    row = data['waits'][token]
+                    for key in ('ended_at', 'closed_at', 'exit_code', 'notified_completed'):
+                        row.pop(key, None)
+                    row.update(state='running', finalizing=known,
+                               terminal_intent={'outcome': 'failed', 'reason': 'command exited with status 7',
+                                                'exit_code': 7} if known else None)
+                with mock.patch.object(self.m, 'process_stamp', return_value=None):
+                    self.m.machine_wait_notices(self.inst, 100001)
+            self.assertEqual(self.waits()[token]['exit_code'], 7 if known else 'unknown')
+            self.assertEqual(self.waits()[token]['outcome'], 'failed' if known else 'abandoned')
+
     def reader(self, status='running', ended=''):
         n = self.inst.node('root')
         job = {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/fixture-reader',
@@ -2859,6 +2928,8 @@ class TerminalProducer(Scenario):
         row = next(iter(self.waits().values()))
         self.assertEqual(row['outcome'], 'error')
         self.assertIn('fixture launch failed', row['reason'])
+        self.assertEqual(row['exit_code'], 'unknown')
+        self.assertEqual(row['log_path'], 'unknown')
         self.assertEqual(row['ended_at'], 100000.0)
         self.assertEqual(wake.call_count, 2)
         self.assertEqual(wake.call_args_list[0].kwargs['items'], wake.call_args_list[1].kwargs['items'])
@@ -2906,6 +2977,7 @@ class TerminalProducer(Scenario):
         row = self.waits()[token]
         self.assertEqual(row['outcome'], 'failed')
         self.assertIn('status 7', row['reason'])
+        self.assertEqual(row['exit_code'], 7)
         self.assertEqual(wake.call_count, 1)
 
     def test_failure_before_queue_publication_still_has_a_terminal_reason(self):

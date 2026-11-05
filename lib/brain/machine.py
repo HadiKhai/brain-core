@@ -666,12 +666,50 @@ def machine_exit_fields(error=None, result=0):
     return 'success', 'command completed successfully'
 
 
-def machine_terminal_row(row, now, outcome, reason):
+def machine_exit_code(result):
+    """Normalize an observed subprocess status; absence is never success."""
+    if type(result) is not int:
+        return 'unknown'
+    return result if result >= 0 else 128 - result
+
+
+def machine_output_path(stream, name=None):
+    """Name only a regular file demonstrably backing this already-open stream."""
+    name = name if name is not None else getattr(stream, 'name', None)
+    if not isinstance(name, (str, os.PathLike)):
+        return 'unknown'
+    try:
+        path = Path(name).resolve(strict=True)
+        opened = os.fstat(stream.fileno())
+        if stat.S_ISREG(opened.st_mode) and os.path.samestat(opened, path.stat()):
+            return str(path)
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return 'unknown'
+
+
+def machine_record_output(inst, token, stdout=None, stderr=None, log_path=None):
+    """Bind existing destinations before starting a command; never tee its bytes."""
+    if inst is None:
+        return
+    with machine_hold_store(inst) as data:
+        row = data.get('waits', {}).get(token)
+        if row is not None and row.get('ended_at') is None:
+            output = machine_output_path(stdout, log_path)
+            error = (output if type(stderr) is int and stderr == subprocess.STDOUT
+                     else machine_output_path(stderr, log_path))
+            row.update(command=True, log_path=output, stderr_log_path=error)
+
+
+def machine_terminal_row(row, now, outcome, reason, exit_code='unknown'):
     """The only terminal transition, shared by unwind and dead-owner recovery."""
     if row.get('ended_at') is not None:
         return False
     row.update(state='completed' if outcome == 'success' else 'exited', outcome=outcome,
-               reason=reason, ended_at=now, closed_at=now, updated_at=now)
+               reason=reason, ended_at=now, closed_at=now, updated_at=now,
+               exit_code=machine_exit_code(exit_code))
+    row.setdefault('log_path', 'unknown')
+    row.setdefault('stderr_log_path', 'unknown')
     row.pop('finalizing', None)
     return True
 
@@ -688,7 +726,9 @@ def machine_finish_intent(inst, token, error=None):
                 if row is not None and row.get('ended_at') is None:
                     row['finalizing'] = True
                     # Success is provisional until every cleanup action finishes.
-                    row['terminal_intent'] = ({'outcome': outcome, 'reason': reason}
+                    row['terminal_intent'] = ({'outcome': outcome, 'reason': reason,
+                                              'exit_code': getattr(token, 'exit_code', 'unknown')
+                                              if error is not None else machine_exit_code(token.result)}
                                               if outcome != 'success' else None)
             return
         except (OSError, ValueError):
@@ -718,7 +758,9 @@ def machine_terminal(inst, token, error=None, result=0):
     with machine_hold_store(inst) as data:
         row = data.get('waits', {}).get(token)
         if row is not None:
-            if machine_terminal_row(row, token.clock.time(), outcome, reason):
+            code = (getattr(token, 'exit_code', 'unknown') if error is not None
+                    else machine_exit_code(result))
+            if machine_terminal_row(row, token.clock.time(), outcome, reason, code):
                 if getattr(token, 'cleanup_errors', None):
                     row['cleanup_errors'] = list(token.cleanup_errors)
     try:
@@ -772,7 +814,8 @@ def machine_run(kind, inst, node, job=None, clock=None, close_success=True, rele
     token = MachineRun(clock)
     row = dict(token=str(token), owner=[os.getpid(), 'unknown'], kind=kind, state='admitting',
                since=clock.time(), reason='checking machine admission', reading={},
-               clears_when='admission checks complete', managed=True)
+               clears_when='admission checks complete', managed=True,
+               exit_code='unknown', log_path='unknown', stderr_log_path='unknown')
     if inst is not None and node is not None:
         row['scope'] = machine_scope(inst, node)
         row.update(machine_job_owner(inst, node, job, cwd))
@@ -869,7 +912,8 @@ def machine_wait_notices(inst, now=None):
                     intent = row.get('terminal_intent') if row.get('finalizing') else None
                     if (isinstance(intent, dict) and intent.get('outcome') in ('error', 'failed', 'cancelled')
                             and isinstance(intent.get('reason'), str) and intent['reason']):
-                        machine_terminal_row(row, now, intent['outcome'], intent['reason'])
+                        machine_terminal_row(row, now, intent['outcome'], intent['reason'],
+                                             intent.get('exit_code', 'unknown'))
                     else:
                         machine_terminal_row(row, now, 'abandoned', 'owner stopped before the command completed')
                 elif (not row.get('finalizing') and unknown and row['state'] in ('queued', 'running')
@@ -1403,6 +1447,11 @@ def machine_hold_read(path):
     if (not isinstance(waits, dict) or any(not machine_queue.valid({**row, 'state': 'running'})
             or row.get('state') not in ('admitting', 'queued', 'running', 'exited', 'completed')
             or token != row['token'] or not isinstance(row.get('node'), str)
+            or ('exit_code' in row and row['exit_code'] != 'unknown'
+                and (type(row['exit_code']) is not int or row['exit_code'] < 0))
+            or any(key in row and (not isinstance(row[key], str) or not row[key])
+                   for key in ('log_path', 'stderr_log_path'))
+            or ('command' in row and type(row['command']) is not bool)
             or not machine_timestamp(row.get('updated_at')) for token, row in waits.items())):
         raise ValueError('invalid recorded machine waits')
     retired = data.get('retired_waits', [])
@@ -1837,6 +1886,7 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
                         for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
             proc, control_read, control_write = None, None, None
             try:
+                machine_record_output(inst, token, stdout, stderr)
                 machine_wait('verify', inst, node, job=label, token=token, reporter=None,
                              cancelled=lambda: stopped[0], workers=int(requested) if requested is not None else None)
                 child_env = machine_environment(token, child_env)
@@ -1875,6 +1925,7 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
                 clean = machine_heavy_monitor(observer, proc.pid, lambda: True,
                         lambda: signal.SIGTERM, lambda: threading.Event().wait(0.02), exclude=(proc.pid,))
                 code = proc.wait()
+                token.exit_code = machine_exit_code(code)
                 if not clean:
                     machine_heavy_uncertain(token, proc.pid)
                     token.result = 125
