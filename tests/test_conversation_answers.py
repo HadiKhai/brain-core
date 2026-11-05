@@ -138,16 +138,16 @@ class StopNoticeGuard(Scenario):
         return {'type': 'assistant', 'message': {'content': [
             {'type': 'tool_use', 'id': 'read-17', 'name': name, 'input': {'file_path': value}}]}}
 
-    def unread(self, *records, last_message=None):
+    def unread(self, *records):
         self.path.write_text(''.join(json.dumps(r) + '\n' for r in records))
-        return self.m.hook_notice_unread(self.path, last_message)
+        return self.m.hook_notice_unread(self.path)
 
-    def test_notice_no_response_requested_blocks_even_after_read(self):
+    def test_reply_text_does_not_change_structural_read_decision(self):
         for text in ('No response requested', '  NO RESPONSE REQUESTED.  ', 'No response requested!',
-                     'No response requested—'):
+                     'No response requested—', 'Done.', '任意の返答'):
             with self.subTest(text=text):
-                self.assertTrue(self.unread(self.notice, self.tool(), self.assistant(text)))
-        self.assertTrue(self.unread(self.notice, self.tool(), last_message='No response requested.'))
+                self.assertTrue(self.unread(self.notice, self.assistant(text)))
+                self.assertFalse(self.unread(self.notice, self.tool(), self.assistant(text)))
 
     def test_notice_without_output_read_blocks(self):
         self.assertTrue(self.unread(self.notice, self.assistant('Done.')))
@@ -204,13 +204,26 @@ class StopNoticeGuard(Scenario):
         self.assertTrue(self.unread(notice, self.tool()))
         self.assertFalse(self.unread(notice, self.tool(), self.tool(value='/tmp/task-18.output')))
 
-    def test_background_command_completion_and_missing_identifiers(self):
+    def test_prose_without_structural_notice_or_identifiers_is_ignored(self):
         notice = {'type': 'user', 'message': {'content':
                   'Background command fixture completed with exit code 0. Output file: /tmp/task-17.output'}}
-        self.assertTrue(self.unread(notice, self.assistant('Done.')))
+        self.assertFalse(self.unread(notice, self.assistant('Done.')))
         self.assertFalse(self.unread(notice, self.tool()))
-        notice['message']['content'] = '<task-notification><status>failed</status></task-notification>'
-        self.assertTrue(self.unread(notice, self.tool()))
+        notice['message']['content'] = ('<task-notification>Output file: /tmp/task-17.output; '
+                                        'task-id: task-17</task-notification>')
+        self.assertFalse(self.unread(notice))
+
+    def test_envelopes_without_identifiers_do_not_create_unread_obligations(self):
+        for body in ('', '<status>failed</status>', '<task-id> </task-id>',
+                     '<task-id>task-17</output-file>'):
+            notice = {'type': 'user', 'message': {'content': '<task-notification>' + body +
+                      '</task-notification>'}}
+            with self.subTest(body=body):
+                self.assertFalse(self.unread(notice, self.assistant('No response requested.')))
+        text = self.notice['message']['content'] + '<task-notification><status>completed</status></task-notification>'
+        mixed = {'type': 'user', 'message': {'content': text}}
+        self.assertTrue(self.unread(mixed))
+        self.assertFalse(self.unread(mixed, self.tool()))
 
     def test_bounded_chunks_malformed_records_and_nonregular_input(self):
         with mock.patch.object(self.m, 'HOOK_TRANSCRIPT_CHUNK', 17):

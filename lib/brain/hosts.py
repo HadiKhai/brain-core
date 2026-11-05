@@ -1528,15 +1528,15 @@ def hook_turn_records(fh, include_operator=False):
     return list(reversed(records))
 
 
-def hook_notice_unread(path, last_message=None):
-    """Check completion notices in the bounded latest turn; retain no transcript content."""
+def hook_notice_unread(path):
+    """Check structural notice/read references in the bounded latest turn."""
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
         return False
     with os.fdopen(fd, "rb") as fh:
         records = hook_turn_records(fh, include_operator=True)
-    notices, final_text = [], ""
+    notices = []
     for rec in records:
         if not isinstance(rec, dict):
             continue
@@ -1554,18 +1554,15 @@ def hook_notice_unread(path, last_message=None):
             notice_text = attachment["prompt"]
         if notice_text is not None:
             notifications = re.findall(r"<task-notification>(.*?)</task-notification>", notice_text, re.S)
-            if not notifications and re.search(
-                    r"\bbackground (?:command|task)\b[^\n]*(?:completed|finished|failed|exited|killed)", notice_text, re.I):
-                notifications = [notice_text]
             for notice in notifications:
-                identifiers = re.findall(r"<(?:output-file|task-id)>([^<]+)</(?:output-file|task-id)>", notice)
-                if not identifiers:
-                    identifiers = re.findall(r"(?:output(?: file)?|task[- ]id)\s*[:=]\s*[`\"']?([^\s`\"'<>]+)", notice, re.I)
-                notices.append([tuple(value.strip() for value in identifiers if value.strip()), False])
+                identifiers = tuple(value.strip() for tag, value in
+                                    re.findall(r"<(output-file|task-id)>([^<]+)</\1>", notice) if value.strip())
+                if identifiers:
+                    notices.append([identifiers, False])
+                # No identifier means no structurally addressable read obligation.
+                # Ignore that envelope rather than demanding an impossible read.
         if rec.get("type") != "assistant":
             continue
-        if text.strip():
-            final_text = text
         for block in blocks if isinstance(blocks, list) else []:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
@@ -1580,10 +1577,7 @@ def hook_notice_unread(path, last_message=None):
                        for value in identifiers):
                     # This call follows the notice and names its output or task exactly.
                     entry[1] = True
-    if isinstance(last_message, str) and last_message.strip():
-        final_text = last_message
-    return bool(notices) and (bool(re.fullmatch(r"no response requested[^\w]*", final_text.strip(), re.I))
-                              or any(not read for identifiers, read in notices))
+    return any(not read for identifiers, read in notices)
 
 
 def hook_questions(path):
@@ -1721,7 +1715,7 @@ def hook_stop(a):
     last_message = data.get("last_assistant_message")
     if not data.get("stop_hook_active") and isinstance(data.get("transcript_path"), str):
         try:
-            if hook_notice_unread(data["transcript_path"], last_message):
+            if hook_notice_unread(data["transcript_path"]):
                 print(json.dumps({"decision": "block", "reason":
                       "Read the notice's output and act on it (fix, next step, or one line to root)."}))
                 return

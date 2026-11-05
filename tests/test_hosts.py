@@ -1398,7 +1398,7 @@ class StopHook(Scenario):
                        'name': 'Read', 'input': {'file_path': '/tmp/task-17.output'}}]}})
         path = self.question_log(rows)
         self.assertIsNone(self.hook(r, r, transcript=path, last_message='relay only'))
-        self.assertEqual(self.hook(r, r, transcript=path, last_message='No response requested.'), expected)
+        self.assertIsNone(self.hook(r, r, transcript=path, last_message='No response requested.'))
 
     def test_user_hook_is_quick_silent_and_read_only_in_unrelated_folder(self):
         r = self.init("alice")
