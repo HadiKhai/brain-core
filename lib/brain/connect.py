@@ -219,6 +219,8 @@ def connect_inputs(inst, n, a=None):
         nodes = inst.nodes()
         chosen = selected()
         out = [m["dir"] / "node.md" for m in chosen]
+        from . import rule_contracts
+        out += rule_contracts.rule_input_paths(n)
         out += [m["dir"] / "never-name.txt" for m in nodes]
         d = connect_dir(inst, n)
         if a is None:  # A new plan discards the previous run; all of that run matters.
@@ -520,7 +522,9 @@ def connect_brief(inst, n, a, plan):
     send = _m_knowledge.host_send(inst, n, a.to)
     out += [f"When you finish or get blocked, send one line via {send}: `done|blocked: <what>; files: <paths>`. "
             "Never wait for the operator in this thread; then end your turn.", ""]
+    from . import rule_contracts
     text = _m_nodes.import_text("\n".join(out), terms) + "\n"
+    text += '\n'.join(rule_contracts.rules_lines(n)) + '\n'
     _m_guard.no_terms_in(n, text, "the connection brief")
     return text
 

@@ -42,6 +42,16 @@ wording does not affect this structural check. Read the output, then fix the
 issue, take the next step or send one line to the coordinating agent. No hook
 configuration change is needed.
 
+## 2026-11-05: Carry verbatim rules into contracts and reviews
+
+Contracts and generated briefs include every inherited applicable rule, retaining
+the source wording and explicit rule IDs. Only structural `Applies:` fields can
+exclude a rule; missing fields mean all nodes. Reviews return a JSON per-rule
+table with pass/fail file:line evidence or a reason for n/a, bound to the current
+rules digest. Copy that table into the independent review identity receipt.
+`brain ready` refuses missing rows, malformed evidence and changed rule wording.
+See [the format and inheritance boundaries](docs/rule-reviews.md).
+
 ## 2026-11-05: Check compact instance rule indexes
 
 `tools/check_rule_index.py` checks that a shortened startup index retains every

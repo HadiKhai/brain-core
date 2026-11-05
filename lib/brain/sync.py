@@ -165,13 +165,16 @@ def cmd_review(a):
                 "A list of findings, most severe first. Each: severity (blocker, major, minor), `file:line`, "
                 "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
                 "that matters, say so plainly.", ""] + _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
-    text = _m_briefs.checked_brief(n, "\n".join(out) + "\n", worker=False, inputs=inputs)
+    from . import rule_contracts
+    rules = rule_contracts.applicable_rules(n)
+    out += rule_contracts.review_rule_lines(n, rules=rules)
+    text = _m_briefs.checked_brief(n, "\n".join(out) + "\n", worker=False, inputs=inputs, rules=rules)
     _m_guard.no_terms_in(n, text, "the review brief")
     if a.out:
         _m_history.write_out(inst, n, a.out, text)
     _m_jobs.job_reviewed(inst, n, a.branch, full=not check_fix, head=head,
                          reason=getattr(a, "reason", None) or "", risk=getattr(a, 'risk', None),
-                         identity_required=fresh or bool(exception), exception=exception)
+                         identity_required=fresh or bool(exception), exception=exception, rules=rules)
     _m_jobs.record_job_route(inst, n, a.branch, kind, reviewer, a.model, review=True, effort=a.effort)
     if not a.out:
         print(text, end="")

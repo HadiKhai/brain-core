@@ -341,6 +341,9 @@ def input_paths(inst, n):
         'status.md', 'brief.md', 'backlog.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md', 'job-handbacks',
         'job-attempts', 'job-contracts', 'job-trains', 'handback-queue', 'sources/import-proposals.md',
         'direction.md', 'role.md', 'standards.md', 'lessons.md', 'synthesis.json', 'feedback.md'))
+    from . import rule_contracts
+    for source in rule_contracts.rule_sources(n):
+        paths.extend((source['dir'] / 'AGENTS.md', source['dir'] / 'library/instance-rules.md'))
     from . import rotation, status, reports, tasks, task_flow, verify, watch, jobs, job_attempts, machine
     from . import recurrence, hosts
     for target in recurrence.synthesis_targets(inst, n):

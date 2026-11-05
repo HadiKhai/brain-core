@@ -310,6 +310,10 @@ def ui_json_stamps(inst, problem_keys=None):
                     *(stamp(own / name) for name in (('HEAD', 'index', 'packed-refs', 'config') if own else ())),
                     *(stamp(path) for pattern in patterns for path in sorted(home.glob(pattern))))
         git = [checkout(home) for home, _, _ in homes[n['id']]]
+        from . import rule_contracts
+        rule_inputs = [stamp(source['dir'] / name) for source in rule_contracts.rule_sources(n)
+                       for name in ('AGENTS.md', 'library/instance-rules.md')]
+        files.extend(rule_inputs)
         if problem_keys is not None:
             # Integrity has no cross-node task blockers or worker/machine meters.
             problem_keys[n['id']] = ui_json_fingerprint([
@@ -320,7 +324,7 @@ def ui_json_stamps(inst, problem_keys=None):
                                             files, git, mine, tasks, hold])
         # A worktree row and its readiness depend on its own checkout, its job and
         # integration refs and the node's policy files, not on status or inbox edits.
-        policy = [meta, *(stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt'))]
+        policy = [meta, *rule_inputs, *(stamp(n['dir'] / name) for name in ('node.md', 'never-name.txt'))]
         parent = n['parent']
         while parent:
             policy.extend(stamp(parent['dir'] / name) for name in ('node.md', 'never-name.txt'))

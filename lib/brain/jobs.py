@@ -698,7 +698,8 @@ def job_started(inst, n, branch, runtime, task_id=None):
             inst.commit([], f"{n['id']}: job started")
 
 
-def job_reviewed(inst, n, branch, *, full=True, head="", reason="", risk=None, identity_required=False, exception=None):
+def job_reviewed(inst, n, branch, *, full=True, head="", reason="", risk=None, identity_required=False, exception=None,
+                 rules=None):
     with _m_instance.brain_lock(inst):
         rows = ledger_rows(n)
         r = open_job(rows or [], branch)
@@ -713,6 +714,10 @@ def job_reviewed(inst, n, branch, *, full=True, head="", reason="", risk=None, i
         r["Review head"] = head
         r["Review kind"] = "full" if full else "check-fix"
         r["Review reason"] = " ".join(reason.splitlines())
+        if rules is not None:
+            from . import rule_contracts
+            r['Review rules digest'] = rule_contracts.rules_digest(rules)
+            r['Review rule ids'] = json.dumps([rule['id'] for rule in rules])
         if risk:
             r['Review risk'] = risk
         if identity_required:
@@ -940,13 +945,15 @@ def job_overlaps(n, rows, include_resolved=False):
 
 
 def contract_lines(inst, n, branch, who="worker"):
+    from . import rule_contracts
+    rules = rule_contracts.rules_lines(n)
     row = open_job(read_jobs(n) or [], branch) if branch else None
     f = contract_file(n, row) if row else None
     if not f or not f.is_file():
-        return []
-    text = _m_guard.redact(f.read_text().strip(), _m_guard.never_terms(n))
+        return rules
+    text = _m_guard.redact(rule_contracts.without_rules(f.read_text()).strip(), _m_guard.never_terms(n))
     if who == "reviewer":
-        return ["## The job's contract", "", "Check the change against its outcome and what done means:", "", text, ""]
+        return ["## The job's contract", "", "Check the change against its outcome and what done means:", "", text, ""] + rules
     budget = _m_spend.contract_budget(text)
     return ["## Contract for this job", "", text, "",
             "Within this contract, act: don't ask for what it authorizes, and use your discretion where it gives it. "
@@ -954,7 +961,7 @@ def contract_lines(inst, n, branch, who="worker"):
             "Use the hand-back path for a stop condition or something it says needs consent.", ""] + (
         [f"Its budget is {_m_spend.budget_text(budget)}. `brain jobs {shlex.quote(n['id'])} --branch {shlex.quote(branch)}` "
          "shows what this job has spent so far; check it before long steps, and say in your report how it went "
-         "against the budget (`brain handback` prints it).", ""] if budget else [])
+         "against the budget (`brain handback` prints it).", ""] if budget else []) + rules
 
 
 def handback_detail(n, row):
@@ -2000,6 +2007,8 @@ def cmd_jobs(a):
         missing = contract_problems(text)
         if missing:
             _m_common.die("the contract needs: " + "; ".join('## ' + f if f in CONTRACT_FIELDS else f for f in missing))
+        from . import rule_contracts
+        text = rule_contracts.without_rules(text).rstrip() + '\n\n' + '\n'.join(rule_contracts.rules_lines(n)) + '\n'
         _m_guard.no_terms_in(n, text, "the contract")
         if _m_nodes.SECRET_LINE.search(text):
             _m_common.die("unsafe contract text")

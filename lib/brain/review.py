@@ -286,6 +286,10 @@ def validate_review_receipt(inst, n, row, head, data, fresh=False):
             refuse()
     if data['verdict'] == 'pass' and any(f['state'] == 'open' and f['severity'] in ('blocker', 'major') for f in data['findings']):
         refuse()
+    from . import rule_contracts
+    rule_contracts.validate_rule_checks(n, data, required=bool(row.get('Review rules digest')))
+    if row.get('Review rules digest') and row['Review rules digest'] != data.get('rules_digest'):
+        raise ValueError('review rules differ from the injected brief; generate a fresh review brief')
     return data
 
 
@@ -298,8 +302,9 @@ def record_review_receipt(inst, n, branch, data):
         if not row:
             raise ValueError('review receipt needs an open job')
         repo = n.get('home_path') if n.get('external') else inst.root
+        from . import rule_contracts
         paths = lambda: [n['dir'] / _m_jobs.JOBS_FILE, n['dir'] / 'status.md',
-                         *_m_instance.git_state_paths(repo)]
+                         *_m_instance.git_state_paths(repo), *rule_contracts.rule_input_paths(n)]
         with _m_instance.released(inst, n, extra=paths):
             head = _m_common.git('rev-parse', '--verify', 'refs/heads/' + branch + '^{commit}', cwd=repo).stdout.strip()
             validate_review_receipt(inst, n, row, head, data, fresh=True)
@@ -331,8 +336,10 @@ def record_review_receipt(inst, n, branch, data):
 def validate_ready_reviews(inst, n, branch, head, packet=None):
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     try:
-        required = independence_policy(inst, n) == 'fresh-thread' or (row or {}).get('Review identity required') == 'true'
-    except ValueError as error:
+        from . import rule_contracts
+        rules = rule_contracts.applicable_rules(n)
+        required = bool(rules) or bool((row or {}).get('Review rules digest')) or independence_policy(inst, n) == 'fresh-thread' or (row or {}).get('Review identity required') == 'true'
+    except (OSError, UnicodeError, ValueError) as error:
         return [str(error)]
     if not required:
         return []
@@ -341,11 +348,18 @@ def validate_ready_reviews(inst, n, branch, head, packet=None):
     try:
         path = review_receipt_path(n, row, head)
         data = json.loads(path.read_text())
+        # Keep actionable per-rule diagnostics, including the missing IDs, instead
+        # of hiding them in the generic identity-receipt refusal below.
+        try:
+            rule_contracts.validate_rule_checks(n, data, rules=rules, required=bool(row.get('Review rules digest')))
+        except ValueError as error:
+            return [str(error)]
         validate_review_receipt(inst, n, row, head, data)
         if data['verdict'] != 'pass':
             raise ValueError('review is blocked')
     except (OSError, ValueError, TypeError, KeyError):
-        return ['missing, stale, blocked or non-independent exact-head review receipt']
+        return ['missing, stale, blocked or non-independent exact-head review receipt' +
+                ('; required rule ids: ' + ', '.join(rule['id'] for rule in rules) if rules else '')]
     try:
         from . import review_findings as _m_review_findings
         findings = _m_review_findings.review_finding_state(inst, n, branch, head)

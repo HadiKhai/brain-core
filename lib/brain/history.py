@@ -1286,7 +1286,9 @@ def history_brief(inst, n, a, out, m):
     send = _m_knowledge.host_send(inst, n, a.to)
     out_lines += [f"When you finish or get blocked, send one line via {send}: `done|blocked: <what>; notes: <path>`. "
                   "Never wait for the operator in this thread; then end your turn.", ""]
+    from . import rule_contracts
     text = _m_nodes.import_text("\n".join(out_lines), _m_guard.never_terms(n)) + "\n"  # titles and ids are metadata too
+    text += '\n'.join(rule_contracts.rules_lines(n)) + '\n'
     _m_guard.no_terms_in(n, text, "the history brief")
     return text
 
@@ -1306,6 +1308,8 @@ def history_range(spec, by_id):
 def history_brief_inputs(inst, n, a):
     out = history_dir(inst, n)[1]
     paths = [out / "manifest.json", _m_usage.usage_file("subscriptions.json")]
+    from . import rule_contracts
+    paths += rule_contracts.rule_input_paths(n)
     # Ordinary reader briefs rely on the manifest, not other readers' notes.
     if a.final:
         paths.append(out / "notes")

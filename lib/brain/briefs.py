@@ -57,7 +57,8 @@ def contract_inputs(n, branch):
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch) if branch else None
     path = _m_jobs.contract_file(n, row) if row else None
     if path and path.is_file():
-        return [("Contract", _m_guard.redact(path.read_text().strip(), _m_guard.never_terms(n)))]
+        from . import rule_contracts
+        return [("Contract", _m_guard.redact(rule_contracts.without_rules(path.read_text()).strip(), _m_guard.never_terms(n)))]
     return []
 
 
@@ -68,11 +69,21 @@ def automated_brief(text):
     return text if text.startswith(AUTOMATED_TURN_PREFIX) else AUTOMATED_TURN_PREFIX + "\n\n" + text
 
 
-def checked_brief(n, text, worker=True, inputs=None):
+def checked_brief(n, text, worker=True, inputs=None, rules=None):
     """Charge source inputs captured before assembly, never headings found in task Markdown.
 
     Legacy callers without provenance conservatively charge the entire output.
     """
+    from . import rule_contracts
+    text = rule_contracts.without_rules(text)
+    # Injected safety instructions are mandatory overhead, not task allowance.
+    if inputs is None:
+        inputs = [("Unclassified task/context", text)]
+    try:
+        rules = rule_contracts.rules_lines(n, rules=rules)
+    except (OSError, UnicodeError, ValueError) as error:
+        _m_common.die('cannot assemble applicable rules: ' + str(error))
+    text += '\n' + '\n'.join(rules) + '\n' if rules else ''
     text = automated_brief(text)
     if worker:
         text += "\n" + COMPACTION_POLICY + "\n"

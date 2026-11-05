@@ -353,6 +353,174 @@ class ReviewDiscipline(Scenario):
         self.assertFalse((wt / "gate-ran").exists())
 
 
+class RuleReviewContracts(Scenario):
+    job = _test_verify.WorkerReadyPackets.job
+
+    def rules(self, root):
+        index = root / 'AGENTS.md'
+        rule = '- R01 **Keep exact wording:** café; preserve  two spaces and `code`.\n'
+        index.write_bytes(index.read_bytes() + rule.encode() + b'- R02 Another scope.\n')
+        library = root / 'library/instance-rules.md'
+        library.parent.mkdir(exist_ok=True)
+        library.write_text('<!-- rule:R01 -->\n- Complete rule.\nApplies: all\n'
+                           '<!-- rule:R02 -->\n- Only the other node.\nApplies: other\n')
+        agents = root / 'nodes/a/AGENTS.md'
+        node_rule = '- Preserve the local boundary.\n  Keep this continuation verbatim.\n'
+        body = agents.read_text()
+        if '## Rules for this node' not in body:
+            body += '\n## Rules for this node\n'
+        agents.write_text(body.replace('## Rules for this node\n', '## Rules for this node\n\n' + node_rule, 1))
+        return rule, node_rule
+
+    def test_worker_small_specialist_and_review_briefs_keep_verbatim_rules(self):
+        root, home, wt = self.job()
+        rule, node_rule = self.rules(root)
+        for flags in (('--branch', 'job'), ('--small',)):
+            text = self.b(root, 'brief', 'a', '--task', 'Inspect the calculation', *flags)
+            self.assertIn(rule.encode(), text.encode())
+            self.assertIn(node_rule.encode(), text.encode())
+            self.assertEqual(text.count('### Rule R01\n'), 1)
+            self.assertNotIn('### Rule R02\n', text)
+        self.b(root, 'specialist', 'new', 'inspector', '--at', 'a', '--title', 'Inspector')
+        text = self.b(root, 'hire', 'inspector', 'a', '--task', 'Inspect the calculation')
+        self.assertIn(rule, text)
+        self.assertIn(node_rule, text)
+        text = self.b(root, 'review', 'a', '--branch', 'job', '--built-by', 'claude')
+        self.assertIn(rule, text)
+        self.assertIn(node_rule, text)
+        self.assertIn('## Per-rule review table', text)
+        self.assertIn('"status": "pass|fail|n/a"', text)
+        self.assertNotIn('### Rule R02\n', text)
+
+    def test_recorded_contract_contains_rules_and_regeneration_replaces_snapshot(self):
+        root, home, wt = self.job()
+        rule, node_rule = self.rules(root)
+        contract = self.tmp / 'contract.md'
+        m = core_loader.SourceFileLoader('contract_rules_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        contract.write_text('\n'.join('## ' + field + '\nA concrete declaration.\n' for field in m.CONTRACT_FIELDS))
+        self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(contract))
+        inst = m.Instance(root)
+        n = inst.node('a')
+        row = m.open_job(m.read_jobs(n), 'job')
+        recorded = m.contract_file(n, row).read_text()
+        self.assertIn(rule, recorded)
+        self.assertIn(node_rule, recorded)
+        text = self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Inspect the calculation')
+        self.assertEqual(text.count('### Rule R01\n'), 1)
+        index = root / 'AGENTS.md'
+        index.write_text(index.read_text().replace('café;', 'cafés;'))
+        text = self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Inspect the calculation')
+        self.assertNotIn(rule, text)
+        self.assertIn(rule.replace('café;', 'cafés;'), text)
+
+    def test_boundary_stops_instance_and_parent_rule_inheritance(self):
+        root = self.init('alice')
+        self.b(root, 'principal', 'add', 'partner')
+        self.b(root, 'new', 'a', '--title', 'Isolated', '--owners', 'partner')
+        rule, node_rule = self.rules(root)
+        text = self.b(root, 'brief', 'a', '--small', '--task', 'Inspect the calculation')
+        self.assertNotIn(rule, text)
+        self.assertIn(node_rule, text)
+
+    def test_ready_refuses_missing_table_missing_row_and_accepts_complete(self):
+        root, wt, m, inst, n, receipt = IndependentReviewReceipts.context(self)
+        self.rules(root)
+        receipt.pop('rule_checks')
+        receipt.pop('rules_digest')
+        rules = m.applicable_rules(n)
+        self.assertEqual(len(rules), 2)
+        path = m.review_receipt_path(n, m.open_job(m.read_jobs(n), 'job'), receipt['head'])
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(receipt))
+        reasons = m.validate_ready_reviews(inst, n, 'job', receipt['head'])
+        self.assertIn('missing per-rule table', reasons[0])
+        self.assertIn('R01', reasons[0])
+        self.assertIn('R01', self.b(root, 'ready', 'a', '--branch', 'job', ok=False))
+        receipt['rules_digest'] = m.rules_digest(rules)
+        receipt['rule_checks'] = [{'id': rules[0]['id'], 'status': 'pass', 'evidence': ['calc.py:1']}]
+        path.write_text(json.dumps(receipt))
+        self.assertIn(rules[1]['id'], m.validate_ready_reviews(inst, n, 'job', receipt['head'])[0])
+        receipt['rule_checks'].append({'id': rules[1]['id'], 'status': 'n/a', 'evidence': [],
+                                       'reason': 'No boundary change in this patch'})
+        m.record_review_receipt(inst, n, 'job', receipt)
+        self.assertEqual(m.validate_ready_reviews(inst, n, 'job', receipt['head']), [])
+        with mock.patch.dict('os.environ', self.env, clear=True), mock.patch.object(m, 'request_wake', return_value=True):
+            packet, reasons = m.record_ready(inst, n, 'job', 1)
+        self.assertEqual(reasons, [])
+        self.assertEqual(packet['verify_result'], 0)
+        index = root / 'AGENTS.md'
+        index.write_text(index.read_text().replace('café;', 'cafés;'))
+        self.assertIn('rules changed', m.validate_ready_reviews(inst, n, 'job', receipt['head'])[0])
+
+    def test_rule_status_evidence_duplicates_and_failure_are_checked_structurally(self):
+        root, home, wt = self.job()
+        self.rules(root)
+        m = core_loader.SourceFileLoader('rule_table_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        n = m.Instance(root).node('a')
+        rules = m.applicable_rules(n)
+        good = {'verdict': 'pass', 'rules_digest': m.rules_digest(rules), 'rule_checks': [
+            {'id': rule['id'], 'status': 'pass', 'evidence': ['calc.py:1']} for rule in rules]}
+        m.validate_rule_checks(n, good)
+        variants = ({'status': 'approved'}, {'status': 'n/a', 'reason': ''},
+                    {'evidence': []}, {'evidence': ['calc.py:0']}, {'evidence': ['calc.py']},
+                    {'status': 'fail'}, {'id': 'unknown'})
+        for change in variants:
+            data = json.loads(json.dumps(good))
+            data['rule_checks'][0].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.validate_rule_checks(n, data)
+        good['rule_checks'].append(good['rule_checks'][0])
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            m.validate_rule_checks(n, good)
+
+    def test_crlf_rules_are_byte_equal_and_parent_edit_invalidates_dashboard_policy(self):
+        root, home, wt = self.job()
+        self.rules(root)
+        m = core_loader.SourceFileLoader('rule_policy_stamp_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        index = root / 'AGENTS.md'
+        index.write_bytes(index.read_bytes().replace(b'\n', b'\r\n'))
+        source_line = b'- R01 **Keep exact wording:** caf\xc3\xa9; preserve  two spaces and `code`.\r\n'
+        output = self.tmp / 'brief.txt'
+        self.b(root, 'brief', 'a', '--small', '--task', 'Inspect the calculation', '--out', str(output))
+        self.assertIn(source_line, output.read_bytes())
+        with mock.patch.dict('os.environ', self.env, clear=True):
+            _, before = m.ui_json_stamps(inst)
+            index.write_bytes(index.read_bytes().replace(b'caf\xc3\xa9;', b'caf\xc3\xa9s;'))
+            _, after = m.ui_json_stamps(inst)
+        self.assertNotEqual(before[('a', 'job')], after[('a', 'job')])
+
+    def test_markers_and_metadata_are_structural_and_examples_cannot_exclude_rules(self):
+        root, home, wt = self.job()
+        self.rules(root)
+        agents = root / 'nodes/a/AGENTS.md'
+        agents.write_text(agents.read_text().replace('## Rules for this node\n',
+            '## Rules for this node\n\n<!-- rule:N01 -->\n'
+            '* Keep every item, even when its prose mentions another scope.\n'
+            '```text\nApplies: other\n- R99 This example is data.\n```\n'
+            '+ A different declared scope. Applies: other\n'))
+        m = core_loader.SourceFileLoader('rule_structure_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        rules = m.applicable_rules(m.Instance(root).node('a'))
+        self.assertEqual(len(rules), 3)
+        self.assertIn('node:a:N01', [rule['id'] for rule in rules])
+        self.assertNotIn('R99', [rule['id'] for rule in rules])
+        self.assertFalse(any(rule['text'].startswith('+ A different') for rule in rules))
+
+    def test_legacy_policy_cannot_drop_a_generated_reviews_table_when_rules_disappear(self):
+        root, home, wt = self.job()
+        self.rules(root)
+        self.b(root, 'review', 'a', '--branch', 'job', '--built-by', 'claude')
+        m = core_loader.SourceFileLoader('rule_removal_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        n = inst.node('a')
+        self.assertTrue(m.open_job(m.read_jobs(n), 'job').get('Review rules digest'))
+        (root / 'AGENTS.md').write_text('# Example instance\n## Instance rules\n')
+        (root / 'nodes/a/AGENTS.md').write_text('# Example node\n## Rules for this node\n')
+        self.assertEqual(m.applicable_rules(n), [])
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertTrue(m.validate_ready_reviews(inst, n, 'job', head))
+
+
 class IndependentReviewReceipts(Scenario):
     job = _test_verify.WorkerReadyPackets.job
 
@@ -374,7 +542,7 @@ class IndependentReviewReceipts(Scenario):
                    'observed_at': inst.now_dt().isoformat(), 'builder': {'threadId': 'builder-thread', 'runtime': 'codex', 'model': 'example-model'},
                    'reviewer': {'threadId': 'reviewer-thread', 'runtime': 'codex', 'model': 'example-model',
                                 'fresh_context': True, 'context_reused': False, 'built_change': False},
-                   'verdict': 'pass', 'findings': []}
+                   'verdict': 'pass', 'findings': [], 'rules_digest': m.rules_digest([]), 'rule_checks': []}
         return r, wt, m, inst, n, receipt
 
     def test_same_model_distinct_fresh_thread_receipt_is_required_and_recorded(self):

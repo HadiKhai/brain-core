@@ -73,6 +73,29 @@ stated; never run a polling loop in an agent.
    what was found, what was fixed, and anything the builder and reviewer still disagree on. Give
    the operator both sides of a disagreement; don't settle it silently.
 
+Every review, including a fix check, also returns the **per-rule review table**
+required by its generated brief. Review each injected rule verbatim as well as
+the contract. Use this exact JSON format (no Markdown table):
+
+```json
+{
+  "rules_digest": "<copy the digest from the brief>",
+  "rule_checks": [
+    {"id": "R01", "status": "pass", "evidence": ["lib/example.py:12"], "reason": "Boundary retained"},
+    {"id": "R02", "status": "n/a", "evidence": [], "reason": "This change has no publishing path"}
+  ]
+}
+```
+
+Include exactly one row for every injected rule ID. `status` is exactly `pass`,
+`fail`, or `n/a`; pass and fail require at least one `file:line` reference with a
+positive line number, and n/a requires a nonempty reason. Explain the evidence;
+do not infer compliance merely because a test is green. A fail row prevents a
+passing receipt. The coordinator copies this JSON into the existing host identity
+receipt alongside its identity, verdict and findings fields. `brain ready`
+refuses absent tables, missing or duplicate IDs, invalid status/evidence and stale
+rule wording. Its structural validation does not judge the review's reasoning.
+
 For core changes, `brain rehearse <id> --branch <branch>` remains available when
 explicitly requested. It executes the committed branch using throwaway copies
 and requires machine admission and an OS write/network sandbox (currently macOS).

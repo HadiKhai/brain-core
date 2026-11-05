@@ -1,0 +1,194 @@
+"""Verbatim inherited rules and structural per-rule review evidence.
+
+Only explicit Markdown structure and Applies fields select rules. This module
+does not infer applicability, compliance or meaning from instruction wording.
+"""
+import hashlib
+import json
+import re
+
+RULES_START = '<!-- brain:applicable-rules -->'
+RULES_END = '<!-- brain:applicable-rules:end -->'
+
+
+def without_rules(text):
+    """Replace generated snapshots; their reserved markers are never rule text."""
+    return re.sub(re.escape(RULES_START) + r'.*?' + re.escape(RULES_END), '', text, flags=re.S)
+
+
+def rule_sources(n):
+    """Nearest boundary is the inheritance fence, including for instance rules."""
+    chain = []
+    while n:
+        chain.append(n)
+        if n.get('sealed'):
+            break
+        n = n.get('parent')
+    return list(reversed(chain))
+
+
+def rule_input_paths(n):
+    return [source['dir'] / name for source in rule_sources(n)
+            for name in ('AGENTS.md', 'library/instance-rules.md')]
+
+
+def _read(path):
+    # Preserve source bytes, including CRLF and indentation, in generated briefs.
+    return path.read_bytes().decode('utf-8') if path.exists() else ''
+
+
+def _structure(text):
+    """Ignore examples/comments when locating Markdown rule declarations."""
+    out, fence, comment = [], None, False
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        marker = re.fullmatch(r'<!-- rule:[A-Za-z0-9_-]+ -->', stripped.strip())
+        hidden = bool(fence or comment)
+        if stripped.startswith(('```', '~~~')) and not comment:
+            token = stripped[0]
+            fence = token if fence is None else None if fence == token else fence
+            hidden = True
+        elif not fence:
+            if '<!--' in line and not marker:
+                comment = '-->' not in line[line.index('<!--') + 4:]
+                hidden = True
+            elif comment and '-->' in line:
+                comment = False
+        out.append((' ' * len(line.rstrip('\r\n')) + line[len(line.rstrip('\r\n')):]) if hidden else line)
+    return ''.join(out)
+
+
+def _applies(text, node_id):
+    values = re.findall(r'(?:^|[ \t])Applies:[ \t]*([^\n]*?)(?=[ \t]+Gate:|$)', _structure(text), re.M)
+    if not values:
+        return True
+    if len(values) != 1 or not values[0]:
+        raise ValueError('rule needs one nonempty Applies field')
+    targets = [part.strip() for part in values[0].split(',')]
+    if any(not part for part in targets) or ('all' in targets and targets != ['all']):
+        raise ValueError('invalid rule Applies field')
+    return targets == ['all'] or node_id in targets
+
+
+def applicable_rules(n):
+    rules = []
+    sources = rule_sources(n)
+    for source in sources:
+        if 'dir' not in source:
+            continue
+        path = source['dir'] / 'AGENTS.md'
+        text = _read(path)
+        full_path = source['dir'] / 'library/instance-rules.md'
+        full = _read(full_path) if not source.get('parent') else ''
+        anchors = list(re.finditer(r'^<!-- rule:(R[0-9]+) -->\r?$', _structure(full), re.M))
+        blocks = {}
+        for i, anchor in enumerate(anchors):
+            key = anchor.group(1)
+            if key in blocks:
+                raise ValueError('duplicate instance rule id: ' + key)
+            blocks[key] = full[anchor.end():anchors[i + 1].start() if i + 1 < len(anchors) else len(full)]
+        lines, active, start = text.splitlines(keepends=True), False, None
+        pending, current_id = None, None
+
+        def add(end):
+            if start is None:
+                return
+            body = ''.join(lines[start:end])
+            if RULES_START in body or RULES_END in body:
+                raise ValueError('rule text contains reserved generated-block marker')
+            numbered = re.match(r'^[-*+] (R[0-9]+)\b', body)
+            identity = re.split(r'[ \t]+(?:Gate|Applies):', body, maxsplit=1)[0].strip()
+            key = numbered.group(1) if numbered else 'node:' + source['id'] + ':' + (
+                current_id or 'N-' + hashlib.sha256(identity.encode()).hexdigest()[:16])
+            metadata = blocks.get(key, body)
+            if _applies(metadata, n['id']):
+                rules.append({'id': key, 'text': body,
+                              'source': str(path.relative_to(sources[0]['dir'])), 'line': start + 1})
+
+        for i, line in enumerate(_structure(text).splitlines(keepends=True)):
+            if line.startswith('## '):
+                add(i)
+                start = None
+                active = line[3:].strip() in ('Instance rules', 'Rules for this node')
+                pending, current_id = None, None
+            elif active and re.fullmatch(r'<!-- rule:[A-Za-z0-9_-]+ -->', line.strip()):
+                add(i)
+                start = None
+                pending = line.strip()[10:-4]
+            elif active and re.match(r'^[-*+] ', line):
+                add(i)
+                start = i
+                current_id, pending = pending, None
+        add(len(lines))
+    ids = [rule['id'] for rule in rules]
+    if len(ids) != len(set(ids)):
+        raise ValueError('inherited rule ids must be unique')
+    return rules
+
+
+def rules_digest(rules):
+    payload = [{key: rule[key] for key in ('id', 'text')} for rule in rules]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def rules_lines(n, rules=None):
+    rules = applicable_rules(n) if rules is None else rules
+    if not rules:
+        return []
+    out = [RULES_START, '## Applicable rules (verbatim)', '',
+           'Every rule below applies unless its own wording says otherwise. Read full indexed rules before acting.',
+           'Full instance wording: library/instance-rules.md at <!-- rule:Rnn -->.',
+           'Rules digest: ' + rules_digest(rules), '']
+    for rule in rules:
+        out += ['### Rule ' + rule['id'], '',
+                'Source: ' + rule['source'] + ':' + str(rule['line']), '', rule['text'], '']
+    return out + [RULES_END, '']
+
+
+def review_rule_lines(n, rules=None):
+    rules = applicable_rules(n) if rules is None else rules
+    return ['## Per-rule review table', '',
+            'Review every injected rule, in addition to the contract. Return a JSON object with',
+            '`rules_digest` and `rule_checks` (also copied into the review identity receipt).',
+            'rules_digest: ' + rules_digest(rules),
+            'Required rule ids: ' + ', '.join(rule['id'] for rule in rules),
+            'Each rule_checks row is {"id": "<rule id>", "status": "pass|fail|n/a",',
+            '"evidence": ["<file>:<positive line number>"], "reason": "<explanation>"}.',
+            'pass and fail require at least one file:line. n/a requires a nonempty reason.',
+            'A fail row blocks readiness. Do not claim semantic compliance from this structural check.', '']
+
+
+def validate_rule_checks(n, data, rules=None, required=False):
+    rules = applicable_rules(n) if rules is None else rules
+    if not rules and not required and not (isinstance(data, dict) and ('rule_checks' in data or 'rules_digest' in data)):
+        return
+    expected = {rule['id'] for rule in rules}
+    rows = data.get('rule_checks') if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError('review missing per-rule table; missing rule ids: ' + ', '.join(sorted(expected)))
+    seen, failed = set(), []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('id'), str):
+            raise ValueError('invalid per-rule review row')
+        key = row['id']
+        if key in seen or key not in expected:
+            raise ValueError('duplicate or unknown review rule id: ' + key)
+        seen.add(key)
+        status, evidence = row.get('status'), row.get('evidence')
+        if status not in ('pass', 'fail', 'n/a') or not isinstance(evidence, list):
+            raise ValueError('invalid per-rule review status/evidence: ' + key)
+        if any(not isinstance(ref, str) or not re.fullmatch(r'[^\s\x00-\x1f]+:[1-9][0-9]*', ref) for ref in evidence):
+            raise ValueError('review needs file:line evidence for rule id: ' + key)
+        if status in ('pass', 'fail') and not evidence:
+            raise ValueError('review needs file:line evidence for rule id: ' + key)
+        if status == 'n/a' and (not isinstance(row.get('reason'), str) or not row['reason'].strip()):
+            raise ValueError('review n/a needs a reason for rule id: ' + key)
+        if status == 'fail':
+            failed.append(key)
+    missing = expected - seen
+    if missing:
+        raise ValueError('review missing rule ids: ' + ', '.join(sorted(missing)))
+    if data.get('rules_digest') != rules_digest(rules):
+        raise ValueError('review rules changed; re-review current rule ids: ' + ', '.join(sorted(expected)))
+    if failed and data.get('verdict') == 'pass':
+        raise ValueError('review failed rule ids: ' + ', '.join(sorted(failed)))
