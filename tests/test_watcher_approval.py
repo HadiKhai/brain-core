@@ -8,12 +8,14 @@ import unittest
 from unittest import mock
 
 
-spec = importlib.util.spec_from_file_location('watcher_approval', Path(__file__).resolve().parents[1] / 'tools/watcher_approval.py')
-approval = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(approval)
-
-
 class WatcherApproval(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        global approval
+        spec = importlib.util.spec_from_file_location('watcher_approval', Path(__file__).resolve().parents[1] / 'tools/watcher_approval.py')
+        approval = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(approval)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -25,11 +27,13 @@ class WatcherApproval(unittest.TestCase):
         self.conn.executescript('''
             CREATE TABLE orchestration_v2_projection_runtime_requests (
                 runtime_request_id TEXT PRIMARY KEY, thread_id TEXT, node_id TEXT,
-                status TEXT, resolved_at TEXT, created_at TEXT);
+                status TEXT, resolved_at TEXT, created_at TEXT, provider_turn_id TEXT);
             CREATE INDEX orchestration_v2_projection_requests_recovery_idx
                 ON orchestration_v2_projection_runtime_requests(thread_id) WHERE status='pending';
             CREATE TABLE orchestration_v2_projection_threads (
                 thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, deleted_at TEXT);
+            CREATE TABLE orchestration_v2_projection_provider_turns (
+                provider_turn_id TEXT PRIMARY KEY, completed_at TEXT);
             CREATE TABLE orchestration_v2_projection_turn_items (
                 node_id TEXT, thread_id TEXT, type TEXT, status TEXT, payload_json TEXT);
             CREATE INDEX orchestration_v2_projection_turn_items_node_ordinal_idx
@@ -39,14 +43,16 @@ class WatcherApproval(unittest.TestCase):
 
     def add(self, request='r1', age=121, project='home', status='pending',
             item_status='waiting', kind='approval_request', prompt='git status',
-            payload=None, created=None, deleted=None, resolved=None):
+            payload=None, created=None, deleted=None, resolved=None, turn_completed=None):
         from datetime import datetime, timezone
         thread = 'thread-' + request
         created = created or datetime.fromtimestamp(self.now-age, timezone.utc).isoformat()
         self.conn.execute('INSERT INTO orchestration_v2_projection_threads VALUES (?,?,?,?)',
                           (thread, project, 'Build\nexample', deleted))
-        self.conn.execute('INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?)',
-                          (request, thread, request, status, resolved, created))
+        self.conn.execute('INSERT INTO orchestration_v2_projection_runtime_requests VALUES (?,?,?,?,?,?,?)',
+                          (request, thread, request, status, resolved, created, request))
+        self.conn.execute('INSERT INTO orchestration_v2_projection_provider_turns VALUES (?,?)',
+                          (request, turn_completed))
         self.conn.execute('INSERT INTO orchestration_v2_projection_turn_items VALUES (?,?,?,?,?)',
                           (request, thread, kind, item_status, payload if payload is not None else json.dumps({'requestId': request, 'prompt': prompt})))
         self.conn.commit()
@@ -61,7 +67,13 @@ class WatcherApproval(unittest.TestCase):
         self.run_rule()
         self.assertEqual([e[1] for e in self.events], ['approval:2', 'approval:3'])
         self.assertIn('70.0 min', self.events[1][2])
-        self.assertIn('oak: Build example (t3-thread://thread-3)', self.events[1][2])
+        self.assertIn('oak: Build example (t3-thread://v1/thread-3)', self.events[1][2])
+
+    def test_stale_waiting_rows_after_provider_turn_completed_do_not_fire(self):
+        self.add(age=4200, turn_completed='2026-01-01T00:00:00Z')
+        self.add('active', age=4200)
+        self.run_rule()
+        self.assertEqual([e[1] for e in self.events], ['approval:active'])
 
     def test_resolved_cancelled_expired_deleted_and_user_questions_do_not_fire(self):
         for i, status in enumerate(('resolved', 'cancelled', 'expired')):

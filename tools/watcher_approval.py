@@ -13,11 +13,13 @@ SELECT r.runtime_request_id, r.thread_id, t.project_id, t.title,
 FROM orchestration_v2_projection_runtime_requests r
      INDEXED BY orchestration_v2_projection_requests_recovery_idx
 JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
+JOIN orchestration_v2_projection_provider_turns pt ON pt.provider_turn_id = r.provider_turn_id
 JOIN orchestration_v2_projection_turn_items i
      INDEXED BY orchestration_v2_projection_turn_items_node_ordinal_idx
      ON i.node_id = r.node_id AND i.thread_id = r.thread_id
 WHERE r.status = 'pending' AND r.resolved_at IS NULL
-  AND t.deleted_at IS NULL AND i.type = 'approval_request' AND i.status = 'waiting'
+  AND t.deleted_at IS NULL AND pt.completed_at IS NULL
+  AND i.type = 'approval_request' AND i.status = 'waiting'
 """
 
 
@@ -81,7 +83,7 @@ def rule_approval(local, fire, db_path, now_ts, log=None):
         seen.add(request)
         node = next(iter(owners))
         clean = lambda value: ' '.join(value.split())
-        reason = ('watcher: approval waiting for %s: %s (t3-thread://%s), %.1f min; '
+        reason = ('watcher: approval waiting for %s: %s (t3-thread://v1/%s), %.1f min; '
                   'command: %s. Only the operator can approve; surface this request.' %
                   (node, clean(title)[:120], thread, age / 60, clean(item['prompt'])[:200]))
         fire(node, 'approval:' + request, reason)
