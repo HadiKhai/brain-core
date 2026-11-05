@@ -51,6 +51,9 @@ table with pass/fail file:line evidence or a reason for n/a, bound to the curren
 rules digest. Copy that table into the independent review identity receipt.
 `brain ready` refuses missing rows, malformed evidence and changed rule wording.
 See [the format and inheritance boundaries](docs/rule-reviews.md).
+Generated contract companions keep the coordinator's authoritative contract bytes
+unchanged. After upgrading, existing reviewed jobs with applicable rules also need
+a fresh exact-head rule-table receipt before readiness can pass.
 
 ## 2026-11-05: Check compact instance rule indexes
 

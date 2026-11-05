@@ -832,7 +832,7 @@ def cleanup_handback(inst, n, row, rows):
     if row.get("Ended") and (row.get("Outcome") != "merged" or row.get("Lessons")):
         if _m_sync.retain_integration(inst, n, row):
             write_jobs(inst, n, rows)
-        for record in (handback_file(n, row), contract_file(n, row)):
+        for record in (handback_file(n, row), contract_file(n, row), contract_rules_file(n, row)):
             record.unlink(missing_ok=True)
             _m_common.touch(record)
 
@@ -843,6 +843,11 @@ CONTRACT_FIELDS = _m_common.CONTRACT_FIELDS
 def contract_file(n, row):
     """The coordinator's contract for one job: what the worker may do without asking (one writer: the coordinator)."""
     return n["dir"] / "job-contracts" / (job_key(row) + ".md")
+
+
+def contract_rules_file(n, row):
+    """Generated companion: the coordinator's exact contract remains authoritative."""
+    return contract_file(n, row).with_suffix('.rules.md')
 
 
 def contract_problems(text, parallel=True):
@@ -2008,9 +2013,10 @@ def cmd_jobs(a):
         if missing:
             _m_common.die("the contract needs: " + "; ".join('## ' + f if f in CONTRACT_FIELDS else f for f in missing))
         from . import rule_contracts
-        text = rule_contracts.without_rules(text).rstrip() + '\n\n' + '\n'.join(rule_contracts.rules_lines(n)) + '\n'
+        rendered = text + '\n' + '\n'.join(rule_contracts.rules_lines(n)) + '\n'
         _m_guard.no_terms_in(n, text, "the contract")
-        if _m_nodes.SECRET_LINE.search(text):
+        _m_guard.no_terms_in(n, rendered, "the contract rules")
+        if _m_nodes.SECRET_LINE.search(rendered):
             _m_common.die("unsafe contract text")
         f = contract_file(n, row)
         f.parent.mkdir(exist_ok=True)
@@ -2020,7 +2026,9 @@ def cmd_jobs(a):
         row['Parallel policy'] = '1'
         write_jobs(inst, n, rows)
         _m_common.atomic_write(f, text)
-        inst.commit([f], f"{n['id']}: contract for {a.branch}")
+        companion = contract_rules_file(n, row)
+        _m_common.atomic_write(companion, rendered)
+        inst.commit([f, companion], f"{n['id']}: contract for {a.branch}")
         print(_m_guard.redact(f"{n['id']}: contract for {a.branch} recorded; briefs for this job carry it", _m_guard.never_terms(n)))
         return
     if a.usage_file:

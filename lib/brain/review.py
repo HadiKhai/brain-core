@@ -233,7 +233,7 @@ def review_receipt_path(n, row, head):
     return root['dir'] / '.brain/review-receipts' / hashlib.sha256(n['id'].encode()).hexdigest() / _m_jobs.job_key(row) / (head + '.json')
 
 
-def validate_review_receipt(inst, n, row, head, data, fresh=False):
+def validate_review_receipt(inst, n, row, head, data, fresh=False, rules=None):
     def refuse():
         raise ValueError('review receipt needs exact code, known builder and distinct fresh non-builder thread identities')
     if (not isinstance(data, dict) or type(data.get('version')) is not int or data['version'] != 1 or
@@ -287,7 +287,7 @@ def validate_review_receipt(inst, n, row, head, data, fresh=False):
     if data['verdict'] == 'pass' and any(f['state'] == 'open' and f['severity'] in ('blocker', 'major') for f in data['findings']):
         refuse()
     from . import rule_contracts
-    rule_contracts.validate_rule_checks(n, data, required=bool(row.get('Review rules digest')))
+    rule_contracts.validate_rule_checks(n, data, rules=rules, required=bool(row.get('Review rules digest')))
     if row.get('Review rules digest') and row['Review rules digest'] != data.get('rules_digest'):
         raise ValueError('review rules differ from the injected brief; generate a fresh review brief')
     return data
@@ -354,7 +354,7 @@ def validate_ready_reviews(inst, n, branch, head, packet=None):
             rule_contracts.validate_rule_checks(n, data, rules=rules, required=bool(row.get('Review rules digest')))
         except ValueError as error:
             return [str(error)]
-        validate_review_receipt(inst, n, row, head, data)
+        validate_review_receipt(inst, n, row, head, data, rules=rules)
         if data['verdict'] != 'pass':
             raise ValueError('review is blocked')
     except (OSError, ValueError, TypeError, KeyError):
@@ -373,6 +373,11 @@ def validate_ready_reviews(inst, n, branch, head, packet=None):
 def review_evidence(inst, n, branch=None):
     """Read-only receipts, including failed review classes, for advisory consumers."""
     out = []
+    from . import rule_contracts
+    try:
+        rules = rule_contracts.applicable_rules(n)
+    except (OSError, UnicodeError, ValueError):
+        return out
     for row in _m_jobs.read_jobs(n) or []:
         if branch and row['Job'] != branch:
             continue
@@ -382,7 +387,7 @@ def review_evidence(inst, n, branch=None):
                 data = json.loads(path.read_text())
                 if not isinstance(data, dict):
                     continue
-                validate_review_receipt(inst, n, row, data.get('head'), data)
+                validate_review_receipt(inst, n, row, data.get('head'), data, rules=rules)
                 out.append(data)
             except (OSError, ValueError, TypeError, KeyError):
                 continue

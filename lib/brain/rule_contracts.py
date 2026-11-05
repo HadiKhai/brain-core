@@ -43,18 +43,29 @@ def _structure(text):
     for line in text.splitlines(keepends=True):
         stripped = line.lstrip()
         marker = re.fullmatch(r'<!-- rule:[A-Za-z0-9_-]+ -->', stripped.strip())
-        hidden = bool(fence or comment)
         if stripped.startswith(('```', '~~~')) and not comment:
             token = stripped[0]
             fence = token if fence is None else None if fence == token else fence
-            hidden = True
-        elif not fence:
-            if '<!--' in line and not marker:
-                comment = '-->' not in line[line.index('<!--') + 4:]
-                hidden = True
-            elif comment and '-->' in line:
-                comment = False
-        out.append((' ' * len(line.rstrip('\r\n')) + line[len(line.rstrip('\r\n')):]) if hidden else line)
+            out.append(''.join(c if c in '\r\n' else ' ' for c in line))
+            continue
+        if fence:
+            out.append(''.join(c if c in '\r\n' else ' ' for c in line))
+            continue
+        visible, pos = list(line), 0
+        while pos < len(line):
+            if comment:
+                end = line.find('-->', pos)
+                stop = len(line) if end < 0 else end + 3
+                for i in range(pos, stop):
+                    if visible[i] not in '\r\n':
+                        visible[i] = ' '
+                comment, pos = end < 0, stop
+            else:
+                begin = line.find('<!--', pos)
+                if begin < 0 or marker:
+                    break
+                comment, pos = True, begin
+        out.append(''.join(visible))
     return ''.join(out)
 
 
@@ -97,7 +108,8 @@ def applicable_rules(n):
             if RULES_START in body or RULES_END in body:
                 raise ValueError('rule text contains reserved generated-block marker')
             numbered = re.match(r'^[-*+] (R[0-9]+)\b', body)
-            identity = re.split(r'[ \t]+(?:Gate|Applies):', body, maxsplit=1)[0].strip()
+            identity = re.split(r'[ \t]+(?:Gate|Applies):', _structure(body), maxsplit=1)[0].strip()
+            identity = ' '.join(identity.split())
             key = numbered.group(1) if numbered else 'node:' + source['id'] + ':' + (
                 current_id or 'N-' + hashlib.sha256(identity.encode()).hexdigest()[:16])
             metadata = blocks.get(key, body)
@@ -131,8 +143,17 @@ def rules_digest(rules):
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def checked_rules(n):
+    """Generators report a bounded refusal; validation callers retain exceptions."""
+    try:
+        return applicable_rules(n)
+    except (OSError, UnicodeError, ValueError) as error:
+        from . import common
+        common.die('cannot assemble applicable rules: ' + str(error))
+
+
 def rules_lines(n, rules=None):
-    rules = applicable_rules(n) if rules is None else rules
+    rules = checked_rules(n) if rules is None else rules
     if not rules:
         return []
     out = [RULES_START, '## Applicable rules (verbatim)', '',
@@ -146,7 +167,7 @@ def rules_lines(n, rules=None):
 
 
 def review_rule_lines(n, rules=None):
-    rules = applicable_rules(n) if rules is None else rules
+    rules = checked_rules(n) if rules is None else rules
     return ['## Per-rule review table', '',
             'Review every injected rule, in addition to the contract. Return a JSON object with',
             '`rules_digest` and `rule_checks` (also copied into the review identity receipt).',

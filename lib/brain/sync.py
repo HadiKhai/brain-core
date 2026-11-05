@@ -166,7 +166,7 @@ def cmd_review(a):
                 "the problem, and a concrete fix. Say which tests you ran and their results. If you find nothing "
                 "that matters, say so plainly.", ""] + _m_knowledge.handback_lines(inst, n, who="reviewer", branch=a.branch)
     from . import rule_contracts
-    rules = rule_contracts.applicable_rules(n)
+    rules = rule_contracts.checked_rules(n)
     out += rule_contracts.review_rule_lines(n, rules=rules)
     text = _m_briefs.checked_brief(n, "\n".join(out) + "\n", worker=False, inputs=inputs, rules=rules)
     _m_guard.no_terms_in(n, text, "the review brief")

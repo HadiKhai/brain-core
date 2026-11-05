@@ -402,7 +402,8 @@ class RuleReviewContracts(Scenario):
         inst = m.Instance(root)
         n = inst.node('a')
         row = m.open_job(m.read_jobs(n), 'job')
-        recorded = m.contract_file(n, row).read_text()
+        self.assertEqual(m.contract_file(n, row).read_bytes(), contract.read_bytes())
+        recorded = m.contract_rules_file(n, row).read_text()
         self.assertIn(rule, recorded)
         self.assertIn(node_rule, recorded)
         text = self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Inspect the calculation')
@@ -412,6 +413,54 @@ class RuleReviewContracts(Scenario):
         text = self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Inspect the calculation')
         self.assertNotIn(rule, text)
         self.assertIn(rule.replace('café;', 'cafés;'), text)
+
+    def test_contract_ending_with_separation_reason_keeps_task_and_native_authority(self):
+        root, home, wt = self.job()
+        rule, _ = self.rules(root)
+        m = core_loader.SourceFileLoader('native_contract_rules_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        n = inst.node('a')
+        contract = n['dir'] / 'contract.md'
+        contract.write_text('\n'.join('## ' + field + '\nScoped parser ownership\n' for field in
+            (*m.CONTRACT_FIELDS, 'Why separate')))
+        tasks = __import__(m.validate_launch_job.__module__.rsplit('.', 1)[0] + '.tasks', fromlist=['tasks'])
+        row = m.open_job(m.read_jobs(n), 'job')
+        row['Task'] = 'APP-1'
+        m.write_jobs(inst, n, [row])
+        tasks.mutate(inst, n, 'APP-1', {'title': 'Parser', 'status': 'ready', 'scope': ['calc.py'],
+            'contract': 'contract.md', 'authority': 'repo:D1'}, create=True)
+        tasks.mutate(inst, n, 'APP-1', {'status': 'in-progress', 'branch': 'job', 'job': m.job_key(row)}, provider=True)
+        self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(contract))
+        inst = m.Instance(root)
+        n = inst.node('a')
+        m.validate_launch_job(inst, n, row)
+        with mock.patch.object(m, 'launch_worker', return_value={'state': 'done'}) as launch:
+            self.assertEqual(m.launch_task(inst, n, 'APP-1')['state'], 'done')
+            launch.assert_called_once()
+        for flags in (('--branch', 'job'), ('--small',)):
+            text = self.b(root, 'brief', 'a', '--task', 'Keep the explicit task', *flags)
+            self.assertIn('Keep the explicit task', text)
+            self.assertIn(rule, text)
+            if '--branch' in flags:
+                self.assertIn('## Contract for this job', text)
+        text = self.b(root, 'review', 'a', '--branch', 'job', '--built-by', 'claude')
+        self.assertIn('## The job\'s contract', text)
+        self.assertIn('Scoped parser ownership', text)
+        self.b(root, 'specialist', 'new', 'inspector', '--at', 'a', '--title', 'Inspector')
+        text = self.b(root, 'hire', 'inspector', 'a', '--branch', 'job', '--task', 'Keep the specialist task')
+        self.assertIn('Keep the specialist task', text)
+        self.assertIn('## Contract for this job', text)
+        self.assertEqual(m.contract_file(n, row).read_bytes(), contract.read_bytes())
+
+    def test_recording_contract_without_rules_preserves_exact_authority_bytes(self):
+        root, home, wt = self.job()
+        m = core_loader.SourceFileLoader('empty_contract_rules_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        contract = self.tmp / 'contract.md'
+        contract.write_text('\n'.join('## ' + field + '\nConcrete declaration\n' for field in m.CONTRACT_FIELDS))
+        self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(contract))
+        n = m.Instance(root).node('a')
+        row = m.open_job(m.read_jobs(n), 'job')
+        self.assertEqual(m.contract_file(n, row).read_bytes(), contract.read_bytes())
 
     def test_boundary_stops_instance_and_parent_rule_inheritance(self):
         root = self.init('alice')
@@ -505,6 +554,22 @@ class RuleReviewContracts(Scenario):
         self.assertIn('node:a:N01', [rule['id'] for rule in rules])
         self.assertNotIn('R99', [rule['id'] for rule in rules])
         self.assertFalse(any(rule['text'].startswith('+ A different') for rule in rules))
+
+    def test_inline_comments_do_not_hide_rule_bullets_or_change_content_ids(self):
+        root, home, wt = self.job()
+        self.rules(root)
+        agents = root / 'nodes/a/AGENTS.md'
+        agents.write_text('# Example node\n## Rules for this node\n'
+                          '- Keep <!-- first comment --> this boundary.\n')
+        m = core_loader.SourceFileLoader('inline_rule_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        n = m.Instance(root).node('a')
+        before = m.applicable_rules(n)
+        self.assertEqual(len(before), 2)
+        self.assertIn('<!-- first comment -->', before[-1]['text'])
+        agents.write_text(agents.read_text().replace('first comment', 'another comment'))
+        after = m.applicable_rules(n)
+        self.assertEqual(before[-1]['id'], after[-1]['id'])
+        self.assertNotEqual(m.rules_digest(before), m.rules_digest(after))
 
     def test_legacy_policy_cannot_drop_a_generated_reviews_table_when_rules_disappear(self):
         root, home, wt = self.job()
