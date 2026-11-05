@@ -6,7 +6,7 @@ from pathlib import Path
 from . import common, instance, verify
 
 
-def main():
+def run_lane_worker():
     payload = json.load(sys.stdin)
     inst = instance.Instance(Path(payload['root']))
     n = inst.node(payload['node'])
@@ -19,4 +19,4 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    run_lane_worker()

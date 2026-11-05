@@ -425,6 +425,10 @@ class WorkerReadyPackets(Scenario):
             log.write_text(result.stdout + result.stderr)
             return result.returncode, str(log)
 
+        def execute_lane(inst, n, branch, w, env, lane):
+            result, output = execute(inst, n, branch, lane['command'], w, env)
+            return result, output, 0.0
+
         cases = [({}, {'PORT': '9200'}, {}, {'PORT': '9201'}, 'PORT'),
                  ({}, {'PORTS': '3'}, {}, {'PORTS': '4'}, 'PORTS'),
                  ({}, {'PORT_LAST': '9202'}, {}, {'PORT_LAST': '9203'}, 'PORT_LAST'),
@@ -443,6 +447,7 @@ class WorkerReadyPackets(Scenario):
                 (owner['_m_lanes'], 'tracked_files', mock.Mock(return_value={'fixture.txt': ['100644', 'digest']})),
                 (owner['_m_lanes'], 'changed_since', mock.Mock(return_value=[]))]:
                 stack.enter_context(mock.patch.object(module, name, value))
+            stack.enter_context(mock.patch.object(owner['_m_lanes'], 'execute_lane', execute_lane))
             for name, value in [('ready_preflight', mock.Mock(return_value=([], head, main))),
                                 ('integration_parent', mock.Mock(return_value=main)),
                                 ('verify_input_files', mock.Mock(return_value={})),

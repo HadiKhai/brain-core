@@ -71,7 +71,7 @@ def execute_lane(inst, n, branch, w, env, lane):
         result_path = Path(temporary) / 'result.json'
         payload = dict(root=str(inst.root), node=n['id'], branch=branch, worktree=w, env=env, lane=lane)
         # The import path and result destination use argv, never shell interpolation.
-        bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from brain.lane_worker import main; main()"
+        bootstrap = "import sys; sys.path.insert(0, sys.argv.pop(1)); from brain.lane_worker import run_lane_worker; run_lane_worker()"
         worker_lib = str(Path(lane_worker.__file__).resolve().parents[1])
         proc = subprocess.run([sys.executable, '-B', '-c', bootstrap, worker_lib, str(result_path)],
                               input=json.dumps(payload), text=True, env=env, pass_fds=descriptors)

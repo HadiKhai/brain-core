@@ -146,6 +146,8 @@ def import_job(branch):
 def import_brief(a):
     inst = _m_instance.Instance(_m_nodes.find_root())
     n = inst.node(a.id)
+    task = Path(a.task_file).read_text() if a.task_file else (a.task or '')
+    _m_jobs.validate_job_parallel(n, None, task)
     if a.branch:
         _m_common.die("--import studies the bound home; omit --branch")
     if not n["external"] or not n["home_path"] or not _m_nodes.repo_root(n["home_path"]):
@@ -180,7 +182,6 @@ def import_brief(a):
            "Summarize source rules and roles; never copy them into active AGENTS.md or role instructions. "
            "Only the operator/coordinator confirms activation after review. Filter outputs with brain scrub before writing; omit unsafe "
            "facts and report only omission counts. Validate the node files, not dirty historical source files.", ""]
-    task = Path(a.task_file).read_text() if a.task_file else (a.task or "")
     inputs = [("Task", task), ("Limits", "\n".join(_m_knowledge.limits_of(n)))]
     out += attribution_lines(runtime, a.model)
     if task:

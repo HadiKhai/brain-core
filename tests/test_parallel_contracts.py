@@ -83,6 +83,7 @@ class ParallelLaunchCommands(Scenario):
             commands = [('jobs', 'a', '--branch', 'job', '--contract-file', str(source)),
                         ('brief', 'a', '--branch', 'job', '--task', 'Synthetic work.'),
                         ('hire', 'tester', 'a', '--branch', 'job', '--task', 'Synthetic work.'),
+                        ('brief', 'a', '--import', '--task', text),
                         ('jobs', 'a', '--branch', 'job')]
             for command in commands:
                 with self.subTest(command=command, field=field):
@@ -97,6 +98,7 @@ class ParallelLaunchCommands(Scenario):
         self.assertIn('Contract for this job', self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Synthetic work.'))
         self.assertIn('Contract for this job', self.b(root, 'hire', 'tester', 'a', '--branch', 'job', '--task', 'Synthetic work.'))
         self.b(root, 'jobs', 'a', '--branch', 'job')
+        self.assertIn('Role: import worker', self.b(root, 'brief', 'a', '--import', '--task', valid))
         # Existing open jobs have no policy marker and keep their old contract.
         path.write_text(base + '\n## Budget\n30M tokens, 3 h\n')
         rows = module.read_jobs(node)
@@ -107,7 +109,23 @@ class ParallelLaunchCommands(Scenario):
 
 
 class ParallelTaskCommands(Scenario):
-    setUp = test_task_dispatch.TaskDispatch.setUp
+    def setUp(self):
+        super().setUp()
+        from brain import tasks
+        from brain.instance import Instance
+        self.root = self.tmp / 'fixture'
+        self.root.mkdir()
+        (self.root / 'instance.md').write_text('---\nprincipals: sample\ntimezone: UTC\n---\n')
+        (self.root / 'node.md').write_text('---\nowners: sample\nseparation_policy: required\n---\n')
+        self.inst = Instance(self.root)
+        self.n = self.inst.node('root')
+        self.contract = self.root / 'contract.md'
+        self.contract.write_text('\n'.join('## ' + h + '\nScoped parser ownership\n' for h in
+            ('Outcome', 'Authorized', 'Discretion', 'Stop when', 'Needs consent', 'Done means', 'Why separate')))
+        with mock.patch.object(self.inst, 'commit'):
+            tasks.mutate(self.inst, self.n, 'APP-1', {'title': 'Parser', 'status': 'ready', 'scope': ['parser.py'],
+                'contract': 'contract.md', 'authority': 'repo:D1'}, create=True)
+
     prepared = test_task_dispatch.TaskDispatch.prepared
 
     def test_task_plan_and_launch_refuse_all_bad_declarations_before_host_calls(self):
