@@ -55,6 +55,13 @@ Frozen rehearsal read lanes validate without publishing sweeps. Ordinary checks
 release the writer lock before diagnostics and live probes; `--fix` retains its
 existing lock while applying repairs.
 
+Plain check runs diagnostics before its narrow sweep writer and does not enter
+the command-wide write journal or refresh generated status as a side effect.
+Outbound links retain their per-link diagnostics and prevent sweep publication.
+Sealing retains legacy node rule wording and supplies only absent annotations:
+`Applies: all` preserves the existing default, and `Gate: none (...)` records
+that no automated gate was supplied. Existing declarations are never replaced.
+
 The local checkpoint is `.brain/rule-registry.json`. Tasks are committed before
 their rule IDs are acknowledged. If the command stops before acknowledgment,
 the next check recognizes matching tasks and finishes the checkpoint. It refuses

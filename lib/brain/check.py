@@ -214,7 +214,8 @@ def collect_global_problems(inst):
     problems, warnings, fixable = [], [], []
     p = problems.append
     from . import rule_registry
-    problems.extend(rule_registry.validate_registry(inst))
+    if not _m_common.outward_links(inst.root):
+        problems.extend(rule_registry.validate_registry(inst))
     fallback = inst.local.get("fallback", [])
     if not isinstance(fallback, list) or any(not isinstance(x, str) or not x.strip() for x in fallback) \
             or (isinstance(fallback, list) and all(isinstance(x, str) for x in fallback)
@@ -384,17 +385,6 @@ def _cmd_check(a):
     if not a.fix:
         _m_instance.unlock()
     inst = _m_nodes.load()
-    from . import rule_registry
-    try:
-        if not (os.environ.get('BRAIN_REHEARSAL_READ') == '1' and not a.fix):
-            rule_registry.sync_sweeps(inst)
-    except (OSError, ValueError) as error:
-        _m_common.die('rule registry: ' + str(error))
-    finally:
-        # The CLI's outer lock scope retains depth after unlock(); explicitly
-        # release the descriptor re-taken by the nested sweep writer as well.
-        if not a.fix:
-            _m_instance.unlock()
     from . import semantic as _m_semantic
     print(_m_semantic.semantic_mode(inst))
     problems, warnings, fixable = collect_problems(inst)
@@ -404,6 +394,18 @@ def _cmd_check(a):
         inst.commit([], "check --fix")
         inst = _m_instance.Instance(inst.root)
         problems, warnings, fixable = collect_problems(inst)
+    from . import rule_registry
+    try:
+        # Diagnose links before opening a writer or touching registry inputs.
+        # Other rule errors do not suppress independent valid-rule sweeps.
+        if (not _m_common.outward_links(inst.root) and
+                not (os.environ.get('BRAIN_REHEARSAL_READ') == '1' and not a.fix)):
+            rule_registry.sync_sweeps(inst)
+    except (OSError, ValueError) as error:
+        _m_common.die('rule registry: ' + str(error))
+    finally:
+        if not a.fix:
+            _m_instance.unlock()
     seen = set()
     for n in inst.nodes():
         target, command = _m_hosts.wake_target(inst, n)

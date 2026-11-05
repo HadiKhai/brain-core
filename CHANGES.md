@@ -5,6 +5,13 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Diagnose check problems before sweep writes
+
+Plain check reports outbound links before any sweep publication and leaves
+generated status migration to explicit repairs. Sealing retains legacy node
+rules and supplies missing structural annotations without inferring prose
+meaning or replacing existing Gate/Applies declarations.
+
 ## 2026-11-05: Share capture and registry rule syntax
 
 Capture and registry Gate readers now share a parser accepting both existing

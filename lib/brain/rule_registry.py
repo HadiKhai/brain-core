@@ -103,6 +103,29 @@ def parse_node_rules(text, node_id):
     return rules
 
 
+def annotate_sealed_rules(text, node_id):
+    """Retain legacy node rules while declaring missing structural metadata.
+
+    Missing applicability already means all to the landed contracts reader.
+    Absence of a supplied gate is recorded explicitly, without judging prose.
+    Existing metadata, including malformed declarations, is never overwritten.
+    """
+    for rule in reversed(parse_node_rules(text, node_id)):
+        visible = _unfenced(rule['text'])
+        fields = []
+        if not re.search(r'(?:^|[ \t])Gate:', visible, re.M):
+            fields.append('  Gate: none (legacy rule retained during sealing; no automated gate supplied)')
+        if not re.search(r'(?:^|[ \t])Applies:', visible, re.M):
+            fields.append('  Applies: all')
+        if fields:
+            # Offsets refer to the original text; reverse order preserves them.
+            start = sum(len(line) for line in text.splitlines(keepends=True)[:rule['line'] - 1])
+            end = start + len(rule['text'])
+            suffix = ('' if text[:end].endswith('\n') else '\n') + '\n'.join(fields) + '\n'
+            text = text[:end] + suffix + text[end:]
+    return text
+
+
 def targets(rule, nodes):
     value = rule['applies']
     if value == 'all':
@@ -329,7 +352,11 @@ def sync_sweeps(inst):
     unrelated task ID collision refuses instead of consuming the new rule.
     """
     from . import tasks
+    if common.outward_links(inst.root):
+        raise ValueError('outbound links prevent sweep publication')
     with instance.brain_lock(inst):
+        if common.outward_links(inst.root):
+            raise ValueError('outbound links prevent sweep publication')
         current = instance.Instance(inst.root)
         registry = read_registry(current)
         rules, nodes = registry

@@ -819,6 +819,17 @@ def cmd_seal(a):
         shutil.move(str(src), str(dest))
         _m_common.touch(src)
         moved.append(rel)
+    # A sealing transition retains legacy wording but needs explicit registry
+    # metadata on the operator-side record as well as the proposed home copy.
+    from . import rule_registry
+    agents = n['dir'] / 'AGENTS.md'
+    if agents.exists():
+        original = agents.read_text()
+        annotated = rule_registry.annotate_sealed_rules(original, n['id'])
+        if annotated != original:
+            _m_common.safe_target(agents)
+            agents.write_text(annotated)
+            _m_common.touch(agents)
     own, above = home_rules(inst, n)
     wrote_rules = False
     if not (home / "AGENTS.md").exists():

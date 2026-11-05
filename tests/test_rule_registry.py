@@ -113,6 +113,20 @@ class RuleRegistryParsing(unittest.TestCase):
             self.assertEqual(contracts.applicable_rules({'id': 'app', 'dir': Path(folder)})[0]['id'],
                              'node:app:LOCAL-1')
 
+    def test_sealing_annotations_preserve_identity_and_existing_metadata(self):
+        original = ('## Rules for this node\n- Keep exact source wording.\n\n'
+                    '- Keep declared metadata. Gate: none (reviewed manually) Applies: app\n')
+        before = self.m.parse_node_rules(original, 'app')
+        annotated = self.m.annotate_sealed_rules(original, 'app')
+        after = self.m.parse_node_rules(annotated, 'app')
+        self.assertEqual([r['id'] for r in before], [r['id'] for r in after])
+        self.assertIn(before[0]['text'], annotated)
+        self.assertIn(before[1]['text'], annotated)
+        self.assertEqual(after[0]['applies'], 'all')
+        self.assertIn('no automated gate supplied', after[0]['gate'])
+        self.assertEqual(after[1]['gate'], before[1]['gate'])
+        self.assertEqual(self.m.annotate_sealed_rules(annotated, 'app'), annotated)
+
     def test_inline_comments_cannot_hide_a_node_rule_and_long_fences_stay_closed(self):
         rows = self.m.parse_node_rules('## Rules for this node\n- Keep <!-- note --> receipts.\n', 'app')
         self.assertEqual(len(rows), 1)
@@ -189,6 +203,32 @@ class RuleRegistryChecks(Scenario):
         self.assertIn('Gate:', output)
         self.assertFalse((root / 'nodes/app/tasks/SWEEP-R01.md').exists())
         library.write_text(self.header + rule(applies='app'))
+        self.assertIn('all checks pass', self.b(root, 'check'))
+
+    def test_plain_check_keeps_diagnostics_before_writes_and_publishes_no_sweeps_through_links(self):
+        root, library = self.fixture()
+        library.write_text(self.header + rule(applies='app'))
+        foreign = self.tmp / 'foreign-tasks'
+        foreign.mkdir()
+        tasks = root / 'nodes/app/tasks'
+        tasks.mkdir(exist_ok=True)
+        tasks.rmdir()
+        tasks.symlink_to(foreign)
+        checkpoint = (root / '.brain/rule-registry.json').read_bytes()
+        output = self.b(root, 'check', ok=False)
+        self.assertIn('a link leading out of the brain', output)
+        self.assertEqual(list(foreign.iterdir()), [])
+        self.assertEqual((root / '.brain/rule-registry.json').read_bytes(), checkpoint)
+
+    def test_sealing_legacy_rules_retains_local_text_and_declares_only_missing_metadata(self):
+        root, _ = self.fixture()
+        self.b(root, 'principal', 'add', 'bob')
+        agents = root / 'nodes/app/AGENTS.md'
+        original = '- Retain exact project evidence.\n'
+        agents.write_text(agents.read_text() + '\n' + original)
+        self.b(root, 'seal', 'app', '--owners', 'bob', '--home', str(self.tmp / 'project-home'))
+        self.assertIn(original, agents.read_text())
+        self.assertIn(original, (self.tmp / 'project-home/AGENTS.md').read_text())
         self.assertIn('all checks pass', self.b(root, 'check'))
 
     def test_missing_test_and_unknown_applies_fail_with_rule_id(self):
