@@ -23,6 +23,7 @@ from . import instance as _m_instance
 _m_briefs = _m_common.LazyModule(__package__, 'briefs')
 _m_conversation_answers = _m_common.LazyModule(__package__, 'conversation_answers')
 _m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_instruction_capture = _m_common.LazyModule(__package__, 'instruction_capture')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_status = _m_common.LazyModule(__package__, 'status')
@@ -1712,6 +1713,12 @@ def hook_stop(a):
         capture_hook_questions(inst, n, data)
     except (Exception, SystemExit):
         pass  # question bookkeeping must not suppress existing reminders or fail a turn
+    reason = _m_instruction_capture.capture_stop(inst, n, data)
+    if reason is _m_instruction_capture.ALLOW_STOP:
+        return
+    if reason:
+        print(json.dumps({'decision': 'block', 'reason': reason}))
+        return
     last_message = data.get("last_assistant_message")
     if not data.get("stop_hook_active") and isinstance(data.get("transcript_path"), str):
         try:

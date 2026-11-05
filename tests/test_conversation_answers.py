@@ -1,6 +1,12 @@
 """Real-shaped runtime replies retire only their exact current question episode."""
 import datetime
+import argparse
+import contextlib
+import io
 import json
+import os
+import subprocess
+import sys
 from unittest import mock
 
 import core_loader
@@ -119,6 +125,197 @@ class ConversationAnswers(Scenario):
         self.capture({'type': 'user', 'message': {'content': [{'type': 'tool_result',
                      'tool_use_id': 'claude-call', 'content': 'User has answered your questions: Blue'}]}})
         self.assertEqual(self.overdue(), [])
+
+
+class InstructionCapture(Scenario):
+    fixture_init_in_process = True
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.init('meadow')
+        self.m = core_loader.SourceFileLoader('capture_fixture', str(CORE / 'bin/brain')).load_module()
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('root')
+        self.n['local'].update(coordinator='host-coordinator', coordinator_sessions=['runtime-coordinator'])
+        self.capture = self.m._owners['capture_stop']
+        self.path = self.tmp / 'capture.jsonl'
+        self.quote = 'Always preserve original evidence.'
+        self.records = []
+        self.data = {'session_id': 'runtime-coordinator', 'transcript_path': str(self.path), 'cwd': str(self.root)}
+        self.message(self.quote)
+
+    def message(self, text, **metadata):
+        self.records.append(dict(type='user', timestamp='2020-01-01T00:00:00Z',
+                                 message={'role': 'user', 'content': text}, **metadata))
+        self.path.write_text(''.join(json.dumps(r) + '\n' for r in self.records))
+
+    def answer(self, data, kind='standing_instruction', quote=None):
+        return {'messages': [{'id': row['id'], 'items': [{'kind': kind, 'quote': quote or row['text']}]}
+                             for row in data]}, {'model': 'fixture', 'usage': {}}
+
+    def stop(self, kind='standing_instruction', data=None, quote=None):
+        with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw:
+                               self.answer(data, kind, quote)):
+            return self.capture.capture_stop(self.inst, self.n, data or self.data)
+
+    def commit_rule(self, gate='Gate: tests/test_sample.py::test_evidence', quote=None):
+        text = quote or self.quote
+        (self.root / 'AGENTS.md').write_text('- Preserve evidence: "' + text + '"\n')
+        library = self.root / 'library/instance-rules.md'
+        library.write_text('<!-- rule:R01 -->\n- Preserve evidence: "' + text + '"\n' + gate + '\n')
+        self.git('add', 'AGENTS.md', 'library/instance-rules.md', cwd=self.root)
+        self.git('commit', '-qm', 'capture fixture instruction', cwd=self.root)
+
+    def test_standing_instruction_without_rule_commit_blocks_and_names_quote(self):
+        reason = self.stop()
+        self.assertIn(self.quote, reason)
+        self.assertIn('same-turn citing rule commit', reason)
+
+    def test_citing_instance_commit_with_gate_passes(self):
+        self.commit_rule()
+        self.assertIsNone(self.stop())
+
+    def test_explicit_none_gate_with_reason_passes(self):
+        self.commit_rule('Gate: none (requires operator judgement)')
+        self.assertIsNone(self.stop())
+
+    def test_uncommitted_rule_or_missing_gate_does_not_pass(self):
+        self.commit_rule('')
+        self.assertIn(self.quote, self.stop())
+        path = self.root / 'library/instance-rules.md'
+        path.write_text(path.read_text() + '\nGate: none (human judgement)\n')
+        self.assertIn(self.quote, self.stop())
+
+    def test_unrelated_rule_gate_does_not_satisfy_instruction(self):
+        self.commit_rule('<!-- rule:R02 -->\n- Another rule\nGate: none (human judgement)')
+        self.assertIn(self.quote, self.stop())
+
+    def test_one_off_and_question_pass(self):
+        for kind in ('one_off', 'question', 'other'):
+            with self.subTest(kind=kind):
+                self.message('Show the current count.')
+                self.assertIsNone(self.stop(kind))
+
+    def test_invented_quote_is_structurally_rejected(self):
+        self.assertIn('exact nonempty substring', self.stop(quote='An invented instruction.'))
+
+    def test_all_messages_and_mixed_items_checked_in_one_call(self):
+        self.message('How many rows?')
+        def classify(system, data, schema, **kw):
+            self.assertEqual([row['text'] for row in data], [self.quote, 'How many rows?'])
+            value, usage = self.answer(data)
+            value['messages'][0]['items'].append({'kind': 'one_off', 'quote': 'evidence'})
+            value['messages'][1]['items'][0]['kind'] = 'question'
+            return value, usage
+        with mock.patch.object(self.capture, 'ai_json', side_effect=classify) as call:
+            self.assertIn(self.quote, self.capture.capture_stop(self.inst, self.n, self.data))
+        call.assert_called_once()
+
+    def test_missing_or_duplicate_message_items_rejected(self):
+        messages = [{'id': '1', 'text': self.quote, 'at': None}]
+        for rows in ([], [{'id': '1', 'items': []}],
+                     [{'id': '1', 'items': [{'kind': 'question', 'quote': self.quote}]}] * 2):
+            with self.subTest(rows=rows), mock.patch.object(self.capture, 'ai_json', return_value=({'messages': rows}, {})):
+                with self.assertRaises(ValueError):
+                    self.capture.classifications(messages)
+
+    def test_outage_records_deduplicated_structured_inbox_gap_and_allows_stop(self):
+        with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('missing_key')):
+            for _ in range(2):
+                self.assertIs(self.capture.capture_stop(self.inst, self.n, self.data), self.capture.ALLOW_STOP)
+        inbox = (self.root / 'inbox.md').read_text()
+        self.assertEqual(inbox.count('"kind": "instruction-capture-gap"'), 1)
+        self.assertIn('"code": "missing_key"', inbox)
+        self.assertNotIn(self.quote, inbox)
+
+    def test_busy_inbox_queues_gap_for_existing_drain(self):
+        with mock.patch.object(self.capture._m_transitions, 'inbox_append', side_effect=BlockingIOError), \
+                mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('timeout')):
+            self.assertIs(self.capture.capture_stop(self.inst, self.n, self.data), self.capture.ALLOW_STOP)
+        rows = list(self.m.hook_question_queue(self.n).glob('*.json'))
+        self.assertEqual(len(rows), 1)
+        self.assertIn('"code": "timeout"', json.loads(rows[0].read_text())['line'])
+
+    def test_worker_identity_is_not_gated_even_in_node_folder(self):
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('worker called AI')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'session_id': 'worker'}))
+        self.assertTrue(self.capture.coordinator(self.n, {'thread_id': 'host-coordinator'}))
+        self.assertFalse(self.capture.coordinator(self.n, {'session_id': ''}))
+
+    def test_structural_provenance_excludes_tools_meta_sidechains_and_senders(self):
+        records = [dict(self.records[0], **metadata) for metadata in (
+            {'isMeta': True}, {'isCompactSummary': True}, {'isSidechain': True},
+            {'promptSource': 'system'}, {'turnOrigin': 'task_notification'}, {'senderThreadId': 'worker'},
+            {'origin': 'system'}, {'sender': 'agent'})]
+        records.append({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': self.quote}]}})
+        for record in records:
+            with self.subTest(record=record):
+                self.assertIsNone(self.capture.operator_text(record))
+        self.assertEqual(self.capture.operator_text(self.records[0]), self.quote)
+        self.assertEqual(self.capture.operator_text(dict(self.records[0], promptSource='sdk', turnOrigin='sdk')), self.quote)
+
+    def test_second_stop_escapes_and_records_unconverted_gap_without_ai(self):
+        self.assertIn(self.quote, self.stop())
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('second stop called AI')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True}))
+        self.assertIn('second_stop_unconverted', (self.root / 'inbox.md').read_text())
+
+    def test_cursor_covers_multiple_new_messages_and_does_not_repeat_old_input(self):
+        self.assertIsNone(self.stop('one_off'))
+        self.message('Use green for this chart.')
+        self.message('How many rows?')
+        def classify(system, data, schema, **kw):
+            self.assertEqual([row['text'] for row in data], ['Use green for this chart.', 'How many rows?'])
+            return self.answer(data, 'one_off')
+        with mock.patch.object(self.capture, 'ai_json', side_effect=classify) as call:
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        call.assert_called_once()
+
+    def test_previous_head_rule_cannot_satisfy_new_turn(self):
+        self.commit_rule()
+        self.assertIsNone(self.stop('one_off'))
+        self.message(self.quote)
+        self.assertIn(self.quote, self.stop())
+
+    def test_bootstrap_starts_after_previous_completed_turn_and_codex_deduplicates(self):
+        self.records = [self.records[0], {'type': 'event_msg', 'payload': {'type': 'task_complete'}},
+                        {'type': 'event_msg', 'timestamp': '2020-01-01T00:00:00Z',
+                         'payload': {'type': 'user_message', 'message': 'How many rows?'}},
+                        {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                         'content': [{'type': 'input_text', 'text': 'How many rows?'}]}}]
+        self.path.write_text(''.join(json.dumps(r) + '\n' for r in self.records))
+        messages, _ = self.capture.snapshot(self.path, {})
+        self.assertEqual([r['text'] for r in messages], ['How many rows?'])
+
+    def test_hook_blocks_capture_before_relay_only_and_skips_notes_on_outage(self):
+        def run():
+            with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({**self.data, 'last_assistant_message': 'relay only'}))), \
+                    mock.patch.object(self.m, 'Instance', return_value=self.inst), \
+                    mock.patch.object(self.m, 'capture_hook_questions'), \
+                    mock.patch.object(self.m, 'notes_lag', side_effect=AssertionError('unexpected notes check')), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.m.hook_stop(argparse.Namespace(event='stop'))
+            return output.getvalue()
+        with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw: self.answer(data)):
+            self.assertIn(self.quote, run())
+        with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('timeout')):
+            # Add new input so the first block's persisted items are not the only work.
+            self.message('What changed?')
+            self.assertEqual(run(), '')
+
+    def test_ai_request_separates_cached_system_and_data_and_bounds_total_wait(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        request = client.json_request(self.capture.SYSTEM, [{'id': '0', 'text': self.quote}], self.capture.SCHEMA)
+        self.assertEqual(request['system'][0]['text'], self.capture.SYSTEM)
+        self.assertEqual(request['system'][0]['cache_control'], {'type': 'ephemeral'})
+        self.assertEqual(json.loads(request['messages'][0]['content']), [{'id': '0', 'text': self.quote}])
+        self.assertEqual(request['output_config']['format']['schema'], self.capture.SCHEMA)
+        with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'synthetic-secret'}), \
+                mock.patch.object(client.subprocess, 'run', side_effect=subprocess.TimeoutExpired('fixture', 20)) as call:
+            with self.assertRaises(client.AIUnavailable):
+                client.ai_json(self.capture.SYSTEM, [], self.capture.SCHEMA)
+        self.assertEqual(call.call_args.kwargs['timeout'], 20)
 
 
 class StopNoticeGuard(Scenario):

@@ -5,6 +5,16 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Capture coordinator standing instructions at stop
+
+Bound coordinator sessions now classify new operator messages with Haiku and
+block unconverted standing instructions until a same-turn rule commit cites
+the verbatim quote with a Gate reference or an explicit reason for no gate.
+Workers are excluded. Provider outages record an inbox gap and allow exit;
+invalid AI structure blocks, with the existing second-stop escape preserved.
+After upgrading, supply `ANTHROPIC_API_KEY` to the hook environment and reconcile
+instruction-capture gaps in the inbox. See [capture behavior and provenance](docs/instruction-capture.md).
+
 ## 2026-11-05: Require explicit contract classification
 
 Every newly registered contract declares `mode: timed`, `mode: paid` or
