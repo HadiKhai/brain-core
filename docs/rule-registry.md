@@ -35,10 +35,14 @@ and HTML comments do not supply metadata.
 `brain check` validates this registry and opens `SWEEP-<rule-id>` tasks with
 status `ready` and the verbatim rule text, once for each applicable node home.
 The first check opens sweeps for all previously unrecorded rules, including rules
-that predate installation. A validation error prevents sweep publication.
+that predate installation. Invalid rules keep diagnostics and remain unacknowledged;
+valid rules still open their sweeps. A task ownership collision stops publication.
 Unlike passive status/dashboard reads, **plain check can now write tasks**.
 It uses the instance writer lock and native task validation. It never contacts
 an AI provider or writes to a node's home repository.
+Frozen rehearsal read lanes validate without publishing sweeps. Ordinary checks
+release the writer lock before diagnostics and live probes; `--fix` retains its
+existing lock while applying repairs.
 
 The local checkpoint is `.brain/rule-registry.json`. Tasks are committed before
 their rule IDs are acknowledged. If the command stops before acknowledgment,

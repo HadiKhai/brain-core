@@ -1,6 +1,12 @@
 """Rule metadata is syntax; tests and nodes below are entirely fabricated."""
 import importlib
+import argparse
+import contextlib
+import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -93,12 +99,13 @@ class RuleRegistryParsing(unittest.TestCase):
                 '// test("commented test", () => {});\n'
                 'const example = `test("string example", () => {})`;\n'
                 'const pattern = /test("regex example", () => {})/;\n'
+                'matcher.test("member example", () => {});\n'
                 '/* it("block example", () => {}); */\n')
             for selector in ('keeps source evidence', "keeps 'quoted' evidence"):
                 self.assertEqual(self.m.gate_references('checks.test.ts::' + selector),
                                  [('checks.test.ts', selector)])
                 self.assertTrue(self.m._test_exists(home, 'checks.test.ts', selector, {}))
-            for selector in ('commented test', 'string example', 'regex example', 'block example', 'missing'):
+            for selector in ('commented test', 'string example', 'regex example', 'member example', 'block example', 'missing'):
                 self.assertFalse(self.m._test_exists(home, 'checks.test.ts', selector, {}))
 
     def test_real_size_registry_is_under_one_second(self):
@@ -147,6 +154,78 @@ class RuleRegistryChecks(Scenario):
         self.assertIn('R01: app: missing Gate test', self.b(root, 'check', ok=False))
         library.write_text(self.header + rule(applies='unknown'))
         self.assertIn('rule R01: Applies', self.b(root, 'check', ok=False))
+
+    def test_overlapping_instance_and_node_ids_fail_before_any_sweep_is_written(self):
+        root, library = self.fixture()
+        library.write_text(self.header + rule(applies='app'))
+        agents = root / 'nodes/app/AGENTS.md'
+        agents.write_text(agents.read_text() + '\n<!-- rule:R01 -->\n'
+                          '- Preserve node receipts. Gate: none (manual) Applies: app\n')
+        for _ in range(2):
+            output = self.b(root, 'check', ok=False)
+            self.assertIn('rule app:R01: sweep ID collision with R01 in app', output)
+            self.assertFalse((root / 'nodes/app/tasks/SWEEP-R01.md').exists())
+
+    def test_rehearsal_read_validates_without_sweeps_or_checkpoint(self):
+        root, library = self.fixture()
+        library.write_text(self.header + rule(applies='app'))
+        self.env['BRAIN_REHEARSAL_READ'] = '1'
+        self.assertIn('all checks pass', self.b(root, 'check'))
+        self.assertFalse((root / 'nodes/app/tasks/SWEEP-R01.md').exists())
+        self.assertFalse((root / '.brain/rule-registry.json').exists())
+        library.write_text(self.header + rule(gate=None, applies='app'))
+        self.assertIn('rule R01: missing or duplicate Gate:', self.b(root, 'check', ok=False))
+
+    def test_invalid_rule_keeps_its_gap_and_does_not_stop_other_rule_sweeps(self):
+        root, library = self.fixture()
+        library.write_text(self.header + rule(applies='app') + rule('R02', gate=None, applies='app'))
+        self.assertIn('rule R02: missing or duplicate Gate:', self.b(root, 'check', ok=False))
+        first = root / 'nodes/app/tasks/SWEEP-R01.md'
+        second = root / 'nodes/app/tasks/SWEEP-R02.md'
+        self.assertTrue(first.exists())
+        self.assertFalse(second.exists())
+        checkpoint = json.loads((root / '.brain/rule-registry.json').read_text())
+        self.assertEqual(checkpoint['rules'], [json.dumps([None, 'R01'])])
+        library.write_text(self.header + rule(applies='app') + rule('R02', applies='app'))
+        self.b(root, 'check')
+        self.assertTrue(second.exists())
+
+    def test_diagnostics_and_live_probes_are_unlocked_but_repairs_stay_locked(self):
+        root, _ = self.fixture()
+        registry = registry_module()
+        check = importlib.import_module(registry.__package__ + '.check')
+        inst = registry.instance.Instance(root)
+        for fix, live in ((False, False), (False, True), (True, False)):
+            with self.subTest(fix=fix, live=live):
+                calls = []
+                def diagnostics(_):
+                    calls.append(True)
+                    if fix:
+                        self.assertIsNotNone(registry.instance._LOCK['fh'])
+                    else:
+                        self.assertIsNone(registry.instance._LOCK['fh'])
+                        result = subprocess.run([sys.executable, '-c',
+                            'import fcntl,sys; f=open(sys.argv[1], "a+"); '
+                            'fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)', str(root / '.brain/lock')],
+                            capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    return [], [], ['facts'] if fix and len(calls) == 1 else []
+                def repair(*_):
+                    self.assertIsNotNone(registry.instance._LOCK['fh'])
+                    return []
+                def probe(*_, **__):
+                    self.assertIsNone(registry.instance._LOCK['fh'])
+                    return 200
+                with mock.patch.object(check._m_nodes, 'load', return_value=inst), \
+                        mock.patch.object(check, 'collect_problems', side_effect=diagnostics), \
+                        mock.patch.object(check, 'apply_fixes', side_effect=repair), \
+                        mock.patch.object(check._m_hosts, 'wake_target', return_value=({'id': 'root'}, 'http://127.0.0.1:1/')), \
+                        mock.patch.object(check._m_hosts, 'wake_disabled_notice', return_value=None), \
+                        mock.patch.object(check._m_hosts, 'wake_probe', side_effect=probe), \
+                        mock.patch.object(check._m_hosts, 'wake_read', return_value=None), \
+                        mock.patch.object(check._m_hosts, 'wake_directory', return_value=root / '.brain'), \
+                        contextlib.redirect_stdout(io.StringIO()), registry.instance.brain_lock(inst):
+                    check.cmd_check(argparse.Namespace(fix=fix, live=live))
 
     def test_new_rule_sweeps_only_applicable_homes_and_repeated_check_is_idempotent(self):
         root, library = self.fixture()

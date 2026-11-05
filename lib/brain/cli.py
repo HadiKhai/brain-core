@@ -206,7 +206,8 @@ def writes(a):
         return bool(getattr(a, "out", None) or getattr(a, "job", None) or
                     (name == "cmd_brief" and getattr(a, "branch", None)))  # Branch briefs also record replay inputs and acknowledge restarts.
     if name == "cmd_check":
-        return True  # new rules open durable sweep tasks, even without --fix
+        # Frozen rehearsal read lanes validate but must not publish sweeps.
+        return a.fix or os.environ.get('BRAIN_REHEARSAL_READ') != '1'
     if name == "cmd_jobs":
         return a.start or a.close or bool(getattr(a, "settled", False)) or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
             or bool(a.usage_file) or bool(getattr(a, 'rebind', None)) or bool(getattr(a, '_reconcile_landings', False))
@@ -775,7 +776,7 @@ def _main():
         opt("--global", action="store_true", dest="glob"), opt("--remove-global", action="store_true", dest="unglobal"),
         opt("targets", nargs="*", metavar="RUNTIME=FOLDER",
             help="with --global: the config folders that get this brain's pointer, e.g. claude=~/.claude-work"))
-    cmd("check", _Command("check", "cmd_check"), "verify what can be checked mechanically; --fix repairs the safe things",
+    cmd("check", _Command("check", "cmd_check"), "validate rules and open new-rule sweep tasks; --fix repairs safe problems",
         opt("--fix", action="store_true"),
         opt("--live", action="store_true", help="send real webhook probes; default check only reads cached results"))
     cmd("gate-lock", _Command("gate_lock", "cmd_gate_lock"), "serialize a command for one node",

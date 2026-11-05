@@ -381,13 +381,20 @@ def cmd_check(a):
 def _cmd_check(a):
     # Sweep publication owns its narrow writer section; the remaining global
     # diagnostics can inspect homes without holding the instance writer lock.
-    _m_instance.unlock()
+    if not a.fix:
+        _m_instance.unlock()
     inst = _m_nodes.load()
     from . import rule_registry
     try:
-        rule_registry.sync_sweeps(inst)
+        if not (os.environ.get('BRAIN_REHEARSAL_READ') == '1' and not a.fix):
+            rule_registry.sync_sweeps(inst)
     except (OSError, ValueError) as error:
         _m_common.die('rule registry: ' + str(error))
+    finally:
+        # The CLI's outer lock scope retains depth after unlock(); explicitly
+        # release the descriptor re-taken by the nested sweep writer as well.
+        if not a.fix:
+            _m_instance.unlock()
     from . import semantic as _m_semantic
     print(_m_semantic.semantic_mode(inst))
     problems, warnings, fixable = collect_problems(inst)

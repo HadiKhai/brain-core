@@ -213,6 +213,8 @@ def _javascript_tests(text):
     for i, token in enumerate(tokens):
         if token not in (('name', 'test'), ('name', 'it')):
             continue
+        if i and tokens[i - 1] == ('punct', '.'):
+            continue  # an arbitrary object's .test() is not a runner declaration
         end = i + 1
         # Test runner modifiers are identifiers, not inferred prose categories.
         while end + 1 < len(tokens) and tokens[end] == ('punct', '.') and tokens[end + 1][0] == 'name':
@@ -225,21 +227,28 @@ def _javascript_tests(text):
 
 
 def _test_exists(home, relative, selector, cache):
-    home = Path(home).resolve()
-    path = home / relative
     try:
-        resolved = path.resolve()
-        if home not in resolved.parents or not path.is_file():
-            return False
-        if resolved not in cache:
+        # One validation observes each source once. Repeated rule references do
+        # not re-resolve/stat the same file thousands of times; no cache survives
+        # this validation call.
+        key = ('source', str(home), relative)
+        if key not in cache:
+            root = Path(home).resolve()
+            path = root / relative
+            resolved = path.resolve()
+            cache[key] = None
+            if root not in resolved.parents or not path.is_file():
+                return False
             # Inspect declarations without importing or executing repository code.
             if path.suffix == '.py':
-                cache[resolved] = ast.parse(path.read_bytes(), filename=relative)
+                cache[key] = ast.parse(path.read_bytes(), filename=relative)
             elif path.suffix in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'):
-                cache[resolved] = _javascript_tests(path.read_text())
+                cache[key] = _javascript_tests(path.read_text())
             else:
                 return False
-        tree = cache[resolved]
+        tree = cache[key]
+        if tree is None:
+            return False
         if isinstance(tree, set):
             return selector in tree
         parts = selector.split('::')
@@ -283,25 +292,37 @@ def read_registry(inst):
     return rules, nodes
 
 
+def _validated_rules(rules, nodes):
+    problems, cache, sweep_ids, invalid = [], {}, {}, set()
+    for index, rule in enumerate(rules):
+        label = (rule['node_id'] + ':' if rule['node_id'] else '') + rule['id']
+        try:
+            selected = targets(rule, nodes)
+            refs = gate_references(rule['gate'])
+            for node in selected:
+                task_key = (node['id'], rule['id'])
+                if task_key in sweep_ids:
+                    other, other_label = sweep_ids[task_key]
+                    problems.append(f"rule {label}: sweep ID collision with {other_label} in {node['id']}")
+                    invalid.update((index, other))
+                sweep_ids[task_key] = (index, label)
+                for path, test in refs:
+                    if not _test_exists(node['home_path'], path, test, cache):
+                        problems.append(f"rule {label}: {node['id']}: missing Gate test {path}::{test}")
+                        invalid.add(index)
+        except ValueError as error:
+            problems.append(f'rule {label}: {error}')
+            invalid.add(index)
+    return [rule for index, rule in enumerate(rules) if index not in invalid], problems
+
+
 def validate_registry(inst, registry=None):
     """Return diagnostics with rule IDs. Never write state or open tasks."""
     try:
         rules, nodes = registry if registry is not None else read_registry(inst)
     except (OSError, ValueError) as error:
         return ['rule registry: ' + str(error)]
-    problems, cache = [], {}
-    for rule in rules:
-        label = (rule['node_id'] + ':' if rule['node_id'] else '') + rule['id']
-        try:
-            selected = targets(rule, nodes)
-            refs = gate_references(rule['gate'])
-            for node in selected:
-                for path, test in refs:
-                    if not _test_exists(node['home_path'], path, test, cache):
-                        problems.append(f"rule {label}: {node['id']}: missing Gate test {path}::{test}")
-        except ValueError as error:
-            problems.append(f'rule {label}: {error}')
-    return problems
+    return _validated_rules(rules, nodes)[1]
 
 
 def sync_sweeps(inst):
@@ -314,10 +335,8 @@ def sync_sweeps(inst):
     with instance.brain_lock(inst):
         current = instance.Instance(inst.root)
         registry = read_registry(current)
-        problems = validate_registry(current, registry)
-        if problems:
-            return problems
         rules, nodes = registry
+        valid, problems = _validated_rules(rules, nodes)
         path = inst.root / '.brain/rule-registry.json'
         common.safe_target(path)
         saved = json.loads(path.read_text()) if path.exists() else {'version': STATE_VERSION, 'rules': []}
@@ -328,8 +347,10 @@ def sync_sweeps(inst):
         known, keys, changed, task_paths = set(saved['rules']), [], False, []
         for rule in rules:
             key = json.dumps([rule['node_id'], rule['id']])
-            keys.append(key)
             if key in known:
+                keys.append(key)
+                continue
+            if rule not in valid:
                 continue
             for node in targets(rule, nodes):
                 ident = 'SWEEP-' + rule['id']
@@ -346,9 +367,10 @@ def sync_sweeps(inst):
                     'provenance': provenance}, create=True)
                 tasks.save_record(node, row)
                 changed = True
+            keys.append(key)
         # Commit tasks before acknowledging rules. A retry also commits tasks
         # already persisted by a previous interrupted attempt.
         if changed or set(keys) != known:
             current.commit(task_paths, 'check: open rule sweep tasks')
             common.atomic_write(path, json.dumps({'version': STATE_VERSION, 'rules': keys}, indent=2) + '\n', private=True)
-        return []
+        return problems
