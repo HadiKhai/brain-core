@@ -195,6 +195,16 @@ def classifications(messages):
         value, usage = ai_json(SYSTEM, data, SCHEMA, model=MODEL)
     except AIResponseInvalid as error:
         raise CaptureRejected(str(error)) from None
+    try:
+        return validated_classifications(messages, value), usage
+    except CaptureRejected:
+        if isinstance(usage, dict) and usage.get('transport') == 'claude_cli':
+            raise AIUnavailable('cli_invalid_response') from None
+        raise
+
+
+def validated_classifications(messages, value):
+    """Structural checks shared by both transports; never infer message meaning."""
     if not isinstance(value, dict) or set(value) != {'messages'} or not isinstance(value['messages'], list):
         raise CaptureRejected('capture response must contain messages')
     expected, found, output = {m['id']: m for m in messages}, set(), []
@@ -213,7 +223,7 @@ def classifications(messages):
             output.append(dict(item, at=message['at']))
     if found != set(expected):
         raise CaptureRejected('capture response omitted an operator message')
-    return output, usage
+    return output
 
 
 def gate_line(text):

@@ -5,6 +5,15 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Capture instructions through a Claude subscription
+
+When no API key is configured, instruction capture uses the logged-in `claude`
+CLI with isolated settings, no tools or session persistence, and a 20-second
+deadline. A child env guard prevents recursive stop-hook capture. CLI auth,
+timeout and invalid-output failures record a local inbox gap and allow exit.
+After upgrading, log into a CLI supporting the documented isolation flags;
+an existing `ANTHROPIC_API_KEY` still selects the unchanged HTTP transport.
+
 ## 2026-11-05: Diagnose check problems before sweep writes
 
 Plain check reports outbound links before any sweep publication and leaves

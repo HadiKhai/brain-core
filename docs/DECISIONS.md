@@ -1,5 +1,16 @@
 # Code decisions
 
+## Subscription transport for instruction capture
+
+An API key selects the existing isolated stdlib HTTP client. Without one,
+capture invokes the logged-in Claude CLI with structured output and a separate
+system prompt. CLI safe mode, empty setting sources and MCP configuration,
+disabled tools and a clean temporary cwd prevent ambient project context from
+entering the request while preserving subscription authentication. A minimal
+environment and an early stop-hook child guard prevent recursive capture.
+Both transports keep a 20-second deadline. Invalid CLI output is a visible gap
+that allows exit; the existing HTTP structural-refusal behavior is retained.
+
 ## Explicit contract mode and checked arithmetic
 
 Every new contract declares exactly one `mode: timed`, `mode: paid` or

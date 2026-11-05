@@ -1689,6 +1689,8 @@ def cmd_hook(a):
 
 
 def hook_stop(a):
+    if os.environ.get('BRAIN_CAPTURE_CHILD') == '1':
+        return
     try:
         data = json.loads(sys.stdin.read() or "{}")
     except ValueError:

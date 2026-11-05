@@ -4,7 +4,7 @@ The stop hook checks only a node's bound `coordinator` or an exact entry in its
 `coordinator_sessions`. Workers in the same folder are excluded. It runs before
 the `relay only` shortcut and preserves the existing second-stop escape.
 
-Configure `ANTHROPIC_API_KEY` in the hook process environment. The stdlib client
+With `ANTHROPIC_API_KEY` in the hook environment, the stdlib client
 calls `claude-haiku-5-5` once for the batch, with instructions in a system block
 marked `cache_control: ephemeral`, and message data alone in the user payload.
 Provider cache eligibility depends on the provider's minimum prefix size.
@@ -12,6 +12,19 @@ No implicit retry or alternative model is used. The entire provider exchange,
 including DNS and response reads, has a 20-second deadline.
 The child uses isolated Python imports, a fixed module directory and an environment
 containing only the API key, so project files cannot shadow stdlib imports.
+
+Without an API key, install and log into the `claude` CLI with a subscription.
+The client invokes `claude -p --model claude-haiku-5-5` with a separate
+`--system-prompt`, `--json-schema` and JSON output; message data travels only on
+stdin. It uses `--safe-mode`, empty `--setting-sources`, explicit disabled-hook
+and memory settings, an empty strict MCP configuration, disabled slash commands
+and Chrome, no tools and no session persistence. It never uses `--bare`, which
+disables subscription authentication. The CLI must support these flags.
+The child runs in a new temporary directory under `/tmp`, outside the project
+and auth home, with only HOME and PATH inherited. It sets
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `BRAIN_CAPTURE_CHILD=1`;
+the latter makes a recursively invoked stop hook return before reading stdin
+or looking for an instance. The same 20-second deadline covers CLI execution.
 
 The AI returns one or more `standing_instruction`, `one_off`, `question` or
 `other` items per message. Code checks complete message coverage, types, enums
@@ -46,9 +59,12 @@ Uncommitted edits and old commits do not satisfy capture.
 Provider unavailability records a deduplicated JSON `instruction-capture-gap`
 entry in the node inbox and allows capture to complete. Existing notice, upgrade
 and note guards still run. Gap lines are excluded from note-event fingerprints;
-a missing key is deduplicated per node/session. A busy inbox uses the existing
+legacy missing-key gaps are deduplicated per node/session. A busy inbox uses the existing
 durable hook inbox queue. The skipped batch is consumed after its gap is recorded.
-Invalid classification structure blocks once and is retained without paid retries.
+On the HTTP transport, invalid classification structure blocks once and is
+retained without paid retries. CLI timeout, auth failure, malformed JSON,
+missing structured output or invalid classification structure instead record
+a gap and allow capture to complete, without a retry or raw error body.
 The second stop rechecks any newly committed rules, records only remaining
 unconverted or unclassified work as a gap, and always allows exit, even with bad
 state or unsafe links. If an inbox cannot safely be written, structured stderr

@@ -1231,6 +1231,15 @@ class QuestionWake(Scenario):
 class StopHook(Scenario):
     fixture_init_in_process = True
 
+    def test_capture_child_guard_returns_before_input_or_instance_lookup(self):
+        module = core_loader.SourceFileLoader('capture_child_hook', str(CORE / 'bin/brain')).load_module()
+        with mock.patch.dict(os.environ, {'BRAIN_CAPTURE_CHILD': '1'}), \
+                mock.patch.object(sys, 'stdin') as stdin, \
+                mock.patch.object(module, 'root_for_path', side_effect=AssertionError('child found instance')), \
+                mock.patch.object(module, 'capture_stop', side_effect=AssertionError('child classified')):
+            module.hook_stop(argparse.Namespace(event='stop'))
+        stdin.read.assert_not_called()
+
     def test_hook_log_append_tightens_existing_mode_and_preserves_contents(self):
         r = self.init('alice')
         time.sleep(1.1)

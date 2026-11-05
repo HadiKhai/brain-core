@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from unittest import mock
 
 import core_loader
@@ -428,6 +429,151 @@ class InstructionCapture(Scenario):
         self.assertEqual(call.call_args.args[0][1:3], ['-I', '-c'])
         self.assertEqual(call.call_args.kwargs['cwd'], CORE / 'lib/brain')
         self.assertEqual(call.call_args.kwargs['env'], {'ANTHROPIC_API_KEY': 'synthetic-secret'})
+
+    def cli_result(self, value=None, **overrides):
+        value = value if value is not None else self.answer([{'id': '0', 'text': self.quote}], 'other')[0]
+        return subprocess.CompletedProcess(['claude'], 0, json.dumps(dict(
+            subtype='success', is_error=False, structured_output=value, usage={'output_tokens': 12},
+            **overrides)), '')
+
+    def test_cli_argv_stdin_environment_and_disposable_cwd(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        payload = [{'id': '0', 'text': self.quote}]
+        def run(argv, **kw):
+            self.assertEqual(argv, ['claude', '-p', '--model', 'claude-haiku-5-5',
+                '--system-prompt', self.capture.SYSTEM, '--json-schema', json.dumps(self.capture.SCHEMA),
+                '--output-format', 'json', '--tools', '', '--no-session-persistence',
+                '--setting-sources', '', '--safe-mode', '--settings',
+                json.dumps({'disableAllHooks': True, 'autoMemoryEnabled': False}),
+                '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                '--disable-slash-commands', '--no-chrome'])
+            self.assertNotIn('--bare', argv)
+            self.assertNotIn(self.quote, argv)
+            self.assertEqual(json.loads(kw['input']), payload)
+            self.assertNotIn(self.capture.SYSTEM, kw['input'])
+            cwd = client.Path(kw['cwd']).resolve()
+            self.assertTrue(cwd.is_dir())
+            self.assertNotIn(client.Path(os.environ['HOME']).resolve(), cwd.parents)
+            self.assertNotIn(self.root.resolve(), cwd.parents)
+            self.assertEqual(kw['timeout'], 20)
+            self.assertEqual(kw['env'], {'HOME': os.environ['HOME'], 'PATH': os.environ['PATH'],
+                'BRAIN_CAPTURE_CHILD': '1', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1'})
+            self.cli_cwd = cwd
+            return self.cli_result()
+        with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': '', 'CLAUDECODE': 'parent',
+                                         'CLAUDE_CONFIG_DIR': '/synthetic/foreign', 'TMPDIR': str(self.root)}), \
+                mock.patch.object(client.subprocess, 'run', side_effect=run):
+            value, usage = client.ai_json(self.capture.SYSTEM, payload, self.capture.SCHEMA)
+        self.assertEqual(value, json.loads(self.cli_result().stdout)['structured_output'])
+        self.assertEqual(usage['transport'], 'claude_cli')
+        self.assertEqual(usage['usage'], {'output_tokens': 12})
+        self.assertGreaterEqual(usage['latency_seconds'], 0)
+        self.assertFalse(self.cli_cwd.exists())
+
+    def test_cli_child_reenters_hook_without_recursion(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        stub_dir = self.tmp / 'stub-bin'
+        stub_dir.mkdir()
+        marker = self.tmp / 'classified'
+        # The stub launches the actual CLI dispatch. Its instrumented capture
+        # would run on this bound session if the env guard were absent.
+        hook = textwrap.dedent('''
+            import sys
+            sys.path.insert(0, LIB)
+            from brain import cli, instruction_capture
+            def classified(*args):
+                from pathlib import Path
+                Path(MARKER).write_text('classified')
+                return None
+            instruction_capture.capture_stop = classified
+            sys.argv = ['brain', 'hook', 'stop']
+            cli.main()
+        ''').replace('LIB', repr(str(CORE / 'lib'))).replace('MARKER', repr(str(marker)))
+        stub = stub_dir / 'claude'
+        stub.write_text('#!' + sys.executable + '\n' + textwrap.dedent('''
+            import json, os, subprocess, sys
+            assert os.environ['BRAIN_CAPTURE_CHILD'] == '1'
+            payload = json.loads(sys.stdin.read())
+            result = subprocess.run([sys.executable, '-B', '-c', HOOK], input=DATA,
+                env=dict(os.environ, BRAIN_ROOT=__ROOT__, BRAIN_NO_REEXEC='1'),
+                text=True, capture_output=True, timeout=5)
+            assert result.returncode == 0, result.stderr
+            assert result.stdout == '', result.stdout
+            print(json.dumps({'subtype': 'success', 'is_error': False,
+                'structured_output': {'messages': [{'id': row['id'], 'items': [
+                    {'kind': 'other', 'quote': row['text']}]} for row in payload]}}))
+        ''').replace('HOOK', repr(hook)).replace('DATA', repr(json.dumps(self.data)))
+            .replace('__ROOT__', repr(str(self.root))))
+        stub.chmod(0o700)
+        with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': '',
+                'PATH': str(stub_dir) + os.pathsep + os.environ['PATH']}):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        self.assertFalse(marker.exists(), 'guarded child classified recursively')
+        # Negative control: the same real hook dispatch reaches capture without
+        # the guard, so the guarded assertion cannot pass merely on bad routing.
+        env = dict(self.env, BRAIN_ROOT=str(self.root), BRAIN_NO_REEXEC='1')
+        env.pop('BRAIN_CAPTURE_CHILD', None)
+        result = subprocess.run([sys.executable, '-B', '-c', hook], input=json.dumps(self.data),
+                                env=env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(marker.exists(), 'negative control never reached capture')
+
+    def test_cli_failures_record_gap_and_allow_exit_without_private_output(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        failures = [
+            ('timeout', subprocess.TimeoutExpired('claude', 20)),
+            ('transport', FileNotFoundError('claude')),
+            ('provider_or_network', subprocess.CompletedProcess(['claude'], 1, '', 'private auth error')),
+            ('provider_or_network', subprocess.CompletedProcess(['claude'], 0,
+                json.dumps({'subtype': 'success', 'is_error': True, 'error': self.quote}), '')),
+            ('cli_invalid_response', subprocess.CompletedProcess(['claude'], 0, 'private invalid output', '')),
+            ('cli_invalid_response', subprocess.CompletedProcess(['claude'], 0, '[]', '')),
+            ('cli_invalid_response', self.cli_result({'messages': []})),
+            ('cli_invalid_response', self.cli_result({'messages': [{'id': '0', 'items': [
+                {'kind': 'unknown', 'quote': self.quote}]}]})),
+            ('cli_invalid_response', self.cli_result({'messages': [{'id': '0', 'items': [
+                {'kind': 'other', 'quote': 'Invented quote.'}]}]})),
+        ]
+        original_run = client.subprocess.run
+        for index, (code, failure) in enumerate(failures):
+            with self.subTest(code=code, index=index):
+                self.data['session_id'] = 'failure-' + str(index)
+                self.n['local']['coordinator_sessions'].append(self.data['session_id'])
+                def run(argv, **kw):
+                    if argv[0] != 'claude':
+                        return original_run(argv, **kw)
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+                with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': ''}), \
+                        mock.patch.object(client.subprocess, 'run', side_effect=run):
+                    self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+                inbox = (self.root / 'inbox.md').read_text()
+                self.assertIn('"code": "' + code + '"', inbox)
+                self.assertNotIn(self.quote, inbox)
+                self.assertNotIn('private', inbox)
+                state = self.root / '.brain/instruction-capture' / (self.capture.capture_key(self.n, self.data) + '.json')
+                self.assertNotIn('rejected', json.loads(state.read_text()))
+
+    def test_api_key_keeps_http_success_and_invalid_response_behavior(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        value = self.answer([{'id': '0', 'text': self.quote}], 'other')[0]
+        response = {'stop_reason': 'end_turn', 'model': 'fixture-model', 'usage': {'output_tokens': 8},
+                    'content': [{'type': 'text', 'text': json.dumps(value)}]}
+        with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'synthetic-secret'}), \
+                mock.patch.object(client.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                    ['python'], 0, json.dumps(response), '')) as call:
+            parsed, usage = client.ai_json(self.capture.SYSTEM, [], self.capture.SCHEMA)
+        self.assertEqual(parsed, value)
+        self.assertEqual(usage['model'], 'fixture-model')
+        self.assertNotIn('transport', usage)
+        self.assertEqual(call.call_args.args[0][0:3], [sys.executable, '-I', '-c'])
+        self.assertEqual(call.call_args.kwargs['env'], {'ANTHROPIC_API_KEY': 'synthetic-secret'})
+        with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'synthetic-secret'}), \
+                mock.patch.object(client.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                    ['python'], 0, 'invalid', '')):
+            with self.assertRaises(client.AIResponseInvalid):
+                client.ai_json(self.capture.SYSTEM, [], self.capture.SCHEMA)
 
 
 class StopNoticeGuard(Scenario):
