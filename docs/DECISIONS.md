@@ -1,27 +1,18 @@
 # Code decisions
 
-## Declared parallel plans and isolated lane execution
+## Explicit concurrency and checked contract arithmetic
 
-Contracts containing a time target, time budget or paid run declare concurrency
-and calls times average duration divided by concurrency. A shared pure validator
-checks the divisor and total with half a displayed unit of rounding tolerance.
-Explicit concurrency one requires a serial reason. New native jobs carry a
-policy marker; unmarked existing open jobs keep their old launch contracts.
-Registering any new contract checks the new policy.
-
-Independent verify lanes run in separate interpreters so lock state and native
-admission records cannot leak between concurrently running lanes. A lane's
-optional `workers` is an owner declaration, like `BRAIN_HEAVY_WORKERS`: its command
-must honor the exported grant. Unknown shell worker counts reserve the full
-budget and execute exclusively, with that reason in scheduler code. Dependencies
-must pass before a lane runs or reuses prior evidence. Explicit `serial_reason`
-also makes a lane exclusive. Cleanup shares the resource lease and waits for all
-lane children to exit. Cheap checks remain a prerequisite of full admission.
-The parent copies its native queue lease context into each scheduling thread,
-records each gated helper before sending its payload, and carries the lease FD
-through the actual verify command. Cancellation stops and joins all active
-helpers before shared cleanup. Cleanup is intentionally once per shared node
-resource lease, including exclusive lanes; every cleanup action is attempted.
+Contracts containing time or cost language declare concurrency and calls times
+average duration divided by concurrency. A shared pure validator checks the
+divisor and total with half a displayed unit of rounding tolerance. Unit words,
+compact numeric durations and currency/cost terms trigger the check without
+trying to infer whether the prose is a forecast or a historical reference.
+Ambiguity fails closed. Explicit concurrency one requires a serial reason.
+New native jobs carry a policy marker; unmarked existing open jobs keep their
+old launch contracts. Registering any new contract checks the new policy.
+Task text can inherit a valid contract's declarations without creating false
+duplicates, while conflicting arithmetic or duplicate declarations within one
+source are refused.
 
 ## Queue batches select one immutable FIFO prefix
 

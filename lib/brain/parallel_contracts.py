@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 
 EXAMPLE = 'concurrency: 8\nsum: 40 x 6 s / 8 = 30 s'
 NUMBER = r'(?:[0-9]{1,12}(?:\.[0-9]{1,9})?)'
-UNIT = r'(?:s|sec(?:ond)?s?|m|min(?:ute)?s?|h|hours?)'
+UNIT = r'(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)'
 
 
 def seconds(number, unit):
@@ -25,11 +25,12 @@ def parallel_problems(text, defaults=''):
         fallback.setdefault(name.lower(), []).append(value.strip())
     for name, values in fallback.items():
         fields.setdefault(name, values)
-    timed = re.search(r'\b(?:ETA|deadline|time[ -]?(?:target|box|limit))\b|\btarget[ \t]*:|\b(?:by|before|at)\s+[0-9]{1,2}:[0-9]{2}\b', text, re.I)
-    duration = re.search(r'(?<![\w.])' + NUMBER + r'\s*(?:' + UNIT + r'|days?|weeks?)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|half|an?)\s+(?:seconds?|minutes?|hours?|days?|weeks?)\b', text, re.I)
-    currency = r'(?:USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?)'
-    paid = re.search(r'\bpaid\b|\b' + currency + r'\s*' + NUMBER + r'|(?<![\w.])' + NUMBER
-                     + r'\s*' + currency + r'\b|[$€£¥]\s*' + NUMBER, text, re.I)
+    # Presence of a unit is enough: don't guess whether a number/phrase is
+    # historical, approximate, hyphenated or spelled out. Ambiguity fails closed.
+    timed = re.search(r'\b(?:ETA|deadline|time[ _-]?(?:target|box|limit|budget))\b|\b(?:target|budget|forecast|estimate)[ \t]*:|\b(?:by|before|at)\s+[0-9]{1,2}:[0-9]{2}\b', text, re.I)
+    duration = re.search(r'\b(?:ms|msecs?|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|months?|years?)\b|(?<![\w.])'
+                         + NUMBER + r'[-\s]*(?:' + UNIT + r'|days?|weeks?|months?|years?)(?=\d|\b)', text, re.I)
+    paid = re.search(r'\b(?:paid|cost|spend|payment|price|USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?)\b|[$€£¥]', text, re.I)
     if not fields and not (timed or duration or paid):
         return []
     errors = []

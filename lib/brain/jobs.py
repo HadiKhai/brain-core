@@ -855,7 +855,7 @@ def validate_job_parallel(n, row, task=''):
         path = contract_file(n, row) if row else None
         text = path.read_text() if path and path.is_file() else ''
         problems = parallel_problems(text)
-        if task:
+        if task and not problems:
             problems += parallel_problems(task, defaults=text)
         if problems:
             _m_common.die('contract: ' + '; '.join(problems))
