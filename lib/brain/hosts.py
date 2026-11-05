@@ -1575,9 +1575,9 @@ def hook_notice_unread(path, last_message=None):
                        for value in identifiers):
                     # This call follows the notice and names its output or task exactly.
                     entry[1] = True
-    if isinstance(last_message, str):
+    if isinstance(last_message, str) and last_message.strip():
         final_text = last_message
-    return bool(notices) and (bool(re.fullmatch(r"no response requested[\s.!?,;:…]*", final_text.strip(), re.I))
+    return bool(notices) and (bool(re.fullmatch(r"no response requested[^\w]*", final_text.strip(), re.I))
                               or any(not read for identifiers, read in notices))
 
 

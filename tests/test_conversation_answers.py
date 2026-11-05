@@ -143,7 +143,8 @@ class StopNoticeGuard(Scenario):
         return self.m.hook_notice_unread(self.path, last_message)
 
     def test_notice_no_response_requested_blocks_even_after_read(self):
-        for text in ('No response requested', '  NO RESPONSE REQUESTED.  ', 'No response requested!'):
+        for text in ('No response requested', '  NO RESPONSE REQUESTED.  ', 'No response requested!',
+                     'No response requested—'):
             with self.subTest(text=text):
                 self.assertTrue(self.unread(self.notice, self.tool(), self.assistant(text)))
         self.assertTrue(self.unread(self.notice, self.tool(), last_message='No response requested.'))
