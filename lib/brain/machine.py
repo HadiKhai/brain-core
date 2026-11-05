@@ -727,8 +727,7 @@ def machine_finish_intent(inst, token, error=None):
                     row['finalizing'] = True
                     # Success is provisional until every cleanup action finishes.
                     row['terminal_intent'] = ({'outcome': outcome, 'reason': reason,
-                                              'exit_code': getattr(token, 'exit_code', 'unknown')
-                                              if error is not None else machine_exit_code(token.result)}
+                                              'exit_code': getattr(token, 'exit_code', 'unknown')}
                                               if outcome != 'success' else None)
             return
         except (OSError, ValueError):
@@ -758,8 +757,7 @@ def machine_terminal(inst, token, error=None, result=0):
     with machine_hold_store(inst) as data:
         row = data.get('waits', {}).get(token)
         if row is not None:
-            code = (getattr(token, 'exit_code', 'unknown') if error is not None
-                    else machine_exit_code(result))
+            code = getattr(token, 'exit_code', 'unknown')
             if machine_terminal_row(row, token.clock.time(), outcome, reason, code):
                 if getattr(token, 'cleanup_errors', None):
                     row['cleanup_errors'] = list(token.cleanup_errors)

@@ -2668,6 +2668,19 @@ class TerminalProducer(Scenario):
                          (3, str(path), str(path)))
         self.assertEqual(path.read_bytes(), b'outerr')
 
+    def test_post_spawn_wrapper_error_has_no_invented_process_exit_status(self):
+        marker = self.tmp / 'must-not-execute'
+        with mock.patch.object(self.m, 'machine_heavy_publish', side_effect=OSError('fixture publication error')), \
+                mock.patch.object(self.m, 'request_wake', return_value=True):
+            result = self.m.machine_execute([sys.executable, '-c',
+                'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()'],
+                self.inst, 'root', 'sample wrapper error')
+        self.assertEqual(result, 125)
+        self.assertFalse(marker.exists())
+        row, = self.waits().values()
+        self.assertEqual(row['exit_code'], 'unknown')
+        self.assertEqual(row['outcome'], 'failed')  # wrapper failure is still retained
+
     def test_open_descriptor_needs_matching_path_and_terminal_evidence_is_immutable(self):
         path = self.tmp / 'stream.log'
         with path.open('wb') as stream:
@@ -2916,6 +2929,7 @@ class TerminalProducer(Scenario):
         self.assertEqual(inbox.read_bytes(), before)
         row, = self.waits().values()
         self.assertEqual(row['outcome'], 'success')
+        self.assertEqual(row['exit_code'], 'unknown')  # admission observed no subprocess exit
         self.assertTrue(row['notified_completed'])
 
     def test_launch_failure_keeps_original_cause_once_and_retries_wake(self):
@@ -2972,6 +2986,7 @@ class TerminalProducer(Scenario):
         with mock.patch.object(self.m, 'request_wake', return_value=True) as wake:
             with self.m.machine_run('heavy', self.inst, 'root', clock=self.clock) as token:
                 token.result = 7
+                token.exit_code = 7  # this fixture explicitly supplies an observed status
             self.m.machine_terminal(self.inst, token, result=0)
             self.m.machine_wait_notices(self.inst, 100010.0)
         row = self.waits()[token]
