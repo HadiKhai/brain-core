@@ -13,6 +13,10 @@ old launch contracts. Registering any new contract checks the new policy.
 Task text can inherit a valid contract's declarations without creating false
 duplicates, while conflicting arithmetic or duplicate declarations within one
 source are refused.
+The rounding boundary is inclusive. Size-only file/line/token/byte counts are
+not timing declarations; ambiguous numeric units still require a plan. A sum's
+optional label is limited to `per round`, `per lane round`, `total` or `overall`,
+so trailing prose cannot add an unchecked duration.
 
 ## Queue batches select one immutable FIFO prefix
 

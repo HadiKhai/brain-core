@@ -28,9 +28,12 @@ def parallel_problems(text, defaults=''):
         fields.setdefault(name, values)
     # Presence of a unit is enough: don't guess whether a number/phrase is
     # historical, approximate, hyphenated or spelled out. Ambiguity fails closed.
-    timed = re.search(r'\b(?:ETA|deadline|time[ _-]?(?:target|box|limit|budget))\b|\b(?:target|budget|forecast|estimate)[ \t]*:|\b(?:by|before|at)\s+[0-9]{1,2}:[0-9]{2}\b', text, re.I)
-    duration = re.search(r'\b(?:ms|msecs?|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|fortnights?|months?|years?)\b|(?<![\w.])[0-9]+(?:\.[0-9]+)?[-\s]*[A-Za-zµμ][A-Za-z0-9µμ]*', text, re.I)
-    paid = (re.search(r'\b(?:paid|cost|spend|payment|price|USD|EUR|GBP|CAD|AUD|JPY|dollars?|euros?|pounds?)\b', text, re.I)
+    timed = re.search(r'\b(?:ETA|deadline|time[ _-]?(?:target|box|limit|budget)|tomorrow|tonight|today|EOD|noon|midnight|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b|\b(?:target|budget|forecast|estimate)[ \t]*:|\b(?:until|till|by|before|at)\s+[0-9]{1,2}:[0-9]{2}\b', text, re.I)
+    size_units = {'file', 'files', 'line', 'lines', 'token', 'tokens', 'byte', 'bytes'}
+    amounts = re.findall(r'(?<![\w.])[0-9]+(?:\.[0-9]+)?[-\s]*([A-Za-zµμ][A-Za-z0-9µμ]*)', text, re.I)
+    duration = (re.search(r'\b(?:ms|msecs?|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|fortnights?|months?|years?)\b', text, re.I)
+                or any(unit.casefold() not in size_units for unit in amounts))
+    paid = (re.search(r'\b(?:paid|pay(?:\b|ment|ing|s\b|able|roll|ee|out)|cost|spen[dt]|pric|bill|fees?\b|charg|budget|cents?\b|bucks?\b|quid\b|USD|EUR|GBP|CAD|AUD|JPY|dollars?\b|euros?\b|pounds?\b)', text, re.I)
             or any(unicodedata.category(char) == 'Sc' for char in text))
     if not fields and not (timed or duration or paid):
         return []
@@ -51,7 +54,7 @@ def parallel_problems(text, defaults=''):
     if len(sums) == 1:
         pattern = (r'(' + NUMBER + r')\s*(?:[A-Za-z][A-Za-z _-]*\s+)?[x×*]\s*(' + NUMBER + r')\s*('
                    + UNIT + r')\s*/\s*([1-9][0-9]{0,11})\s*=\s*(' + NUMBER + r')\s*(' + UNIT
-                   + r')(?:\s+[A-Za-z][A-Za-z _.-]*)?')
+                   + r')(?:[ \t]+(?:per (?:lane )?round|total|overall))?')
         match = re.fullmatch(pattern, sums[0], re.I) if len(sums[0]) <= 512 else None
         if not match:
             error('sum: must state calls x seconds / concurrency = total')

@@ -147,13 +147,15 @@ def import_brief(a):
     inst = _m_instance.Instance(_m_nodes.find_root())
     n = inst.node(a.id)
     task = Path(a.task_file).read_text() if a.task_file else (a.task or '')
-    _m_jobs.validate_job_parallel(n, None, task)
     if a.branch:
         _m_common.die("--import studies the bound home; omit --branch")
     if not n["external"] or not n["home_path"] or not _m_nodes.repo_root(n["home_path"]):
         _m_common.die("--import needs an external git home on this machine")
     home = n["home_path"]
     head = _m_common.git("rev-parse", "--verify", "-q", "HEAD", cwd=home).stdout.strip() or "unborn"
+    branch = import_job_id(home)
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
+    _m_jobs.validate_job_parallel(n, row, task)
     runtime, usage = _m_knowledge.worker_route(inst, n, a, extra=[Path(a.out).expanduser()] if a.out else [])
     out = [f"Role: import worker for node `{n['id']}` ({n['fm'].get('title', '')}).",
            f"Run in: {n['dir']}  ·  runtime: {runtime}  ·  class: {a.job_class}" + (f"  ·  model: {a.model}" if a.model else ""),
@@ -187,8 +189,6 @@ def import_brief(a):
     if task:
         out += [task, ""]
     out += peer_lines(a) + _m_knowledge.limits_lines(n)
-    branch = import_job_id(home)
-    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     if not row:
         out += [f"Before launching, the coordinator must run `brain jobs {shlex.quote(n['id'])} "
                 f"--branch {shlex.quote(branch)} --start` to record this study.", ""]
@@ -257,7 +257,7 @@ def cmd_brief(a):
     if n["external"] and not (n["home_path"] and n["home_path"].exists()):
         _m_common.die(f"{n['id']}'s home isn't on this machine (brain set {n['id']} home=<path>): a worker can't run there, "
             "and never in the instance instead")
-    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch) if w else None
+    row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], a.branch) if a.branch else None
     signal = _m_jobs.read_handback(n, row) if row else None
     saved = saved_brief_inputs(n, row)
     reuse_inputs = w and a.task_file is None and a.task is None and a.context_file is None
