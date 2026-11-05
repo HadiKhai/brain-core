@@ -137,6 +137,7 @@ class InstructionCapture(Scenario):
         self.inst = self.m.Instance(self.root)
         self.n = self.inst.node('root')
         self.n['local'].update(coordinator='host-coordinator', coordinator_sessions=['runtime-coordinator'])
+        self.inst.save_local()
         self.capture = self.m._owners['capture_stop']
         self.path = self.tmp / 'capture.jsonl'
         self.quote = 'Always preserve original evidence.'
@@ -333,7 +334,6 @@ class InstructionCapture(Scenario):
     def test_hook_joins_capture_and_notice_and_preserves_notice_guard_on_outage(self):
         def run():
             with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(self.data))), \
-                    mock.patch.object(self.m, 'Instance', return_value=self.inst), \
                     mock.patch.object(self.m, 'capture_hook_questions'), \
                     mock.patch.object(self.m, 'hook_notice_unread', return_value=True) as notice, \
                     contextlib.redirect_stdout(io.StringIO()) as output:
@@ -400,7 +400,6 @@ class InstructionCapture(Scenario):
     def test_hook_blocks_capture_before_relay_only_and_skips_notes_on_outage(self):
         def run():
             with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({**self.data, 'last_assistant_message': 'relay only'}))), \
-                    mock.patch.object(self.m, 'Instance', return_value=self.inst), \
                     mock.patch.object(self.m, 'capture_hook_questions'), \
                     mock.patch.object(self.m, 'notes_lag', side_effect=AssertionError('unexpected notes check')), \
                     contextlib.redirect_stdout(io.StringIO()) as output:
