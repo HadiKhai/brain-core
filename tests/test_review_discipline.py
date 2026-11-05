@@ -397,7 +397,8 @@ class RuleReviewContracts(Scenario):
         rule, node_rule = self.rules(root)
         contract = self.tmp / 'contract.md'
         m = core_loader.SourceFileLoader('contract_rules_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
-        contract.write_text('\n'.join('## ' + field + '\nA concrete declaration.\n' for field in m.CONTRACT_FIELDS))
+        contract.write_text('\n'.join('## ' + field + '\nA concrete declaration.\n' for field in m.CONTRACT_FIELDS) +
+                            'mode: untimed\n')
         self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(contract))
         inst = m.Instance(root)
         n = inst.node('a')
@@ -422,7 +423,7 @@ class RuleReviewContracts(Scenario):
         n = inst.node('a')
         contract = n['dir'] / 'contract.md'
         contract.write_text('\n'.join('## ' + field + '\nScoped parser ownership\n' for field in
-            (*m.CONTRACT_FIELDS, 'Why separate')))
+            (*m.CONTRACT_FIELDS, 'Why separate')) + 'mode: untimed\n')
         tasks = __import__(m.validate_launch_job.__module__.rsplit('.', 1)[0] + '.tasks', fromlist=['tasks'])
         row = m.open_job(m.read_jobs(n), 'job')
         row['Task'] = 'APP-1'
@@ -456,7 +457,8 @@ class RuleReviewContracts(Scenario):
         root, home, wt = self.job()
         m = core_loader.SourceFileLoader('empty_contract_rules_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
         contract = self.tmp / 'contract.md'
-        contract.write_text('\n'.join('## ' + field + '\nConcrete declaration\n' for field in m.CONTRACT_FIELDS))
+        contract.write_text('\n'.join('## ' + field + '\nConcrete declaration\n' for field in m.CONTRACT_FIELDS) +
+                            'mode: untimed\n')
         self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(contract))
         n = m.Instance(root).node('a')
         row = m.open_job(m.read_jobs(n), 'job')
