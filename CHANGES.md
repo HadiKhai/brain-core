@@ -13,7 +13,8 @@ a 16-worker or undeclared run owns the full budget and later requests wait.
 Legacy reservations and opaque commands retain full-budget ownership. The optional
 `worker_budget` machine-care policy sets the budget without changing node config.
 Native literal pytest commands pass their requested count into admission and clamp
-only their worker arguments to the grant. Every child receives `BRAIN_TEST_WORKERS`.
+only their worker arguments to the grant. Budgeted verify and heavy-run children
+receive `BRAIN_TEST_WORKERS`; admission-only checks retain their command and environment.
 A cooperating heavy-run child declares its request through `BRAIN_HEAVY_WORKERS`
 and must honor the grant. Opaque node scripts need owner-defined worker support
 before they can share capacity; their command bytes remain unchanged.
