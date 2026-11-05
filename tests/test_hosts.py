@@ -64,6 +64,8 @@ class LockHotfix(Scenario):
                         '--summary', 'Synthetic result', '--lessons', 'none: fixture']
                 if site == 'handback_question':
                     args += ['--question', 'Choose a fixture color']
+                else:
+                    args += ['--dissection', str(self.dissection_report())]
         else:
             root = self.init('fixture')
             wt = None

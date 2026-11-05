@@ -165,6 +165,14 @@ class HandbackDissection(Scenario):
             self.assertFalse(list((root / 'nodes/a/job-handbacks').glob('*.json')))
             self.assertFalse(list((root / '.brain/write-queue').glob('*.request')))
 
+    def test_done_report_metadata_is_not_treated_as_diagnosis_evidence(self):
+        root, _, _ = self.job()
+        (root / 'nodes/a/never-name.txt').write_text('Café\n')
+        self.send(root, 'done', 'Fixture complete', '--report', 'Café/report.md')
+        record = json.loads(next((root / 'nodes/a/job-handbacks').glob('*.json')).read_text())
+        self.assertEqual(record['report'], 'Café/report.md')
+        self.assertNotIn('dissection', record)
+
 
 class QuestionDissection(Scenario):
     def setUp(self):

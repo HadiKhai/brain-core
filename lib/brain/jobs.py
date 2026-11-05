@@ -311,7 +311,11 @@ def cmd_handback(a):
         a._dissection_consumed = False
     validate_handback_options(a, row=row)
     _m_guard.no_terms_in(n, a.summary, 'handback summary')
-    _m_guard.no_terms_in(n, json.dumps(a._dissection_snapshot, ensure_ascii=False), 'handback dissection')
+    # The signature caches validation inputs, including the legacy report path.
+    # Screen actual diagnosis evidence; ordinary report metadata is redacted by readers.
+    evidence = a._dissection_snapshot.get('evidence')
+    if evidence is not None:
+        _m_guard.no_terms_in(n, json.dumps(evidence, ensure_ascii=False), 'handback dissection')
     if getattr(a, 'question', None):
         _m_guard.no_terms_in(n, a.question, 'handback question')
     if getattr(a, 'enqueue', False):
