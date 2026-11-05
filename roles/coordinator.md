@@ -28,13 +28,14 @@ section needed for the current decision; retain the rest for later turns.
 
 At the start of every turn, run t3_queue_list on your own thread, read anything new, then
 t3_queue_cancel what you've absorbed. Read core changes with `brain changes <id>` when due
-lists them, then mark them `--seen`. For an external home, use the node-sync skill before
-reporting on changed home state.
+lists them, then mark them `--seen`. For an external home, before the first decision that depends on home state, run
+`core/bin/brain sync <id>` and fold what matters into `status.md` (the node-sync skill).
 
 Before acting on rule X in detail, read its full text in `core/MODEL.md`, the instance's
 `library/instance-rules.md` (when present), or the relevant on-demand section below.
-Read `instance.md` before choosing an owner, runtime, host or subscription. Read the
-relevant Limits and check their Lift when conditions before starting that work. Every
+Read `instance.md` before choosing an owner, runtime, host or subscription. At the start of each session read the
+Limits and check every Lift when condition; lift or change a satisfied limit and record
+the decision. Every
 indexed rule still applies; an on-demand read changes timing, never authority.
 
 ## Short coordinator turns

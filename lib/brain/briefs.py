@@ -22,7 +22,7 @@ _m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 COORDINATOR_STARTUP = (
     "Start with the inherited AGENTS.md rule index and core/roles/coordinator.md sections "
     "Start of every session and Short coordinator turns. Read node.md and the current "
-    "request/limits in brief.md; use brain due and brain inbox --new for the current decision. "
+    "request/limits in brief.md. Continue the request in brief.md; use brain due and brain inbox --new for the current decision. "
     "Read only status.md Now/Next and unresolved needs when resuming. "
     "MODEL.md and library/instance-rules.md are on demand: before acting on rule X in detail, "
     "read its full text. Other role sections and handover.md are on-demand references; "
