@@ -849,14 +849,20 @@ def contract_problems(text, parallel=True):
 
 
 def validate_job_parallel(n, row, task=''):
-    """Old open jobs retain their contract; new jobs check it at every launch."""
+    """Unmarked open jobs predate policy; replacement registration opts them in.
+
+    A plain task title is not a contract. Stored contracts and inline contract
+    syntax always declare a mode; titles inherit their bound contract's mode.
+    """
     if row is None or row.get('Parallel policy'):
-        from .parallel_contracts import parallel_problems
+        from .parallel_contracts import inline_contract, parallel_problems
         path = contract_file(n, row) if row else None
-        text = path.read_text() if path and path.is_file() else ''
-        problems = parallel_problems(text)
+        registered = bool(path and path.is_file())
+        text = path.read_text() if registered else ''
+        problems = parallel_problems(text) if registered else []
         if task and not problems:
-            problems += parallel_problems(task, defaults=text)
+            if registered or inline_contract(task):
+                problems += parallel_problems(task, defaults=text)
         if problems:
             _m_common.die('contract: ' + '; '.join(problems))
 
@@ -1986,7 +1992,8 @@ def cmd_jobs(a):
         if not a.id or not a.branch:
             _m_common.die("a contract needs a node and --branch: brain jobs <node> --branch <branch> --contract-file <file>")
         n = inst.node(a.id)
-        row = open_job(read_jobs(n) or [], a.branch)
+        rows = ledger_rows(n)
+        row = open_job(rows or [], a.branch)
         if not row:
             _m_common.die(_m_guard.redact(f"no open job for {a.branch} in {n['id']}", _m_guard.never_terms(n)))
         text = Path(a.contract_file).read_text().strip() + "\n"
@@ -1998,6 +2005,11 @@ def cmd_jobs(a):
             _m_common.die("unsafe contract text")
         f = contract_file(n, row)
         f.parent.mkdir(exist_ok=True)
+        # Cutoff: pre-policy open jobs stay grandfathered until a coordinator
+        # registers a replacement. Mark first: failed file publication then
+        # leaves a strict admission, never a new file with a legacy exemption.
+        row['Parallel policy'] = '1'
+        write_jobs(inst, n, rows)
         _m_common.atomic_write(f, text)
         inst.commit([f], f"{n['id']}: contract for {a.branch}")
         print(_m_guard.redact(f"{n['id']}: contract for {a.branch} recorded; briefs for this job carry it", _m_guard.never_terms(n)))

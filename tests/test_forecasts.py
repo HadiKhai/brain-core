@@ -100,7 +100,7 @@ class JobForecasts(Scenario):
         self.m.write_jobs(inst, n, self.rows() + [row])
         contract = self.m.contract_file(n, row)
         contract.parent.mkdir(exist_ok=True)
-        contract.write_text("## Size\n3 files, 300 lines\n")
+        contract.write_text("mode: untimed\n## Size\n3 files, 300 lines\n")
         brief = self.b(self.root, "brief", "app", "--branch", "job/sample", "--class", "build", "--model", "sample-model")
         self.assertIn("Forecast build: 5 similar merged jobs (nearest 5 sizes)", brief)
         row = self.m.open_job(self.m.read_jobs(n), "job/sample")

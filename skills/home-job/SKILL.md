@@ -56,6 +56,11 @@ stated; never run a polling loop in an agent.
    the job carries it, so the worker acts within it instead of asking, and you answer from it
    instead of re-deciding. `brain jobs <id>` shows each open job's tokens so far and flags one
    over budget, over twice the median, compacting again and again, or mostly spent by sub-agents.
+
+   New contracts declare exactly one `mode: timed`, `mode: paid` or `mode: untimed`.
+   Timed/paid modes also declare `concurrency:` and `sum:`; concurrency one needs
+   `serial_reason:`. Classification is explicit, never inferred from task prose.
+
 3. **Worker.** Host `launch` in the node's `home_project`, in the existing worktree (path and
    branch from step 1), on the node's runtime unless the job calls for another. The brief is
    self-contained (axiom 9). A runtime pin at its stop line stays pinned: use the named alternative

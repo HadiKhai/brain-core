@@ -1,22 +1,31 @@
 # Code decisions
 
-## Explicit concurrency and checked contract arithmetic
+## Explicit contract mode and checked arithmetic
 
-Contracts containing time or cost language declare concurrency and calls times
-average duration divided by concurrency. A shared pure validator checks the
-divisor and total with half a displayed unit of rounding tolerance. Unit words,
-compact numeric durations and currency/cost terms trigger the check without
-trying to infer whether the prose is a forecast or a historical reference.
-Ambiguity fails closed. Explicit concurrency one requires a serial reason.
-New native jobs carry a policy marker; unmarked existing open jobs keep their
-old launch contracts. Registering any new contract checks the new policy.
-Task text can inherit a valid contract's declarations without creating false
-duplicates, while conflicting arithmetic or duplicate declarations within one
-source are refused.
-The rounding boundary is inclusive. Size-only file/line/token/byte counts are
-not timing declarations; ambiguous numeric units still require a plan. A sum's
-optional label is limited to `per round`, `per lane round`, `total` or `overall`,
-so trailing prose cannot add an unchecked duration.
+Every new contract declares exactly one `mode: timed`, `mode: paid` or
+`mode: untimed`. The declaration is authoritative: code never classifies prose,
+cost words, currency symbols or duration phrases. Missing and unknown modes
+fail closed. Timed/paid modes require concurrency and a numeric calls times
+average duration divided by concurrency sum. Untimed mode does not require a
+sum; any explicitly supplied plan is still validated. Task declarations inherit
+the already validated bound contract, and cannot downgrade its mode.
+
+Arithmetic uses Decimal with half the last displayed unit of rounding tolerance,
+including the boundary. Concurrency one requires a serial reason. Sum labels are
+limited to `per round`, `per lane round`, `total` or `overall`, so trailing prose
+cannot append an unchecked duration.
+
+The cutoff is persisted, not inferred from dates or file timestamps. Open jobs
+without `Parallel policy` predate enforcement and retain their contracts. This
+core marks newly created jobs. Every replacement `jobs --contract-file` admission
+validates mode and marks its job, including a formerly grandfathered job. New task
+launch-plans always validate mode; existing unmarked prepared jobs retain their
+old contract on restart. No migration rewrites old rows or contracts.
+
+A plain task title is not a registered contract. It inherits a bound mode; inline
+contract syntax is checked when supplied. Native task launch still requires its
+node-local contract through the existing authority check. Contract registration
+never infers an untimed default.
 
 ## Queue batches select one immutable FIFO prefix
 

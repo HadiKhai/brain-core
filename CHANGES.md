@@ -5,15 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
-## 2026-11-05: Validate parallel contracts before launching
+## 2026-11-05: Require explicit contract classification
 
-New timed or paid contracts require `concurrency:` and a checked `sum:`;
-concurrency one also requires `serial_reason:`. Registration, worker/specialist
-briefs, native task launches/plans and launch forecasts share the refusal.
-Existing open jobs retain their prior contracts. New registrations always check
-arithmetic and displayed rounding. Time units and cost language trigger the
-check even when values are approximate, spelled out, abbreviated or hyphenated;
-ambiguous declarations fail closed with an example to correct the contract.
+Every newly registered contract declares `mode: timed`, `mode: paid` or
+`mode: untimed`. Missing, unknown or duplicate modes are refused with an example.
+Timed/paid contracts require `concurrency:` and checked `sum:` arithmetic;
+concurrency one also requires `serial_reason:`. Untimed contracts need no plan.
+No prose, duration-word or currency detector chooses the mode.
+
+Cutoff: existing unmarked open jobs retain their pre-upgrade contracts. New jobs
+are marked at creation; registering any replacement contract also marks its job
+and opts that contract into the new checks, even on a legacy job. A new task
+launch-plan is a new admission; prepared legacy open-job restarts remain exempt.
+Registration, briefs/imports, specialist launches and native task/forecast reads
+share validation. Plain task titles inherit a bound contract's classification;
+inline contracts require their own mode when no registered contract is bound.
 
 ## 2026-11-05: Check compact instance rule indexes
 

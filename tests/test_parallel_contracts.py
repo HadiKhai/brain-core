@@ -8,15 +8,28 @@ jobs = core_loader.SourceFileLoader('parallel_contract_fixture', str(CORE / 'bin
 
 
 class ParallelContracts(unittest.TestCase):
-    def test_time_target_requires_concurrency(self):
-        text = '\n'.join('## ' + field + '\nSynthetic scope.' for field in jobs.CONTRACT_FIELDS)
-        text += '\n## Budget\ntarget: 30 s\nsum: 40 x 6 s / 8 = 30 s\n'
-        self.assertIn('concurrency:', ' '.join(jobs.contract_problems(text)))
+    def validator(self, text, defaults=''):
+        from importlib import import_module
+        module = import_module(jobs.contract_problems.__module__.rsplit('.', 1)[0] + '.parallel_contracts')
+        return module.parallel_problems(text, defaults)
+
+    def test_mode_is_explicit_and_prose_never_classifies_it(self):
+        for body in ('Synthetic scope.', 'spending cap of ten', 'by Friday', '2-hour run',
+                     'finish within 1h30m', 'Payments capped', 'budget twenty bucks', 'Budget 40 ₹',
+                     '## Size\n3 files, 300 lines', 'costs ten', 'Stop after 2wk'):
+            with self.subTest(body=body):
+                errors = self.validator(body)
+                self.assertIn('missing mode:', ' '.join(errors))
+                self.assertIn('mode: timed', ' '.join(errors))
+                self.assertEqual(self.validator('mode: untimed\n' + body), [])
+        for text in ('mode:', 'mode: guessed', 'mode: timed\nmode: paid'):
+            self.assertIn('mode:', ' '.join(self.validator(text)))
 
     def test_declaration_matrix_and_rounding(self):
-        valid = 'target: 30 s\nconcurrency: 8\nsum: 40 calls x 6 s / 8 = 30 s\n'
+        valid = 'mode: timed\nconcurrency: 8\nsum: 40 calls x 6 s / 8 = 30 s\n'
         cases = [
-            (valid, None),
+            (valid, None), (valid.replace('mode: timed', 'mode: paid'), None),
+            (valid.replace('mode: timed\n', ''), 'mode:'),
             (valid.replace('concurrency: 8\n', ''), 'concurrency:'),
             (valid.split('sum:')[0], 'sum:'),
             (valid.replace('8', '1').replace('30 s', '240 s'), 'serial_reason:'),
@@ -25,60 +38,25 @@ class ParallelContracts(unittest.TestCase):
             (valid.replace('concurrency: 8', 'concurrency: 0'), 'integer'),
             (valid.replace('concurrency: 8', 'concurrency: 2.5'), 'integer'),
             (valid + 'concurrency: 8\n', 'duplicate'),
-            ('Paid run with synthetic inputs.', 'concurrency:'),
-            ('## Stop when\n- 2 hours elapsed', 'concurrency:'),
-            ('Budget: 3 h of agent time', 'sum:'),
-            ('cost cap 5 USD', 'concurrency:'),
-            ('time box: 30 min', 'sum:'),
-            ('ETA 20 min per call, 40 calls', 'concurrency:'),
-            ('Stop after 2 hrs', 'concurrency:'),
-            ('Budget: 3 hr', 'sum:'),
-            ('a 2-hour run', 'concurrency:'),
-            ('30-minute limit', 'sum:'),
-            ('two-hour cap', 'concurrency:'),
-            ('finish within 1h30m', 'sum:'),
-            ('about twenty minutes', 'concurrency:'),
-            ('spend cap 5€', 'sum:'),
-            ('budget 40 $', 'concurrency:'),
-            ('Stop after 2wk', 'concurrency:'),
-            ('Limit: 5 ticks', 'sum:'),
-            ('Budget 40 ₹', 'concurrency:'),
-            ('Stop when spending reaches ten', 'sum:'),
-            ('costs ten', 'concurrency:'),
-            ('spent no more than ten', 'sum:'),
-            ('Payments capped', 'concurrency:'),
-            ('priced at ten', 'sum:'),
-            ('budget of twenty', 'concurrency:'),
-            ('the fee is ten', 'sum:'),
-            ('ten cents', 'concurrency:'),
-            ('ten quid', 'sum:'),
-            ('budget twenty bucks', 'concurrency:'),
-            ('by tomorrow', 'sum:'),
-            ('by Friday', 'concurrency:'),
-            ('by EOD', 'sum:'),
-            ('tonight', 'concurrency:'),
-            ('noon', 'sum:'),
-            ('till 17:00', 'concurrency:'),
-            ('## Size\n3 files, 300 lines\n', None),
-            ('concurrency: 8\nsum: 40 x 6 s / 8 = 30 s plus two hours', 'sum:'),
-            ('## Budget\n30M tokens, 2.5 h\n', 'concurrency:'),
-            ('target: 1s\n', 'sum:'),
-            ('No timed work.', None),
-            ('concurrency: 1\nserial_reason: Ordered writes share state.\nsum: 3 x 60 s / 1 = 3 m', None),
-            ('concurrency: 3\nsum: 1 x 1 s / 3 = 0.33 s', None),
-            ('concurrency: 3\nsum: 1 x 1 s / 3 = 0.32 s', 'arithmetic'),
-            ('concurrency: 6\nsum: 6 cheap lanes x 60 s / 6 = 60 s per lane round', None),
+            ('mode: untimed', None),
+            ('mode: untimed\nconcurrency: 2', 'sum:'),
+            ('mode: paid', 'sum:'), ('mode: timed', 'concurrency:'),
+            ('mode: timed\nconcurrency: 1\nserial_reason: Ordered writes share state.\nsum: 3 x 60 s / 1 = 3 m', None),
+            ('mode: timed\nconcurrency: 3\nsum: 1 x 1 s / 3 = 0.33 s', None),
+            ('mode: timed\nconcurrency: 3\nsum: 1 x 1 s / 3 = 0.32 s', 'arithmetic'),
+            ('mode: timed\nconcurrency: 6\nsum: 6 cheap lanes x 60 s / 6 = 60 s per lane round', None),
+            (valid.replace('= 30 s', '= 30 s plus two hours'), 'sum:'),
         ]
-        from importlib import import_module
-        validator = import_module(jobs.contract_problems.__module__.rsplit('.', 1)[0] + '.parallel_contracts')
         for text, expected in cases:
             with self.subTest(text=text):
-                problems = validator.parallel_problems(text)
+                problems = self.validator(text)
                 if expected:
                     self.assertIn(expected, ' '.join(problems))
                     self.assertIn('example:', ' '.join(problems))
                 else:
                     self.assertEqual(problems, [])
+        self.assertEqual(self.validator('A plain title.', valid), [])
+        self.assertIn('match', ' '.join(self.validator('mode: untimed', valid)))
 
 
 from scenario import Scenario
@@ -105,9 +83,11 @@ class ParallelLaunchCommands(Scenario):
         path = module.contract_file(node, row)
         path.parent.mkdir(exist_ok=True)
         base = '\n'.join('## ' + field + '\nSynthetic scope.' for field in jobs.CONTRACT_FIELDS)
-        valid = base + '\n## Budget\ntarget: 30 s\nconcurrency: 8\nsum: 40 x 6 s / 8 = 30 s\n'
+        valid = base + '\nmode: timed\n## Budget\ntarget: 30 s\nconcurrency: 8\nsum: 40 x 6 s / 8 = 30 s\n'
         source = self.tmp / 'contract.md'
-        variants = [(valid.replace('concurrency: 8\n', ''), 'concurrency:'),
+        variants = [(valid.replace('mode: timed\n', ''), 'mode:'),
+                    (valid.replace('mode: timed', 'mode: unknown'), 'mode:'),
+                    (valid.replace('concurrency: 8\n', ''), 'concurrency:'),
                     (valid.split('sum:')[0], 'sum:'),
                     (valid.replace('concurrency: 8', 'concurrency: 1').replace('/ 8 = 30', '/ 1 = 240'), 'serial_reason:'),
                     (valid.replace('= 30 s', '= 31 s'), 'arithmetic')]
@@ -131,6 +111,7 @@ class ParallelLaunchCommands(Scenario):
         source.write_text(valid)
         self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(source))
         self.assertIn('Contract for this job', self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Synthetic work.'))
+
         self.assertIn('Contract for this job', self.b(root, 'brief', 'a', '--branch', 'job', '--task', valid))
         self.assertIn('Contract for this job', self.b(root, 'hire', 'tester', 'a', '--branch', 'job', '--task', 'Synthetic work.'))
         self.b(root, 'jobs', 'a', '--branch', 'job')
@@ -142,6 +123,13 @@ class ParallelLaunchCommands(Scenario):
         with mock.patch.dict(os.environ, self.env, clear=True):
             module.write_jobs(inst, node, rows)
         self.assertIn('Contract for this job', self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Synthetic work.'))
+        # Replacing a pre-policy contract is a new admission and opts the old
+        # job into checks. Even an emptied contract must then refuse mode.
+        source.write_text(base + '\nmode: untimed\n')
+        self.b(root, 'jobs', 'a', '--branch', 'job', '--contract-file', str(source))
+        path.write_text('')
+        self.assertIn('mode:', self.b(root, 'brief', 'a', '--branch', 'job', '--task', 'Synthetic work.', ok=False))
+
 
 
 class ParallelTaskCommands(Scenario):
@@ -156,7 +144,7 @@ class ParallelTaskCommands(Scenario):
         self.inst = Instance(self.root)
         self.n = self.inst.node('root')
         self.contract = self.root / 'contract.md'
-        self.contract.write_text('\n'.join('## ' + h + '\nScoped parser ownership\n' for h in
+        self.contract.write_text('mode: untimed\n' + '\n'.join('## ' + h + '\nScoped parser ownership\n' for h in
             ('Outcome', 'Authorized', 'Discretion', 'Stop when', 'Needs consent', 'Done means', 'Why separate')))
         with mock.patch.object(self.inst, 'commit'):
             tasks.mutate(self.inst, self.n, 'APP-1', {'title': 'Parser', 'status': 'ready', 'scope': ['parser.py'],
@@ -166,16 +154,17 @@ class ParallelTaskCommands(Scenario):
 
     def test_task_plan_and_launch_refuse_all_bad_declarations_before_host_calls(self):
         from brain import task_dispatch, task_flow, worker_lifecycle, jobs as native_jobs
-        base = self.contract.read_text()
-        variants = [('target: 30 s\nsum: 40 x 6 s / 8 = 30 s', 'concurrency:'),
-                    ('target: 30 s\nconcurrency: 8', 'sum:'),
-                    ('concurrency: 1\nsum: 40 x 6 s / 1 = 240 s', 'serial_reason:'),
-                    ('concurrency: 8\nsum: 40 x 6 s / 8 = 31 s', 'arithmetic')]
+        base = self.contract.read_text().replace('mode: untimed\n', '')
+        variants = [('mode: unknown', 'mode:'), ('concurrency: 8\nsum: 40 x 6 s / 8 = 30 s', 'mode:'),
+                    ('mode: timed\ntarget: 30 s\nsum: 40 x 6 s / 8 = 30 s', 'concurrency:'),
+                    ('mode: timed\ntarget: 30 s\nconcurrency: 8', 'sum:'),
+                    ('mode: paid\nconcurrency: 1\nsum: 40 x 6 s / 1 = 240 s', 'serial_reason:'),
+                    ('mode: timed\nconcurrency: 8\nsum: 40 x 6 s / 8 = 31 s', 'arithmetic')]
         for declaration, field in variants:
             self.contract.write_text(base + '\n' + declaration)
             with self.assertRaisesRegex(ValueError, field):
                 task_flow.launch_plan(self.inst, self.n)
-        valid = base + '\nconcurrency: 8\nsum: 40 x 6 s / 8 = 30 s'
+        valid = base + '\nmode: timed\nconcurrency: 8\nsum: 40 x 6 s / 8 = 30 s'
         self.contract.write_text(valid)
         self.assertEqual(task_flow.launch_plan(self.inst, self.n)['task'], 'APP-1')
         row = self.prepared()

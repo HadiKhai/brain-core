@@ -1860,7 +1860,7 @@ class Tasks(Scenario):
         with self.assertRaises(ValueError):
             tasks.launch_plan(self.inst, self.n)
         contract = self.root / 'task-contract.md'
-        contract.write_text('\n'.join('## ' + heading + '\nExplicit scoped behavior\n' for heading in
+        contract.write_text('mode: untimed\n' + '\n'.join('## ' + heading + '\nExplicit scoped behavior\n' for heading in
             ('Outcome', 'Authorized', 'Discretion', 'Stop when', 'Needs consent', 'Done means')))
         tasks.mutate(self.inst, self.n, 'APP-1', {'contract': 'task-contract.md', 'authority': 'private:D-1'})
         plan = tasks.launch_plan(self.inst, self.n)

@@ -1,9 +1,8 @@
 """Pure, shared validation of concurrency and forecast arithmetic."""
 import re
-import unicodedata
 from decimal import Decimal, InvalidOperation
 
-EXAMPLE = 'concurrency: 8\nsum: 40 x 6 s / 8 = 30 s'
+EXAMPLE = 'mode: timed\nconcurrency: 8\nsum: 40 x 6 s / 8 = 30 s'
 NUMBER = r'(?:[0-9]{1,12}(?:\.[0-9]{1,9})?)'
 UNIT = r'(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?)'
 
@@ -12,34 +11,51 @@ def seconds(number, unit):
     return Decimal(number) * (3600 if unit.startswith('h') else 60 if unit.startswith('m') else 1)
 
 
-def parallel_problems(text, defaults=''):
-    """Require declarations for timed/paid work; check declared sums exactly.
+FIELD_LINE = re.compile(r'^[ \t]*(?:[-*][ \t]+)?(mode|concurrency|sum|serial_reason)[ \t]*:[ \t]*([^\n]*)', re.I | re.M)
 
-    Labels between numbers are permitted (``6 cheap lanes x 60 s``).
-    Rounding tolerance is half the last displayed decimal place of the total.
-    """
+
+def declared_fields(text):
     fields = {}
-    for name, value in re.findall(r'^[ \t]*(?:[-*][ \t]+)?(concurrency|sum|serial_reason)[ \t]*:[ \t]*([^\n]*)', text, re.I | re.M):
+    for name, value in FIELD_LINE.findall(text):
         fields.setdefault(name.lower(), []).append(value.strip())
-    fallback = {}
-    for name, value in re.findall(r'^[ \t]*(?:[-*][ \t]+)?(concurrency|sum|serial_reason)[ \t]*:[ \t]*([^\n]*)', defaults, re.I | re.M):
-        fallback.setdefault(name.lower(), []).append(value.strip())
+    return fields
+
+
+def inline_contract(text):
+    """Recognize declared contract syntax, never infer a mode from prose."""
+    return bool(declared_fields(text) or re.search(
+        r'^##[ \t]+(?:Class|Outcome|Authorized|Discretion|Stop when|Needs consent|Done means|Budget)[ \t]*$', text, re.I | re.M))
+
+
+def parallel_problems(text, defaults=''):
+    """Every new contract declares its mode; timed/paid plans need checked sums.
+
+    Mode is authoritative; there is deliberately no prose/cost/time detector.
+    A task may inherit declarations from its already validated bound contract.
+    """
+    fields, fallback = declared_fields(text), declared_fields(defaults)
+    own_mode = fields.get('mode')
     for name, values in fallback.items():
         fields.setdefault(name, values)
-    # Presence of a unit is enough: don't guess whether a number/phrase is
-    # historical, approximate, hyphenated or spelled out. Ambiguity fails closed.
-    timed = re.search(r'\b(?:ETA|deadline|time[ _-]?(?:target|box|limit|budget)|tomorrow|tonight|today|EOD|noon|midnight|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b|\b(?:target|budget|forecast|estimate)[ \t]*:|\b(?:until|till|by|before|at)\s+[0-9]{1,2}:[0-9]{2}\b', text, re.I)
-    size_units = {'file', 'files', 'line', 'lines', 'token', 'tokens', 'byte', 'bytes'}
-    amounts = re.findall(r'(?<![\w.])[0-9]+(?:\.[0-9]+)?[-\s]*([A-Za-zµμ][A-Za-z0-9µμ]*)', text, re.I)
-    duration = (re.search(r'\b(?:ms|msecs?|milliseconds?|secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|fortnights?|months?|years?)\b', text, re.I)
-                or any(unit.casefold() not in size_units for unit in amounts))
-    paid = (re.search(r'\b(?:paid|pay(?:\b|ment|ing|s\b|able|roll|ee|out)|cost|spen[dt]|pric|bill|fees?\b|charg|budget|cents?\b|bucks?\b|quid\b|USD|EUR|GBP|CAD|AUD|JPY|dollars?\b|euros?\b|pounds?\b)', text, re.I)
-            or any(unicodedata.category(char) == 'Sc' for char in text))
-    if not fields and not (timed or duration or paid):
-        return []
     errors = []
     def error(message):
         errors.append(message + '; example:\n' + EXAMPLE)
+    modes = fields.get('mode', [])
+    if not modes:
+        error('missing mode: (timed, paid or untimed)')
+        return errors
+    if len(modes) != 1:
+        error('duplicate mode:')
+        return errors
+    mode = modes[0].casefold()
+    if mode not in ('timed', 'paid', 'untimed'):
+        error('unknown mode: must be timed, paid or untimed')
+        return errors
+    if own_mode and fallback.get('mode') and mode != fallback['mode'][0].casefold():
+        error('mode: must match the bound contract mode')
+        return errors
+    if mode == 'untimed' and not any(name in fields for name in ('concurrency', 'sum', 'serial_reason')):
+        return []
     for name in ('concurrency', 'sum'):
         if not fields.get(name):
             error('missing ' + name + ':')

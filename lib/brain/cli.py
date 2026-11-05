@@ -454,7 +454,7 @@ def _main():
         opt("--all-closed", action="store_true", help="with --settled: attest a complete host sweep for all closed ledger jobs"),
         opt("--attestation-file", help="fresh version 1 coordinator export with exhaustive per-job/thread/project coverage"),
         opt("--contract-file", dest="contract_file", help="coordinator: the job's contract (" +
-            ", ".join(f"## {f}" for f in _m_common.CONTRACT_FIELDS) + "; an optional ## Budget, e.g. 20M tokens, 3 h)"),
+            ", ".join(f"## {f}" for f in _m_common.CONTRACT_FIELDS) + "; required mode: timed|paid|untimed; timed/paid need concurrency: and sum:; optional ## Budget, e.g. 20M tokens, 3 h)"),
         opt("--usage-file", dest="usage_file", help="coordinator: the job's usage as the host reports it (JSON); "
             "wins over what transcripts show"))
     cmd("settle", _Command("settlement", "cmd_settle"), "print exact host calls for a closed job; never calls the host", "id",

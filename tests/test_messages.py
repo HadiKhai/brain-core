@@ -75,7 +75,7 @@ class WorkerMessages(Scenario):
     def test_contract_brief_has_one_message_protocol(self):
         root, _ = self.job()
         contract = self.tmp / "contract.md"
-        contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
+        contract.write_text("mode: untimed\n\n" + "".join("## " + field + "\nSynthetic scope.\n\n" for field in
                                    ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")))
         self.b(root, "jobs", "a", "--branch", "job/sample", "--contract-file", str(contract))
         brief = self.b(root, "brief", "a", "--branch", "job/sample", "--task", "Build a sample.")

@@ -17,7 +17,7 @@ class TaskDispatch(Scenario):
         self.inst = Instance(self.root)
         self.n = self.inst.node('root')
         self.contract = self.root / 'contract.md'
-        self.contract.write_text('\n'.join('## ' + h + '\nScoped parser ownership\n' for h in
+        self.contract.write_text('mode: untimed\n' + '\n'.join('## ' + h + '\nScoped parser ownership\n' for h in
             ('Outcome', 'Authorized', 'Discretion', 'Stop when', 'Needs consent', 'Done means', 'Why separate')))
         with mock.patch.object(self.inst, 'commit'):
             tasks.mutate(self.inst, self.n, 'APP-1', {'title': 'Parser', 'status': 'ready', 'scope': ['parser.py'],

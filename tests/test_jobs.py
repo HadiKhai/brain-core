@@ -1435,7 +1435,7 @@ class Workflow(Scenario):
             body = saved.read_text() if "--out" in args else explicit.stdout
             self.assertIn("Why a separate agent: Independent concern", body)
         contract = self.tmp / "contract.md"
-        contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
+        contract.write_text("mode: untimed\n\n" + "".join("## " + field + "\nSynthetic scope.\n\n" for field in
                             ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")) +
                             "## Why separate\nDistinct ownership.\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
@@ -1485,7 +1485,7 @@ class Workflow(Scenario):
         self.assertNotIn("Synthetic Forbidden Phrase", out)
         self.assertNotIn("Traceback", out)
         contract = self.tmp / "contract.md"
-        contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
+        contract.write_text("mode: untimed\n\n" + "".join("## " + field + "\nSynthetic scope.\n\n" for field in
                             ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")) +
                             "## Why separate\nDistinct ownership.\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
@@ -1588,7 +1588,7 @@ class Workflow(Scenario):
         self.assertIn("Why a separate agent: Check independently", self.b(r, *review, "--reason", "security",
                       "--why-separate", "Check independently"))
         contract = self.tmp / "contract.md"
-        contract.write_text("".join("## " + field + "\nSynthetic scope.\n\n" for field in
+        contract.write_text("mode: untimed\n\n" + "".join("## " + field + "\nSynthetic scope.\n\n" for field in
                             ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means")) +
                             "## Why separate\nDistinct expertise.\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
@@ -1758,7 +1758,7 @@ class Workflow(Scenario):
         self.assertIn("## Discretion", out)
         contract.write_text("## Outcome\nProve the login flow.\n\n## Authorized\nRun the four SQL cases.\n\n"
                             "## Discretion\nRepair reversible preflight defects.\n\n## Stop when\nThe target changes.\n\n"
-                            "## Needs consent\nA live migration.\n\n## Done means\nAll cases pass; resources cleaned up.\n")
+                            "## Needs consent\nA live migration.\n\n## Done means\nAll cases pass; resources cleaned up.\nmode: untimed\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
         self.assertEqual(len(list((r / "nodes/a/job-contracts").glob("*.md"))), 1)
         self.b(r, "jobs", "a", "--branch", "nope", "--contract-file", str(contract), ok=False)
