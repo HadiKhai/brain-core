@@ -135,6 +135,7 @@ class InstructionCapture(Scenario):
         self.root = self.init('meadow')
         self.m = core_loader.SourceFileLoader('capture_fixture', str(CORE / 'bin/brain')).load_module()
         self.inst = self.m.Instance(self.root)
+        self.inst.local_of('root')
         self.n = self.inst.node('root')
         self.n['local'].update(coordinator='host-coordinator', coordinator_sessions=['runtime-coordinator'])
         self.inst.save_local()
