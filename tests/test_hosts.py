@@ -1370,15 +1370,35 @@ class StopHook(Scenario):
         self.assertTrue(any('changed after status.md:' in line and 'backlog.md' in line for line in lag), lag)
 
 
-    def hook(self, r, cwd, session="s1", active=False, transcript=None):
+    def hook(self, r, cwd, session="s1", active=False, transcript=None, last_message=None):
         """Run the exact command the runtimes run, as they do: hook JSON on stdin, in the session's folder."""
         cmd = json.loads((CORE / "adapters" / "runtimes" / "claude-hooks.json").read_text())["hooks"]["Stop"][0]["hooks"][0]["command"]
         env = {k: v for k, v in self.env.items() if k != "BRAIN_HOOK_REMIND_MINUTES"}
         res = subprocess.run(["sh", "-c", cmd], cwd=cwd, env=env, capture_output=True, text=True,
                              input=json.dumps({"cwd": str(cwd), "session_id": session, "stop_hook_active": active,
-                                               "hook_event_name": "Stop", "transcript_path": str(transcript) if transcript else None}), timeout=10)
+                                               "hook_event_name": "Stop", "last_assistant_message": last_message,
+                                               "transcript_path": str(transcript) if transcript else None}), timeout=10)
         self.assertEqual(res.returncode, 0, res.stderr)
         return json.loads(res.stdout) if res.stdout.strip() else None
+
+    def test_stop_notice_guard_blocks_ignored_output_and_second_stop_passes(self):
+        r = self.init('fixture')
+        rows = [{'type': 'user', 'message': {'content':
+                 '<task-notification><task-id>task-17</task-id><output-file>/tmp/task-17.output</output-file>'
+                 '<status>completed</status></task-notification>'}},
+                {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Done.'}]}}]
+        path = self.question_log(rows)
+        expected = {"decision": "block", "reason":
+                    "Read the notice's output and act on it (fix, next step, or one line to root)."}
+        self.assertEqual(self.hook(r, r, transcript=path), expected)
+        self.assertEqual(self.hook(r, r, transcript=path, last_message='No response requested.'), expected)
+        self.assertEqual(self.hook(r, r, transcript=path, last_message='relay only'), expected)
+        self.assertIsNone(self.hook(r, r, active=True, transcript=path))
+        rows.insert(1, {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'read-17',
+                       'name': 'Read', 'input': {'file_path': '/tmp/task-17.output'}}]}})
+        path = self.question_log(rows)
+        self.assertIsNone(self.hook(r, r, transcript=path, last_message='relay only'))
+        self.assertEqual(self.hook(r, r, transcript=path, last_message='No response requested.'), expected)
 
     def test_user_hook_is_quick_silent_and_read_only_in_unrelated_folder(self):
         r = self.init("alice")

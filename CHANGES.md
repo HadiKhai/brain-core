@@ -21,6 +21,15 @@ Registration, briefs/imports, specialist launches and native task/forecast reads
 share validation. Plain task titles inherit a bound contract's classification;
 inline contracts require their own mode when no registered contract is bound.
 
+## 2026-11-05: Read background completion output before stopping
+
+`brain hook stop` blocks the first stop after a task completion notice when its
+output file or task ID has not appeared in a later reading tool call. It also
+blocks a final "No response requested" reply after a notice, even after a read.
+The hook scans only the bounded latest transcript turn and allows the existing
+second-stop escape. Read the output, then fix the issue, take the next step or
+send one line to the coordinating agent. No hook configuration change is needed.
+
 ## 2026-11-05: Check compact instance rule indexes
 
 `tools/check_rule_index.py` checks that a shortened startup index retains every

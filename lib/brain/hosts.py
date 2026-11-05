@@ -1502,7 +1502,7 @@ def hook_operator_message(rec):
                                       or item.get("type") == "user_message")
 
 
-def hook_turn_records(fh):
+def hook_turn_records(fh, include_operator=False):
     """Walk backward to the latest operator message, reading at most four MiB of a snapshot.
     A capped, incomplete leading record is discarded; never parse a fragment as a record.
     """
@@ -1521,9 +1521,64 @@ def hook_turn_records(fh):
             except ValueError:
                 continue  # partial final line, malformed record, or blank trailing line
             if hook_operator_message(rec):
+                if include_operator:
+                    records.append(rec)
                 return list(reversed(records))
             records.append(rec)
     return list(reversed(records))
+
+
+def hook_notice_unread(path, last_message=None):
+    """Check completion notices in the bounded latest turn; retain no transcript content."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        return False
+    with os.fdopen(fd, "rb") as fh:
+        records = hook_turn_records(fh, include_operator=True)
+    notices, final_text = [], ""
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        msg = rec.get("message", {})
+        if not isinstance(msg, dict):
+            continue
+        blocks = msg.get("content", [])
+        text = blocks if isinstance(blocks, str) else "\n".join(
+            b.get("text", "") for b in blocks if isinstance(b, dict) and isinstance(b.get("text"), str)
+        ) if isinstance(blocks, list) else ""
+        if rec.get("type") == "user" and hook_operator_message(rec):
+            notifications = re.findall(r"<task-notification>(.*?)</task-notification>", text, re.S)
+            if not notifications and re.search(
+                    r"\bbackground (?:command|task)\b[^\n]*(?:completed|finished|failed|exited|killed)", text, re.I):
+                notifications = [text]
+            for notice in notifications:
+                identifiers = re.findall(r"<(?:output-file|task-id)>([^<]+)</(?:output-file|task-id)>", notice)
+                if not identifiers:
+                    identifiers = re.findall(r"(?:output(?: file)?|task[- ]id)\s*[:=]\s*[`\"']?([^\s`\"'<>]+)", notice, re.I)
+                notices.append([tuple(value.strip() for value in identifiers if value.strip()), False])
+        if rec.get("type") != "assistant":
+            continue
+        if text.strip():
+            final_text = text
+        for block in blocks if isinstance(blocks, list) else []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = str(block.get("name", "")).lower().split("__")[-1].split(".")[-1]
+            if name not in ("read", "read_file", "bash", "bashoutput", "taskoutput", "exec_command",
+                            "shell", "shell_command", "execute", "exec"):
+                continue
+            tool_input = json.dumps(block.get("input", {}), ensure_ascii=False)
+            for entry in notices:
+                identifiers = entry[0]
+                if any(re.search(r"(?<![\w/.-])" + re.escape(value) + r"(?![\w/.-])", tool_input)
+                       for value in identifiers):
+                    # This call follows the notice and names its output or task exactly.
+                    entry[1] = True
+    if isinstance(last_message, str):
+        final_text = last_message
+    return bool(notices) and (bool(re.fullmatch(r"no response requested[\s.!?,;:…]*", final_text.strip(), re.I))
+                              or any(not read for identifiers, read in notices))
 
 
 def hook_questions(path):
@@ -1659,6 +1714,14 @@ def hook_stop(a):
     except (Exception, SystemExit):
         pass  # question bookkeeping must not suppress existing reminders or fail a turn
     last_message = data.get("last_assistant_message")
+    if not data.get("stop_hook_active") and isinstance(data.get("transcript_path"), str):
+        try:
+            if hook_notice_unread(data["transcript_path"], last_message):
+                print(json.dumps({"decision": "block", "reason":
+                      "Read the notice's output and act on it (fix, next step, or one line to root)."}))
+                return
+        except (OSError, ValueError):
+            pass  # unreadable transcripts follow the existing fail-open hook convention
     if isinstance(last_message, str) and last_message.strip().casefold() == "relay only":
         return  # explicit read-only relay: capture questions, then skip notes and reminder bookkeeping
     if data.get("stop_hook_active") or not node_at(inst, cwd):

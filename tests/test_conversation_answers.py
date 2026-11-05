@@ -119,3 +119,82 @@ class ConversationAnswers(Scenario):
         self.capture({'type': 'user', 'message': {'content': [{'type': 'tool_result',
                      'tool_use_id': 'claude-call', 'content': 'User has answered your questions: Blue'}]}})
         self.assertEqual(self.overdue(), [])
+
+
+class StopNoticeGuard(Scenario):
+    """Synthetic completion notices never silently retire unread task output."""
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('stop_notice_fixture', str(CORE / 'bin/brain')).load_module()
+        self.path = self.tmp / 'notice.jsonl'
+        self.notice = {'type': 'user', 'message': {'content': (
+            '<task-notification><task-id>task-17</task-id><output-file>/tmp/task-17.output</output-file>'
+            '<status>completed</status><summary>Fixture finished</summary></task-notification>')}}
+
+    def assistant(self, text):
+        return {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}}
+
+    def tool(self, name='Read', value='/tmp/task-17.output'):
+        return {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'id': 'read-17', 'name': name, 'input': {'file_path': value}}]}}
+
+    def unread(self, *records, last_message=None):
+        self.path.write_text(''.join(json.dumps(r) + '\n' for r in records))
+        return self.m.hook_notice_unread(self.path, last_message)
+
+    def test_notice_no_response_requested_blocks_even_after_read(self):
+        for text in ('No response requested', '  NO RESPONSE REQUESTED.  ', 'No response requested!'):
+            with self.subTest(text=text):
+                self.assertTrue(self.unread(self.notice, self.tool(), self.assistant(text)))
+        self.assertTrue(self.unread(self.notice, self.tool(), last_message='No response requested.'))
+
+    def test_notice_without_output_read_blocks(self):
+        self.assertTrue(self.unread(self.notice, self.assistant('Done.')))
+        self.assertTrue(self.unread(self.notice))
+        self.assertTrue(self.unread(self.notice, self.tool('SendMessage'), self.assistant('Root notified.')))
+        self.assertTrue(self.unread(self.notice, self.tool(value='/tmp/task-17.output.other')))
+        self.assertTrue(self.unread(self.notice, self.tool(value='/tmp/other.output')))
+
+    def test_notice_read_and_bash_or_task_output_pass(self):
+        for name, value in (('Read', '/tmp/task-17.output'), ('Bash', 'cat /tmp/task-17.output'),
+                            ('Bash', 'tail -n 40 /tmp/task-17.output'), ('TaskOutput', 'task-17'),
+                            ('BashOutput', 'task-17')):
+            with self.subTest(name=name, value=value):
+                self.assertFalse(self.unread(self.notice, self.tool(name, value), self.assistant('Fixed.')))
+        self.assertFalse(self.unread(self.notice, self.tool(), self.tool('SendMessage'),
+                                     self.assistant('Root notified.')))
+
+    def test_no_notice_and_old_turn_are_unaffected(self):
+        self.assertFalse(self.unread(self.assistant('No response requested.')))
+        self.assertFalse(self.unread(self.notice, {'type': 'user', 'message': {'content': 'New request'}},
+                                     self.assistant('No response requested.')))
+        quoted = {'type': 'user', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': 'old', 'content': self.notice['message']['content']}]}}
+        self.assertFalse(self.unread(quoted, self.assistant('Done.')))
+
+    def test_read_before_notice_and_partial_task_id_do_not_count(self):
+        self.assertTrue(self.unread(self.tool(), self.notice, self.assistant('Done.')))
+        self.assertTrue(self.unread(self.notice, self.tool('TaskOutput', 'task-170')))
+
+    def test_list_content_multiple_notices_require_every_output(self):
+        text = self.notice['message']['content']
+        notice = {'type': 'user', 'message': {'content': [{'type': 'text', 'text': text +
+                  text.replace('task-17', 'task-18')}]}}
+        self.assertTrue(self.unread(notice, self.tool()))
+        self.assertFalse(self.unread(notice, self.tool(), self.tool(value='/tmp/task-18.output')))
+
+    def test_background_command_completion_and_missing_identifiers(self):
+        notice = {'type': 'user', 'message': {'content':
+                  'Background command fixture completed with exit code 0. Output file: /tmp/task-17.output'}}
+        self.assertTrue(self.unread(notice, self.assistant('Done.')))
+        self.assertFalse(self.unread(notice, self.tool()))
+        notice['message']['content'] = '<task-notification><status>failed</status></task-notification>'
+        self.assertTrue(self.unread(notice, self.tool()))
+
+    def test_bounded_chunks_malformed_records_and_nonregular_input(self):
+        with mock.patch.object(self.m, 'HOOK_TRANSCRIPT_CHUNK', 17):
+            self.assertTrue(self.unread(None, self.notice, self.assistant('Done.')))
+        with self.path.open('a') as stream:
+            stream.write('{"unfinished')
+        self.assertTrue(self.m.hook_notice_unread(self.path))
+        self.assertFalse(self.m.hook_notice_unread('/dev/null'))
