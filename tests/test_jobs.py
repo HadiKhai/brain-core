@@ -1761,6 +1761,10 @@ class Workflow(Scenario):
                             "## Needs consent\nA live migration.\n\n## Done means\nAll cases pass; resources cleaned up.\nmode: untimed\n")
         self.b(r, "jobs", "a", "--branch", "job", "--contract-file", str(contract))
         self.assertEqual(len(list((r / "nodes/a/job-contracts").glob("*.md"))), 1)
+        authority = next((r / "nodes/a/job-contracts").glob("*.md"))
+        companion = authority.parent / "rules" / authority.name
+        self.assertTrue(companion.is_file())
+        self.assertIn("All cases pass; resources cleaned up.", companion.read_text())
         self.b(r, "jobs", "a", "--branch", "nope", "--contract-file", str(contract), ok=False)
         brief = self.b(r, "brief", "a", "--branch", "job", "--task", "Prove it")
         self.assertIn("## Contract for this job", brief)
@@ -1792,6 +1796,7 @@ class Workflow(Scenario):
         self.assertNotIn("doesn't say what clears it", self.b(r, "check"))
         self.b(r, "wt", "rm", "a", "job", "--cause", "fixture done")
         self.assertEqual(list((r / "nodes/a/job-contracts").glob("*.md")), [])
+        self.assertFalse(companion.exists())
 
     def test_workflow_review_round_one(self):
         from core_loader import SourceFileLoader

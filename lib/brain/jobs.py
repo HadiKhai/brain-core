@@ -847,7 +847,8 @@ def contract_file(n, row):
 
 def contract_rules_file(n, row):
     """Generated companion: the coordinator's exact contract remains authoritative."""
-    return contract_file(n, row).with_suffix('.rules.md')
+    authority = contract_file(n, row)
+    return authority.parent / 'rules' / authority.name
 
 
 def contract_problems(text, parallel=True):
@@ -2027,6 +2028,7 @@ def cmd_jobs(a):
         write_jobs(inst, n, rows)
         _m_common.atomic_write(f, text)
         companion = contract_rules_file(n, row)
+        companion.parent.mkdir(exist_ok=True)
         _m_common.atomic_write(companion, rendered)
         inst.commit([f, companion], f"{n['id']}: contract for {a.branch}")
         print(_m_guard.redact(f"{n['id']}: contract for {a.branch} recorded; briefs for this job carry it", _m_guard.never_terms(n)))

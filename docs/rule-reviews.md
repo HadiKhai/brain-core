@@ -4,7 +4,7 @@ Generated worker, small-job, import, specialist and review briefs carry inherite
 rules verbatim. The startup wording under `## Instance rules` is the minimum;
 full indexed rules remain in `library/instance-rules.md` under `<!-- rule:R01 -->`
 markers. Rules under `## Rules for this node` travel with inherited parent rules,
-up to the nearest ownership boundary. Generated contract companions (`<job-key>.rules.md`)
+up to the nearest ownership boundary. Generated contract companions (`job-contracts/rules/<job-key>.md`)
 contain the same rules. The authoritative `<job-key>.md` retains the coordinator's
 contract bytes for task launch checks and metadata readers. Briefs render that
 contract with the current rules; companions are refreshed when contracts are recorded.
