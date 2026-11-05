@@ -16,8 +16,11 @@ Paths are relative to each applicable node's bound home. Tests must exist there;
 outward symlinks and parent traversal fail. Python function and class-method
 declarations are checked without importing or executing the file. A bare test
 method name works when unique; class-qualified names use `Class::test_method`.
-This is an existence check, not evidence that the test passes or enforces the
-rule's meaning. Non-Python gates need a Python test entry point.
+JavaScript and TypeScript gates may name a literal `test("name", ...)` or
+`it("name", ...)` declaration, including runner modifiers. Comments and strings
+containing example declarations do not count. Computed test names need a literal
+named wrapper test. This is an existence check, not evidence that the test passes
+or enforces the rule's meaning.
 
 `Applies: all` selects all active nodes with a home on this machine. An explicit
 comma-separated list selects just those registered node IDs. Unknown or repeated

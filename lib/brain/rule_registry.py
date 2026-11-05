@@ -134,10 +134,94 @@ def gate_references(value):
         relative = Path(path)
         if (not sep or not path or relative.is_absolute() or '..' in relative.parts
                 or '\\' in path or '\x00' in entry or not selector
-                or any(not part.isidentifier() for part in selector.split('::'))):
+                or selector != selector.strip() or any(ord(char) < 32 for char in selector)):
             raise ValueError('malformed Gate: use path::test or none (reason)')
         refs.append((path, selector))
     return refs
+
+
+def _javascript_tests(text):
+    """Read literal test()/it() names, ignoring comments and string contents.
+
+    Tokenization checks declaration syntax only. Computed names and generated
+    tests need a literal named wrapper test; repository code is never executed.
+    """
+    tokens, offset = [], 0
+    while offset < len(text):
+        char = text[offset]
+        if char.isspace():
+            offset += 1
+            continue
+        if text.startswith('//', offset):
+            end = text.find('\n', offset)
+            offset = len(text) if end < 0 else end + 1
+            continue
+        if text.startswith('/*', offset):
+            end = text.find('*/', offset + 2)
+            if end < 0:
+                return set()
+            offset = end + 2
+            continue
+        if char == '/' and (not tokens or tokens[-1] in (
+                ('punct', '='), ('punct', '('), ('punct', '['), ('punct', ','),
+                ('punct', ':'), ('punct', '!'), ('punct', '?'), ('punct', ';'),
+                ('name', 'return'), ('name', 'throw'))):
+            end, bracket = offset + 1, False
+            while end < len(text) and text[end] not in '\r\n':
+                if text[end] == '\\':
+                    end += 2
+                    continue
+                if text[end] == '[':
+                    bracket = True
+                elif text[end] == ']':
+                    bracket = False
+                elif text[end] == '/' and not bracket:
+                    break
+                end += 1
+            if end >= len(text) or text[end] != '/':
+                return set()
+            tokens.append(('regexp', None))
+            offset = end + 1
+            continue
+        if char in ('"', "'", '`'):
+            end = offset + 1
+            while end < len(text):
+                if text[end] == '\\':
+                    end += 2
+                elif text[end] == char:
+                    break
+                else:
+                    end += 1
+            if end >= len(text):
+                return set()
+            raw = text[offset:end + 1]
+            try:
+                value = ast.literal_eval(raw) if char != '`' else None
+            except (ValueError, SyntaxError):
+                value = None
+            tokens.append(('string', value))
+            offset = end + 1
+            continue
+        word = re.match(r'[A-Za-z_$][A-Za-z0-9_$]*', text[offset:])
+        if word:
+            tokens.append(('name', word[0]))
+            offset += len(word[0])
+            continue
+        tokens.append(('punct', char))
+        offset += 1
+    names = set()
+    for i, token in enumerate(tokens):
+        if token not in (('name', 'test'), ('name', 'it')):
+            continue
+        end = i + 1
+        # Test runner modifiers are identifiers, not inferred prose categories.
+        while end + 1 < len(tokens) and tokens[end] == ('punct', '.') and tokens[end + 1][0] == 'name':
+            end += 2
+        if (end + 2 < len(tokens) and tokens[end] == ('punct', '(')
+                and tokens[end + 1][0] == 'string' and isinstance(tokens[end + 1][1], str)
+                and tokens[end + 2] == ('punct', ',')):
+            names.add(tokens[end + 1][1])
+    return names
 
 
 def _test_exists(home, relative, selector, cache):
@@ -149,9 +233,18 @@ def _test_exists(home, relative, selector, cache):
             return False
         if resolved not in cache:
             # Inspect declarations without importing or executing repository code.
-            cache[resolved] = ast.parse(path.read_bytes(), filename=relative)
+            if path.suffix == '.py':
+                cache[resolved] = ast.parse(path.read_bytes(), filename=relative)
+            elif path.suffix in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'):
+                cache[resolved] = _javascript_tests(path.read_text())
+            else:
+                return False
         tree = cache[resolved]
+        if isinstance(tree, set):
+            return selector in tree
         parts = selector.split('::')
+        if any(not part.isidentifier() for part in parts):
+            return False
         if len(parts) == 1:
             definitions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                            and node.name == selector]

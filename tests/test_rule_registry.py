@@ -85,6 +85,22 @@ class RuleRegistryParsing(unittest.TestCase):
             (home / 'escape.py').symlink_to(Path(__file__).resolve())
             self.assertFalse(self.m._test_exists(home, 'escape.py', 'test_one', {}))
 
+    def test_javascript_literal_test_names_are_syntax_not_substring_matches(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / 'checks.test.ts').write_text('test("keeps source evidence", () => {});\n'
+                "it.only('keeps \\'quoted\\' evidence', () => {});\n"
+                '// test("commented test", () => {});\n'
+                'const example = `test("string example", () => {})`;\n'
+                'const pattern = /test("regex example", () => {})/;\n'
+                '/* it("block example", () => {}); */\n')
+            for selector in ('keeps source evidence', "keeps 'quoted' evidence"):
+                self.assertEqual(self.m.gate_references('checks.test.ts::' + selector),
+                                 [('checks.test.ts', selector)])
+                self.assertTrue(self.m._test_exists(home, 'checks.test.ts', selector, {}))
+            for selector in ('commented test', 'string example', 'regex example', 'block example', 'missing'):
+                self.assertFalse(self.m._test_exists(home, 'checks.test.ts', selector, {}))
+
     def test_real_size_registry_is_under_one_second(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
