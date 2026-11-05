@@ -75,6 +75,9 @@ def execute_lane(inst, n, branch, w, env, lane, cancelled=None, log_keep=5):
     import time
     from . import gate_lock, handback_queue, lane_worker, owned_runs
     started = time.monotonic()
+    # A sibling may briefly publish under the parent's writer lock. An old
+    # BRAIN_LOCK_HELD hint must never let its helper bypass that real lock.
+    env = {key: value for key, value in env.items() if key != 'BRAIN_LOCK_HELD'}
     inherited = gate_lock.gate_inherited_fd(inst.root, env, n['id'])
     queue_fd = handback_queue.queue_descendant_fd()
     descriptors = tuple(fd for fd in (inherited, queue_fd) if fd is not None)

@@ -145,6 +145,7 @@ class NativeParallelLanes(Scenario):
             request = module.enqueue_handback(inst, n, row, args)
             lease_path = module.queue_path(n, request['id']).with_suffix('.lease')
             script = ('import os,sys; info=os.stat(sys.argv[1]); found=False\n'
+                      'assert "BRAIN_LOCK_HELD" not in os.environ, "stale parent writer hint leaked"\n'
                       'for fd in range(3,256):\n'
                       ' try: current=os.fstat(fd)\n'
                       ' except OSError: continue\n'
@@ -154,6 +155,7 @@ class NativeParallelLanes(Scenario):
             command = 'python3 -c ' + shlex.quote(script) + ' ' + shlex.quote(str(lease_path))
             # The map is a direct run_lanes snapshot; no queued binding is changed.
             env = module.verify_env(n, 'job', n['local']['worktrees']['job'])
+            env['BRAIN_LOCK_HELD'] = str(inst.root) + '|' + str(os.getpid())
             snapshot = module.lane_snapshot(n, n['local']['worktrees']['job'], env, 'fixture-input')
             for lane in snapshot['lanes']:
                 lane.update(command=command, workers=1)
