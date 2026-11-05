@@ -1,6 +1,7 @@
 """Small, bounded stdlib Messages API client. No telemetry or implicit retries."""
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -8,6 +9,10 @@ import time
 
 class AIUnavailable(Exception):
     """A safe diagnostic code, never provider response text or credentials."""
+
+
+class AIResponseInvalid(ValueError):
+    """The provider answered but its response cannot establish classification."""
 
 
 # A child gives the entire exchange a deadline, including DNS and slow reads.
@@ -41,7 +46,9 @@ def ai_json(system, data, schema, model='claude-haiku-5-5'):
     request = json_request(system, data, schema, model)
     started = time.monotonic()
     try:
-        result = subprocess.run([sys.executable, '-c', _REQUEST], input=json.dumps(request),
+        result = subprocess.run([sys.executable, '-I', '-c', _REQUEST], input=json.dumps(request),
+                                cwd=Path(__file__).resolve().parent,
+                                env={'ANTHROPIC_API_KEY': os.environ['ANTHROPIC_API_KEY']},
                                 text=True, capture_output=True, timeout=20, check=False)
     except subprocess.TimeoutExpired:
         raise AIUnavailable('timeout') from None
@@ -58,4 +65,4 @@ def ai_json(system, data, schema, model='claude-haiku-5-5'):
         return value, {'model': response.get('model'), 'usage': response.get('usage'),
                        'latency_seconds': time.monotonic() - started}
     except (ValueError, TypeError, KeyError, AttributeError):
-        raise ValueError('invalid or incomplete AI response') from None
+        raise AIResponseInvalid('invalid or incomplete AI response') from None

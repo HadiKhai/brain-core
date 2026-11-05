@@ -1419,6 +1419,7 @@ def hook_note_events(n):
             text = f.read_text()
             if f.name == "inbox.md":
                 content = [line for line in text.splitlines() if line.startswith("- ")
+                           and '<!-- instruction-capture-gap:' not in line
                            and re.sub(r"<!--.*?-->", "", line[2:]).strip()]
                 label = f"inbox: {len(content)} pending entr{'y' if len(content) == 1 else 'ies'}"
             elif f.name == _m_jobs.JOBS_FILE:
@@ -1713,21 +1714,24 @@ def hook_stop(a):
         capture_hook_questions(inst, n, data)
     except (Exception, SystemExit):
         pass  # question bookkeeping must not suppress existing reminders or fail a turn
-    reason = _m_instruction_capture.capture_stop(inst, n, data)
-    if reason is _m_instruction_capture.ALLOW_STOP:
-        return
-    if reason:
-        print(json.dumps({'decision': 'block', 'reason': reason}))
-        return
+    reasons = []
+    try:
+        reason = _m_instruction_capture.capture_stop(inst, n, data)
+        if reason:
+            reasons.append(reason)
+    except (Exception, SystemExit):
+        _m_instruction_capture.best_effort_gap(inst, n, _m_instruction_capture.capture_key(n, data),
+                                             'capture_unexpected_error')
     last_message = data.get("last_assistant_message")
     if not data.get("stop_hook_active") and isinstance(data.get("transcript_path"), str):
         try:
             if hook_notice_unread(data["transcript_path"]):
-                print(json.dumps({"decision": "block", "reason":
-                      "Read the notice's output and act on it (fix, next step, or one line to root)."}))
-                return
+                reasons.append("Read the notice's output and act on it (fix, next step, or one line to root).")
         except (OSError, ValueError):
             pass  # unreadable transcripts follow the existing fail-open hook convention
+    if reasons:
+        print(json.dumps({'decision': 'block', 'reason': '\n'.join(reasons)}))
+        return
     if isinstance(last_message, str) and last_message.strip().casefold() == "relay only":
         return  # explicit read-only relay: capture questions, then skip notes and reminder bookkeeping
     if data.get("stop_hook_active") or not node_at(inst, cwd):

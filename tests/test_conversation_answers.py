@@ -221,7 +221,7 @@ class InstructionCapture(Scenario):
 
     def test_outage_records_deduplicated_structured_inbox_gap_and_allows_stop(self):
         with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('missing_key')):
-            self.assertIs(self.capture.capture_stop(self.inst, self.n, self.data), self.capture.ALLOW_STOP)
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         inbox = (self.root / 'inbox.md').read_text()
         self.assertEqual(inbox.count('"kind": "instruction-capture-gap"'), 1)
@@ -231,7 +231,7 @@ class InstructionCapture(Scenario):
     def test_busy_inbox_queues_gap_for_existing_drain(self):
         with mock.patch.object(self.capture._m_transitions, 'inbox_append', side_effect=BlockingIOError), \
                 mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('timeout')):
-            self.assertIs(self.capture.capture_stop(self.inst, self.n, self.data), self.capture.ALLOW_STOP)
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         rows = list(self.m.hook_question_queue(self.n).glob('*.json'))
         self.assertEqual(len(rows), 1)
         self.assertIn('"code": "timeout"', json.loads(rows[0].read_text())['line'])
@@ -264,6 +264,92 @@ class InstructionCapture(Scenario):
         evidence = list((self.root / '.brain/instruction-capture/gaps').glob('*.json'))
         self.assertEqual(len(evidence), 1)
         self.assertIn(self.quote, evidence[0].read_text())
+
+    def test_second_stop_rechecks_conversion_and_does_not_record_false_gap(self):
+        self.assertIn(self.quote, self.stop())
+        self.commit_rule()
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('second stop called AI')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True}))
+        self.assertNotIn('instruction-capture-gap', (self.root / 'inbox.md').read_text())
+        state = json.loads((self.root / '.brain/instruction-capture' /
+                            (self.capture.capture_key(self.n, self.data) + '.json')).read_text())
+        self.assertEqual(state['head'], self.git('rev-parse', 'HEAD', cwd=self.root).stdout.strip())
+
+    def test_second_stop_always_escapes_bad_state_links_and_git_errors(self):
+        self.assertIn(self.quote, self.stop())
+        active = {**self.data, 'stop_hook_active': True}
+        with mock.patch.object(self.capture, 'rule_committed', side_effect=self.capture.AIUnavailable('rule_git_unavailable')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, active))
+        state = self.root / '.brain/instruction-capture' / (self.capture.capture_key(self.n, self.data) + '.json')
+        for content in (b'{', b'\xff'):
+            state.write_bytes(content)
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, active))
+        with mock.patch.object(self.capture._m_common, 'outward_links', return_value=['unsafe-fixture']), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, active))
+        self.assertIn('second_stop_evidence_unavailable', stderr.getvalue())
+
+    def test_rejected_batch_is_not_retried_and_second_stop_records_unclassified_gap(self):
+        with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw:
+                               self.answer(data, quote='invented')) as call:
+            self.assertIn('rejected structurally', self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIn('rejected structurally', self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True}))
+        call.assert_called_once()
+        self.assertIn('second_stop_unclassified', (self.root / 'inbox.md').read_text())
+
+    def test_missing_key_deduplicates_across_turns_and_does_not_create_note_event(self):
+        with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('missing_key')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            self.message('How many rows?')
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        inbox = (self.root / 'inbox.md').read_text()
+        self.assertEqual(inbox.count('"kind": "instruction-capture-gap"'), 1)
+        events = self.m.hook_note_events(self.n)
+        self.assertFalse(any(e['label'].startswith('inbox:') for e in events.values()))
+
+    def test_replaced_transcript_records_gap_then_recovers(self):
+        self.assertIsNone(self.stop('one_off'))
+        replacement = self.path.with_suffix('.replacement')
+        replacement.write_text(json.dumps(self.records[0]) + '\n')
+        replacement.replace(self.path)
+        with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw:
+                               self.answer(data, 'question')) as call:
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            call.assert_not_called()
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            call.assert_called_once()
+        self.assertIn('transcript_changed', (self.root / 'inbox.md').read_text())
+
+    def test_bad_transcript_type_and_gap_write_failure_are_not_silent(self):
+        self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'transcript_path': None}))
+        self.assertIn('transcript_path_unavailable', (self.root / 'inbox.md').read_text())
+        with mock.patch.object(self.capture._m_transitions, 'inbox_append', side_effect=OSError('synthetic shared target')), \
+                mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('missing_key')), \
+                contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        self.assertIn('inbox_unavailable', stderr.getvalue())
+
+    def test_hook_joins_capture_and_notice_and_preserves_notice_guard_on_outage(self):
+        def run():
+            with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(self.data))), \
+                    mock.patch.object(self.m, 'Instance', return_value=self.inst), \
+                    mock.patch.object(self.m, 'capture_hook_questions'), \
+                    mock.patch.object(self.m, 'hook_notice_unread', return_value=True) as notice, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.m.hook_stop(argparse.Namespace(event='stop'))
+            notice.assert_called_once()
+            return output.getvalue()
+        with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw: self.answer(data)):
+            reason = run()
+            self.assertIn(self.quote, reason)
+            self.assertIn('Read the notice', reason)
+        self.message('How many rows?')
+        with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('missing_key')):
+            self.assertIn('Read the notice', run())
+        with mock.patch.object(self.capture, 'capture_stop', side_effect=SystemExit(1)):
+            self.assertIn('Read the notice', run())
+        self.assertIn('capture_unexpected_error', (self.root / 'inbox.md').read_text())
 
     def test_node_rule_commit_and_same_turn_timestamp_are_enforced(self):
         self.n = dict(self.n, id='oak', dir=self.root / 'nodes/oak')
@@ -339,6 +425,9 @@ class InstructionCapture(Scenario):
             with self.assertRaises(client.AIUnavailable):
                 client.ai_json(self.capture.SYSTEM, [], self.capture.SCHEMA)
         self.assertEqual(call.call_args.kwargs['timeout'], 20)
+        self.assertEqual(call.call_args.args[0][1:3], ['-I', '-c'])
+        self.assertEqual(call.call_args.kwargs['cwd'], CORE / 'lib/brain')
+        self.assertEqual(call.call_args.kwargs['env'], {'ANTHROPIC_API_KEY': 'synthetic-secret'})
 
 
 class StopNoticeGuard(Scenario):
