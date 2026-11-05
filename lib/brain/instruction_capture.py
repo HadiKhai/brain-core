@@ -13,6 +13,7 @@ from .ai_json import AIUnavailable, ai_json
 
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_status = _m_common.LazyModule(__package__, 'status')
+_m_jobs = _m_common.LazyModule(__package__, 'jobs')
 
 MODEL = 'claude-haiku-5-5'
 ALLOW_STOP = object()
@@ -48,10 +49,12 @@ def coordinator(n, data):
     sessions = local.get('coordinator_sessions', [])
     session = data.get('session_id')
     bound = local.get('coordinator')
+    thread = data.get('thread_id')
     return bool(isinstance(bound, str) and bound and (
         isinstance(session, str) and session and
         (session == bound or isinstance(sessions, list) and session in sessions)
-        or isinstance(data.get('thread_id'), str) and data['thread_id'] == bound))
+        or isinstance(thread, str) and thread and
+        _m_jobs.thread_reference_ids(thread).intersection(_m_jobs.thread_reference_ids(bound))))
 
 
 def operator_text(record):
@@ -272,10 +275,16 @@ def rule_committed(inst, n, item, baseline=None):
     return False
 
 
-def capture_gap(inst, n, key, code):
+def capture_gap(inst, n, key, code, items=None):
     """Visible, structured and deduplicated; no raw transcript/provider body."""
     record = {'kind': 'instruction-capture-gap', 'code': code, 'node': n['id'], 'capture': key}
     marker = '<!-- instruction-capture-gap:' + hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest() + ' -->'
+    if items:
+        # Preserve escaped instructions locally for reconciliation, while the
+        # inbox carries only an opaque reference and no private quoted text.
+        evidence = inst.root / '.brain/instruction-capture/gaps' / (key + '.json')
+        _m_common.atomic_write(evidence, json.dumps(dict(record, items=items), ensure_ascii=False) + '\n',
+                               private=True, create=True)
     line = '- ' + inst.now() + ' from runtime: ' + json.dumps(record, sort_keys=True) + ' ' + marker + '\n'
     try:
         _m_transitions.inbox_append(n['dir'], line, marker, nonblocking=True)
@@ -303,9 +312,10 @@ def capture_stop(inst, n, data):
             raise AIUnavailable('capture_state_invalid')
         if data.get('stop_hook_active'):
             if state.get('pending'):
-                capture_gap(inst, n, key, 'second_stop_unconverted')
+                episode = hashlib.sha256((key + state.get('anchor', '')).encode()).hexdigest()
+                capture_gap(inst, n, episode, 'second_stop_unconverted', state['pending'])
                 state['pending'] = []
-                _m_common.atomic_write(path, json.dumps(state) + '\n', private=True)
+                _m_common.atomic_write(path, json.dumps(state) + '\n', private=True, create=True)
             return None
         messages, cursor = snapshot(data['transcript_path'], state)
         items, usage = classifications(messages) if messages else ([], None)
@@ -317,14 +327,14 @@ def capture_stop(inst, n, data):
             head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=inst.root, text=True,
                                   capture_output=True, timeout=2, check=True).stdout.strip()
             cursor['head'] = head
-        _m_common.atomic_write(path, json.dumps(cursor, ensure_ascii=False) + '\n', private=True)
+        _m_common.atomic_write(path, json.dumps(cursor, ensure_ascii=False) + '\n', private=True, create=True)
         if missing:
             return 'Capture standing instructions before stopping; missing same-turn citing rule commit and/or Gate line: ' + '; '.join(
                 json.dumps(i['quote'], ensure_ascii=False) for i in missing)
     except ValueError as error:
         # Invalid AI structure is a refusal, distinct from provider unavailability.
         return 'Instruction capture rejected structurally: ' + str(error)
-    except (AIUnavailable, OSError, KeyError, subprocess.SubprocessError) as error:
+    except (AIUnavailable, OSError, UnicodeError, KeyError, subprocess.SubprocessError) as error:
         code = str(error) if isinstance(error, AIUnavailable) else 'capture_evidence_unavailable'
         episode = hashlib.sha256((key + json.dumps(cursor or {}, sort_keys=True)).encode()).hexdigest()
         capture_gap(inst, n, episode, code)
@@ -332,6 +342,6 @@ def capture_stop(inst, n, data):
             # Outages skip this bounded batch after recording its gap. Do not
             # classify it as a future turn or silently replay paid calls.
             cursor.update(pending=[], head=state.get('head'))
-            _m_common.atomic_write(path, json.dumps(cursor) + '\n', private=True)
+            _m_common.atomic_write(path, json.dumps(cursor) + '\n', private=True, create=True)
         return ALLOW_STOP  # A fresh gap must not itself trigger the notes-lag reminder.
     return None

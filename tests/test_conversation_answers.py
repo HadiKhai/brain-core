@@ -221,8 +221,8 @@ class InstructionCapture(Scenario):
 
     def test_outage_records_deduplicated_structured_inbox_gap_and_allows_stop(self):
         with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('missing_key')):
-            for _ in range(2):
-                self.assertIs(self.capture.capture_stop(self.inst, self.n, self.data), self.capture.ALLOW_STOP)
+            self.assertIs(self.capture.capture_stop(self.inst, self.n, self.data), self.capture.ALLOW_STOP)
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         inbox = (self.root / 'inbox.md').read_text()
         self.assertEqual(inbox.count('"kind": "instruction-capture-gap"'), 1)
         self.assertIn('"code": "missing_key"', inbox)
@@ -239,6 +239,8 @@ class InstructionCapture(Scenario):
     def test_worker_identity_is_not_gated_even_in_node_folder(self):
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('worker called AI')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'session_id': 'worker'}))
+        self.assertTrue(self.capture.coordinator(self.n, {'thread_id': 'host-coordinator'}))
+        self.n['local']['coordinator'] = 't3-thread://v1/host-coordinator'
         self.assertTrue(self.capture.coordinator(self.n, {'thread_id': 'host-coordinator'}))
         self.assertFalse(self.capture.coordinator(self.n, {'session_id': ''}))
 
@@ -259,6 +261,27 @@ class InstructionCapture(Scenario):
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('second stop called AI')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True}))
         self.assertIn('second_stop_unconverted', (self.root / 'inbox.md').read_text())
+        evidence = list((self.root / '.brain/instruction-capture/gaps').glob('*.json'))
+        self.assertEqual(len(evidence), 1)
+        self.assertIn(self.quote, evidence[0].read_text())
+
+    def test_node_rule_commit_and_same_turn_timestamp_are_enforced(self):
+        self.n = dict(self.n, id='oak', dir=self.root / 'nodes/oak')
+        self.n['dir'].mkdir(parents=True)
+        (self.n['dir'] / 'AGENTS.md').write_text('- "' + self.quote + '" Gate: none (human judgement)\n')
+        self.git('add', 'nodes/oak/AGENTS.md', cwd=self.root)
+        self.git('commit', '-qm', 'capture node fixture', cwd=self.root)
+        self.assertIsNone(self.stop())
+        item = {'kind': 'standing_instruction', 'quote': self.quote, 'at': '2099-01-01T00:00:00Z'}
+        self.assertFalse(self.capture.rule_committed(self.inst, self.n, item))
+
+    def test_capped_bootstrap_retains_current_turn_with_explicit_boundary(self):
+        self.records = [{'type': 'user', 'message': {'content': 'x' * 2000}},
+                        {'type': 'event_msg', 'payload': {'type': 'task_complete'}}, self.records[0]]
+        self.path.write_text(''.join(json.dumps(r) + '\n' for r in self.records))
+        with mock.patch.object(self.capture, 'LIMIT', 512):
+            messages, _ = self.capture.snapshot(self.path, {})
+        self.assertEqual([m['text'] for m in messages], [self.quote])
 
     def test_cursor_covers_multiple_new_messages_and_does_not_repeat_old_input(self):
         self.assertIsNone(self.stop('one_off'))
