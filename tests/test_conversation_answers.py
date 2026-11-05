@@ -273,7 +273,7 @@ class InstructionCapture(Scenario):
         self.assertNotIn('instruction-capture-gap', (self.root / 'inbox.md').read_text())
         state = json.loads((self.root / '.brain/instruction-capture' /
                             (self.capture.capture_key(self.n, self.data) + '.json')).read_text())
-        self.assertEqual(state['head'], self.git('rev-parse', 'HEAD', cwd=self.root).stdout.strip())
+        self.assertEqual(state['head'], self.git('rev-parse', 'HEAD', cwd=self.root).strip())
 
     def test_second_stop_always_escapes_bad_state_links_and_git_errors(self):
         self.assertIn(self.quote, self.stop())
