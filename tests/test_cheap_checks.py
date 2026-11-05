@@ -23,7 +23,7 @@ class CheapChecks(Scenario):
                 yield token
             events.append('release-cheap')
         @contextlib.contextmanager
-        def full(*args):
+        def full(*args, **kwargs):
             events.append('full-admission')
             yield 'full-token'
         def execute(inst, n, branch, command, w, env, token, lane=None):
