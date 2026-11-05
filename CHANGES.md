@@ -5,6 +5,13 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Check compact instance rule indexes
+
+`tools/check_rule_index.py` checks that a shortened startup index retains every
+complete rule, preserves original requirements and the operator block, and stays
+within its character budget. It changes no instance files. See
+[the format and retention checks](docs/rule-index.md) when shortening an index.
+
 ## 2026-11-05: Admit verification by worker count
 
 Heavy runs and native verifies now share a CPU-sized worker budget, in addition
