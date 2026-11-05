@@ -213,6 +213,8 @@ def _collect_problems(inst):
 def collect_global_problems(inst):
     problems, warnings, fixable = [], [], []
     p = problems.append
+    from . import rule_registry
+    problems.extend(rule_registry.validate_registry(inst))
     fallback = inst.local.get("fallback", [])
     if not isinstance(fallback, list) or any(not isinstance(x, str) or not x.strip() for x in fallback) \
             or (isinstance(fallback, list) and all(isinstance(x, str) for x in fallback)
@@ -377,7 +379,15 @@ def cmd_check(a):
 
 
 def _cmd_check(a):
+    # Sweep publication owns its narrow writer section; the remaining global
+    # diagnostics can inspect homes without holding the instance writer lock.
+    _m_instance.unlock()
     inst = _m_nodes.load()
+    from . import rule_registry
+    try:
+        rule_registry.sync_sweeps(inst)
+    except (OSError, ValueError) as error:
+        _m_common.die('rule registry: ' + str(error))
     from . import semantic as _m_semantic
     print(_m_semantic.semantic_mode(inst))
     problems, warnings, fixable = collect_problems(inst)

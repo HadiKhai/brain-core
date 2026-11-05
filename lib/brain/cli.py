@@ -206,7 +206,7 @@ def writes(a):
         return bool(getattr(a, "out", None) or getattr(a, "job", None) or
                     (name == "cmd_brief" and getattr(a, "branch", None)))  # Branch briefs also record replay inputs and acknowledge restarts.
     if name == "cmd_check":
-        return bool(a.fix)
+        return True  # new rules open durable sweep tasks, even without --fix
     if name == "cmd_jobs":
         return a.start or a.close or bool(getattr(a, "settled", False)) or a.lessons is not None or a.switch is not None or bool(a.contract_file) \
             or bool(a.usage_file) or bool(getattr(a, 'rebind', None)) or bool(getattr(a, '_reconcile_landings', False))

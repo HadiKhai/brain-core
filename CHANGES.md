@@ -55,6 +55,16 @@ Generated contract companions keep the coordinator's authoritative contract byte
 unchanged. After upgrading, existing reviewed jobs with applicable rules also need
 a fresh exact-head rule-table receipt before readiness can pass.
 
+## 2026-11-05: Check rule gates and open sweeps
+
+`brain check` now validates each instance rule section and node rule bullet's
+`Gate:` and `Applies:` metadata. Missing annotations and test declarations fail
+with the rule ID. An explicit `Gate: none (reason)` remains valid. New rule IDs
+open one ready sweep task per applicable node home, with the rule verbatim;
+repeated checks preserve existing tasks. Plain check now writes these tasks,
+while passive status reads only validate. After upgrading, annotate the existing
+rules; see [the format and checkpoint behavior](docs/rule-registry.md).
+
 ## 2026-11-05: Check compact instance rule indexes
 
 `tools/check_rule_index.py` checks that a shortened startup index retains every
