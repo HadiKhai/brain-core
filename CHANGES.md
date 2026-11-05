@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-05: Admit verification by worker count
+
+Heavy runs and native verifies now share a CPU-sized worker budget, in addition
+to day/night run-count caps. Two explicit 8-worker requests fit a 16-worker budget;
+a 16-worker or undeclared run owns the full budget and later requests wait.
+Legacy reservations and opaque commands retain full-budget ownership. The optional
+`worker_budget` machine-care policy sets the budget without changing node config.
+Native literal pytest commands pass their requested count into admission and clamp
+only their worker arguments to the grant. Every child receives `BRAIN_TEST_WORKERS`.
+A cooperating heavy-run child declares its request through `BRAIN_HEAVY_WORKERS`
+and must honor the grant. Opaque node scripts need owner-defined worker support
+before they can share capacity; their command bytes remain unchanged.
+
 ## 2026-11-05: Require diagnosis for failure handbacks and questions
 
 Failure handbacks and typed question files require `## Dissection`: three cases

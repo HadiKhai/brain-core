@@ -448,7 +448,7 @@ class WorkerReadyPackets(Scenario):
                                 ('verify_input_files', mock.Mock(return_value={})),
                                 ('read_verify_input_files', mock.Mock(return_value={})),
                                 ('write_verify_input_files', mock.Mock(return_value=None)),
-                                ('verify_reservation', lambda *args: contextlib.nullcontext(None)),
+                                ('verify_reservation', lambda *args, **kwargs: contextlib.nullcontext(None)),
                                 ('run_verify', execute), ('run_verify_stream', execute)]:
                 stack.enter_context(mock.patch.object(m, name, value))
             for lane in (False, True):

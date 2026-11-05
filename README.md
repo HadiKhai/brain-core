@@ -543,6 +543,24 @@ Then talk to it:
 
 ---
 
+Heavy runs and native verification share a machine worker budget (CPU count by default;
+`worker_budget` in `~/.local/state/brain/machine-care.json` can override it). Day/night
+verify limits also cap run count. On a 16-CPU machine, one 16-worker run fills the budget;
+two explicit 8-worker requests can overlap when the run-count cap allows two. Requests
+wait for their full count, capped to the budget; running grants never shrink. Undeclared,
+opaque and legacy reservations take the full budget, so opaque verifies serialize.
+
+Native verification recognizes a single literal `pytest` or `python -m pytest` command,
+including numeric `-n`/`--numprocesses` forms. It counts the requested workers and clamps
+only those worker arguments to the grant; `auto`/`logical` reserve the full budget and
+become the granted count. Shell wrappers, compound commands and unsupported syntax stay
+opaque. Every verify child receives `BRAIN_TEST_WORKERS` with its immutable grant; opaque
+commands retain their command bytes and can use this variable when their owners add support.
+For a cooperating `brain heavy run` child, declare its worker request with
+`BRAIN_HEAVY_WORKERS=8 brain heavy run -- <command...>` and make the child honor
+`BRAIN_TEST_WORKERS`. An undeclared heavy run reserves the full budget. Plain
+`brain heavy` remains admission only.
+
 ## Commands
 
 For focused specs, configure the node's runner argument prefix once, for example

@@ -880,15 +880,83 @@ def queued_attempt_phase():
         pass  # unreadable phase evidence remains unknown; publication rechecks it
 
 
+def literal_pytest_workers(command):
+    """Recognize one literal pytest invocation, never shell programs or wrappers.
+
+    Return the effective request and the exact worker-value spans. Unsupported
+    shell syntax stays opaque and therefore reserves the whole machine budget.
+    """
+    if any(c in command for c in '\r\n$`;&|<>(){}*?~#'):
+        return None
+    words = list(re.finditer(r"(?:[^ \t'\"\\]+|'[^']*'|\"[^\"\\]*\"|\\[^\r\n])+", command))
+    previous, args = 0, []
+    try:
+        for word in words:
+            if command[previous:word.start()].strip():
+                return None
+            parsed = shlex.split(word.group())
+            if len(parsed) != 1:
+                return None
+            args.append(parsed[0])
+            previous = word.end()
+    except ValueError:
+        return None
+    if command[previous:].strip() or not args:
+        return None
+    executable = Path(args[0]).name
+    if executable in ('pytest', 'py.test'):
+        offset = 1
+    elif re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?', executable) and args[1:3] == ['-m', 'pytest']:
+        offset = 3
+    else:
+        return None
+    values, requested, i = [], None, offset
+    while i < len(args):
+        arg, prefix = args[i], ''
+        if arg == '--':
+            break
+        if arg in ('-n', '--numprocesses'):
+            i += 1
+            if i == len(args):
+                return None
+            value = args[i]
+        elif arg.startswith('--numprocesses='):
+            prefix, value = '--numprocesses=', arg.partition('=')[2]
+        elif arg.startswith('-n') and len(arg) > 2:
+            prefix, value = '-n', arg[2:]
+        else:
+            i += 1
+            continue
+        if value not in ('auto', 'logical') and not re.fullmatch(r'[0-9]+', value):
+            return None
+        requested = None if value in ('auto', 'logical') else max(1, int(value))
+        # Replace the option/value word only. Every other original byte remains.
+        values.append((words[i].start(), words[i].end(), prefix, value))
+        i += 1
+    return requested, values
+
+
+def verify_worker_command(command, workers):
+    parsed = literal_pytest_workers(command)
+    if parsed is None:
+        return command
+    for start, end, prefix, value in reversed(parsed[1]):
+        if value in ('auto', 'logical') or int(value) > workers:
+            command = command[:start] + shlex.quote(prefix + str(workers)) + command[end:]
+    return command
+
+
 @contextlib.contextmanager
-def command_reservation(inst, n, branch=None, kind='verify'):
+def command_reservation(inst, n, branch=None, kind='verify', command=None):
     """One producer context spans native admission, execution and every cleanup."""
     managed = getattr(_m_machine, 'machine_run', None)
     with managed(kind, inst, n['id'], branch, release=False) if managed else contextlib.nullcontext(None) as run:
         primary = None
         token = run
         try:
-            token = (_m_machine.machine_wait(kind, inst, n['id'], job=branch, token=run)
+            parsed = literal_pytest_workers(command) if kind == 'verify' and command else None
+            admission = {'workers': parsed[0], 'reduction_ready': bool(parsed[1])} if parsed is not None else {}
+            token = (_m_machine.machine_wait(kind, inst, n['id'], job=branch, token=run, **admission)
                      if managed else _m_machine.machine_wait(kind, inst, n['id']))
             if kind == 'verify':
                 from . import job_attempts as _m_attempts
@@ -923,8 +991,8 @@ def command_reservation(inst, n, branch=None, kind='verify'):
 
 
 @contextlib.contextmanager
-def verify_reservation(inst, n, branch=None):
-    with command_reservation(inst, n, branch) as token:
+def verify_reservation(inst, n, branch=None, command=None):
+    with command_reservation(inst, n, branch, command=command) as token:
         yield token
 
 
@@ -943,17 +1011,19 @@ def run_verify(inst, n, branch, verify, w, env):
             if cheap and cheap[0]:
                 resources['failed'] = True
                 return cheap
-        with verify_reservation(inst, n, branch) as token:
+        with verify_reservation(inst, n, branch, command=verify) as token:
             result = run_verify_stream(inst, n, branch, verify, w, gate_env, token)
             resources['failed'] = bool(result[0])
             return result
 
 
 def run_verify_stream(inst, n, branch, verify, w, env, token, lane=None):
-    """Drain the same combined stdout/stderr pipe as before; stdin, environment and shell stay unchanged.
+    """Drain the combined pipe, exporting the grant and clamping literal pytest workers.
     Only redacted text reaches disk or failure tails. Memory holds at most 15 bounded
     lines per named lane, plus an overall tail and the scrubber's protected suffix.
     """
+    env = _m_machine.machine_environment(token, env)
+    verify = verify_worker_command(verify, int(env['BRAIN_TEST_WORKERS']))
     import codecs
     import io
     import selectors
@@ -1185,7 +1255,7 @@ def run_lanes(inst, n, branch, w, env, snap, previous, head, main, inputs, force
             elif reuse:
                 row.update(previous_lane, reused=True)
             else:
-                with verify_reservation(inst, n, branch) as token:
+                with verify_reservation(inst, n, branch, command=lane['command']) as token:
                     print('verify lane: ' + name, flush=True)
                     start = time.monotonic()
                     result, log = run_verify_stream(inst, n, branch, lane['command'], w, env, token, lane=name)

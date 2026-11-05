@@ -29,7 +29,7 @@ _m_ui = _m_common.LazyModule(__package__, 'ui')
 
 MACHINE_DEFAULTS = {"load5_per_cpu": 0.8, "memory_free_gb": 8, "disk_free_gb": 40,
                     "verify_day": 2, "verify_night": 1, "night_start": 22, "night_end": 8, "cpu_idle_min_pct": 15,
-                    "memory_pressure_max_pct": 80, "max_hold_minutes": 20}
+                    "memory_pressure_max_pct": 80, "max_hold_minutes": 20, "worker_budget": os.cpu_count() or 1}
 MACHINE_RETRY = 5
 ADMISSION_TIMING = contextvars.ContextVar("brain_admission_timing", default=None)
 
@@ -569,8 +569,8 @@ def machine_policy(strict=True):
                 raise ValueError("invalid " + k)
             if k.endswith("_pct") and v > 100:
                 raise ValueError("percentage exceeds 100")
-            if k.startswith("verify_") and (type(v) is not int or v < 1):
-                raise ValueError("verify limits must be positive integers")
+            if (k.startswith("verify_") or k == "worker_budget") and (type(v) is not int or v < 1):
+                raise ValueError("verify limits and worker budget must be positive integers")
             if k.startswith("night_") and (type(v) is not int or v > 23):
                 raise ValueError("night hours must be integers from 0 to 23")
         policy["_configured"] = list(supplied)
@@ -1151,6 +1151,8 @@ class machine_queue:
                 and row.get("priority", "normal") in ("normal", "landing")
                 and all(key not in row or queue_number(row[key]) for key in ("queued_at", "started_at"))
                 and (row.get("expected_seconds") is None or queue_number(row["expected_seconds"]))
+                and all(key not in row or (type(row[key]) is int and row[key] > 0)
+                        for key in ("requested_workers", "workers"))
                 and ("child" not in row or identity(row["child"]))
                 and ("session" not in row or (type(row['session']) is int and row['session'] > 0))
                 and ("uncertain" not in row or type(row['uncertain']) is bool)
@@ -1305,14 +1307,16 @@ def job_queue_projection(inst, node, owner):
 
 
 def machine_wait(kind="heavy", inst=None, node=None, job=None, clock=None, read=None, pause=None,
-                 reduction_ready=False, token=None, gate_phase='running', reporter=print, cancelled=None):
+                 reduction_ready=False, token=None, gate_phase='running', reporter=print, cancelled=None, workers=None):
+    if workers is not None and (type(workers) is not int or workers < 1):
+        _m_common.die("machine care: requested workers must be a positive integer")
     clock = clock or (token.clock if token is not None else time)
     with (_m_gate_lock.gate_admission(inst, node, gate_phase) if inst is not None and node is not None
           else contextlib.nullcontext()):
         if token is not None:
-            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled)
+            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled, workers)
         with machine_run(kind, inst, node, job, clock, close_success=False) as token:
-            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled)
+            return machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter, cancelled, workers)
 
 
 def machine_release(token):
@@ -1816,7 +1820,10 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
     if not command:
         _m_common.die('heavy run: provide a command after --')
     observer = MachineProcesses()  # refuse unsupported ownership before admission/spawn
-    child_env = os.environ if env is None else env
+    child_env = dict(os.environ if env is None else env)
+    requested = child_env.pop('BRAIN_HEAVY_WORKERS', None)
+    if requested is not None and not re.fullmatch(r'[1-9][0-9]*', requested):
+        _m_common.die('heavy run: BRAIN_HEAVY_WORKERS must be a positive integer')
     gate_fd = (_m_gate_lock.gate_inherited_fd(inst.root, child_env, node)
                if inst is not None and node is not None else None)
     from . import handback_queue as _m_queue
@@ -1831,7 +1838,8 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
             proc, control_read, control_write = None, None, None
             try:
                 machine_wait('verify', inst, node, job=label, token=token, reporter=None,
-                             cancelled=lambda: stopped[0])
+                             cancelled=lambda: stopped[0], workers=int(requested) if requested is not None else None)
+                child_env = machine_environment(token, child_env)
                 if stopped[0]:
                     raise MachineSignal(stopped[0])
                 control_read, control_write = os.pipe()
@@ -1842,7 +1850,7 @@ def machine_execute(command, inst=None, node=None, label=None, cwd=None, env=Non
                 proc = subprocess.Popen([sys.executable, '-I', '-S', '-c', bootstrap,
                                          str(Path(__file__).resolve().parent.parent), str(control_read), str(token),
                                          ','.join(map(str, inherited)), *command],
-                                        cwd=cwd, env=env, stdout=stdout, stderr=stderr,
+                                        cwd=cwd, env=child_env, stdout=stdout, stderr=stderr,
                                         pass_fds=(control_read,) + inherited, start_new_session=True)
                 token.retain = True
                 os.close(control_read)
@@ -2058,7 +2066,7 @@ def machine_thermal_recovered(samples):
 
 
 
-def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter=print, cancelled=None):
+def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_ready, reporter=print, cancelled=None, workers=None):
     """A live queued process owns its continuation; no replay of arbitrary commands."""
     clock = clock or time
     token.clock = clock
@@ -2097,32 +2105,42 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
             row = next((r for r in queue.rows if r["token"] == token), None)
             if row is None:
                 row = {"token": token, "owner": owner, "kind": kind, "state": "queued",
-                       "priority": priority, "expected_seconds": expected, "queued_at": clock.time()}
+                       "priority": priority, "expected_seconds": expected, "queued_at": clock.time(),
+                       "requested_workers": workers or policy["worker_budget"]}
                 if boot is not None:
                     row["boot"] = boot
                 if inst is not None and node is not None:
                     row["scope"] = machine_scope(inst, node)
                 queue.rows.append(row)
             waiting = queue_order([r for r in queue.rows if r["kind"] == kind and r["state"] == "queued"], clock.time())
-            running = sum(r["kind"] == "verify" and r["state"] == "running" for r in queue.rows)
+            running_rows = [r for r in queue.rows if r["kind"] == "verify" and r["state"] == "running"]
+            running = len(running_rows)
+            budget = policy['worker_budget']
+            # Legacy/undeclared reservations own the entire budget. Never infer
+            # their parallelism or shrink a grant after the child has started.
+            used = sum(r.get('workers', budget) for r in running_rows)
+            grant = 1 if reduced else min(row.get('requested_workers', budget), budget)
             position = waiting.index(row) + 1
             limit = 1 if reduced else machine_limit(policy)
-            admitted = not resource_hold and (kind != "verify" or (position == 1 and running < limit))
+            admitted = not resource_hold and (kind != "verify" or (position == 1 and running < limit and used + grant <= budget))
             detail = ("; ".join(reasons) if resource_hold else
-                      f"queued #{position}, {running}/{limit} verify slots busy")
+                      f"queued #{position}, {running}/{limit} verify slots busy; {used}/{budget} workers busy, requesting {grant}")
             if admitted:
                 row['state'] = 'running'
                 row['started_at'] = clock.time()
                 row['reduced'] = reduced
+                row['workers'] = grant
+                token.workers, token.reduced = grant, reduced
                 if 'since' in row:
                     row['resumed_at'] = clock.time()
             else:
                 row.setdefault('since', clock.time())
                 row.update(reason=detail, reading=reading, position=position,
-                           clears_when='resource thresholds clear once, or maximum hold expires; FIFO verify slot available')
+                           clears_when='resource thresholds clear once, or maximum hold expires; FIFO verify slot and worker budget available')
             if job is not None:
                 row["job"] = hashlib.sha256(job.encode()).hexdigest()
-            estimate = queue_wait_estimate(queue.rows, row, limit, now=clock.time(), held=resource_hold)
+            estimate = queue_wait_estimate(queue.rows, row, limit, now=clock.time(),
+                                           held=resource_hold or (kind == 'verify' and used + grant > budget))
             snapshot = dict(row)
         # No machine lock is held across instance state publication or transport enqueue.
         if inst is not None and node is not None:
@@ -2135,7 +2153,7 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
                 reporter(f"machine care: {kind} resumed after {elapsed:.0f}s" +
                       ('; reduced parallelism (1)' if reduced else ''), flush=True)
             return token
-        status = (re.sub(r"\d+(?:\.\d+)?", "#", detail), position, running, limit)
+        status = (re.sub(r"\d+(?:\.\d+)?", "#", detail), position, running, limit, used, grant)
         now = clock.monotonic()
         if status != previous or now - last_report >= 60:
             wait = estimate['wait_seconds']
@@ -2148,11 +2166,19 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
 
 
 def machine_environment(token, env):
-    """Propagate degraded admission to the command, without rewriting its shell text."""
-    with machine_queue() as queue:
-        reduced = any(r['token'] == token and r.get('reduced') for r in queue.rows)
-    if not reduced:
-        return env
-    return {**env, 'BRAIN_REDUCED_PARALLELISM': '1', 'BRAIN_PARALLELISM': '1',
-            'CMAKE_BUILD_PARALLEL_LEVEL': '1', 'MAKEFLAGS': '-j1', 'OMP_NUM_THREADS': '1',
-            'OPENBLAS_NUM_THREADS': '1', 'MKL_NUM_THREADS': '1', 'CARGO_BUILD_JOBS': '1'}
+    """Export the immutable worker grant to every admitted command."""
+    workers = getattr(token, 'workers', None)
+    reduced = getattr(token, 'reduced', False)
+    if workers is None:
+        with machine_queue() as queue:
+            row = next((r for r in queue.rows if r['token'] == token), None)
+            if row is None:
+                _m_common.die('machine care: reservation disappeared; no command started')
+            workers = row.get('workers', machine_policy()['worker_budget'])
+            reduced = row.get('reduced', False)
+    out = {**env, 'BRAIN_TEST_WORKERS': str(workers)}
+    if reduced:
+        out.update(BRAIN_REDUCED_PARALLELISM='1', BRAIN_PARALLELISM='1',
+                   CMAKE_BUILD_PARALLEL_LEVEL='1', MAKEFLAGS='-j1', OMP_NUM_THREADS='1',
+                   OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1', CARGO_BUILD_JOBS='1')
+    return out

@@ -29,6 +29,125 @@ import test_verify as _test_verify
 from scenario import Scenario, AutonomyProject, shlex_quote
 
 
+class WorkerAdmission(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('worker_admission_fixture', str(CORE / 'bin/brain')).load_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.patches = [mock.patch.object(self.m, 'machine_dir', return_value=self.folder),
+                        mock.patch.object(self.m, 'machine_boot_id', return_value='linux:fixture'),
+                        mock.patch.object(self.m, 'process_stamp', return_value='fixture-birth'),
+                        mock.patch.object(self.m, 'machine_reading', return_value={}),
+                        mock.patch.object(self.m, 'machine_limit', return_value=2),
+                        mock.patch.dict(self.m.MACHINE_DEFAULTS, worker_budget=16)]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def admit(self, **kwargs):
+        return self.m.machine_wait('verify', reporter=None, **kwargs)
+
+    def rows(self):
+        return json.loads((self.folder / 'machine-care-queue.json').read_text())
+
+    def test_undeclared_and_legacy_running_rows_reserve_the_full_budget(self):
+        token = self.admit()
+        self.assertEqual((token.workers, self.rows()[0]['workers']), (16, 16))
+        with self.m.machine_queue() as queue:
+            queue.rows[0].pop('workers')
+            queue.rows[0].pop('requested_workers')
+        attempts = []
+        def release(_):
+            attempts.append(self.rows())
+            self.assertEqual([r['state'] for r in attempts[-1]], ['running', 'queued'])
+            self.m.machine_release(token)
+        second = self.admit(workers=8, pause=release)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(second.workers, 8)
+        self.m.machine_release(second)
+
+    def test_two_eight_worker_requests_share_but_sixteen_waits(self):
+        first = self.admit(workers=8)
+        second = self.admit(workers=8, pause=lambda _: self.fail('8 + 8 must fit'))
+        self.assertEqual([r['workers'] for r in self.rows()], [8, 8])
+        observations = []
+        def release(_):
+            observations.append(self.rows())
+            self.assertEqual(observations[-1][-1]['state'], 'queued')
+            self.m.machine_release(first if len(observations) == 1 else second)
+        third = self.admit(workers=16, pause=release)
+        self.assertEqual(len(observations), 2)  # a free run slot alone is insufficient
+        self.assertEqual(third.workers, 16)
+        self.m.machine_release(third)
+
+    def test_second_full_request_waits_and_never_shrinks_the_first(self):
+        first = self.admit(workers=16)
+        def release(_):
+            self.assertEqual(self.rows()[0]['workers'], 16)
+            self.assertEqual(self.rows()[1]['state'], 'queued')
+            self.m.machine_release(first)
+        second = self.admit(workers=16, pause=release)
+        self.assertEqual(second.workers, 16)
+        self.m.machine_release(second)
+
+    def test_oversized_request_clamps_and_environment_uses_the_immutable_grant(self):
+        token = self.admit(workers=32)
+        env = {'BRAIN_TEST_WORKERS': '999', 'OTHER': 'kept'}
+        with mock.patch.object(self.m, 'machine_queue', side_effect=AssertionError('extra queue read')):
+            self.assertEqual(self.m.machine_environment(token, env), {'BRAIN_TEST_WORKERS': '16', 'OTHER': 'kept'})
+        self.assertEqual(env['BRAIN_TEST_WORKERS'], '999')
+        self.assertEqual(self.rows()[0]['requested_workers'], 32)
+        self.m.machine_release(token)
+
+    def test_invalid_requests_policy_and_queue_counts_fail_closed(self):
+        for value in (0, -1, True, 1.5, '8'):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                self.admit(workers=value)
+        self.assertFalse((self.folder / 'machine-care-queue.json').exists())
+        for value in (0, -1, True, 1.5, '8'):
+            (self.folder / 'machine-care.json').write_text(json.dumps({'worker_budget': value}))
+            with self.subTest(policy=value), self.assertRaises(SystemExit):
+                self.m.machine_policy()
+        (self.folder / 'machine-care.json').unlink()
+        token = self.admit(workers=8)
+        row = self.rows()[0]
+        for field in ('workers', 'requested_workers'):
+            for value in (0, -1, True, 1.5, '8'):
+                self.assertFalse(self.m.machine_queue.valid(dict(row, **{field: value})))
+        self.m.machine_release(token)
+
+    def test_admission_uses_one_queue_transaction(self):
+        factory = self.m.machine_queue
+        with mock.patch.object(self.m, 'machine_queue', wraps=factory) as queue:
+            token = self.admit(workers=8)
+        self.assertEqual(queue.call_count, 1)
+        self.m.machine_release(token)
+
+    def test_literal_parser_preserves_unrelated_bytes_and_rejects_shells(self):
+        parse, clamp = self.m.literal_pytest_workers, self.m.verify_worker_command
+        command = " /usr/bin/python3 -m pytest  -n '16' -k 'a b' tests/test_case.py  "
+        self.assertEqual(parse(command)[0], 16)
+        self.assertEqual(clamp(command, 8), command.replace("'16'", '8'))
+        for option in ('-n16', '--numprocesses=16', '--numprocesses 16'):
+            self.assertEqual(parse('pytest ' + option)[0], 16)
+            self.assertNotIn('16', clamp('pytest ' + option, 8))
+        self.assertEqual(parse('pytest -n16 -n8')[0], 8)
+        self.assertEqual(clamp('pytest -n16 -n8', 8), 'pytest -n8 -n8')
+        self.assertEqual(clamp('pytest -n auto', 8), 'pytest -n 8')
+        self.assertEqual(parse('pytest -n0')[0], 1)
+        self.assertEqual(clamp('pytest -n0', 8), 'pytest -n0')
+        self.assertEqual(parse('pytest -- -n8')[0], None)
+        for command in ('env pytest -n8', 'sh -c "pytest -n8"', 'pytest -n8; true',
+                        'pytest -n8 && true', 'pytest -n8 | cat', 'pytest -n8 # -n1',
+                        'pytest -n "$COUNT"', 'pytest -n8\ntrue', 'pytest -n8 > out',
+                        'pytest -n8 $(true)', 'bun run verify', 'python3 -m py_compile x.py',
+                        "pytest -n '8", 'pytest -n invalid', 'pytest -n'):
+            with self.subTest(command=command):
+                self.assertIsNone(parse(command))
+                self.assertEqual(clamp(command, 8), command)
+
+
 class MachineCare(Scenario):
     fixture_init_in_process = True
     def setUp(self):
@@ -52,6 +171,60 @@ class MachineCare(Scenario):
                             '--node', 'root', '--label', 'fixture', '--', sys.executable, '-c', code,
                             '--brain', 'child', '-b', 'value'], cwd=root, env=self.env, capture_output=True)
         self.assertEqual((r.returncode, r.stdout, r.stderr), (7, b'out\x00', b'err\xff'))
+        with self.m.machine_queue() as queue:
+            self.assertEqual(queue.rows, [])
+
+    def test_heavy_run_explicit_grant_reaches_child(self):
+        root = self.init('oak')
+        env = dict(self.env, BRAIN_HEAVY_WORKERS='2', BRAIN_TEST_WORKERS='999')
+        result = subprocess.run([sys.executable, str(root / 'core/bin/brain'), 'heavy', 'run',
+                                 '--', sys.executable, '-c',
+                                 "import os; print(os.environ['BRAIN_TEST_WORKERS']); assert 'BRAIN_HEAVY_WORKERS' not in os.environ"],
+                                cwd=root, env=env, capture_output=True)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b'2\n', b''))
+        with self.m.machine_queue() as queue:
+            self.assertEqual(queue.rows, [])
+
+    def test_native_worker_adapter_clamps_literal_and_exports_opaque_grant(self):
+        root = self.init('oak')
+        home = self.repo(self.tmp / 'fixture-home')
+        self.b(root, 'set', 'root', 'home=' + str(home))
+        inst = self.m.Instance(root)
+        policy = self.m.machine_dir() / 'machine-care.json'
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        policy.write_text(json.dumps({'worker_budget': 4}))
+        child = self.tmp / 'pytest'
+        child.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
+                         "print('grant-result=' + json.dumps([sys.argv[1:], os.environ['BRAIN_TEST_WORKERS']]))\n")
+        child.chmod(0o700)
+        env = dict(self.env, BRAIN_TEST_WORKERS='999')
+        literal = shlex.quote(str(child)) + " -n 32 -k 'a b' tests"
+        opaque = shlex.join([sys.executable, str(child), '-n', '32'])
+        with contextlib.redirect_stdout(io.StringIO()):
+            for command, expected in ((literal, ['-n', '4', '-k', 'a b', 'tests']),
+                                      (opaque, ['-n', '32'])):
+                code, log = self.m.run_verify(inst, inst.node('root'), 'fixture', command,
+                                             {'path': str(home)}, env)
+                self.assertEqual(code, 0, Path(log).read_text())
+                line = next(line for line in Path(log).read_text().splitlines() if line.startswith('grant-result='))
+                self.assertEqual(json.loads(line.partition('=')[2]), [expected, '4'])
+        self.assertEqual(env['BRAIN_TEST_WORKERS'], '999')
+
+    def test_native_literal_reservations_pass_eight_worker_requests(self):
+        roots = [self.init(name) for name in ('oak', 'elm')]
+        policy = self.m.machine_dir() / 'machine-care.json'
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        policy.write_text(json.dumps({'worker_budget': 16, 'verify_day': 2, 'verify_night': 2}))
+        with contextlib.ExitStack() as stack:
+            tokens = []
+            for root in roots:
+                inst = self.m.Instance(root)
+                tokens.append(stack.enter_context(self.m.verify_reservation(
+                    inst, inst.node('root'), 'fixture', command='python3 -m pytest -n8 tests')))
+            with self.m.machine_queue() as queue:
+                self.assertEqual([r['state'] for r in queue.rows], ['running', 'running'])
+                self.assertEqual([r['requested_workers'] for r in queue.rows], [8, 8])
+            self.assertEqual([token.workers for token in tokens], [8, 8])
         with self.m.machine_queue() as queue:
             self.assertEqual(queue.rows, [])
 
@@ -721,7 +894,7 @@ class MachineCare(Scenario):
             finished = [threading.Event() for _ in range(3)]
             def worker(i):
                 try:
-                    token = m.machine_wait("verify")
+                    token = m.machine_wait("verify", workers=1)
                     try:
                         with mutex:
                             started.append(i)
@@ -826,12 +999,13 @@ command = ' '.join(shlex.quote(arg) for arg in
 result, log = m.run_verify(inst, inst.node(sys.argv[8]), 'fixture', command, {'path': root}, dict(os.environ))
 raise SystemExit(result)
 """)
-        for limit in limits:
+        for configured_limit in limits:
+            limit = 1  # opaque native commands reserve the entire worker budget
             m.machine_dir().mkdir(parents=True, exist_ok=True)
             (m.machine_dir() / "machine-care.json").write_text(json.dumps(
-                {"verify_day": limit, "verify_night": 1, "night_start": 0, "night_end": 0}))
+                {"verify_day": configured_limit, "verify_night": 1, "night_start": 0, "night_end": 0}))
             events.write_text("")
-            barrier = self.tmp / ('barrier-' + str(limit))
+            barrier = self.tmp / ('barrier-' + str(configured_limit))
             barrier.mkdir()
             processes = []
 
