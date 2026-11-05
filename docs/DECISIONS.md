@@ -7,7 +7,8 @@ capture invokes the logged-in Claude CLI with structured output and a separate
 system prompt. CLI safe mode, empty setting sources and MCP configuration,
 disabled tools and a clean temporary cwd prevent ambient project context from
 entering the request while preserving subscription authentication. A minimal
-environment and an early stop-hook child guard prevent recursive capture.
+environment preserves HOME, PATH, USER and LOGNAME for executable and keychain
+lookup; an early stop-hook child guard prevents recursive capture.
 Both transports keep a 20-second deadline. Invalid CLI output is a visible gap
 that allows exit; the existing HTTP structural-refusal behavior is retained.
 

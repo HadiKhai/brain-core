@@ -21,7 +21,9 @@ and memory settings, an empty strict MCP configuration, disabled slash commands
 and Chrome, no tools and no session persistence. It never uses `--bare`, which
 disables subscription authentication. The CLI must support these flags.
 The child runs in a new temporary directory under `/tmp`, outside the project
-and auth home, with only HOME and PATH inherited. It sets
+and auth home, with only HOME, PATH, USER and LOGNAME inherited. USER preserves
+macOS keychain subscription lookup; no parent session or configuration env is
+inherited. It sets
 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `BRAIN_CAPTURE_CHILD=1`;
 the latter makes a recursively invoked stop hook return before reading stdin
 or looking for an instance. The same 20-second deadline covers CLI execution.

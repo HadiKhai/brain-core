@@ -457,10 +457,12 @@ class InstructionCapture(Scenario):
             self.assertNotIn(self.root.resolve(), cwd.parents)
             self.assertEqual(kw['timeout'], 20)
             self.assertEqual(kw['env'], {'HOME': os.environ['HOME'], 'PATH': os.environ['PATH'],
+                'USER': 'fixture-user', 'LOGNAME': 'fixture-user',
                 'BRAIN_CAPTURE_CHILD': '1', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1'})
             self.cli_cwd = cwd
             return self.cli_result()
         with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': '', 'CLAUDECODE': 'parent',
+                                         'USER': 'fixture-user', 'LOGNAME': 'fixture-user',
                                          'CLAUDE_CONFIG_DIR': '/synthetic/foreign', 'TMPDIR': str(self.root)}), \
                 mock.patch.object(client.subprocess, 'run', side_effect=run):
             value, usage = client.ai_json(self.capture.SYSTEM, payload, self.capture.SCHEMA)

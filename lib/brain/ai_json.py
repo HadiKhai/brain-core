@@ -74,9 +74,10 @@ def cli_json(system, data, schema, model):
 
     Safe mode preserves OAuth/keychain access (unlike --bare). Empty setting
     sources, explicit settings and MCP configuration also fence customization.
-    Only auth's home and executable lookup cross the parent environment boundary.
+    Only auth's home/user identity and executable lookup cross the environment
+    boundary. macOS keychain lookup requires USER even when HOME is present.
     """
-    env = {k: os.environ[k] for k in ('HOME', 'PATH') if k in os.environ}
+    env = {k: os.environ[k] for k in ('HOME', 'PATH', 'USER', 'LOGNAME') if k in os.environ}
     env.update(BRAIN_CAPTURE_CHILD='1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
     argv = ['claude', '-p', '--model', model, '--system-prompt', system,
             '--json-schema', json.dumps(schema), '--output-format', 'json', '--tools', '',
