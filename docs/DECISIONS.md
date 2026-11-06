@@ -4465,3 +4465,9 @@ limit may add classifier calls and false instruction gaps. Historical schedule
 definition receipts require explicit reconciliation rather than a silent rebind.
 Duplicate runtime representations of the same batch source are deduplicated
 before testing source-cover uniqueness; distinct ambiguous batches remain invalid.
+
+Review receipt validation compares the known `claudeAgent` host route with the
+canonical `claude` runtime, without changing identity membership or thread
+independence checks. A rule marked not applicable needs a reason and may omit
+its evidence array, matching the review brief; pass and fail still require
+file-and-line evidence. Validation does not rewrite submitted receipts.

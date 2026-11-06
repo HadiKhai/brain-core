@@ -274,6 +274,8 @@ def validate_review_receipt(inst, n, row, head, data, fresh=False, rules=None):
             refuse()
     for key in ('runtime', 'model'):
         expected = row.get('Review ' + key) or n['fm'].get('review_' + key, inst.cfg.get('review_' + key))
+        if key == 'runtime' and expected == 'claudeAgent':
+            expected = 'claude'  # Host route identifier; receipts name the runtime.
         if expected and expected != reviewer[key]:
             refuse()
     if data.get('verdict') not in ('pass', 'blocked') or not isinstance(data.get('findings'), list):

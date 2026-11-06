@@ -560,6 +560,36 @@ class RuleReviewContracts(Scenario):
         index.write_text(index.read_text().replace('café;', 'cafés;'))
         self.assertIn('rules changed', m.validate_ready_reviews(inst, n, 'job', receipt['head'])[0])
 
+    def test_reasoned_na_allows_absent_evidence_but_pass_fail_stay_strict(self):
+        root, home, wt = self.job()
+        self.rules(root)
+        m = core_loader.SourceFileLoader('optional_na_evidence_fixture', str(_test_verify.CORE / 'bin/brain')).load_module()
+        n = m.Instance(root).node('a')
+        rules = m.applicable_rules(n)
+        good = {'verdict': 'pass', 'rules_digest': m.rules_digest(rules), 'rule_checks': [
+            {'id': rule['id'], 'status': 'pass', 'evidence': ['calc.py:1']} for rule in rules]}
+        good['rule_checks'][0] = {'id': rules[0]['id'], 'status': 'n/a', 'reason': 'No boundary change'}
+        original = json.loads(json.dumps(good))
+        m.validate_rule_checks(n, good)
+        self.assertEqual(good, original)
+        good['rule_checks'][0]['evidence'] = []
+        m.validate_rule_checks(n, good)
+        for change in ({'reason': ''}, {'reason': '   '}, {'evidence': None},
+                       {'evidence': 'calc.py:1'}, {'evidence': ['calc.py:0']}):
+            data = json.loads(json.dumps(good))
+            data['rule_checks'][0].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                m.validate_rule_checks(n, data)
+        for status in ('pass', 'fail'):
+            for evidence in (None, []):
+                data = json.loads(json.dumps(good))
+                data['verdict'] = 'blocked'
+                data['rule_checks'][0] = {'id': rules[0]['id'], 'status': status}
+                if evidence is not None:
+                    data['rule_checks'][0]['evidence'] = evidence
+                with self.subTest(status=status, evidence=evidence), self.assertRaises(ValueError):
+                    m.validate_rule_checks(n, data)
+
     def test_rule_status_evidence_duplicates_and_failure_are_checked_structurally(self):
         root, home, wt = self.job()
         self.rules(root)
@@ -682,6 +712,30 @@ class IndependentReviewReceipts(Scenario):
         self.git('commit', '--allow-empty', '-qm', 'next change', cwd=wt)
         head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
         self.assertTrue(m.validate_ready_reviews(inst, n, 'job', head))
+
+    def test_claude_host_route_accepts_runtime_identity_without_relaxing_independence(self):
+        r, wt, m, inst, n, receipt = self.context()
+        n['fm']['review_independence'] = 'cross-runtime'
+        row = m.open_job(m.read_jobs(n), 'job')
+        row.update({'Review runtime': 'claudeAgent', 'Review model': 'example-model'})
+        receipt['reviewer']['runtime'] = 'claude'
+        original = json.loads(json.dumps(receipt))
+        self.assertIs(m.validate_review_receipt(inst, n, row, receipt['head'], receipt), receipt)
+        self.assertEqual(receipt, original)
+        for fields in ({'threadId': 'builder-thread'}, {'fresh_context': False},
+                       {'context_reused': True}, {'built_change': True},
+                       {'runtime': 'codex'}, {'runtime': 'unknown-provider'}, {'model': 'other-model'}):
+            data = json.loads(json.dumps(receipt))
+            data['reviewer'].update(fields)
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                m.validate_review_receipt(inst, n, row, data['head'], data)
+        same_runtime = json.loads(json.dumps(receipt))
+        same_runtime['builder']['runtime'] = 'claude'
+        with self.assertRaises(ValueError):
+            m.validate_review_receipt(inst, n, dict(row, Runtime='claude'), receipt['head'], same_runtime)
+        with self.assertRaises(ValueError):
+            m.validate_review_receipt(inst, n, dict(row, **{'Review runtime': 'unknown-provider'}),
+                                      receipt['head'], receipt)
 
     def test_self_unknown_reused_builder_and_failed_receipts_are_rejected(self):
         r, wt, m, inst, n, original = self.context()

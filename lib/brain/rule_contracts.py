@@ -207,7 +207,8 @@ def validate_rule_checks(n, data, rules=None, required=False):
         if key in seen or key not in expected:
             raise ValueError('duplicate or unknown review rule id: ' + key)
         seen.add(key)
-        status, evidence = row.get('status'), row.get('evidence')
+        status = row.get('status')
+        evidence = row.get('evidence', [] if status == 'n/a' else None)
         if status not in ('pass', 'fail', 'n/a') or not isinstance(evidence, list):
             raise ValueError('invalid per-rule review status/evidence: ' + key)
         if any(not isinstance(ref, str) or not re.fullmatch(r'[^\s\x00-\x1f]+:[1-9][0-9]*', ref) for ref in evidence):
