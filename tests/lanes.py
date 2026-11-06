@@ -66,7 +66,7 @@ LANE_TESTS.update({
     'train': ('test_train.py', 'test_train_review.py', 'test_train_landing.py', 'test_land.py', 'test_train_automation.py', 'test_release.py', 'test_preview_upgrade.py', 'test_preview_stdio.py'),
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py', 'test_throughput.py', 'test_job_adoption.py', 'test_host_lifecycle.py', 'test_worker_lifecycle.py'),
     'knowledge': ('test_knowledge.py', 'test_semantic_recall.py', 'test_recurrence.py', 'test_learning_loop.py', 'test_feedback.py', 'test_teach.py'),
-    'status': ('test_status.py', 'test_inbox_noise.py', 'test_status_projection.py'),
+    'status': ('test_status.py', 'test_inbox_noise.py', 'test_status_projection.py', 'test_coordinator_startup.py'),
     'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py', 'test_instruction_capture_repair.py'),
     'worktrees': ('test_worktrees.py', 'test_t3_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py', 'test_prune_thread_targets.py', 'test_job_env.py', 'test_lock_sites.py', 'test_atomic_durability.py'),
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py', 'test_rehearse_external.py'),
@@ -78,7 +78,7 @@ LANE_TESTS.update({
     'catch-all': ('test_repo_lanes.py',),
     'messages': ('test_messages.py', 'test_worker_message_guard.py', 'test_communication_policy.py'),
     'dissection': ('test_dissection.py', 'test_failure_ledger.py'),
-    'rotation': ('test_rotation.py', 'test_rotation_host.py'),
+    'rotation': ('test_rotation.py', 'test_rotation_host.py', 'test_coordinator_profile.py'),
     'diagnostics': ('test_diagnostics.py', 'test_write_queue_proof.py'),
     'scorecard': ('test_scorecard.py',),
 })
