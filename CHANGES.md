@@ -12,12 +12,16 @@ effort each role may launch on, forbidden models or accounts, a cap on admitted
 non-coordinator launches per provider, and pointer files whose line 1 names a role's
 current thread. The PreToolUse hook refuses a `t3_thread_launch` or `delegate_task` that
 breaks them, a capped launch without an open job's `brain-job:` mark, and a
-`t3_thread_send` to a thread its pointer file no longer names. Coordinator provisioning,
+`t3_thread_send` to a thread its pointer file no longer names (including its committed
+history). Caps count live host threads: core paths ask the host, and a new PostToolUse
+hook (`brain hook posttool`) records complete agent `t3_thread_list` results for the
+PreToolUse check. Coordinator provisioning,
 rotation and native worker launches check the same policy before their host call;
 rotation now always passes an explicit model selection. `brain delegate` recovers a
 host-refused delegation once as a visible thread on the same model. Nothing changes until
 keys are declared. After upgrading: declare the keys your rules require in instance.md
-(and per node where a node restricts its builders).
+(and per node where a node restricts its builders), and re-trust the changed project hooks
+in Codex with `brain hook approve`.
 
 ## 2026-11-06: Carry accepted reviews across pure rebases
 

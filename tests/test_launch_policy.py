@@ -71,6 +71,19 @@ class PolicyFixture(Scenario):
     def brief(self, key):
         return f'Role: worker in node `app`.\nbrain-job: {key} (lets `brain jobs` count this job)\n'
 
+    def observe(self, threads, **arguments):
+        """The PostToolUse hook after an agent's t3_thread_list call."""
+        args = {'allProjects': True, 'includeSubagents': True, 'limit': 100,
+                'statuses': ['preparing', 'queued', 'starting', 'running', 'waiting'], **arguments}
+        response = [{'type': 'text', 'text': json.dumps({'threads': threads, 'total': len(threads), 'nextCursor': None})}]
+        data = {'cwd': str(self.root), 'tool_name': 'mcp__t3-code__t3_thread_list', 'tool_input': args,
+                'tool_response': response}
+        with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(data))):
+            self.m.cmd_hook_posttool(None)
+
+    def live(self, *names, provider='main-agent', status='running'):
+        return [{'threadId': name, 'providerInstanceId': provider, 'status': status, 'title': name} for name in names]
+
 
 class RolePolicy(PolicyFixture):
     def test_coordinator_initial_launch_and_rotation_require_allowed_account_model_effort(self):
@@ -126,40 +139,60 @@ class SubscriptionAdmission(PolicyFixture):
     def test_fifth_builder_or_reviewer_is_refused_coordinators_are_excluded_and_only_ordered_deliverables_admit(self):
         keys = self.ledger('job-a', 'job-b', 'job-c', 'job-d', 'job-e')
         main = selection('main-agent', 'model-a')
-        for branch in ('job-a', 'job-b', 'job-c'):
-            self.assertIsNone(self.launch(main, self.brief(keys[branch])))
-        review = {'task': self.brief(keys['job-d']), 'target': {'providerInstanceId': 'main-agent', 'model': 'model-a',
-                                                                'options': {'reasoningEffort': 'high'}}}
-        self.assertIsNone(self.pretool('delegate_task', review))
-        refused = self.launch(main, self.brief(keys['job-e']))
+        # Without a fresh complete host count the capped provider admits nothing.
+        self.assertIn('no fresh host count', self.launch(main, self.brief(keys['job-a'])))
+        self.observe(self.live('builder-1', 'builder-2') + self.live('reviewer-1', status='waiting')
+                     + self.live('fixture-parent')                 # the bound coordinator is not counted
+                     + self.live('other-1', provider='code-agent'))  # other providers are not counted
+        self.assertIsNone(self.launch(main, self.brief(keys['job-a'])))       # 3 live + this = 4
+        refused = self.launch(main, self.brief(keys['job-a']))                 # same job again is a fifth thread
         self.assertIn('cap 4 is full', refused)
-        self.assertIn('app:job-a', refused)
-        # A relaunch of admitted work reuses its slot; coordinators are never counted.
-        self.assertIsNone(self.launch(main, self.brief(keys['job-a'])))
-        self.assertIsNone(self.launch(selection('main-agent', 'model-a'), 'Role: coordinator of node app.\n'))
+        self.assertIn('builder-1', refused)
+        self.assertIn('admitted job-a', refused)
+        review = {'task': self.brief(keys['job-b']), 'target': {'providerInstanceId': 'main-agent', 'model': 'model-a',
+                                                                'options': {'reasoningEffort': 'high'}}}
+        self.assertIn('cap 4 is full', self.pretool('delegate_task', review))
+        # Coordinators are never counted, even at the cap.
+        self.assertIsNone(self.launch(main, 'Role: coordinator of node app.\n'))
+        # A new complete count replaces the admitted guesses: two finished, so two may start.
+        self.observe(self.live('builder-1', 'new-a') + self.live('builder-2', status='completed'))
+        self.assertIsNone(self.launch(main, self.brief(keys['job-c'])))
+        self.assertIsNone(self.pretool('delegate_task', review))
+        self.assertIn('cap 4 is full', self.launch(main, self.brief(keys['job-d'])))
+        # Partial or filtered lists never count as a complete observation.
+        self.observe(self.live('builder-1'), projectId='one-project')
+        self.assertIn('cap 4 is full', self.launch(main, self.brief(keys['job-d'])))
+        # A stale count admits nothing.
+        state = self.root / '.brain/live-threads.json'
+        data = json.loads(state.read_text())
+        data['observed_at'] = '2020-01-01T00:00:00+00:00'
+        state.write_text(json.dumps(data))
+        self.assertIn('no fresh host count', self.launch(main, self.brief(keys['job-d'])))
         # Polling or ceremony carries no open job: refused before the host call, even with free slots.
-        self.assertIn('ordered deliverables', self.launch(selection('main-agent', 'model-a'), 'Check the queue.\n'))
+        self.observe([])
+        self.assertIn('ordered deliverables', self.launch(main, 'Check the queue.\n'))
         self.assertIn('ordered deliverables', self.launch(main, self.brief('0' * 24)))
-        # Other providers are not capped here.
         self.assertIsNone(self.launch(selection('code-agent', 'model-b'), 'Role: worker in node `app`.\n'))
-        # An ended job frees its slot at once, and is no longer an ordered deliverable.
-        keys = self.ledger('job-a', 'job-b', 'job-c', 'job-d', 'job-e', 'job-f', ended=('job-a',))
-        self.assertIsNone(self.launch(main, self.brief(keys['job-e'])))
-        self.assertIn('ordered deliverables', self.launch(main, self.brief(keys['job-a'])))
-        self.assertIn('cap 4 is full', self.launch(main, self.brief(keys['job-f'])))
         # Unreadable admission state never admits.
-        (self.root / '.brain/launch-admissions.json').write_text('[]')
-        self.assertIn('state unavailable', self.launch(main, self.brief(keys['job-b'])))
+        state.write_text('[]')
+        self.assertIn('state unavailable', self.launch(main, self.brief(keys['job-d'])))
 
-    def test_core_worker_launch_refuses_before_host_call(self):
-        keys = self.ledger('job-a', 'job-b', 'job-c', 'job-d', 'job-e')
+    def test_core_paths_count_live_host_threads_before_their_host_call(self):
+        keys = self.ledger('job-a')
         n = self.inst.node('app')
-        for branch in ('job-a', 'job-b', 'job-c', 'job-d'):
-            self.m.require_admission(self.inst, n, 'worker', selection('main-agent', 'model-a'), self.brief(keys[branch]))
+        live = self.live('builder-1', 'builder-2', 'builder-3', 'builder-4') + self.live('fixture-parent')
+        def rpc(name, args):
+            self.assertEqual(name, 't3_thread_list')
+            self.assertTrue(args['allProjects'] and args['includeSubagents'])
+            return {'threads': live, 'total': len(live), 'nextCursor': None}
         with self.assertRaisesRegex(ValueError, 'cap 4 is full'):
-            self.m.require_admission(self.inst, n, 'worker', selection('main-agent', 'model-a'), self.brief(keys['job-e']))
-        with self.assertRaisesRegex(ValueError, 'forbidden'):
-            self.m.require_selection(self.inst, n, 'worker', selection('retired-account', 'model-a'))
+            self.m.require_admission(self.inst, n, 'worker', selection('main-agent', 'model-a'), '', rpc=rpc, job=keys['job-a'])
+        live.pop(0)
+        self.m.require_admission(self.inst, n, 'worker', selection('main-agent', 'model-a'), '', rpc=rpc, job=keys['job-a'])
+        def partial(name, args):
+            return {'threads': live[:1], 'total': len(live), 'nextCursor': None}
+        with self.assertRaisesRegex(ValueError, 'exhaustion'):
+            self.m.require_admission(self.inst, n, 'worker', selection('main-agent', 'model-a'), '', rpc=partial, job=keys['job-a'])
 
 
 class DelegationRouteRecovery(PolicyFixture):
@@ -231,27 +264,111 @@ class DelegationRouteRecovery(PolicyFixture):
 
 
 class LanderPointer(PolicyFixture):
-    def point(self, line):
-        (self.root / 'nodes/app/lander.md').write_text(line + '\n\nHistory below the first line is prose.\n')
+    def point(self, line, commit=False):
+        path = self.root / 'nodes/app/lander.md'
+        path.write_text(line + '\n\nHistory below the first line is prose.\n')
+        if commit:
+            self.git('add', str(path), cwd=self.root)
+            self.git('commit', '-qm', 'fixture pointer', cwd=self.root)
 
     def send(self, thread):
         return self.pretool('t3_thread_send', {'threadId': thread, 'message': 'Land the approved batch.'})
 
     def test_send_to_replaced_pointer_thread_is_refused_and_names_the_current_one(self):
-        self.point('Lander: [first lander](t3-thread://v1/thread-a)')
-        self.assertIsNone(self.send('thread-a'))
+        # The first send after a replacement is refused: the former pointer is in the file's history.
+        self.point('Lander: [first lander](t3-thread://v1/thread-a)', commit=True)
         self.point('Lander: [second lander](t3-thread://v2/env-1/thread-b)')
         refused = self.send('thread-a')
-        self.assertIn('app/lander.md line 1', refused)
+        self.assertIn('app/lander.md', refused)
         self.assertIn('t3-thread://v2/env-1/thread-b', refused)
+        self.assertIn('no longer the one', self.send('t3-thread://v1/thread-a'))
         self.assertIsNone(self.send('thread-b'))
         self.assertIsNone(self.send('unrelated-thread'))
-        self.assertIn('thread-a was replaced', self.send('t3-thread://v1/thread-a'))
+        # An uncommitted pointer is learned before an agent edits the file.
+        self.point('Lander: thread-c')
+        self.assertIsNone(self.pretool('Edit', {'file_path': str(self.root / 'nodes/app/lander.md'),
+                                                'old_string': 'thread-c', 'new_string': 'thread-d'}))
+        self.point('Lander: thread-d')
+        self.assertIn('names the current one: Lander: thread-d', self.send('thread-c'))
         # A pointer line that names no single thread refuses sends to any thread it named.
-        self.point('Lander: thread-c or thread-d')
+        self.point('Lander: thread-e or thread-f')
         self.assertIn('does not name one thread', self.send('thread-b'))
         self.point('Lander: thread-b')
         self.assertIsNone(self.send('thread-b'))
+
+
+def declared_keys():
+    """The instance-key lines to test: an applied patch's instance.md additions if one is named, else POLICY.
+
+    BRAIN_INSTANCE_KEYS_PATCH names a unified diff whose `+++ b/instance.md` hunk adds the
+    keys; the same assertions then prove the exact declarations an instance will apply.
+    """
+    path = os.environ.get('BRAIN_INSTANCE_KEYS_PATCH')
+    if not path:
+        return dict(POLICY)
+    keys, current = {}, None
+    for line in open(path).read().splitlines():
+        if line.startswith('+++ '):
+            current = line[4:].split('\t')[0].strip()
+        elif current in ('b/instance.md', 'instance.md') and line.startswith('+') and ':' in line:
+            key, value = line[1:].split(':', 1)
+            if key.startswith(('launch_', 'thread_pointers')):
+                keys[key.strip()] = value.strip()
+    return keys
+
+
+class InstanceKeys(PolicyFixture):
+    policy = {}
+
+    def declare(self, keys):
+        path = self.root / 'instance.md'
+        path.write_text(path.read_text().replace('---\n', '---\n' + ''.join(f'{k}: {v}\n' for k, v in keys.items()), 1))
+
+    def test_declared_instance_keys_refuse_at_the_call(self):
+        keys = declared_keys()
+        allowed = {role: [e.split('/', 1) for e in self.m.lst(keys.get('launch_allow_' + role, ''))]
+                   for role in ('coordinator', 'worker')}
+        efforts = {role: self.m.lst(keys.get('launch_effort_' + role, '')) for role in ('coordinator', 'worker')}
+        forbidden = self.m.lst(keys.get('launch_forbid', ''))
+        self.assertTrue(allowed['coordinator'] and allowed['worker'] and efforts['coordinator'] and efforts['worker']
+                        and forbidden, 'the declarations must cover both roles and a forbidden list')
+        coordinator = 'Role: coordinator of node app.\n'
+        worker_instance, worker_model = allowed['worker'][0]
+        off_policy = [selection(f, worker_model, efforts['worker'][0]) for f in forbidden] + \
+                     [selection(worker_instance, f, efforts['worker'][0]) for f in forbidden] + \
+                     [selection(worker_instance, worker_model, 'low'), None]
+        # Absent declarations: dormant, every launch passes.
+        for chosen in off_policy:
+            self.assertIsNone(self.launch(chosen))
+        self.declare(keys)
+        for chosen in off_policy:
+            with self.subTest(chosen=chosen):
+                self.assertIsNotNone(self.launch(chosen))
+                self.assertIsNotNone(self.launch(chosen, coordinator))
+        inst = self.m.Instance(self.root)
+        for instance, model in allowed['worker']:  # admission (caps) is checked below
+            self.assertEqual(self.m.selection_reasons(inst, inst.node('app'), 'worker',
+                                                      selection(instance, model, efforts['worker'][0])), [])
+        instance, model = allowed['coordinator'][0]
+        self.assertIsNone(self.launch(selection(instance, model, efforts['coordinator'][0]), coordinator))
+        self.assertIsNotNone(self.launch(selection(instance, model, 'low'), coordinator))
+        # Each declared cap: a fresh count at the cap refuses the next ordered launch.
+        caps = {k[len('launch_cap_'):]: int(v) for k, v in keys.items() if k.startswith('launch_cap_')}
+        self.assertTrue(caps, 'the declarations must cap a provider')
+        key = self.ledger('job-a')['job-a']
+        for capped, limit in caps.items():
+            model = next(m for i, m in allowed['worker'] if i == capped)
+            live = [{'threadId': f'live-{i}', 'providerInstanceId': capped, 'status': 'running'} for i in range(limit)]
+            self.observe(live)
+            self.assertIn(f'cap {limit} is full', self.launch(selection(capped, model, efforts['worker'][0]), self.brief(key)))
+        # Each declared pointer file: the first send to a replaced thread is refused.
+        for name in self.m.lst(keys.get('thread_pointers', '')):
+            path = self.root / 'nodes/app' / name
+            path.write_text('Pointer: thread-old\n')
+            self.git('add', str(path), cwd=self.root)
+            self.git('commit', '-qm', 'fixture pointer', cwd=self.root)
+            path.write_text('Pointer: thread-new\n')
+            self.assertIn('thread-new', self.pretool('t3_thread_send', {'threadId': 'thread-old', 'message': 'x'}))
 
 
 class StopHookTiming(Scenario):
@@ -286,16 +403,15 @@ class StopHookTiming(Scenario):
         return root, transcript
 
     def stop_seconds(self, root, payload):
-        best = None
+        runs = []
         for _ in range(3):
             start = time.monotonic()
             result = subprocess.run([sys.executable, str(root / 'core/bin/brain'), 'hook', 'stop'], cwd=payload['cwd'],
                                     env={**self.env, 'ANTHROPIC_API_KEY': ''}, input=json.dumps(payload),
                                     capture_output=True, text=True, timeout=30)
-            elapsed = time.monotonic() - start
+            runs.append(time.monotonic() - start)
             self.assertEqual(result.returncode, 0, result.stderr)
-            best = elapsed if best is None else min(best, elapsed)
-        return best
+        return runs
 
     def test_non_operator_turn_stop_checks_finish_under_one_second(self):
         root, transcript = self.fixture()
@@ -306,6 +422,8 @@ class StopHookTiming(Scenario):
                                            'transcript_path': str(transcript), 'last_assistant_message': 'Done.'},
         }
         timings = {name: self.stop_seconds(root, payload) for name, payload in cases.items()}
-        print('stop hook seconds: ' + json.dumps({k: round(v, 3) for k, v in timings.items()}), file=sys.stderr)
-        for name, seconds in timings.items():
-            self.assertLess(seconds, self.budget, f'{name}: Stop hook took {seconds:.3f} s')
+        print('stop hook seconds: ' + json.dumps({k: [round(v, 3) for v in runs] for k, runs in timings.items()}),
+              file=sys.stderr)
+        for name, runs in timings.items():
+            for seconds in runs:  # every run must meet the budget, not the fastest
+                self.assertLess(seconds, self.budget, f'{name}: Stop hook took {seconds:.3f} s')

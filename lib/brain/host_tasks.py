@@ -84,7 +84,7 @@ def host_delegate(inst, n, task, target, key, rpc=None):
         return dict(prior)
     if prior and prior.get('recovery'):
         return delegation_recovery(inst, n, identity, payload, rpc)
-    _m_launch_policy.require_admission(inst, n, 'worker', selection, payload['task'], 'delegate')
+    _m_launch_policy.require_admission(inst, n, 'worker', selection, payload['task'], 'delegate', rpc=rpc)
     with host_task_store(inst) as data:
         row = data['tasks'].get(identity)
         if row and row.get('input_digest') != digest:
@@ -133,7 +133,7 @@ def delegation_recovery(inst, n, identity, payload, rpc):
         if not row.get('route_failure'):
             raise ValueError('route recovery requires a confirmed delegation failure')
         row['recovery'] = {'phase': 'launching', 'marker': marker, 'at': inst.now()}
-    _m_launch_policy.require_admission(inst, n, 'worker', selection, payload['task'], 'delegate')
+    _m_launch_policy.require_admission(inst, n, 'worker', selection, payload['task'], 'delegate', rpc=rpc)
     current = inst.__class__(inst.root).node(n['id'])['local']
     project = current.get('home_project') or current.get('host_project')
     if current.get('coordinator') != n['local'].get('coordinator') or not project:

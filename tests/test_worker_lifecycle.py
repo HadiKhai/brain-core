@@ -285,6 +285,22 @@ class WorkerLifecycle(Scenario):
         self.assertEqual(self.initial_tick()['state'], 'pending')
         self.assertEqual(self.actions('t3_thread_launch'), [])
 
+    def test_initial_launch_refuses_when_live_capped_threads_fill_the_cap(self):
+        # R19: the native launch counts live host threads on a capped provider before launching.
+        path = self.root / 'instance.md'
+        path.write_text(path.read_text().replace('---\n', '---\nlaunch_cap_codex: 1\n', 1))
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('root')
+        self.unbound()
+        self.threads['busy'] = {**self.thread('busy', 'running', 'busy-run'), 'worktreePath': str(self.root / 'elsewhere')}
+        result = self.initial_tick()
+        self.assertEqual(result['state'], 'pending')
+        self.assertIn('cap 1 is full', result['reason'])
+        self.assertEqual(self.actions('t3_thread_launch'), [])
+        self.threads['busy']['status'] = 'completed'
+        self.assertEqual(self.initial_tick()['state'], 'done')
+        self.assertEqual(len(self.actions('t3_thread_launch')), 1)
+
     def test_initial_launch_unknown_outcome_never_repeats(self):
         self.unbound()
         self.launch_unknown = True

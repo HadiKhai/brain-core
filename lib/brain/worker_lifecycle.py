@@ -255,7 +255,7 @@ def _restart_worker(inst, n, key, rpc):
         if receipt['phase'] == 'stopping':
             usage = captured_restart_usage(fresh, current, row)
             text, selection = restart_brief(fresh, current, row)
-            _m_launch_policy.require_admission(fresh, current, 'worker', selection, text)
+            _m_launch_policy.require_admission(fresh, current, 'worker', selection, text, rpc=rpc, job=key)
             marker = 'native-restart: ' + identity + '-' + receipt['episode']
             receipt.update(phase='launching', usage=usage, workspace=workspace, modelSelection=selection, marker=marker)
             # Launch has no idempotency key. Persist intent FIRST, never repeat an
@@ -378,7 +378,7 @@ def launch_worker(inst, n, key, rpc=None):
                     if thread['worktreePath'] == workspace:
                         raise ValueError('existing unbound conversation uses this workspace; adopt it explicitly')
                 text, selection = restart_brief(fresh, current, row)
-                _m_launch_policy.require_admission(fresh, current, 'worker', selection, text)
+                _m_launch_policy.require_admission(fresh, current, 'worker', selection, text, rpc=rpc, job=key)
                 marker = 'native-launch: ' + identity + '-' + os.urandom(12).hex()
                 receipt = {'job': key, 'host': host, 'phase': 'launching', 'workspace': workspace,
                            'modelSelection': selection, 'marker': marker, 'at': inst.now()}

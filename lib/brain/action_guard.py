@@ -189,3 +189,15 @@ def cmd_hook_pretool(a):
                   'permissionDecision': 'deny', 'permissionDecisionReason': _m_guard.redact(reason, _m_guard.never_terms(nearest[0]))}}))
     except (Exception, SystemExit):
         return  # Missing policy, malformed input or unavailable bookkeeping never breaks a runtime.
+
+
+def cmd_hook_posttool(a):
+    """Record what launch admission needs from a host tool's result. Never fails the runtime."""
+    try:
+        data = json.loads(sys.stdin.read() or '{}')
+        cwd = data.get('cwd') if isinstance(data, dict) else None
+        root = _m_nodes.root_for_path(Path(cwd)) if isinstance(cwd, str) else None
+        if root:
+            _m_launch_policy.posttool_observe(_m_instance.Instance(root), data)
+    except (Exception, SystemExit):
+        return

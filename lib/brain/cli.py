@@ -126,7 +126,7 @@ def reexec_into_instance_core():
 READ_ONLY = {"cmd_agent_message", "cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_settle", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_due", "cmd_inbox", "cmd_timings", "cmd_time", "cmd_index", "cmd_scorecard", "cmd_introspect",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
-             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
+             "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_posttool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
              "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_heavy_run", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton", "cmd_task_apply_plan", "cmd_coordinator_profile"}
 
@@ -750,6 +750,8 @@ def _main():
     t.set_defaults(f=_Command("hosts", "cmd_hook_approve"))
     t = hsub.add_parser("pretool", help="check declared forbidden tool actions; reads runtime JSON on stdin")
     t.set_defaults(f=_Command("action_guard", "cmd_hook_pretool"))
+    t = hsub.add_parser("posttool", help="record host observations launch policy needs; reads runtime JSON on stdin")
+    t.set_defaults(f=_Command("action_guard", "cmd_hook_posttool"))
     cmd("allow", _Command("action_guard", "cmd_allow"), "allow one exact forbidden shell command once", "id", "action",
         opt("--once", action="store_true", required=True), opt("--cwd"), opt("--tool", default="Bash"))
     cmd("wake", _Command("hosts", "cmd_wake"), "wake a node coordinator (or root); inbox remains the record", "id",
