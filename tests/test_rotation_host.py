@@ -92,6 +92,24 @@ class RotationHost(Scenario):
         scoped.assert_called_once()
         self.assertFalse(any(name == 't3_thread_launch' for name, _ in self.calls))
 
+    def test_lost_scoped_idle_launch_retries_its_original_request_key(self):
+        self.threads['old']['providerInstanceId'] = 'claudeAgent'
+        owner = self.m._owners['rotate_coordinator']
+        attempts = []
+        def scoped(inst, node, rpc, ticket, message, receipt, publish):
+            attempts.append(ticket)
+            if len(attempts) == 1:
+                raise self.m.HostRPCError('idle launch response lost')
+            receipt.update(new='new', workspace=str(self.root))
+            publish(receipt)
+            return {'thread': 'new'}
+        with mock.patch.object(owner._m_startup, 'launch_scoped', side_effect=scoped):
+            self.assertEqual(self.rotate()['state'], 'pending')
+            second = self.rotate()
+        self.assertEqual(second['state'], 'launched')
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+
     def test_live_children_are_listed_first_and_preserved_without_launch(self):
         self.threads['child'] = self.thread('child', 'running', 'child-run', 'old')
         self.assertEqual(self.rotate()['state'], 'pending')

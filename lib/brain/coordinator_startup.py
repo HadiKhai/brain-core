@@ -6,16 +6,7 @@ import re
 
 from . import common as _m_common
 from . import instance as _m_instance
-
-
-def compact_index(text):
-    """Drop only standalone structural metadata in the instance rule index."""
-    parts = re.split(r'(?m)(^## Instance rules\s*$)', text, maxsplit=1)
-    if len(parts) != 3:
-        raise ValueError('missing instance rule index')
-    section = re.split(r'(?m)(?=^## )', parts[2], maxsplit=1)
-    section[0] = re.sub(r'(?m)^[ \t]+(?:Gate:|Applies:)[^\n]*(?:\n|$)', '', section[0])
-    return ''.join(parts[:2]) + ''.join(section)
+_m_host = _m_common.LazyModule(__package__, 'host_lifecycle')
 
 
 def profile_home():
@@ -50,6 +41,17 @@ def install_profile(inst, node_id, workspace, home=None, connectors=True, skills
         if previous.get('_brainCoordinator') != marker:
             raise ValueError('existing local settings belong to another session; preserved')
     data = {'_brainCoordinator': marker, 'env': {'BRAIN_ROOT': marker['root']}}
+    # Keep instructions/runtime only: a coordinator must not silently edit a
+    # committed stale copy of canonical inbox/status/handover files.
+    patterns = ['/AGENTS.md', '/CLAUDE.md', '/.claude/', '/core/']
+    node = inst.node(node_id)
+    while node.get('parent'):
+        relative = node['dir'].relative_to(inst.root).as_posix()
+        patterns += ['/' + relative + '/AGENTS.md', '/' + relative + '/CLAUDE.md']
+        node = node['parent']
+    sparse = _m_common.git('sparse-checkout', 'set', '--no-cone', *patterns, cwd=workspace)
+    if sparse.returncode:
+        raise ValueError('coordinator sparse workspace preparation failed; first input withheld')
     if connectors:
         data['disableClaudeAiConnectors'] = True
         data['env']['ENABLE_CLAUDEAI_MCP_SERVERS'] = 'false'
@@ -84,29 +86,41 @@ def launch_scoped(inst, n, rpc, ticket, message, receipt=None, publish=None):
     """Launch idle, install per-launch settings, then deliver idempotent first input."""
     receipt = receipt if receipt is not None else {}
     if not receipt.get('new'):
-        result = rpc('t3_thread_launch', {'title': n['id'] + ' coordinator',
+        result = _m_host.host_object(rpc, 't3_thread_launch', {'title': n['id'] + ' coordinator',
             'clientRequestId': 'coordinator-launch-' + ticket,
-            'projectId': n['local'].get('host_project'),
+            'projectId': n['local'].get('host_project') or n['local'].get('home_project'),
             'workspaceStrategy': {'type': 'worktree', 'baseRef': 'HEAD', 'startFromOrigin': False}})
         if not isinstance(result.get('threadId'), str) or not result['threadId']:
             raise ValueError('coordinator launch outcome unknown; retain intent')
         receipt['new'] = result['threadId']
         if publish:
             publish(receipt)
-    observed = rpc('t3_thread_read', {'threadId': receipt['new'], 'limit': 1, 'maxCharsPerItem': 100})['thread']
-    if observed.get('activeRunId'):
-        raise ValueError('coordinator profile requires an idle thread before first input')
+    observed = _m_host.host_object(rpc, 't3_thread_read',
+        {'threadId': receipt['new'], 'limit': 1, 'maxCharsPerItem': 100}).get('thread')
+    if not isinstance(observed, dict) or observed.get('threadId') != receipt['new']:
+        raise ValueError('unknown native coordinator thread observation; intent retained')
     if not isinstance(observed.get('worktreePath'), str):
         raise ValueError('native coordinator workspace preparation pending; idle thread retained')
-    profile = install_profile(inst, n['id'], observed['worktreePath'])
+    if observed.get('activeRunId') or observed.get('runCount', 0):
+        workspace = Path(observed['worktreePath'])
+        settings = workspace / '.claude/settings.local.json'
+        marker = {'root': str(inst.root.resolve()), 'node': n['id'], 'workspace': str(workspace.resolve())}
+        if (not receipt.get('profile_ready') or str(workspace.resolve()) != receipt.get('workspace')
+                or settings.is_symlink() or not settings.is_file()
+                or json.loads(settings.read_text()).get('_brainCoordinator') != marker):
+            raise ValueError('coordinator first input is running; profile readiness unknown, retain for reconciliation')
+        profile = {'workspace': str(workspace.resolve()), 'settings': str(settings)}
+    else:
+        profile = install_profile(inst, n['id'], observed['worktreePath'])
     receipt['workspace'] = profile['workspace']
+    receipt['profile_ready'] = True
     if publish:
         publish(receipt)
     state = ('\n\nPrivate launch workspace: settings only. The canonical Brain state root is ' +
              str(inst.root) + '; node folder: ' + str(n['dir']) +
              '. Use absolute paths there for state reads/edits; BRAIN_ROOT routes commands there. '
              'The private checkout is not a second writable instance.\n')
-    rpc('t3_thread_send', {'threadId': receipt['new'], 'mode': 'queue',
+    _m_host.host_object(rpc, 't3_thread_send', {'threadId': receipt['new'], 'mode': 'queue',
         'clientRequestId': 'coordinator-start-' + ticket, 'message': message + state})
     return {'thread': receipt['new'], 'workspace': profile['workspace'], 'settings': profile['settings']}
 

@@ -117,7 +117,7 @@ def rotate_coordinator(inst, n, rpc=None):
                 if receipt['old'] != old:
                     raise ValueError('rotation binding changed; preserve in-flight receipt')
                 if receipt['phase'] == 'launching':
-                    if receipt.get('scoped') and receipt.get('new'):
+                    if receipt.get('scoped'):
                         _m_startup.launch_scoped(fresh, current, rpc, receipt['ticket'],
                                                receipt['message'], receipt, publish)
                         receipt['phase'] = 'launched'

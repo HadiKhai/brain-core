@@ -12,7 +12,10 @@ Claude coordinators can start idle in a host-created private worktree, run
 brief. Connectors and user plugin/skill listings are disabled only there;
 Brain skills and t3-code remain. Canonical state stays in the original instance
 through BRAIN_ROOT and explicit state paths. Native Claude rotation follows
-this sequence; other runtime launches keep their existing route. Preparation
+this sequence with a sparse instruction/runtime checkout, excluding stale
+instance state. Lost idle-launch replies reuse their original request key;
+already-running first input is confirmed through its stable send identity.
+Other runtime launches keep their existing route. Preparation
 waits retain the idle thread and launch intent. Follow the T3 adapter's startup
 steps after upgrading. Never apply this profile to a shared project directory.
 Instance rule indexes retain their bullets; canonical Gate/Applies annotations
