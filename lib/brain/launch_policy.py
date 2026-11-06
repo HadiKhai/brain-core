@@ -25,6 +25,7 @@ from . import common as _m_common
 
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_launch_receipts = _m_common.LazyModule(__package__, 'launch_receipts')
 
 
 LAUNCH_ROLES = ('coordinator', 'worker')
@@ -101,6 +102,53 @@ def require_selection(inst, n, role, selection):
         raise ValueError('launch policy refused: ' + '; '.join(reasons))
 
 
+def policy_declared(inst, n, role):
+    return any(_m_common.lst(policy_value(inst, n, key)) for key in
+               ('launch_allow_' + role, 'launch_effort_' + role, 'launch_forbid'))
+
+
+def observed_reasons(inst, n, role, requested, thread, always=False):
+    """Refusals for the thread a host returned, before it is bound, started or adopted.
+
+    The host's thread observation must show the requested provider instance and model and
+    pass the declared policy itself. Options the host reports must match the requested
+    ones; a host that reports none leaves the checked request as the only effort on record.
+    Without declared policy nothing is checked unless `always` is set.
+    """
+    if not (always or policy_declared(inst, n, role)):
+        return []
+    if not isinstance(thread, dict):
+        return ['the launched thread could not be observed']
+    instance, model = selection_identity(thread)
+    if not instance or not model:
+        return ['the launched thread reports no provider instance and model']
+    want = selection_identity(requested)
+    reasons = []
+    if want != (None, None) and (instance, model) != want:
+        reasons.append(f'the launched thread runs {instance}/{model}, not the requested {want[0]}/{want[1]}')
+    observed = {'instanceId': instance, 'model': model}
+    reported = thread.get('options')
+    if reported is not None:
+        try:
+            reported = _m_launch_receipts.receipt_options(reported)
+            asked = _m_launch_receipts.receipt_options(requested.get('options') or {}) if requested else {}
+        except ValueError:
+            return reasons + ['the launched thread reports unreadable options']
+        different = sorted(k for k in asked if reported.get(k) != asked[k])
+        if different:
+            reasons.append('the launched thread reports other ' + ', '.join(different) + ' than requested')
+        observed['options'] = reported
+    elif isinstance(requested, dict) and 'options' in requested:
+        observed['options'] = requested['options']
+    return reasons + selection_reasons(inst, n, role, observed)
+
+
+def require_observed(inst, n, role, requested, thread, refused):
+    reasons = observed_reasons(inst, n, role, requested, thread)
+    if reasons:
+        raise ValueError('launch policy refused the launched thread (' + '; '.join(reasons) + '); ' + refused)
+
+
 def coordinator_selection(inst, n, observed=None):
     """An explicit coordinator selection: the declared one first, else the predecessor's observed one."""
     allowed = _m_common.lst(policy_value(inst, n, 'launch_allow_coordinator'))
@@ -163,12 +211,12 @@ def pointer_thread(line):
 
 
 def pointer_files(inst):
+    """Every declared pointer as (label, path, usable); a missing or unsafe file is still listed."""
     names = _m_common.lst(inst.cfg.get('thread_pointers'))
     for node in inst.nodes():
         for name in names:
             path = node['dir'] / name
-            if not path.is_symlink() and path.is_file():
-                yield node['id'] + '/' + name, path
+            yield node['id'] + '/' + name, path, not path.is_symlink() and path.is_file()
 
 
 def _first_line(path):
@@ -190,10 +238,10 @@ def _committed_pointers(inst, path, record):
         end = out.index(b'\n', pos)
         header = out[pos:end].split()
         pos = end + 1
-        if len(header) == 3 and header[1] == b'blob':
+        if len(header) == 3:
             size = int(header[2])
             blob, pos = out[pos:pos + size], pos + size + 1
-            thread = pointer_thread(blob.split(b'\n', 1)[0].decode(errors='replace'))
+            thread = pointer_thread(blob.split(b'\n', 1)[0].decode(errors='replace')) if header[1] == b'blob' else None
             if thread:
                 record['history'][thread] = record['history'].get(thread) or sha
         record['commits'].append(sha)
@@ -203,17 +251,24 @@ def _committed_pointers(inst, path, record):
 def _observe_pointers(inst, data, committed=True):
     pointers = data.setdefault('pointers', {})
     current = {}
-    for label, path in pointer_files(inst):
-        record = pointers.setdefault(label, {})
+    for label, path, usable in pointer_files(inst):
+        record = pointers.get(label)
+        if record is None and not (usable or committed):
+            continue  # never seen and not readable now: the send-time history read covers it
+        record = record if record is not None else {}
         record.setdefault('history', {})
         record.setdefault('commits', [])
-        first = _first_line(path)
-        thread = pointer_thread(first)
         if committed:
             _committed_pointers(inst, path, record)
+        first = _first_line(path) if usable else None
+        thread = pointer_thread(first) if usable else None
         if thread:
             record['history'][thread] = record['history'].get(thread) or 'seen ' + inst.now()
-        record.update(current=thread, line=first)
+        if not (usable or record['history']):
+            continue
+        # A missing or unsafe file keeps its known history: its current target is unresolved.
+        record.update(current=thread, line=first, missing=not usable)
+        pointers[label] = record
         current[label] = record
     return current
 
@@ -245,6 +300,9 @@ def pointer_send_reason(inst, arguments):
     for label, record in records.items():
         if targets & {record['current']} or not targets & set(record['history']):
             continue
+        if record.get('missing'):
+            return (f'{label} is missing or not a regular file, and it named thread {target.strip()} before; '
+                    'restore the pointer, then send to the thread its line 1 names')
         if not record['current']:
             return f'{label} line 1 does not name one thread; fix the pointer, then send to the thread it names'
         return (f'thread {target.strip()} is no longer the one {label} names; line 1 names the current one: '
@@ -288,4 +346,3 @@ def _pretool_launch_reason(inst, n, data):
         text = ''
     reasons = selection_reasons(inst, n, launch_role(text), selection)
     return ('Launch policy refused this ' + tool + ': ' + '; '.join(reasons)) if reasons else None
-

@@ -160,14 +160,17 @@ def delegation_recovery(inst, n, identity, payload, rpc):
         raise ValueError('route recovery launch outcome unknown; intent retained, no repeat')
     observed = rpc('t3_thread_read', {'threadId': thread, 'limit': 1})
     observed = observed.get('thread') if isinstance(observed, dict) else None
-    same = (isinstance(observed, dict) and observed.get('threadId') == thread and
-            observed.get('providerInstanceId') == selection['instanceId'] and observed.get('model') == selection['model'])
+    observed = observed if isinstance(observed, dict) and observed.get('threadId') == thread else None
+    # Provider, model and every option the host reports are compared even without declared policy.
+    reasons = _m_launch_policy.observed_reasons(inst, n, 'worker', selection, observed, always=True)
+    same = not reasons
     with host_task_store(inst) as data:
         row = data['tasks'][identity]
         row['recovery'].update(phase='launched' if same else 'mismatch', thread=thread)
         result = dict(row)
     if not same:
-        raise ValueError('route recovery thread does not run the requested provider and model; it was not adopted')
+        raise ValueError('route recovery thread does not run the requested selection (' + '; '.join(reasons) +
+                         '); it was not adopted')
     return result
 
 

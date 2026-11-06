@@ -84,6 +84,25 @@ def host_action_call(inst, nid, tool, arguments):
     return host_call(inst, tool, arguments)
 
 
+def _require_observed_coordinator(inst, n, coordinator, selection):
+    """Under declared policy, bind only a returned thread whose observed identity passes it."""
+    if not _m_launch_policy.policy_declared(inst, n, 'coordinator'):
+        return
+    value = host_action_call(inst, n['id'], 't3_thread_read', {'threadId': coordinator, 'limit': 1, 'maxCharsPerItem': 1})
+    thread = value.get('thread') if isinstance(value, dict) else None
+    thread = thread if isinstance(thread, dict) and thread.get('threadId') == coordinator else None
+    reasons = _m_launch_policy.observed_reasons(inst, n, 'coordinator', selection, thread)
+    if not reasons:
+        return
+    with _m_instance.brain_lock(inst):
+        inst.local = inst._load_local()
+        pending = inst.local_of(n['id']).setdefault('host_setup_pending', {'operation': 'coordinator', 'started': inst.now()})
+        pending['refused_launch'] = {'thread': coordinator, 'reasons': reasons, 'at': inst.now()}
+        inst.save_local()
+    raise ValueError('coordinator thread ' + coordinator + ' was launched but not bound (' + '; '.join(reasons) +
+                     '); retire it on the host, then clear the pending operation')
+
+
 def provision_coordinator(inst, nid, selection, require_no_auto_settle=False):
     _m_host_instances.require_local_host(_m_instance.Instance(inst.root), nid)
     if require_no_auto_settle:
@@ -125,6 +144,7 @@ def provision_coordinator(inst, nid, selection, require_no_auto_settle=False):
         coordinator = launched.get('threadId')
         if not isinstance(coordinator, str) or not coordinator:
             raise ValueError('host launch returned no thread id; inspect the pending operation')
+        _require_observed_coordinator(inst, n, coordinator, selection)
         _bind(inst, nid, coordinator=coordinator)
     host_action_call(inst, nid, 't3_thread_organize', {'threadId':coordinator, 'action':'pin'})
     with _m_instance.brain_lock(inst):

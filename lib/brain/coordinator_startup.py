@@ -97,12 +97,15 @@ def launch_scoped(inst, n, rpc, ticket, message, receipt=None, publish=None):
         if not isinstance(result.get('threadId'), str) or not result['threadId']:
             raise ValueError('coordinator launch outcome unknown; retain intent')
         receipt['new'] = result['threadId']
+        receipt['modelSelection'] = selection
         if publish:
             publish(receipt)
     observed = _m_host.host_object(rpc, 't3_thread_read',
         {'threadId': receipt['new'], 'limit': 1, 'maxCharsPerItem': 100}).get('thread')
     if not isinstance(observed, dict) or observed.get('threadId') != receipt['new']:
         raise ValueError('unknown native coordinator thread observation; intent retained')
+    _m_launch_policy.require_observed(inst, n, 'coordinator', receipt.get('modelSelection'), observed,
+                                      'not started; the idle thread is retained for reconciliation')
     if not isinstance(observed.get('worktreePath'), str):
         raise ValueError('native coordinator workspace preparation pending; idle thread retained')
     if observed.get('activeRunId') or observed.get('runCount', 0):

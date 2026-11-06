@@ -118,6 +118,7 @@ class DelegationRouteRecovery(PolicyFixture):
         self.delegate = 'rejected'
         self.launched = {'threadId': 'visible-1'}
         self.observed_model = 'model-b'
+        self.observed_options = None
 
     def rpc(self, name, args):
         self.calls.append((name, args))
@@ -132,7 +133,10 @@ class DelegationRouteRecovery(PolicyFixture):
                 raise self.launched
             return self.launched
         self.assertEqual(name, 't3_thread_read')
-        return {'thread': {'threadId': args['threadId'], 'providerInstanceId': 'code-agent', 'model': self.observed_model}}
+        thread = {'threadId': args['threadId'], 'providerInstanceId': 'code-agent', 'model': self.observed_model}
+        if self.observed_options is not None:
+            thread['options'] = self.observed_options
+        return {'thread': thread}
 
     def register(self, key='one-task'):
         target = {'providerInstanceId': 'code-agent', 'model': 'model-b', 'options': {'reasoningEffort': 'high'}}
@@ -176,6 +180,19 @@ class DelegationRouteRecovery(PolicyFixture):
             self.register()
         self.assertEqual(self.names().count('t3_thread_launch'), 1)
 
+    def test_recovered_thread_reporting_another_effort_is_not_adopted(self):
+        self.observed_options = {'reasoningEffort': 'low'}
+        with self.assertRaisesRegex(ValueError, 'not adopted'):
+            self.register()
+        row = self.m.host_task_read(self.inst)['tasks']
+        self.assertEqual(next(iter(row.values()))['recovery']['phase'], 'mismatch')
+        with self.assertRaisesRegex(ValueError, 'different provider or model'):
+            self.register()
+        self.assertEqual(self.names().count('t3_thread_launch'), 1)
+        # The host reporting the requested effort is adopted.
+        self.observed_options = [{'id': 'reasoningEffort', 'value': 'high'}]
+        self.assertEqual(self.register('reported-high')['recovery']['phase'], 'launched')
+
     def test_refusal_before_recovery_intent_stays_retryable_and_launches_once(self):
         # A pre-launch refusal records no launching intent: the confirmed failure is retried later.
         self.inst.local_of('app').pop('home_project')
@@ -190,6 +207,101 @@ class DelegationRouteRecovery(PolicyFixture):
         self.assertEqual(self.names().count('t3_thread_launch'), 1)
         self.assertEqual(self.register()['recovery']['thread'], 'visible-1')
         self.assertEqual(self.names().count('t3_thread_launch'), 1)
+
+class ObservedCoordinator(PolicyFixture):
+    """An allowed request is not enough: the thread the host returns is read and checked first."""
+
+    def setUp(self):
+        super().setUp()
+        self.b(self.root, 'new', 'fresh', '--title', 'Fresh')
+        self.inst = self.m.Instance(self.root)
+        self.calls = []
+        self.observed = {'providerInstanceId': 'main-agent', 'model': 'model-a'}
+
+    def host(self, inst, tool, args):
+        self.calls.append(tool)
+        if tool == 't3_project_create':
+            return {'id': 'fresh-project'}
+        if tool == 't3_thread_launch':
+            return {'threadId': 'launched-thread'}
+        if tool == 't3_thread_read':
+            return {'thread': {'threadId': args['threadId'], **self.observed}} if self.observed is not None else {}
+        return {}
+
+    def provision(self):
+        with mock.patch.object(self.m, 'host_call', side_effect=self.host):
+            return self.m.provision_coordinator(self.m.Instance(self.root), 'fresh', selection('main-agent', 'model-a'))
+
+    def test_provisioning_never_binds_a_returned_thread_with_a_refused_observed_identity(self):
+        for observed in ({'providerInstanceId': 'retired-account', 'model': 'model-x'},
+                         {'providerInstanceId': 'main-agent', 'model': 'model-a', 'options': {'reasoningEffort': 'low'}},
+                         {'providerInstanceId': 'main-agent'}, None):
+            with self.subTest(observed=observed):
+                local = self.m.Instance(self.root)
+                local.local_of('fresh').pop('host_setup_pending', None)
+                local.save_local()
+                self.observed, self.calls = observed, []
+                with self.assertRaisesRegex(ValueError, 'not bound'):
+                    self.provision()
+                fresh = self.m.Instance(self.root).local_of('fresh')
+                self.assertIsNone(fresh.get('coordinator'))
+                self.assertEqual(fresh['host_setup_pending']['refused_launch']['thread'], 'launched-thread')
+                self.assertNotIn('t3_thread_organize', self.calls)
+                # Retained for reconciliation: a retry never launches a second coordinator.
+                with self.assertRaisesRegex(ValueError, 'pending'):
+                    self.provision()
+                self.assertEqual(self.calls.count('t3_thread_launch'), 1)
+        local = self.m.Instance(self.root)
+        local.local_of('fresh').pop('host_setup_pending', None)
+        local.save_local()
+        self.observed = {'providerInstanceId': 'main-agent', 'model': 'model-a'}
+        self.assertEqual(self.provision(), 'launched-thread')
+        self.assertEqual(self.m.Instance(self.root).local_of('fresh')['coordinator'], 'launched-thread')
+
+    def test_scoped_start_sends_no_first_input_to_a_refused_observed_coordinator(self):
+        workspace = self.tmp / 'scoped-workspace'
+        workspace.mkdir()
+        for observed in ({'providerInstanceId': 'retired-account', 'model': 'model-a'},
+                         {'providerInstanceId': 'main-agent', 'model': 'model-a', 'options': {'reasoningEffort': 'low'}},
+                         {'model': 'model-a'}):
+            calls = []
+            def rpc(name, args):
+                calls.append(name)
+                if name == 't3_thread_launch':
+                    return {'threadId': 'scoped-new'}
+                return {'thread': {'threadId': args['threadId'], 'worktreePath': str(workspace),
+                                   'runCount': 0, **observed}}
+            with self.subTest(observed=observed), self.assertRaisesRegex(ValueError, 'not started'):
+                self.m.launch_scoped(self.inst, self.inst.node('app'), rpc, 'ticket', 'Start here',
+                                     {'modelSelection': selection('main-agent', 'model-a')})
+            self.assertEqual(calls, ['t3_thread_launch', 't3_thread_read'])
+            self.assertFalse((workspace / '.claude/settings.local.json').exists())
+
+    def test_rotation_acceptance_never_binds_a_replacement_on_another_identity(self):
+        self.inst.local_of('fresh').update(coordinator='old', host_project='project')
+        self.inst.save_local()
+        node = self.m.Instance(self.root).node('fresh')
+        receipt = {'version': 1, 'node': 'fresh', 'phase': 'launched', 'old': 'old', 'new': 'new', 'ticket': 't',
+                   'tasks': [], 'projects': ['project'], 'workspace': str(self.root), 'old_sessions': [],
+                   'modelSelection': selection('main-agent', 'model-a')}
+        owner = self.m._owners['accept_rotation']
+
+        @contextlib.contextmanager
+        def store(inst, n):
+            yield receipt, lambda r: None
+        replacement = {'threadId': 'new', 'worktreePath': str(self.root),
+                       'providerInstanceId': 'retired-account', 'model': 'model-a'}
+        with mock.patch.object(owner, 'rotation_action_store', store), \
+                mock.patch.object(owner._m_worker, 'restart_children', return_value=(['project'], {'old', 'new'}, {'new'})), \
+                mock.patch.object(owner, 'rotation_registry_children'), \
+                mock.patch.object(owner._m_worker, 'restart_thread', return_value=replacement), \
+                mock.patch.object(owner, 'rotation_schedules', return_value={}) as schedules:
+            result = self.m.accept_rotation(self.inst, node, 't', 'new-session', rpc=lambda *a: {})
+        self.assertEqual(result['state'], 'pending')
+        self.assertIn('not bound', result['reason'])
+        schedules.assert_not_called()
+        self.assertEqual(self.m.Instance(self.root).local_of('fresh')['coordinator'], 'old')
+
 
 class LanderPointer(PolicyFixture):
     def point(self, line, commit=False):
@@ -223,6 +335,40 @@ class LanderPointer(PolicyFixture):
         self.assertIn('does not name one thread', self.send('thread-b'))
         self.point('Lander: thread-b')
         self.assertIsNone(self.send('thread-b'))
+
+    def test_missing_or_unsafe_pointer_keeps_refusing_every_thread_it_named(self):
+        path = self.root / 'nodes/app/lander.md'
+        self.point('Lander: thread-old', commit=True)
+        self.point('Lander: thread-new')
+        self.assertIn('no longer the one', self.send('thread-old'))
+        path.unlink()
+        for thread in ('thread-old', 'thread-new', 't3-thread://v1/thread-old'):
+            self.assertIn('missing or not a regular file', self.send(thread))
+        self.assertIsNone(self.send('unrelated-thread'))
+        path.mkdir()
+        self.assertIn('missing or not a regular file', self.send('thread-old'))
+        path.rmdir()
+        other = self.root / 'nodes/app/elsewhere.md'
+        other.write_text('Lander: thread-old\n')
+        path.symlink_to(other)
+        self.assertIn('missing or not a regular file', self.send('thread-old'))
+        self.assertIn('missing or not a regular file', self.send('thread-new'))
+        path.unlink()
+        # Restored: the current thread is allowed again, every former one is still refused.
+        self.point('Lander: thread-new')
+        self.assertIsNone(self.send('thread-new'))
+        self.assertIn('no longer the one', self.send('thread-old'))
+
+    def test_pointer_deleted_in_a_commit_before_any_observation_refuses_its_committed_threads(self):
+        self.point('Lander: thread-old', commit=True)
+        self.point('Lander: thread-new', commit=True)
+        self.git('rm', '-q', str(self.root / 'nodes/app/lander.md'), cwd=self.root)
+        self.git('commit', '-qm', 'fixture pointer removed', cwd=self.root)
+        state = self.root / self.m._owners['pointer_send_reason'].POINTER_FILE
+        self.assertFalse(state.exists())
+        self.assertIn('missing or not a regular file', self.send('thread-old'))
+        self.assertIn('missing or not a regular file', self.send('thread-new'))
+        self.assertIsNone(self.send('unrelated-thread'))
 
     def test_uncommitted_pointer_replaced_by_codex_apply_patch_or_shell_refuses_the_first_send(self):
         self.point('Lander: thread-g')

@@ -221,6 +221,8 @@ def accept_rotation(inst, n, ticket, session_id, rpc=None):
             if callers != {new} or new not in inventory:
                 raise ValueError('rotation acceptance must run from the exact replacement host thread')
             replacement = _m_worker.restart_thread(rpc, new)
+            _m_launch_policy.require_observed(fresh, current, 'coordinator', receipt.get('modelSelection'), replacement,
+                                              'replacement not bound; the old coordinator stays bound')
             if replacement.get('worktreePath') != receipt['workspace']:
                 raise ValueError('replacement coordinator workspace is not confirmed')
             if current['local'].get('coordinator') not in (old, new):

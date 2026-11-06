@@ -14,7 +14,9 @@ line 1 names a role's current thread. The PreToolUse hook refuses a `t3_thread_l
 longer names (including its committed history and each line 1 seen before an agent tool
 call). Coordinator provisioning,
 rotation and native worker launches check the same policy before their host call;
-rotation now always passes an explicit model selection. `brain delegate` recovers a
+rotation now always passes an explicit model selection. The thread the host returns is
+read and checked too, before it is bound, started or adopted. A pointer file that goes
+missing or unsafe keeps refusing every thread it named. `brain delegate` recovers a
 host-refused delegation once as a visible thread on the same model. Nothing changes until
 keys are declared. After upgrading: declare the keys your rules require in instance.md
 (and per node where a node restricts its builders).

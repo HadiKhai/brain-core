@@ -22,11 +22,20 @@ Where it is checked:
 - Core paths, before their host call: coordinator provisioning, coordinator rotation (which
   always passes an explicit selection: the declared one, else the predecessor's observed
   one), native worker launch and restart, and `brain delegate`.
+- The thread the host returns, before it is bound, started or adopted: coordinator
+  provisioning, a scoped coordinator start, rotation acceptance and `brain delegate`'s
+  route recovery read it and refuse it unless it runs the requested provider and model,
+  passes the declared policy itself, and reports no option other than the requested one.
+  A host that reports no options leaves the checked request as the effort on record. A
+  refused coordinator stays unbound with its thread id in the pending operation, and the
+  old coordinator stays bound; nothing is launched again.
 
 Former pointers come from every committed version of the pointer file (read once per commit)
 plus each line 1 seen before every agent tool call (so before an `Edit`, `Write`, Codex
 `apply_patch` or shell command replaces it) and every send, kept in
-`.brain/thread-pointers.json`. The first send to a replaced thread is refused.
+`.brain/thread-pointers.json`. The first send to a replaced thread is refused. A pointer
+file that goes missing, or becomes a folder or a link, keeps its known history: every
+thread it named is refused until the file is restored, and other threads are unaffected.
 
 `brain delegate` treats only a host refusal as a confirmed route failure. It then launches
 the same work once as a visible thread in the node's home project on the same provider,
