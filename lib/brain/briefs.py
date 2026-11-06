@@ -102,8 +102,9 @@ def checked_brief(n, text, worker=True, inputs=None, rules=None):
     charge = sum(size for size, name in sections)
     total = len(automated_brief(text).encode("utf-8"))
     # Include the accounting line itself in the absolute byte total.
+    separator = '' if text.endswith('\n') else '\n'
     while True:
-        note = f"\nBrief bytes: chargeable={charge}; total={total}; absolute ceiling={BRIEF_ABSOLUTE_BYTES}.\n"
+        note = f"{separator}Brief bytes: chargeable={charge}; total={total}; absolute ceiling={BRIEF_ABSOLUTE_BYTES}.\n"
         measured = len(automated_brief(text + note).encode("utf-8"))
         if measured == total:
             break

@@ -4471,3 +4471,8 @@ canonical `claude` runtime, without changing identity membership or thread
 independence checks. A rule marked not applicable needs a reason and may omit
 its evidence array, matching the review brief; pass and fail still require
 file-and-line evidence. Validation does not rewrite submitted receipts.
+
+The generated brief accounting line uses the body's existing trailing newline
+as its separator. This avoids adding a blank line to compact briefs while
+preserving the body, mandatory instructions and complete envelope coverage;
+the declared byte total still includes the accounting line and its separator.
