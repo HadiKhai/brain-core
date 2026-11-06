@@ -822,6 +822,23 @@ class ClosedFindingInputs(Scenario):
         m.record_review_findings(inst, n, 'job', head, [finding])
         self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'closed')
 
+    def test_pure_rebase_keeps_closure_only_while_the_finding_patch_id_matches(self):
+        r, wt, m, inst, n, receipt = self.context()
+        finding = {'id': 'bounds', 'class': 'boundary', 'severity': 'blocker', 'text': 'Guard the range',
+                   'paths': ['calc.py', 'notes.txt'], 'state': 'closed', 'evidence': 'test_range passes'}
+        m.record_review_findings(inst, n, 'job', receipt['head'], [finding])
+        home = self.tmp / 'app'
+        (home / 'notes.txt').write_text('main note\n')
+        self.git('add', 'notes.txt', cwd=home)
+        self.git('commit', '-qm', 'main moves a finding input', cwd=home)
+        self.git('rebase', '-q', 'main', cwd=wt)
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'closed')
+        (wt / 'calc.py').write_text('value = 3\n')
+        self.git('commit', '-q', '--amend', '-am', 'fix', cwd=wt)
+        head = self.git('rev-parse', 'HEAD', cwd=wt).strip()
+        self.assertEqual(m.review_finding_state(inst, n, 'job', head)[0]['state'], 'reopened')
+
 
 class ReceiptReadinessIntegration(Scenario):
     job = _test_verify.WorkerReadyPackets.job

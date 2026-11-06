@@ -4,6 +4,7 @@ import os
 import json
 import shutil
 import signal
+import site
 import subprocess
 import sys
 import time
@@ -12,6 +13,19 @@ from unittest import mock
 
 import core_loader
 from scenario import CORE, Scenario
+
+
+class ScenarioUserSite(Scenario):
+    def setUp(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop('PYTHONUSERBASE', None)
+            super().setUp()
+
+    def test_nested_python_keeps_the_real_user_base_under_the_fixture_home(self):
+        result = subprocess.run([sys.executable, '-c', 'import site; print(site.getuserbase())'],
+                                env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), site.getuserbase())
 
 
 class ParallelSelftest(Scenario):

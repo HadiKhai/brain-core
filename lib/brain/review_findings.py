@@ -62,6 +62,18 @@ def read_finding_state(inst, n, row, required=False):
     return data
 
 
+def same_finding_patch(n, record, head):
+    """After a pure rebase a closure stands when the job's own patch to the finding's paths has the same patch-id."""
+    from . import review_carry
+    try:
+        repo, main = n['home_path'], review_carry.main_commit(n)
+        ids = [review_carry.patch_id(repo, review_carry.merge_base(repo, rev, main), rev, record['paths'])
+               for rev in (record['head'], head)]
+    except (KeyError, TypeError, ValueError, OSError):
+        return False
+    return ids[0] == ids[1]
+
+
 def review_finding_state(inst, n, branch, head):
     row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
     if not row:
@@ -70,7 +82,8 @@ def review_finding_state(inst, n, branch, head):
     out = []
     for record in read_finding_state(inst, n, row, required=True)['findings'].values():
         current = dict(record)
-        if record['state'] == 'closed' and finding_inputs(repo, head, record['paths']) != record['inputs']:
+        if (record['state'] == 'closed' and finding_inputs(repo, head, record['paths']) != record['inputs'] and
+                not same_finding_patch(n, record, head)):
             current['state'] = 'reopened'
         out.append(current)
     return out

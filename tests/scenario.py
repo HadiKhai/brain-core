@@ -16,6 +16,7 @@ import os
 import py_compile
 import shutil
 import shlex
+import site
 import subprocess
 import sys
 import tempfile
@@ -243,6 +244,8 @@ class Scenario(unittest.TestCase):
                     "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false",
                     "GIT_CONFIG_KEY_2": "gc.autoDetach", "GIT_CONFIG_VALUE_2": "false",
                     "PATH": os.environ.get("PATH", ""),
+                    # The user site follows HOME; keep the real one so nested Python finds its packages.
+                    "PYTHONUSERBASE": os.environ.get("PYTHONUSERBASE") or site.getuserbase(),
                     "PYTHONPATH": str(CORE / "tests"), "BRAIN_USAGE_TESTING": "1",
                     "BRAIN_USAGE_TEST_NO_KEYCHAIN": "1", "BRAIN_MACHINE_TESTING": "1",
                     "BRAIN_MACHINE_READING": json.dumps({"cpus": 8, "load": [1, 1, 1],

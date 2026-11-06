@@ -51,9 +51,9 @@ def merge_base(repo, head, main):
     return value
 
 
-def patch_id(repo, base, head):
+def patch_id(repo, base, head, paths=()):
     """git patch-id of base..head: --stable as specified, and --verbatim so whitespace bytes count too."""
-    diff = _git(repo, *DIFF, base, head)
+    diff = _git(repo, *DIFF, base, head, '--', *(':(literal)' + path for path in paths))
     if diff.returncode:
         raise ValueError(REFUSED + 'cannot diff ' + base[:12] + '..' + head[:12])
     if not diff.stdout:
