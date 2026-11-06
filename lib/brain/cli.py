@@ -123,7 +123,7 @@ def reexec_into_instance_core():
 
 
 # Commands that change nothing in the instance: they never wait for the lock.
-READ_ONLY = {"cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_settle", "cmd_stale", "cmd_ui", "cmd_guard",
+READ_ONLY = {"cmd_agent_message", "cmd_show", "cmd_tree", "cmd_status", "cmd_now", "cmd_jobs", "cmd_settle", "cmd_stale", "cmd_ui", "cmd_guard",
              "cmd_due", "cmd_inbox", "cmd_timings", "cmd_time", "cmd_index", "cmd_scorecard", "cmd_introspect",
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
@@ -510,6 +510,8 @@ def _main():
         opt('--operator', action='store_true', help='root only: aggregate retained notices once per local delivery day'))
     cmd("msg", _Command("messages", "cmd_msg"), "format start/done/blocked/question for a coordinator (does not send)",
         "id", opt("kind", choices=_m_common.MESSAGE_KINDS), "message", opt("--branch"), opt("--report"))
+    cmd("agent-message", _Command("messages", "cmd_agent_message"), "mark agent-to-agent text for host send (does not send)",
+        opt("message", nargs="?"), opt("--message-file", type=Path))
     queueable_command(cmd, 'handback')
     cmd("queue", _Command("queue_priority", "cmd_gate_queue"), "run one hand-back or explicitly reorder queued native verify tokens",
         opt("action", choices=['run', 'wait', 'drain'], nargs='?'), opt('id', nargs='?'), opt('--once', action='store_true'),

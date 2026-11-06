@@ -234,6 +234,54 @@ class InstructionCaptureRepair(unittest.TestCase):
         self.assertFalse(result['complete'])
         self.assertIn('does not match', result['warnings'][0]['error'])
 
+    def test_agent_proof_reconciles_exact_inputs_without_schedule_or_gap_changes(self):
+        text = 'No resource bypass or foreign cleanup.'
+        path = self.gap('agent-send', text, source_text=text)
+        host = {'type': 'user_message', 'createdBy': 'agent', 'creationSource': 'mcp',
+                'senderThreadId': 'fixture-worker', 'sourceThreadId': 'fixture-parent',
+                'itemId': 'fixture-message', 'text': text, 'textTruncated': False}
+        proof = {path.name: [host]}
+        before, inbox = path.read_bytes(), self.inbox.read_bytes()
+        dry = self.repair.reconcile_gaps(self.root, None, agent_messages=proof, require=['agent-send'])
+        self.assertTrue(dry['complete'])
+        self.assertEqual(dry['reconciliations'][0]['disposition'], 'non_operator')
+        self.assertFalse((self.gaps.parent / 'reconciliations').exists())
+        result = self.repair.reconcile_gaps(self.root, None, dry_run=False, agent_messages=proof)
+        self.assertEqual(len(result['reconciliations']), 1)
+        receipt = json.loads((self.gaps.parent / 'reconciliations' / path.name).read_text())
+        self.assertIn('agent-to-agent', receipt['reason'])
+        self.assertEqual(receipt['agent_messages'][0]['itemId'], 'fixture-message')
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.inbox.read_bytes(), inbox)
+        self.assertEqual(self.repair.reconcile_gaps(self.root, None, dry_run=False,
+                                                  agent_messages=proof)['reconciliations'], [])
+        export = self.root / 'agent-messages.json'
+        export.write_text(json.dumps(proof))
+        run = subprocess.run([sys.executable, '-B', '-m', 'brain.instruction_capture_repair', 'reconcile',
+                              '--root', str(self.root), '--agent-messages-json', str(export),
+                              '--dry-run', '--require', 'agent-send'],
+                             env={**os.environ, 'PYTHONPATH': str(CORE / 'lib')},
+                             text=True, capture_output=True, timeout=10)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
+    def test_agent_proof_never_closes_operator_relays_partial_or_mixed_inputs(self):
+        text = 'Always retain original evidence.'
+        path = self.gap('operator', text, source_text=text)
+        host = {'type': 'user_message', 'createdBy': 'agent', 'creationSource': 'mcp',
+                'senderThreadId': 'fixture-worker', 'sourceThreadId': 'fixture-parent',
+                'itemId': 'fixture-message', 'text': text, 'textTruncated': False}
+        for change in ({'createdBy': 'user'}, {'creationSource': 'web'}, {'senderThreadId': ''},
+                       {'textTruncated': True}, {'text': 'Relayed: ' + text}, {'itemId': ''}):
+            result = self.repair.reconcile_gaps(self.root, None,
+                                               agent_messages={path.name: [dict(host, **change)]})
+            self.assertEqual(result['reconciliations'], [])
+            self.assertEqual(len(result['kept']), 1)
+        mixed = json.loads(path.read_text())
+        mixed['items'].append({'quote': text, 'source_text': 'Operator relays: ' + text})
+        path.write_text(json.dumps(mixed))
+        self.assertEqual(self.repair.reconcile_gaps(self.root, None,
+                         agent_messages={path.name: [host]})['reconciliations'], [])
+
     def test_bad_gap_is_reported_while_other_gaps_continue(self):
         (self.gaps / 'bad.json').write_text('{')
         self.gap('good', 'Read current work.', source_text=self.tasks[1]['prompt'])

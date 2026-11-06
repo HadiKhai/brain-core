@@ -24,6 +24,9 @@ class WorkerMessageGuard(Scenario):
     def test_four_kinds_allowed_and_progress_denied_for_bound_parent(self):
         for kind in ('start', 'done', 'blocked', 'question'):
             self.assertIsNone(self.guard(kind + ': fixture result'))
+            marked = 'Agent message: sent by another agent, not the operator.\n\n'
+            self.assertIsNone(self.guard(marked + kind + ': fixture result'))
+            self.assertIsNotNone(self.guard(marked + 'progress: still working'))
         self.assertIsNotNone(self.guard('progress: still working'))
         self.assertIsNotNone(self.guard('FYI: no action requested'))
         self.assertIsNotNone(self.guard('I completed another small step.'))

@@ -298,6 +298,46 @@ class InstructionCapture(Scenario):
             for record in records:
                 self.assertEqual(self.capture.operator_text(record), None if text == marker + '\nFixture' else text)
 
+    def test_agent_marker_skips_only_at_zero_and_operator_relay_still_captures(self):
+        marker = self.capture.AGENT_MESSAGE_PREFIX
+        instruction = 'No resource bypass or foreign cleanup.'
+        marked = marker + '\n\n' + instruction
+        for text in (marked, instruction, 'Operator relays: ' + marked, ' ' + marked, marker[:-1]):
+            records = [
+                {'type': 'user', 'promptSource': 'sdk', 'turnOrigin': 'sdk',
+                 'message': {'role': 'user', 'content': [{'type': 'text', 'text': text}]}},
+                {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': text}},
+                {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                 'content': [{'type': 'input_text', 'text': text}]}},
+                {'type': 'event_msg', 'payload': {'type': 'item_completed',
+                 'item': {'type': 'UserMessage', 'content': text}}}]
+            for record in records:
+                self.assertEqual(self.capture.operator_text(record), None if text == marked else text)
+        self.records = []
+        self.message(marked, promptSource='sdk', turnOrigin='sdk')
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('agent message called AI')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True}))
+        self.message(instruction, promptSource='sdk', turnOrigin='sdk')
+        self.assertIn(instruction, self.stop())
+        self.assertFalse(list((self.root / '.brain/instruction-capture/gaps').glob('*.json')))
+
+    def test_agent_bootstrap_and_codex_duplicate_keep_current_turn_boundary(self):
+        marker = self.capture.AGENT_MESSAGE_PREFIX
+        self.records.append({'type': 'assistant', 'message': {'stop_reason': 'end_turn'}})
+        self.message(marker + '\n\nFixture agent send')
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('replayed operator input')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        state = self.root / '.brain/instruction-capture' / (self.capture.capture_key(self.n, self.data) + '.json')
+        state.unlink()
+        self.records = [
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+             'content': [{'type': 'input_text', 'text': 'Fixture environment.'}]}},
+            {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': marker + '\n\nFixture'}}]
+        self.path.write_text(''.join(json.dumps(row) + '\n' for row in self.records))
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('agent context called AI')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+
     def test_automated_bootstrap_does_not_replay_previous_completed_operator_turn(self):
         self.records.append({'type': 'assistant', 'message': {'stop_reason': 'end_turn'}})
         self.message(self.capture.AUTOMATED_TURN_PREFIX + '\nFixture wake')

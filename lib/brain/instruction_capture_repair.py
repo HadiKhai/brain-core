@@ -20,6 +20,12 @@ Reconciliation accepts only the exact host nonce-span/footer rendering of a
 recorded prompt, with or without its generated marker line. Use --require GAP_ID
 [GAP_ID ...] to fail if a required gap remains kept or cannot be found uniquely.
 The stderr summary always includes the kept count.
+
+Agent sends can instead be proven with --agent-messages-json: a gap-filename map
+of raw T3 user_message items (createdBy=agent, creationSource=mcp, nonempty
+senderThreadId). Their entire untruncated text must equal each original input.
+This local export is caller-supplied evidence; repair never queries the host.
+Schedule export is optional for agent-only reconciliation.
 """
 import argparse
 import datetime
@@ -155,8 +161,35 @@ def automated_source_hashes(items, task, recorded_ids, records):
     return sorted(hashes)
 
 
-def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None):
-    """All quotes must match ONE prompt, with each original source turn proven automated.
+def agent_source_proof(items, messages, records):
+    """Bind every original whole input to an explicit host agent send, never quote overlap."""
+    if not isinstance(messages, list):
+        return None
+    proven = []
+    for item in items:
+        sources = [item['source_text']] if isinstance(item.get('source_text'), str) else []
+        if not sources and isinstance(records, list) and isinstance(item.get('at'), str) and item['at']:
+            sources = [text for record in records if isinstance(record, dict)
+                       and record.get('timestamp') == item['at']
+                       for text in [_m_capture.operator_text(record, include_automated=True)] if text is not None]
+        match = next((message for message in messages if isinstance(message, dict)
+                      and message.get('type') == 'user_message' and message.get('createdBy') == 'agent'
+                      and message.get('creationSource') == 'mcp' and message.get('textTruncated') is False
+                      and all(isinstance(message.get(key), str) and message[key]
+                              for key in ('senderThreadId', 'sourceThreadId', 'itemId', 'text'))
+                      and message['text'] in sources and item['quote'] in message['text']), None)
+        if match is None:
+            return None
+        proof = {key: match[key] for key in ('itemId', 'sourceThreadId', 'senderThreadId')}
+        proof['source_turn_sha256'] = hashlib.sha256(match['text'].encode()).hexdigest()
+        proof['host_record_sha256'] = hashlib.sha256(json.dumps(match, sort_keys=True).encode()).hexdigest()
+        if proof not in proven:
+            proven.append(proof)
+    return proven
+
+
+def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None, agent_messages=None):
+    """Require a proven scheduled turn or host agent input for every quoted item.
 
     No meaning is inferred, and no partial match can close a mixed operator gap.
     Disabled schedules remain valid historical provenance. A sidecar binds the
@@ -164,11 +197,15 @@ def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None
     """
     # A retired schedule can still explain a historical gap. Its exact exported
     # prompt remains evidence even after its local binding has been replaced.
-    inventory = known_tasks(root, exported, include_unbound=True)
+    inventory = (known_tasks(root, exported, include_unbound=True) if exported is not None else
+                 {'tasks': [], 'missing': [], 'recorded_ids': set(), 'skipped': []})
     tasks, missing = inventory['tasks'], inventory['missing']
     source_turns = {} if source_turns is None else source_turns
     if not isinstance(source_turns, dict):
         raise ValueError('source turns JSON must map gap filenames to raw runtime records')
+    agent_messages = {} if agent_messages is None else agent_messages
+    if not isinstance(agent_messages, dict):
+        raise ValueError('agent messages JSON must map gap filenames to raw host message records')
     base = root / '.brain/instruction-capture'
     matches, warnings, kept, satisfied = [], list(inventory['skipped']), [], set()
     paths = sorted((base / 'gaps').glob('*.json'))
@@ -193,7 +230,8 @@ def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None
                 if source_hashes:
                     task = row
                     break
-            if task is None:
+            agent_proof = agent_source_proof(items, agent_messages.get(path.name), source_turns.get(path.name))
+            if task is None and not agent_proof:
                 kept.append({'gap': path.name, 'status': 'kept: not provably automated'})
                 continue
             digest = hashlib.sha256(raw).hexdigest()
@@ -207,10 +245,14 @@ def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None
                     continue
                 raise ValueError('existing reconciliation does not match gap')
             record = {'gap': path.name, 'gap_sha256': digest, 'disposition': 'non_operator',
-                      'reason': REASON, 'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      'scheduledTaskId': task['scheduledTaskId'],
-                      'source_turn_sha256': source_hashes,
-                      'prompt_sha256': hashlib.sha256(task['prompt'].encode()).hexdigest()}
+                      'reason': REASON if task else 'agent-to-agent host message; explicit MCP sender provenance',
+                      'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            if task:
+                record.update(scheduledTaskId=task['scheduledTaskId'], source_turn_sha256=source_hashes,
+                              prompt_sha256=hashlib.sha256(task['prompt'].encode()).hexdigest())
+            else:
+                record.update(agent_messages=agent_proof,
+                              source_turn_sha256=sorted({proof['source_turn_sha256'] for proof in agent_proof}))
             if not dry_run:
                 if path.read_bytes() != raw:
                     raise ValueError('gap changed during reconciliation')
@@ -234,27 +276,34 @@ def repair_main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('action', choices=('plan', 'reconcile'))
     parser.add_argument('--root', required=True, type=Path)
-    parser.add_argument('--tasks-json', required=True, type=Path, help='raw local host schedule export; no host calls')
+    parser.add_argument('--tasks-json', type=Path, help='raw local host schedule export; no host calls')
     parser.add_argument('--output', type=Path, help='private JSON plan/result file')
     parser.add_argument('--source-turns-json', type=Path, help='legacy gap filename to raw timestamped runtime records')
+    parser.add_argument('--agent-messages-json', type=Path,
+                        help='gap filename to raw T3 user_message items with explicit agent sender provenance')
     parser.add_argument('--dry-run', action='store_true', help='list reconciliation candidates without writing sidecars')
     parser.add_argument('--require', nargs='+', default=[], metavar='GAP_ID',
                         help='require these gap filenames or unambiguous id prefixes to reconcile')
     args = parser.parse_args(argv)
-    if args.action == 'plan' and not args.output:
-        parser.error('plan requires --output')
+    if args.action == 'plan' and (not args.output or not args.tasks_json):
+        parser.error('plan requires --output and --tasks-json')
+    if not args.tasks_json and not args.agent_messages_json:
+        parser.error('reconcile requires --tasks-json or --agent-messages-json')
     try:
-        exported = json.loads(args.tasks_json.read_text())
+        # Agent-only repair does not depend on the unrelated schedule inventory.
+        exported = json.loads(args.tasks_json.read_text()) if args.tasks_json else None
+        agent_messages = json.loads(args.agent_messages_json.read_text()) if args.agent_messages_json else None
         source_turns = json.loads(args.source_turns_json.read_text()) if args.source_turns_json else None
         if args.action == 'plan':
             result = marker_plan(args.root, exported)
         elif args.dry_run:
-            result = reconcile_gaps(args.root, exported, source_turns=source_turns, require=args.require)
+            result = reconcile_gaps(args.root, exported, source_turns=source_turns,
+                                    require=args.require, agent_messages=agent_messages)
         else:
             from .instance import Instance, brain_lock
             with brain_lock(Instance(args.root)):
                 result = reconcile_gaps(args.root, exported, dry_run=False, source_turns=source_turns,
-                                        require=args.require)
+                                        require=args.require, agent_messages=agent_messages)
         encoded = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
         if args.output:
             common.atomic_write(args.output, encoded, private=True, create=True)

@@ -2,6 +2,11 @@
 
 Expect only start, done, blocked or question from workers, formatted with `brain msg` or the hand-back path. Request no progress notes, receipts or acknowledgements. Questions and failure reports always go through. For shared-commit work, name the peer thread in both briefs with `brain brief --peer <thread>` so workers coordinate directly.
 
+Before every agent-to-agent host send, prepare the full message with
+`brain agent-message --message-file <file>` and send its output unchanged. This
+adds machine-readable provenance; do not type the marker yourself. Operator
+messages in their own thread remain operator input, including quoted relays.
+
 You are responsible for one node, named in your launch brief. Its folder is your working
 folder. The rules you must respect are in `core/MODEL.md`; the instance's specifics (operator,
 principals, runtimes, host) are in `instance.md` at the instance root.

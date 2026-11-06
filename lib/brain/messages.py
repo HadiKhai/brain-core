@@ -8,6 +8,26 @@ _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
+AGENT_MESSAGE_PREFIX = "Agent message: sent by another agent, not the operator."
+
+
+def agent_message(text):
+    """Tool-generated provenance at character zero; preserve the entire body."""
+    return text if text.startswith(AGENT_MESSAGE_PREFIX) else AGENT_MESSAGE_PREFIX + "\n\n" + text
+
+
+def cmd_agent_message(a):
+    if a.message_file and a.message is not None:
+        raise SystemExit("provide message or --message-file, not both")
+    text = a.message
+    if a.message_file:
+        with a.message_file.open(encoding="utf-8", newline="") as stream:
+            text = stream.read()
+    if not isinstance(text, str) or not text:
+        raise SystemExit("provide a nonempty message or --message-file")
+    print(agent_message(text))
+
+
 MESSAGE_KINDS = _m_common.MESSAGE_KINDS
 MESSAGE_PROTOCOL = (
     "Send the coordinator only start, done, blocked or question; no progress notes, receipts, acknowledgements or hash relays. "
@@ -42,6 +62,8 @@ def worker_message_guard(inst, sender_thread, tool, args):
     if len(target) != 1 or not target.intersection(coordinators):
         return None  # peer coordination and unknown targets are not parent chatter
     message = args.get('message')
+    if isinstance(message, str) and message.startswith(AGENT_MESSAGE_PREFIX + "\n\n"):
+        message = message[len(AGENT_MESSAGE_PREFIX) + 2:]
     if isinstance(message, str) and re.match(r'^\s*(start|done|blocked|question)\s*:\s*\S', message, re.I):
         return None
     return ('Worker messages to a coordinator require start:, done:, blocked: or question:. '
@@ -65,7 +87,7 @@ def cmd_msg(a):
     report = a.report
     if not report and row:
         report = (_m_jobs.read_handback(n, row) or {}).get("report") or _m_common.tilde(_m_jobs.handback_file(n, row))
-    print(_m_guard.redact(format_worker_message(a.kind, a.message, branch, report), _m_guard.never_terms(n)))
+    print(agent_message(_m_guard.redact(format_worker_message(a.kind, a.message, branch, report), _m_guard.never_terms(n))))
     if n['id'] == 'root' and a.kind != 'question':
         print('INBOX ONLY: record landing/park/FYI with brain notify; do not host-send this update')
     else:

@@ -13,6 +13,7 @@ from . import common as _m_common
 from .ai_json import (AIResponseInvalid, AIUnavailable, CLI_DETAIL_BYTES,
                       CLI_FAILURE_STAGES, ai_json, cli_schema_detail)
 from .briefs import AUTOMATED_TURN_PREFIX
+from .messages import AGENT_MESSAGE_PREFIX
 
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_status = _m_common.LazyModule(__package__, 'status')
@@ -117,7 +118,7 @@ def operator_text(record, *, include_automated=False):
             return None
         content = '\n'.join(b['text'] for b in content if isinstance(b, dict)
                             and b.get('type') in ('text', 'input_text') and isinstance(b.get('text'), str))
-    if isinstance(content, str) and content and (include_automated or not content.startswith(AUTOMATED_TURN_PREFIX)):
+    if isinstance(content, str) and content and (include_automated or not content.startswith((AUTOMATED_TURN_PREFIX, AGENT_MESSAGE_PREFIX))):
         return content
     return None
 

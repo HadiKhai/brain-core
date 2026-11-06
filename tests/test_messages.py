@@ -3,6 +3,9 @@ import re
 
 from scenario import consume_fixture_wake, Scenario, CORE
 
+AGENT_MARKER = "Agent message: sent by another agent, not the operator."
+AGENT_HEADER = AGENT_MARKER + "\n\n"
+
 
 class WorkerMessages(Scenario):
     def job(self):
@@ -17,13 +20,13 @@ class WorkerMessages(Scenario):
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "Synthetic message", "--branch", "job/sample")
             self.assertIn("NOT SENT: use the host send", out)
-            self.assertTrue(out.startswith(kind + ": Synthetic message"), out)
+            self.assertTrue(out.startswith(AGENT_HEADER + kind + ": Synthetic message"), out)
 
     def test_formatter_and_briefs(self):
         root, _ = self.job()
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "One\nline", "--branch", "job/sample", "--report", "~/reports/example.md")
-            self.assertEqual(out.strip(), kind + ": One line [branch: job/sample; report: ~/reports/example.md]\nNOT SENT: use the host send")
+            self.assertEqual(out.strip(), AGENT_HEADER + kind + ": One line [branch: job/sample; report: ~/reports/example.md]\nNOT SENT: use the host send")
         out = self.b(root, "msg", "a", "question", "What next?", "--branch", "job/sample")
         self.assertIn("job-handbacks/", out)
         self.b(root, "msg", "a", "progress", "Working", "--branch", "job/sample", ok=False)
@@ -44,19 +47,32 @@ class WorkerMessages(Scenario):
             folder = run_in.replace("~", str(self.tmp), 1)
             for kind in ("start", "done", "blocked", "question"):
                 output = self.run_(["msg", "a", kind, "Made-up result"], cwd=folder, brain=CORE / "bin/brain")
-                self.assertTrue(output.startswith(kind + ": Made-up result"), output)
+                self.assertTrue(output.startswith(AGENT_HEADER + kind + ": Made-up result"), output)
                 if options == ("--branch", "job/sample"):
                     self.assertIn("[branch: job/sample; report:", output)
                 else:
-                    self.assertEqual(output.strip(), kind + ": Made-up result [branch: main]\nNOT SENT: use the host send")
+                    self.assertEqual(output.strip(), AGENT_HEADER + kind + ": Made-up result [branch: main]\nNOT SENT: use the host send")
         # A generic worker may be outside Git entirely, with no ledger job or report.
         plain = self.tmp / "plain"
         plain.mkdir()
         for kind in ("start", "done", "blocked", "question"):
             output = self.run_(["msg", "a", kind, "Made-up result"], cwd=plain, brain=CORE / "bin/brain")
-            self.assertEqual(output, kind + ": Made-up result\nNOT SENT: use the host send\n")
+            self.assertEqual(output, AGENT_HEADER + kind + ": Made-up result\nNOT SENT: use the host send\n")
         self.assertEqual(self.b(root, "msg", "a", "done", "Result", "--branch", "other").strip(),
-                         "done: Result [branch: other]\nNOT SENT: use the host send")
+                         AGENT_HEADER + "done: Result [branch: other]\nNOT SENT: use the host send")
+
+    def test_freeform_agent_formatter_preserves_bytes_and_never_sends(self):
+        root = self.init('alice')
+        body = 'Keep original evidence.\n  Preserve indentation and spaces.  '
+        path = self.tmp / 'message.txt'
+        path.write_text(body)
+        expected = AGENT_HEADER + body + '\n'
+        self.assertEqual(self.b(root, 'agent-message', '--message-file', str(path)), expected)
+        self.assertEqual(self.b(root, 'agent-message', body), expected)
+        self.assertEqual(self.b(root, 'agent-message', AGENT_HEADER + body), expected)
+        self.b(root, 'agent-message', ok=False)
+        self.b(root, 'agent-message', '', ok=False)
+        self.b(root, 'agent-message', body, '--message-file', str(path), ok=False)
 
     def test_peer_threads_and_coordinator_duty(self):
         root, _ = self.job()

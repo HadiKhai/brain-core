@@ -40,6 +40,12 @@ are excluded. Older native user records have no sender; SDK user records also
 may omit it. These use the runtime's user role as the provenance boundary;
 the hook cannot independently authenticate a human behind an unlabelled SDK
 message. Host adapters should retain sender metadata for forwarded messages.
+When that metadata does not reach a runtime transcript, prepare agent sends with
+`brain agent-message --message-file <file>` or `brain msg`. These commands prepend
+the fixed agent-message marker; capture excludes it only at character zero, just
+like the automated wake marker. A quoted, partial or indented marker is still
+operator input. No host lookup or message-meaning heuristic runs in the hook.
+Keep operator messages in their original thread so their instructions are captured.
 
 A private per-session cursor records complete-line offsets and an inode/anchor
 fingerprint. Every new message since the preceding stop is included, including
