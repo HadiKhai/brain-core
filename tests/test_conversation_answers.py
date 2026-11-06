@@ -546,7 +546,8 @@ class InstructionCapture(Scenario):
         self.assertEqual(usage['transport'], 'claude_cli')
         self.assertEqual(usage['usage'], json.loads(self.cli_result().stdout)['usage'])
         self.assertEqual(set(usage), {'transport', 'model', 'usage', 'latency_seconds'})
-        self.assertNotIn('detail', json.dumps(usage))
+        self.assertNotIn('"detail":', json.dumps(usage))
+        self.assertNotIn('stdout_tail_b64', json.dumps(usage))
         self.assertGreaterEqual(usage['latency_seconds'], 0)
         self.assertFalse(self.cli_cwd.exists())
 
