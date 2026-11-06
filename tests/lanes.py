@@ -74,7 +74,7 @@ LANE_TESTS.update({
     'watch': ('test_watch.py', 'test_watch_extension.py', 'test_decision_gate.py', 'test_watcher_approval.py'),
     'verify': ('test_verify.py', 'test_preview_evidence.py', 'test_verify_train_hooks.py', 'test_spec_run.py', 'test_gate_context.py', 'test_full_gate.py', 'test_cheap_checks.py', 'test_ready_policies.py', 'test_verify_ownership.py', 'test_per_change_gate.py'),
     'parallel_contracts': ('test_parallel_contracts.py',),
-    'review': ('test_review_discipline.py',),
+    'review': ('test_review_discipline.py', 'test_review_carry.py'),
     'catch-all': ('test_repo_lanes.py',),
     'messages': ('test_messages.py', 'test_worker_message_guard.py', 'test_communication_policy.py'),
     'dissection': ('test_dissection.py', 'test_failure_ledger.py'),
