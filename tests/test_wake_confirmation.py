@@ -78,6 +78,23 @@ class WakeConfirmation(Scenario):
                 self.assertFalse(list(self.directory.glob('shown-*.json')))
                 self.assertIn('disabled', self.m.wake_diagnostic(self.inst, self.n))
 
+    def test_due_summary_keeps_reasons_pending_until_full_read(self):
+        pending = self.enqueue()
+        self.drain()
+        args = argparse.Namespace(id='app', quiet=False, json=False, machine=False, summary=True)
+        status = self.m._owners['cmd_due']
+        with mock.patch.object(status._m_nodes, 'load', return_value=self.inst):
+            with contextlib.redirect_stdout(io.StringIO()) as stream:
+                status.cmd_due(args)
+            self.assertIn('app: wake-reasons:', stream.getvalue())
+            self.assertTrue(pending.exists())
+            self.assertTrue(self.m.wake_turn_outstanding(self.inst, self.n))
+            args.summary = False
+            with contextlib.redirect_stdout(io.StringIO()):
+                status.cmd_due(args)
+        self.assertFalse(pending.exists())
+        self.assertFalse(self.m.wake_turn_outstanding(self.inst, self.n))
+
     def test_disabled_route_keeps_new_requests_and_prevents_consumption_or_fallback(self):
         pending = self.enqueue()
         self.drain()

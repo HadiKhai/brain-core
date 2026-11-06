@@ -1065,6 +1065,20 @@ def unsettled_thread_items(inst, n):
         return [{**item, 'id': _m_reminders.reminder_key(item), 'lifecycle_error': 'receipt state unknown; no suppression'}]
 
 
+def due_summary(items, node_id=None):
+    """Count structural inventory kinds; leave their complete text on demand."""
+    if not items:
+        return ''
+    counts = {}
+    for item in items:
+        key = (item['node'], item['kind'])
+        counts[key] = counts.get(key, 0) + 1
+    command = 'brain due' + (' ' + node_id if node_id else '')
+    lines = [f'due: {len(items)} item(s); full details: {command}; JSON: {command} --json']
+    lines += [f'{node}: {kind}: {count}' for (node, kind), count in sorted(counts.items())]
+    return '\n'.join(lines)
+
+
 def cmd_due(a):
     inst = _m_ui.UIInstance.from_instance(_m_nodes.load())
     if getattr(a, "synthesis_seen", None):
@@ -1097,6 +1111,10 @@ def cmd_due(a):
             sys.exit(1 if items else 0)
         if a.json:
             print(json.dumps(items, indent=2))
+        elif getattr(a, 'summary', False):
+            summary = due_summary(items, a.id)
+            if summary:
+                print(summary)
         else:
             for i in items:
                 print(f"{i['node']}: {i['kind']}: {i['text']}")
@@ -1233,6 +1251,14 @@ def _due_tick(a, inst, nodes):
         sys.exit(1 if any(not i.get('informational') for i in items) else 0)
     if a.json:
         print(json.dumps(items, indent=2))
+    elif getattr(a, 'summary', False):
+        summary = due_summary(items, a.id)
+        if summary:
+            print(summary)
+        # Counts do not prove that the coordinator saw the delivered reasons.
+        # Leave them available for a later full/JSON read.
+        sys.stdout.flush()
+        return
     else:
         for item in items:
             print(f"{item['node']}: {item['kind']}: " + (f"[{item['id'][:8]}] " if item.get('id') else '') + item['text'] +

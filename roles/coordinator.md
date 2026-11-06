@@ -26,14 +26,18 @@ not in `node.md`: read them with `core/bin/brain show <id>` (axiom 23).
 
 Read the inherited AGENTS.md rule index and this section plus **Short coordinator turns**.
 Read `node.md` for the node identity and the current request/limits in `brief.md`; use
-`brain due <id>` and `brain inbox <id> --new` to choose this turn's decision.
+`brain due <id> --summary` and `brain inbox <id> --new` to choose this turn's decision.
+The summary counts every item by node and kind. Open `brain due <id>` (or `--json`)
+for the current decision's full evidence; counts do not acknowledge delivered wake reasons.
 Read `status.md`'s Now/Next and unresolved needs when resuming work. Do not load the whole
 node, handover, backlog or rule library at startup. A handover is an index: open only the
 section needed for the current decision; retain the rest for later turns.
 
 At the start of every turn, run t3_queue_list on your own thread, read anything new, then
 t3_queue_cancel what you've absorbed. Read core changes with `brain changes <id>` when due
-lists them, then mark them `--seen`. For an external home, before the first decision that depends on home state, run
+lists them: start with `brain changes <id> --summary`, then read the full instructions
+with `brain changes <id>` before acting on them or marking them `--seen`.
+For an external home, before the first decision that depends on home state, run
 `core/bin/brain sync <id>` and fold what matters into `status.md` (the node-sync skill).
 
 Before acting on rule X in detail, read its full text in `core/MODEL.md`, the instance's

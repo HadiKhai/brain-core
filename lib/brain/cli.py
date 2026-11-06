@@ -475,6 +475,7 @@ def _main():
         opt("--session-id", help="replacement runtime actual session identity; never a host thread ID substitute"))
     cmd("rotate", _Command("rotation", "cmd_rotate"), "prepare a file-based coordinator handover; prints host steps", "id")
     cmd("due", _Command("status", "cmd_due"), "coordinator actions and machine holds; empty means no output",
+        opt('--summary', action='store_true', help='startup counts by node and kind; full text remains available without this flag'),
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
         opt("--synthesis-seen", metavar="SET", help="record an exact synthesis set after its proposal has been reviewed"),
         opt("--machine", action="store_true", help="also show informational machine readings, even without node actions"),
@@ -807,7 +808,8 @@ def _main():
         opt("--rollback", action="store_true", help="swap back to the previous installed core release"))
     cmd("changes", _Command("upgrade", "cmd_changes"), "what changed in core for agents: unread entries (default), --all, --seen",
         opt("id", nargs="?"), opt("--seen", action="store_true", help="mark every entry read on this machine"),
-        opt("--all", action="store_true"), opt("--json", action="store_true"))
+        opt("--all", action="store_true"), opt("--json", action="store_true"),
+        opt("--summary", action="store_true", help="list entry headings; read full instructions before --seen"))
     cmd("selftest", cmd_selftest, "run the core's scenario tests in throwaway folders",
         opt("-v", "--verbose", action="store_true"), opt("-k"),
         opt("--jobs", type=int, default=1, help="parallel pytest workers (requires requirements-test.txt); 1 uses stdlib unittest"))

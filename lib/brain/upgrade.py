@@ -570,6 +570,11 @@ def cmd_changes(a):
     if not show:
         print(f"{n['id']}: nothing new in core since you last read it" if not a.all else "no CHANGES.md")
         return
+    if getattr(a, 'summary', False):
+        for entry in show:
+            print(_m_nodes.import_text('## ' + entry['id'], terms))
+        print(f"Full instructions: brain changes {n['id']}" + (' --all' if a.all else ''))
+        return
     for e in show:
         print(_m_nodes.import_text(f"## {e['id']}\n\n{e['body']}", terms) + "\n")
     if not a.all:

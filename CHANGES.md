@@ -5,6 +5,15 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Keep coordinator startup inventories compact
+
+Coordinator startup now uses `brain due <node> --summary` for counts by node
+and kind, and `brain changes <node> --summary` for unread headings. Full text
+and JSON remain available through the existing commands. Counts do not
+acknowledge wake reasons; read the full due inventory to consume those reasons.
+Read full change instructions before acting on them or marking them seen.
+No rules, rotation thresholds or host tool injections change.
+
 ## 2026-11-06: Render cross-home rule annotations privately
 
 Generated rule sections replace explicit foreign-home Gate/Applies metadata
