@@ -1674,8 +1674,14 @@ def projection_result(events, method, before, after, now):
     require(method in ('cap-now', 'status-commit'))
     require(re.fullmatch(r'(?:nodes/[^/]+/)*status\.md', before['path']) is not None)
     require(before['node'] == events.node_ref(before['node_id']))
-    require(0 <= (now - timestamp(before['at'])).total_seconds() < 120)
-    require(all(after[k] == before[k] for k in ('node', 'node_id', 'path', 'at')))
+    started, ended = timestamp(before['at']), timestamp(after['at'])
+    require(0 <= (now - started).total_seconds() < 120 and started <= ended <= now)
+    require(all(after[k] == before[k] for k in ('node', 'node_id', 'path')))
+    def published_at(value):
+        # Native writes can occur in either minute. Use their captured stamp,
+        # bounded by the observer, while deriving every other output byte.
+        require(started <= timestamp(value) <= ended)
+        return value
     raw_cache = bytes.fromhex(before['cache'] or '')
     saved = json_value(raw_cache) if raw_cache else {}
     require(isinstance(saved, dict))
@@ -1707,7 +1713,10 @@ def projection_result(events, method, before, after, now):
                         break
             if cut < len(lines):
                 expected = text[:match.start(1)] + ''.join(lines[:cut]) + '\n' + text[match.end(1):]
-                archive = (archive.decode() + '\n## ' + before['at'] + ': Now overflow\n\n' +
+                offset = len(archive) + len(b'\n## ')
+                at = published_at(bytes.fromhex(after['archive'])[offset:
+                                  offset + len(before['at'].encode())].decode())
+                archive = (archive.decode() + '\n## ' + at + ': Now overflow\n\n' +
                            ''.join(lines[cut:]) + '\n').encode()
                 archive_hex = archive.hex()
                 ownership = (not before['base_code'] and
@@ -1724,7 +1733,8 @@ def projection_result(events, method, before, after, now):
                  (events.judgement(base.decode()) != events.judgement(old.decode()) and not owned))
         prior = timestamp(stamp['at']) if stamp.get('at') else None
         if not dirty and (before['force'] or not prior or (now - prior).total_seconds() >= 3600):
-            saved[before['node']] = {'at': before['at']}
+            at = published_at(json_value(bytes.fromhex(after['cache']))[before['node']]['at'])
+            saved[before['node']] = {'at': at}
             changed_cache = True
     require(after['archive'] == archive_hex)
     if archive_hex is not None:
