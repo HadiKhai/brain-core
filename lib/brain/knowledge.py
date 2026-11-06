@@ -876,7 +876,7 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                 "For question state also supply --question '<one-line choice>'. Questions also append to inbox; "
                 "for a blocked human need add `--need-human '<need>'`. Legacy failed is also accepted.",
                 "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
-                f'a host notification is optional: run `{formatter} <kind> "<one-line result>"` and send its marked '
+                f'a host message is optional: run `{formatter} <kind> "<one-line result>"` and send its marked '
                 f"message unchanged via {how}, linking the record. Do not duplicate Lessons "
                 "in a message or report; --lessons carries your proposals.", ""]
     return ["## Questions and hand-back", "", _m_messages.MESSAGE_PROTOCOL, "",
