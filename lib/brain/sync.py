@@ -111,6 +111,11 @@ def cmd_review(a):
                              cwd=n["home_path"] if n["external"] else inst.root)
     if base_ref.returncode:
         _m_common.die("cannot resolve review base")
+    if row:
+        from . import evidence_policy as _m_evidence
+        refused = _m_evidence.review_admission(inst, n, row, head)
+        if refused:
+            _m_common.die(_m_guard.redact("; ".join(refused), _m_guard.never_terms(n)))
     mechanical = _m_review.review_mechanical(inst, n, a, row, where, base_ref.stdout.strip(), head)
     out = [f"Reviewer runtime: {reviewer}  (the change was built on {built}) · class: {kind}",
            f"Run in: {where}" + (f"  ·  model: {a.model}" if a.model else ""), "",

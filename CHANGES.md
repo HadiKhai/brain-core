@@ -5,6 +5,23 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Refuse evidence-rule breaks where they happen
+
+`brain evidence <node> --branch <b> --kind <kind> --file <json>` records
+exact-head job evidence: `real-result`, `model-selection`, `score-read`,
+`setup-correction` and `design-check`. A contract `## Scored work` section
+(frozen `test_set` + `test_set_sha256`, `threshold`, `cap`, `scorer`, optional
+`model_choice: yes` with `data_class`) makes `brain review` refuse until a
+capped real result on that set passes (a zero goes to the inbox at once) and,
+for a model choice, until two or more providers are measured on it. Scored
+hand-backs need a score-read receipt for `--result` and, when done, a report
+opening with `## What was removed / kept`. `## Design reference` contracts are
+not ready without paired screenshots of every screen and a checklist from a
+different runtime. `contract_reading_list=required` makes contracts carry
+`## Reading list` and `## Proven`. Relaunch briefs refuse inherited no-retry
+or stop clauses (AI judgement; fails open). One setup correction per job;
+`setup_corrections: 0` forbids it. See `docs/evidence-policy.md`.
+
 ## 2026-11-06: Refuse launches and sends that break declared launch policy
 
 New optional instance keys (`docs/launch-policy.md`) declare which provider/model and

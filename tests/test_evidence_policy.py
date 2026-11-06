@@ -1,0 +1,298 @@
+"""Evidence rules refuse at the command that breaks them; invented projects only."""
+import hashlib
+import importlib
+import json
+import os
+from unittest import mock
+
+import core_loader
+from scenario import CORE, Scenario
+
+SECTIONS = "mode: untimed\n\n" + "".join("## " + field + "\nSynthetic scope.\n\n" for field in
+                                         ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means"))
+CHECKLIST = ('buttons', 'spacing', 'links', 'validation', 'navigation', 'consistency')
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class EvidencePolicy(Scenario):
+    def job(self):
+        r = self.init('alice')
+        home = self.repo(self.tmp / 'app', {'calc.py': 'value = 1\n',
+                                            'test_calc.py': 'def test_value():\n    assert True\n',
+                                            'score.py': 'def score(expected, got):\n    return float(expected == got)\n'})
+        self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
+        self.b(r, 'set', 'a', 'runtime=claude')
+        self.b(r, 'wt', 'add', 'a', 'job')
+        wt = self.tmp / 'app-work/worktrees/job'
+        return r, home, wt
+
+    def core(self, root):
+        return core_loader.SourceFileLoader('evidence_policy_fixture', str(CORE / 'bin/brain')).load_module()
+
+    def head(self, wt):
+        return self.git('rev-parse', 'HEAD', cwd=wt).strip()
+
+    def commit(self, wt, message, files=None):
+        for name, body in (files or {}).items():
+            (wt / name).write_text(body)
+        self.git('add', '-A', cwd=wt)
+        self.git('commit', '--allow-empty', '-qm', message, cwd=wt)
+        return self.head(wt)
+
+    def contract(self, r, extra='', ok=True):
+        path = self.tmp / 'contract.md'
+        path.write_text(SECTIONS + extra)
+        return self.b(r, 'jobs', 'a', '--branch', 'job', '--contract-file', str(path), ok=ok)
+
+    def fixed_set(self):
+        path = self.tmp / 'real-set.jsonl'
+        path.write_text('{"input": "invented item one"}\n{"input": "invented item two"}\n')
+        return path
+
+    def scored(self, path, extra=''):
+        return ('## Scored work\ntest_set: ' + str(path) + '\ntest_set_sha256: ' + sha(path) +
+                '\nthreshold: 0.8\ncap: 20\nscorer: score.py\n' + extra + '\n')
+
+    def evidence(self, r, kind, data, ok=True):
+        path = self.tmp / (kind + '.json')
+        path.write_text(json.dumps(data))
+        return self.b(r, 'evidence', 'a', '--branch', 'job', '--kind', kind, '--file', str(path), ok=ok)
+
+    def receipt(self, r, wt, kind, **fields):
+        m = self.core(r)
+        row = m.open_job(m.read_jobs(m.Instance(r).node('a')), 'job')
+        return {'version': 1, 'kind': kind, 'node': 'a', 'branch': 'job', 'job_key': m.job_key(row),
+                'head': self.head(wt), **fields}
+
+    def real_result(self, r, wt, test_set, score, **fields):
+        data = self.receipt(r, wt, 'real_result', test_set_sha256=sha(test_set), items=10, score=score,
+                            threshold=0.8, test_set_check={'reference_score': 1.0, 'method': 'gold answers scored'},
+                            run_ref='runs/real-1.jsonl')
+        data.update(fields)
+        return data
+
+    def review(self, r, ok=True):
+        return self.b(r, 'review', 'a', '--branch', 'job', '--built-by', 'claude', ok=ok)
+
+    # R60: real result before review
+
+    def test_scored_review_needs_passing_capped_real_result_and_zero_escalates(self):
+        r, home, wt = self.job()
+        test_set = self.fixed_set()
+        self.assertIn('test_set_sha256 does not match', self.contract(
+            r, self.scored(test_set).replace(sha(test_set), '0' * 64), ok=False))
+        self.contract(r, self.scored(test_set))
+        self.assertIn('no review before a real result', self.review(r, ok=False))
+        self.assertIn('cannot reach its own threshold', self.evidence(r, 'real-result', self.real_result(
+            r, wt, test_set, 0.9, test_set_check={'reference_score': 0.5, 'method': 'gold answers scored'}), ok=False))
+        self.assertIn('contract cap', self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.9, items=21),
+                                                    ok=False))
+        self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0))
+        self.assertIn('zero real score for job', (r / 'nodes/a/inbox.md').read_text())
+        self.assertIn('real score is zero', self.review(r, ok=False))
+        self.commit(wt, 'partial fix')
+        self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.5))
+        self.assertIn('below the threshold 0.8', self.review(r, ok=False))
+        self.commit(wt, 'fix')
+        self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.85))
+        self.assertIn('Review round 1 (full)', self.review(r))
+
+    # R61: models across providers
+
+    def selection(self, r, wt, test_set, providers):
+        candidates = []
+        for i, (provider, model) in enumerate(providers):
+            run = self.tmp / ('run-' + str(i) + '.json')
+            run.write_text(json.dumps({'provider': provider, 'model': model, 'items': 10,
+                                       'test_set_sha256': sha(test_set)}))
+            candidates.append({'provider': provider, 'model': model, 'run_ref': str(run), 'run_sha256': sha(run),
+                               'score': 0.8 + i / 100, 'cost_usd': 0.1, 'latency_s': 2.0})
+        return self.receipt(r, wt, 'model_selection', test_set_sha256=sha(test_set), items=10, data_class='public',
+                            candidates=candidates, chosen={'provider': providers[0][0], 'model': providers[0][1]})
+
+    def test_model_choice_needs_same_set_measurements_across_providers(self):
+        r, home, wt = self.job()
+        test_set = self.fixed_set()
+        self.assertIn('model_choice needs data_class', self.contract(r, self.scored(test_set, 'model_choice: yes'),
+                                                                     ok=False))
+        self.contract(r, self.scored(test_set, 'model_choice: yes\ndata_class: public'))
+        self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.9))
+        self.assertIn('measured across providers on the test set first', self.review(r, ok=False))
+        one = self.selection(r, wt, test_set, [('vendor-a', 'alpha-1'), ('vendor-a', 'alpha-2')])
+        self.assertIn('1 provider(s) measured, 2 required', self.evidence(r, 'model-selection', one, ok=False))
+        forged = self.selection(r, wt, test_set, [('vendor-a', 'alpha-1'), ('vendor-b', 'beta-1')])
+        forged['candidates'][1]['model'] = 'beta-2'
+        self.assertIn('must match its own run receipt', self.evidence(r, 'model-selection', forged, ok=False))
+        good = self.selection(r, wt, test_set, [('vendor-a', 'alpha-1'), ('vendor-b', 'beta-1')])
+        self.evidence(r, 'model-selection', good)
+        self.assertIn('Review round 1 (full)', self.review(r))
+        self.contract(r, self.scored(test_set, 'model_choice: yes\ndata_class: restricted'))
+        self.assertIn('never leave', self.evidence(r, 'model-selection', {**good, 'data_class': 'restricted'},
+                                                   ok=False))
+
+    # R66: read a number before reporting it
+
+    def dissected(self, extra=''):
+        path = self.tmp / 'report.md'
+        path.write_text(extra + '## Dissection\nCause: Synthetic shortfall.\nItems covered: 3\n### Cases\n'
+                        '1. Ref: case-a; One.\n2. Ref: case-b; Two.\n3. Ref: case-c; Three.\n'
+                        '### Fixes\n1. Repair.\n2. Retain.\nRecommendation: 1\n')
+        return path
+
+    def test_scored_handback_reports_a_number_only_after_scorer_and_three_cases_are_read(self):
+        r, home, wt = self.job()
+        test_set = self.fixed_set()
+        self.contract(r, self.scored(test_set))
+        handback = ('handback', 'a', '--branch', 'job', '--state', 'blocked', '--summary', 'below target on real data',
+                    '--result', '0.5', '--target', '0.8', '--report', str(self.dissected()))
+        self.assertIn('only after reading its scorer and 3 real cases', self.b(r, *handback, ok=False))
+        blob = self.git('rev-parse', 'HEAD:score.py', cwd=wt).strip()
+        cases = [{'input_ref': 'set:' + str(i), 'output_ref': 'run:' + str(i), 'check': 'exact match'} for i in range(3)]
+        read = self.receipt(r, wt, 'score_read', scorer={'path': 'score.py', 'blob': blob}, cases=cases,
+                            measures='exact string equality per item', does_not_measure='near-miss spellings')
+        self.assertIn('exactly 3 real cases', self.evidence(r, 'score-read', {**read, 'cases': cases[:2]}, ok=False))
+        self.assertIn('its blob at this head', self.evidence(
+            r, 'score-read', {**read, 'scorer': {'path': 'score.py', 'blob': '0' * 40}}, ok=False))
+        self.evidence(r, 'score-read', read)
+        self.assertNotIn('only after reading its scorer', self.b(r, *handback))
+
+    # R69: quality before counts
+
+    def test_scored_done_handback_opens_with_source_judged_removed_and_kept_examples(self):
+        r, home, wt = self.job()
+        test_set = self.fixed_set()
+        self.contract(r, self.scored(test_set))
+        done = ('handback', 'a', '--branch', 'job', '--state', 'done', '--summary', 'filter run finished',
+                '--reviews', '1', '--lessons', 'none: fixture')
+        counts_first = self.tmp / 'counts.md'
+        counts_first.write_text('## Totals\nDropped 228 of 300.\n\n## What was removed / kept\n### Right\n'
+                                '1. Ref: item-4; Source: set:4; Removed: duplicate of item-3\n'
+                                '### Wrong\nNone found: read all 12 removed items against the set\n')
+        self.assertIn('before any totals', self.b(r, *done, '--report', str(counts_first), ok=False))
+        missing = self.tmp / 'missing.md'
+        missing.write_text('## What was removed / kept\n### Right\nSeveral were fine.\n')
+        out = self.b(r, *done, '--report', str(missing), ok=False)
+        self.assertIn('### Right needs numbered examples', out)
+        self.assertIn('### Wrong needs numbered examples', out)
+        good = self.tmp / 'good.md'
+        good.write_text('Answer first.\n\n## What was removed / kept\n### Right\n'
+                        '1. Ref: item-4; Source: set:4; Removed: duplicate of item-3\n'
+                        '### Wrong\n1. Ref: item-9; Source: set:9; Removed: a pronoun fragment; name the subject instead\n'
+                        '\n## Totals\nDropped 2 of 10.\n')
+        self.assertNotIn('What was removed / kept', self.b(r, *done, '--report', str(good), ok=None))
+
+    # R58: one task-local setup correction
+
+    def test_one_source_proven_setup_correction_within_original_bounds(self):
+        r, home, wt = self.job()
+        self.contract(r)
+        m = self.core(r)
+        contract = m.contract_file(m.Instance(r).node('a'), m.open_job(m.read_jobs(m.Instance(r).node('a')), 'job'))
+        correction = self.receipt(r, wt, 'setup_correction', contract_sha256=sha(contract), correction='selector',
+                                  before='test_calc.py::test_values', after='test_calc.py::test_value', bounds='original')
+        self.assertIn('must exist in the source', self.evidence(
+            r, 'setup-correction', {**correction, 'after': 'test_calc.py::test_missing'}, ok=False))
+        self.assertIn('original bounds', self.evidence(r, 'setup-correction', {**correction, 'bounds': 'doubled'},
+                                                       ok=False))
+        self.assertIn('selector or start_format fix only', self.evidence(
+            r, 'setup-correction', {**correction, 'correction': 'assertion'}, ok=False))
+        self.evidence(r, 'setup-correction', correction)
+        self.assertIn('one setup correction for this job is spent', self.evidence(
+            r, 'setup-correction', {**correction, 'before': 'test_calc.py::test_value', 'after': 'test_calc.py'},
+            ok=False))
+        self.b(r, 'wt', 'add', 'a', 'job2')
+        wt2 = self.tmp / 'app-work/worktrees/job2'
+        path = self.tmp / 'contract2.md'
+        path.write_text(SECTIONS + 'setup_corrections: 0\n')
+        self.b(r, 'jobs', 'a', '--branch', 'job2', '--contract-file', str(path))
+        row = m.open_job(m.read_jobs(m.Instance(r).node('a')), 'job2')
+        strict = {**correction, 'branch': 'job2', 'job_key': m.job_key(row), 'head': self.head(wt2),
+                  'contract_sha256': sha(m.contract_file(m.Instance(r).node('a'), row))}
+        source = self.tmp / 'strict.json'
+        source.write_text(json.dumps(strict))
+        self.assertIn('allows no setup correction', self.b(r, 'evidence', 'a', '--branch', 'job2', '--kind',
+                                                           'setup-correction', '--file', str(source), ok=False))
+
+    # R54: contract reading list
+
+    def test_contract_reading_list_names_exact_ranges_and_proven_references(self):
+        r, home, wt = self.job()
+        self.contract(r)  # optional by default
+        self.b(r, 'set', 'a', 'contract_reading_list=required')
+        out = self.contract(r, ok=False)
+        self.assertIn('## Reading list', out)
+        self.assertIn('## Proven', out)
+        self.assertIn('range is outside calc.py', self.contract(
+            r, '## Reading list\n- calc.py:1-9\n\n## Proven\n- value exists; Ref: calc.py\n', ok=False))
+        self.assertIn('## Proven', self.contract(r, '## Reading list\n- calc.py:1-1\n\n## Proven\n- value exists\n',
+                                                 ok=False))
+        self.contract(r, '## Reading list\n- calc.py:1-1 the value\n\n## Proven\n- value exists; Ref: calc.py\n')
+        self.assertIn('## Reading list', self.review(r))
+
+    # R53: a hand-back is context, not proof
+
+    def test_relaunch_brief_refuses_inherited_no_retry_clause_and_keeps_operator_limits(self):
+        r, home, wt = self.job()
+        self.commit(wt, 'earlier attempt', {'calc.py': 'value = 2\n'})
+        task = 'Finish the calc change. The earlier builder found the sole attempt spent: do not retry the migration.'
+        verdict = self.tmp / 'verdict.json'
+        brief = ('brief', 'a', '--branch', 'job', '--task', task, '--allow-unexplained')
+        verdict.write_text(json.dumps({'restricts': True, 'authority': 'inherited',
+                                       'quote': 'the sole attempt spent: do not retry the migration'}))
+        self.env['BRAIN_JUDGE_FIXTURE'] = str(verdict)
+        self.assertIn('context, not proof', self.b(r, *brief, ok=False))
+        verdict.write_text(json.dumps({'restricts': True, 'authority': 'operator', 'quote': 'do not retry the migration'}))
+        out = self.b(r, *brief)
+        self.assertIn('Inherited conclusions are context, not proof', out)
+        verdict.write_text(json.dumps({'restricts': True, 'authority': 'inherited', 'quote': 'not in the brief'}))
+        self.b(r, *brief)  # a quote that is not in the text is not evidence
+        self.env.pop('BRAIN_JUDGE_FIXTURE')
+        self.b(r, *brief)  # no judge while testing: fail open
+
+    # R12: UI matches its reference
+
+    def design(self, r, wt, reference, build, **fields):
+        data = self.receipt(r, wt, 'design_check',
+                            screens=[{'screen': 'Home', 'reference': {'path': str(reference), 'sha256': sha(reference)},
+                                      'build': {'path': str(build), 'sha256': sha(build)}}],
+                            checklist={k: {'verdict': 'pass', 'note': 'compared side by side'} for k in CHECKLIST},
+                            checker={'threadId': 'fixture-checker', 'runtime': 'codex', 'model': 'fixture-model'})
+        data.update(fields)
+        return data
+
+    def ready(self, r, wt):
+        m = self.core(r)
+        verify = importlib.import_module(m.read_jobs.__module__.rsplit('.', 1)[0] + '.verify')
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(r)
+            return verify.ready_policy_reasons(inst, inst.node('a'), 'job', self.head(wt), preview=False)
+
+    def test_every_touched_screen_requires_paired_screenshots_and_independent_checklist(self):
+        r, home, wt = self.job()
+        reference, build = self.tmp / 'home-reference.png', self.tmp / 'home-build.png'
+        reference.write_bytes(b'invented reference pixels')
+        build.write_bytes(b'invented build pixels')
+        self.assertIn('not a readable file', self.contract(r, '## Design reference\n- Home: missing.png\n', ok=False))
+        self.contract(r, '## Design reference\n- Home: ' + str(reference) + '\n')
+        self.assertIn('design reference needs reference/build screenshots', '; '.join(self.ready(r, wt)))
+        self.assertIn('different runtime than the builder', self.evidence(r, 'design-check', self.design(
+            r, wt, reference, build, checker={'threadId': 'fixture-checker', 'runtime': 'claude', 'model': 'm'}),
+            ok=False))
+        self.assertIn('differ from the build', self.evidence(r, 'design-check', self.design(r, wt, reference, reference),
+                                                             ok=False))
+        self.assertIn('every touched screen', self.evidence(r, 'design-check', self.design(r, wt, reference, build,
+                                                                                            screens=[]), ok=False))
+        rows = dict(self.design(r, wt, reference, build)['checklist'])
+        rows.pop('links')
+        self.assertIn('design checklist rates', self.evidence(r, 'design-check', self.design(
+            r, wt, reference, build, checklist=rows), ok=False))
+        self.evidence(r, 'design-check', self.design(r, wt, reference, build))
+        self.assertFalse([reason for reason in self.ready(r, wt) if 'design' in reason])
+        self.commit(wt, 'restyle')
+        failed = self.design(r, wt, reference, build)
+        failed['checklist']['spacing'] = {'verdict': 'fail', 'note': 'card padding 12px, reference 16px'}
+        self.evidence(r, 'design-check', failed)
+        self.assertIn('design checklist failed: spacing', '; '.join(self.ready(r, wt)))

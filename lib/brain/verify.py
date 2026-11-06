@@ -528,7 +528,8 @@ def ready_policy_reasons(inst, n, branch, head, packet=None, preview=True):
     cfg = getattr(inst, 'cfg', {})
     cfg = cfg if isinstance(cfg, dict) else {}
     for module_name, function in (('.review', 'validate_ready_reviews'),
-                                  ('.preview_evidence', 'validate_ready_preview')):
+                                  ('.preview_evidence', 'validate_ready_preview'),
+                                  ('.evidence_policy', 'validate_ready_design')):
         if module_name == '.preview_evidence' and not preview:
             continue
         try:

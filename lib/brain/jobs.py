@@ -310,6 +310,10 @@ def cmd_handback(a):
         a._dissection_snapshot = None  # a reused library Namespace is a new authoring call
         a._dissection_consumed = False
     validate_handback_options(a, row=row)
+    from . import evidence_policy as _m_evidence
+    evidence_problems = _m_evidence.handback_problems(inst, n, row, a)
+    if evidence_problems:
+        _m_common.die(_m_guard.redact('; '.join(evidence_problems), _m_guard.never_terms(n)))
     _m_guard.no_terms_in(n, a.summary, 'handback summary')
     # The signature caches validation inputs, including the legacy report path.
     # Screen actual diagnosis evidence; ordinary report metadata is redacted by readers.
@@ -2013,6 +2017,10 @@ def cmd_jobs(a):
         missing = contract_problems(text)
         if missing:
             _m_common.die("the contract needs: " + "; ".join('## ' + f if f in CONTRACT_FIELDS else f for f in missing))
+        from . import evidence_policy as _m_evidence
+        evidence_problems = _m_evidence.contract_problems(inst, n, text)
+        if evidence_problems:
+            _m_common.die("contract: " + "; ".join(evidence_problems))
         from . import rule_contracts
         rendered = text + '\n' + '\n'.join(rule_contracts.rules_lines(n)) + '\n'
         _m_guard.no_terms_in(n, text, "the contract")

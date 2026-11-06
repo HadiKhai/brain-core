@@ -683,6 +683,10 @@ def _main():
         opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
     cmd("preview-receipt", _Command("preview_evidence", "cmd_preview_receipt"), "record rendered preview source samples", "id",
         opt("--branch", required=True), opt("--file", required=True))
+    cmd("evidence", _Command("evidence_policy", "cmd_evidence"), "record exact-head job evidence: a capped real result, "
+        "a cross-provider model selection, a scorer read, the one setup correction or a design check", "id",
+        opt("--branch", required=True), opt("--kind", required=True, choices=["real-result", "model-selection",
+        "score-read", "setup-correction", "design-check"]), opt("--file", required=True))
     cmd("preview-receipt-skeleton", _Command("preview_evidence", "cmd_preview_receipt_skeleton"),
         "read current own-job receipt JSON; fill null browser/render and three-source fields before preview-receipt; writes nothing",
         "id", opt("--branch", required=True),

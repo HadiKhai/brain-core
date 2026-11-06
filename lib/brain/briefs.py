@@ -347,6 +347,7 @@ def cmd_brief(a):
                 "brief came from (axiom 6). Ask before pushing, publishing or anything irreversible (axiom 24).",
                 ""]
     if w:
+        from . import evidence_policy as _m_evidence
         exclude = [w["start"]] if w.get("start") else []
         if _m_common.git("rev-parse", "--verify", "--quiet", "refs/heads/main", cwd=where).returncode == 0:
             exclude.append("refs/heads/main")
@@ -366,8 +367,13 @@ def cmd_brief(a):
                     f"Read the worker hand-back in `{_m_common.tilde(n['dir'] / 'job-handbacks')}` if present, or a legacy "
                     f"packet in `{_m_common.tilde(_m_verify.ready_path(inst, n, a.branch).parent)}/`; "
                     "it may be missing or stale. Recheck it after finishing the remaining work.",
+                    _m_evidence.RESUME_LINE,
                     "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
             inputs.append(("Resume context", json.dumps(row, ensure_ascii=False)))
+            inherited = "\n\n".join(body for label, body in inputs if label in ("Task", "Shared context") and body)
+            refused = _m_evidence.relaunch_problems(inherited)
+            if refused:
+                _m_common.die(_m_guard.redact("; ".join(refused), _m_guard.never_terms(n)))
     inputs += contract_inputs(n, a.branch)
     contract = _m_jobs.contract_lines(inst, n, a.branch)
     from . import tasks as _m_tasks
