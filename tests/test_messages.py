@@ -569,7 +569,8 @@ class ReportGates(Scenario):
         self.write({'type': 'user', 'timestamp': '2026-01-15T12:00:00Z', 'message': {'role': 'user', 'content': text}})
 
     def automated(self, text='Wake: check the queue.'):
-        self.write({'type': 'user', 'message': {'role': 'user', 'content': self.m.AUTOMATED_TURN_PREFIX + '\n\n' + text}})
+        """An automated turn as the host delivers it: the production length/digest envelope."""
+        self.write({'type': 'user', 'message': {'role': 'user', 'content': self.m.automated_brief(text)}})
 
     def tool(self, name, tool_input, failed=False, result='ok'):
         """A paired call and result; a failed result is the host's error (cancelled, ENOENT)."""

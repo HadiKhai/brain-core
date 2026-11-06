@@ -2316,7 +2316,8 @@ class AgentGitCommands(Scenario):
     def test_directory_changing_compound_git_is_denied_and_git_dash_c_is_allowed(self):
         refused = ['cd /tmp/app && git status', 'cd /tmp/app; git commit -m "a && b"', 'cd /tmp/app || exit 1\ngit push',
                    '(cd /tmp/app && git log -1)', 'pushd /tmp/app >/dev/null && FOO=1 git diff',
-                   'cd /tmp/app && /usr/bin/git status']
+                   'cd /tmp/app && /usr/bin/git status', 'cd /tmp/app &&\ngit status', 'cd /tmp/app;\ngit status',
+                   'cd /tmp/app ||\n  git status', 'pushd /tmp/app &\ngit status', 'cd /tmp/app\n\ngit status']
         allowed = ['git -C /tmp/app status', 'git status && cd /tmp', 'echo "cd /tmp/app && git status"',
                    'cd /tmp/app && ls', 'git -C /tmp/app commit -m "cd x && git y"']
         for tool, key in (('Bash', 'command'), ('exec_command', 'cmd')):

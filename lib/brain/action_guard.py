@@ -59,7 +59,7 @@ def tool_action(data):
     return {'tool': tool, 'arguments': args, 'cwd': cwd}
 
 
-SHELL_SEPARATORS = {';', '&', '&&', '|', '||', '|&', '(', ')', '\n', ';;'}
+SHELL_CONTROL_CHARS = ';&|()\n'
 
 
 def shell_segments(command):
@@ -67,15 +67,17 @@ def shell_segments(command):
 
     Unparseable input yields no segments: the guard fails open, as hook errors do.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()\n')
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=SHELL_CONTROL_CHARS)
     lexer.whitespace, lexer.whitespace_split = ' \t\r', True
     try:
         tokens = list(lexer)
     except ValueError:
         return []
     segments, words = [], []
+    # shlex yields a maximal run of control characters as one token (`&&` then a
+    # newline is '&&\n'), so a token made only of them is one or more operators.
     for token in tokens + ['\n']:
-        if token in SHELL_SEPARATORS:
+        if token and set(token) <= set(SHELL_CONTROL_CHARS):
             if words:
                 segments.append(words)
             words = []
