@@ -53,7 +53,8 @@ class EvidencePolicy(Scenario):
 
     def fixed_set(self):
         path = self.tmp / 'real-set.jsonl'
-        path.write_text('{"input": "invented item one"}\n{"input": "invented item two"}\n')
+        path.write_text('{"input": "invented item one"}\n{"input": "invented item two"}\n'
+                        '{"input": "invented item three"}\n')
         return path
 
     def scored(self, path, extra=''):
@@ -71,9 +72,16 @@ class EvidencePolicy(Scenario):
         return {'version': 1, 'kind': kind, 'node': 'a', 'branch': 'job', 'job_key': m.job_key(row),
                 'head': self.head(wt), **fields}
 
+    def outputs(self, test_set):
+        lines = [line for line in test_set.read_text().splitlines() if line.strip()]
+        return [{'input': line, 'output': 'output for ' + line} for line in lines]
+
     def real_result(self, r, wt, test_set, score, run=None, **fields):
         head = self.head(wt)
         record = {'head': head, 'test_set_sha256': sha(test_set), 'items': 10, 'score': score,
+                  'outputs': [{'input_sha256': hashlib.sha256(o['input'].encode()).hexdigest(),
+                               'output_sha256': hashlib.sha256(o['output'].encode()).hexdigest()}
+                              for o in self.outputs(test_set)],
                   'scorer': {'path': 'score.py', 'blob': self.git('rev-parse', 'HEAD:score.py', cwd=wt).strip()}}
         record.update(run or {})
         path = self.tmp / ('real-run-' + head[:12] + '-' + str(score) + '.json')
@@ -165,6 +173,69 @@ class EvidencePolicy(Scenario):
         path.write_text(body)
         return {'ref': str(path), 'sha256': sha(path)}
 
+    def member_cases(self, test_set, output=None):
+        cases, prefix = [], 'forged-' if output else 'member-'
+        for i, item in enumerate(self.outputs(test_set)):
+            given = self.artifact(prefix + 'in-' + str(i), item['input'])
+            got = self.artifact(prefix + 'out-' + str(i), output(i) if output else item['output'])
+            cases.append({'input_ref': given['ref'], 'input_sha256': given['sha256'], 'output_ref': got['ref'],
+                          'output_sha256': got['sha256'], 'check': 'exact match'})
+        return cases
+
+    def score_read_fixture(self):
+        r, home, wt = self.job()
+        test_set = self.fixed_set()
+        self.contract(r, self.scored(test_set))
+        run = self.real_result(r, wt, test_set, 0.5)
+        self.evidence(r, 'real-result', run)
+        blob = self.git('rev-parse', 'HEAD:score.py', cwd=wt).strip()
+        read = self.receipt(r, wt, 'score_read', scorer={'path': 'score.py', 'blob': blob},
+                            cases=self.member_cases(test_set), run_ref=run['run_ref'], run_sha256=run['run_sha256'],
+                            measures='exact string equality per item', does_not_measure='near-miss spellings')
+        return r, test_set, read
+
+    def test_score_read_cases_are_members_of_the_frozen_set_and_bound_run(self):
+        r, test_set, read = self.score_read_fixture()
+        # Three hashed files that are not items of the frozen set prove nothing about it.
+        strangers = []
+        for i in range(3):
+            given, got = self.artifact('stranger-in-' + str(i), 'unrelated ' + str(i)), self.artifact('o' + str(i), 'x')
+            strangers.append({'input_ref': given['ref'], 'input_sha256': given['sha256'], 'output_ref': got['ref'],
+                              'output_sha256': got['sha256'], 'check': 'exact match'})
+        self.assertIn('item of the frozen test set', self.evidence(r, 'score-read', {**read, 'cases': strangers},
+                                                                   ok=False))
+        # Real items, but outputs the bound run never produced.
+        forged = self.member_cases(test_set, output=lambda i: 'invented better output ' + str(i))
+        self.assertIn('the one the bound run recorded', self.evidence(r, 'score-read', {**read, 'cases': forged},
+                                                                       ok=False))
+        self.evidence(r, 'score-read', read)
+
+    def test_relaunch_judge_egress_covers_task_file_data_class_and_retention(self):
+        r, home, wt = self.job()
+        self.commit(wt, 'earlier attempt', {'calc.py': 'value = 2\n'})
+        task = 'Finish the calc change. The earlier builder found the sole attempt spent: do not retry the migration.'
+        verdict = self.tmp / 'verdict.json'
+        verdict.write_text(json.dumps({'restricts': True, 'authority': 'inherited', 'quote': 'do not retry the migration'}))
+        self.env['BRAIN_JUDGE_FIXTURE'] = str(verdict)
+        self.b(r, 'set', 'a', 'ai_judge_egress=allowed')
+        inline = ('brief', 'a', '--branch', 'job', '--task', task, '--allow-unexplained')
+        self.assertIn('Inherited-text check not run', self.b(r, *inline))  # unclassified: fail closed
+        self.b(r, 'set', 'a', 'data_class=restricted')
+        self.assertIn('Inherited-text check not run', self.b(r, *inline))
+        self.b(r, 'set', 'a', 'data_class=internal')
+        self.assertIn('Inherited-text check not run', self.b(r, *inline))  # retention unconfirmed
+        self.b(r, 'set', 'a', 'ai_judge_retention=zero')
+        self.assertIn('context, not proof', self.b(r, *inline, ok=False))
+        self.b(r, 'set', 'a', 'data_class=public')
+        outside = self.tmp / 'private-task.md'
+        outside.write_text(task + '\n')
+        from_file = ('brief', 'a', '--branch', 'job', '--task-file', str(outside), '--allow-unexplained')
+        self.assertIn('Inherited-text check not run', self.b(r, *from_file))
+        inside = home / 'task.md'
+        inside.write_text(task + '\n')
+        self.assertIn('context, not proof', self.b(r, 'brief', 'a', '--branch', 'job', '--task-file', str(inside),
+                                                   '--allow-unexplained', ok=False))
+
     def test_scored_handback_reports_a_number_only_after_scorer_and_three_cases_are_read(self):
         r, home, wt = self.job()
         test_set = self.fixed_set()
@@ -175,11 +246,7 @@ class EvidencePolicy(Scenario):
         run = self.real_result(r, wt, test_set, 0.5)
         self.evidence(r, 'real-result', run)
         blob = self.git('rev-parse', 'HEAD:score.py', cwd=wt).strip()
-        cases = []
-        for i in range(3):
-            given, got = self.artifact('in-' + str(i), 'invented input ' + str(i)), self.artifact('out-' + str(i), 'out')
-            cases.append({'input_ref': given['ref'], 'input_sha256': given['sha256'], 'output_ref': got['ref'],
-                          'output_sha256': got['sha256'], 'check': 'exact match'})
+        cases = self.member_cases(test_set)
         read = self.receipt(r, wt, 'score_read', scorer={'path': 'score.py', 'blob': blob}, cases=cases,
                             run_ref=run['run_ref'], run_sha256=run['run_sha256'],
                             measures='exact string equality per item', does_not_measure='near-miss spellings')
@@ -292,6 +359,7 @@ class EvidencePolicy(Scenario):
         # Without explicit egress authority the brief text never reaches the judge.
         self.assertIn('Inherited-text check not run', self.b(r, *brief))
         self.b(r, 'set', 'a', 'ai_judge_egress=allowed')
+        self.b(r, 'set', 'a', 'data_class=public')
         self.assertIn('context, not proof', self.b(r, *brief, ok=False))
         private = self.tmp / 'private-trace.md'
         private.write_text('Earlier transcript excerpt.\n')

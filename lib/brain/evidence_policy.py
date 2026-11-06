@@ -371,6 +371,19 @@ def validate_score_read(inst, n, row, head, contract, data):
                 raise ValueError('each case ' + side + '_ref must be a stored file with its ' + side + '_sha256')
     if len({c['input_sha256'] for c in cases}) != 3:
         raise ValueError('score read needs 3 distinct real cases')
+    # Membership by stored identity: each input is an item (line) of the frozen
+    # test set, and each input/output pair is one the bound run recorded.
+    with open(local_file(inst, n, scored['test_set']), 'rb') as stream:
+        members = {hashlib.sha256(line.rstrip(b'\r\n')).hexdigest() for line in stream if line.strip()}
+    outputs = stored_run(inst, n, result).get('outputs')
+    pairs = {(o.get('input_sha256'), o.get('output_sha256')) for o in outputs if isinstance(o, dict)} \
+        if isinstance(outputs, list) else set()
+    for case in cases:
+        if case['input_sha256'] not in members:
+            raise ValueError('each case input must be an item of the frozen test set (sha256 of its line)')
+        if (case['input_sha256'], case['output_sha256']) not in pairs:
+            raise ValueError('each case output must be the one the bound run recorded for that input '
+                             '(run outputs: input_sha256, output_sha256)')
     if not text(data.get('measures')) or not text(data.get('does_not_measure')):
         raise ValueError('score read needs measures and does_not_measure in plain words')
 
@@ -627,8 +640,8 @@ def inherited_judge(data):
 
 
 NO_EGRESS_LINE = ("Inherited-text check not run: brief text leaves this machine only where the node sets "
-                  "ai_judge_egress=allowed, is not sealed and shares context from its home. Recheck inherited "
-                  "conclusions yourself.")
+                  "ai_judge_egress=allowed and data_class=public (or internal with ai_judge_retention=zero), is "
+                  "not sealed, and its task and context files are in its home. Recheck inherited conclusions yourself.")
 
 
 def judge_egress(inst, n, context_paths):
@@ -639,7 +652,14 @@ def judge_egress(inst, n, context_paths):
             return False
         node = node.get('parent')
     cfg = inst.cfg if isinstance(inst.cfg, dict) else {}
-    if str(n['fm'].get('ai_judge_egress', cfg.get('ai_judge_egress', ''))).lower() != 'allowed':
+    setting = lambda key: str(n['fm'].get(key, cfg.get(key, ''))).strip().lower()
+    if setting('ai_judge_egress') != 'allowed':
+        return False
+    # Fail closed: an unclassified, restricted or sealed node never sends text.
+    # Internal data also needs the judge provider's zero retention confirmed;
+    # unconfirmed retention is allowed for public data only.
+    data_class, retention = setting('data_class'), setting('ai_judge_retention')
+    if not (data_class == 'public' or data_class == 'internal' and retention == 'zero'):
         return False
     home = n.get('home_path') if n.get('external') else None
     if context_paths and home is None:
