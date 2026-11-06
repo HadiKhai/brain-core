@@ -244,63 +244,117 @@ def host_result(response):
 
 def record_live_observation(inst, rows):
     with _state_store(inst, LIVE_FILE, {'version': 1}) as data:
+        # Hook admissions before this count are in it; core admissions say when their launch returned.
+        core = [a for a in data.get('admitted', []) if isinstance(a, dict) and a.get('via') == 'core']
         data.clear()
-        data.update(version=1, observed_at=inst.now_dt().isoformat(), threads=rows, admitted=[])
+        data.update(version=1, observed_at=inst.now_dt().isoformat(), threads=rows, admitted=core)
+
+
+def _reservations(inst, data, now):
+    """Admissions at most LIVE_SECONDS old; older ones are dropped."""
+    kept = []
+    for a in data.get('admitted', []):
+        at = inst.parse_time(a.get('at') or '') if isinstance(a, dict) else None
+        if at and 0 <= (now - at).total_seconds() <= LIVE_SECONDS:
+            kept.append(a)
+    data['admitted'] = kept
+    return kept
 
 
 def admission_reason(inst, n, role, selection, text, kind, rpc=None, job=None):
-    """Admit one launch on a capped provider, or say why not. Coordinators are never counted.
+    """The refusal for one launch on a capped provider, or None; see `admit`."""
+    return admit(inst, n, role, selection, text, kind, rpc=rpc, job=job)[0]
+
+
+def admit(inst, n, role, selection, text, kind, rpc=None, job=None):
+    """Admit one launch on a capped provider: (refusal, None) or (None, reservation id or None).
 
     Capacity is live host threads on that provider (preparing to waiting, subagents
-    included) minus bound or rotated-out coordinators. Core paths ask the host; the hook
-    uses the latest complete agent observation if it is fresh, plus every launch it has
-    admitted since. Only an ordered deliverable is admitted: an open ledger job, named by
-    the core or by the brief's job mark.
+    included) minus bound or rotated-out coordinators, plus the one reservation list both
+    paths share. Core paths count the host under the lock; the hook uses the latest complete
+    agent observation if it is fresh. Every admission reserves a slot for LIVE_SECONDS: a
+    core reservation stops counting in host counts once its launch returns (`admission_launched`),
+    a hook one counts until a later observation (the hook never sees its launch return).
+    Only an ordered deliverable is admitted: an open ledger job, named by the core or by the
+    brief's job mark.
     """
     instance, _ = selection_identity(selection)
     cap = policy_value(inst, n, 'launch_cap_' + instance) if instance else None
     if not cap or role == 'coordinator':
-        return None
+        return None, None
     try:
         limit = int(cap)
         if limit < 0:
             raise ValueError
     except ValueError:
-        return f'launch_cap_{instance} must be a non-negative integer'
+        return f'launch_cap_{instance} must be a non-negative integer', None
     if job is None:
         found = _m_spend.JOB_MARK_RE.search((text or '').encode())
         job = found.group(1).decode() if found else None
     owner, row = _open_job(inst, job) if job else (None, None)
     if row is None:
         return (f'{instance} admits only ordered deliverables: the brief must carry the job mark '
-                f'(brain-job: <key>) of an open ledger job')
+                f'(brain-job: <key>) of an open ledger job'), None
     excluded = coordinator_threads(inst)
     with _state_store(inst, LIVE_FILE, {'version': 1}) as data:
+        now = inst.now_dt()
+        admitted = _reservations(inst, data, now)
         if rpc is not None:
-            threads, admitted = host_live_threads(rpc), []
+            threads = host_live_threads(rpc)
+            # The host lists every launch that returned; the rest are still on their way.
+            pending = [a for a in admitted if not a.get('launched_at')]
         else:
             at = inst.parse_time(data.get('observed_at') or '')
-            age = (inst.now_dt() - at).total_seconds() if at else None
+            age = (now - at).total_seconds() if at else None
             if age is None or not 0 <= age <= LIVE_SECONDS:
                 return (f'{instance} cap {limit}: no fresh host count of live threads. Call t3_thread_list with '
                         f'allProjects, includeSubagents, statuses {list(LIVE_STATUSES)} and limit 100 (one complete '
-                        f'page), then retry within {LIVE_SECONDS} s')
-            threads, admitted = data.get('threads', []), data.setdefault('admitted', [])
+                        f'page), then retry within {LIVE_SECONDS} s'), None
+            threads = data.get('threads', [])
+            # The observation holds only launches that returned before it was taken.
+            pending = [a for a in admitted if not a.get('launched_at')
+                       or (inst.parse_time(a['launched_at']) or now) >= at]
         live = sorted({t['threadId'] for t in threads if t.get('providerInstanceId') == instance} - excluded)
-        pending = [a for a in admitted if a.get('instance') == instance]
+        pending = [a for a in pending if a.get('instance') == instance]
         if len(live) + len(pending) >= limit:
             names = ', '.join(live + ['admitted ' + a['branch'] for a in pending])
-            return f'{instance} cap {limit} is full ({names}); wait for one to finish'
-        if rpc is None:
-            admitted.append({'instance': instance, 'job': job, 'kind': kind, 'node': owner['id'],
-                             'branch': row['Job'], 'at': inst.now()})
-    return None
+            return f'{instance} cap {limit} is full ({names}); wait for one to finish', None
+        token = os.urandom(8).hex()
+        admitted.append({'id': token, 'instance': instance, 'job': job, 'kind': kind, 'node': owner['id'],
+                         'branch': row['Job'], 'via': 'hook' if rpc is None else 'core', 'at': now.isoformat()})
+    return None, token
 
 
 def require_admission(inst, n, role, selection, text, kind='thread', rpc=None, job=None):
-    reason = admission_reason(inst, n, role, selection, text, kind, rpc=rpc, job=job)
+    """Admit or raise; returns the reservation id (None when the provider is not capped)."""
+    reason, token = admit(inst, n, role, selection, text, kind, rpc=rpc, job=job)
     if reason:
         raise ValueError('launch policy refused: ' + reason)
+    return token
+
+
+def _settle_admission(inst, token, launched):
+    if not token:
+        return
+    with _state_store(inst, LIVE_FILE, {'version': 1}) as data:
+        kept = []
+        for a in data.get('admitted', []):
+            if isinstance(a, dict) and a.get('id') == token:
+                if not launched:
+                    continue
+                a = {**a, 'launched_at': inst.now_dt().isoformat()}
+            kept.append(a)
+        data['admitted'] = kept
+
+
+def admission_launched(inst, token):
+    """A core launch returned: host counts from now on list its thread."""
+    _settle_admission(inst, token, True)
+
+
+def admission_released(inst, token):
+    """The host refused the launch: nothing started, the slot is free."""
+    _settle_admission(inst, token, False)
 
 
 def pointer_thread(line):
@@ -356,7 +410,7 @@ def _committed_pointers(inst, path, record):
     record['commits'] = record['commits'][-500:]
 
 
-def _observe_pointers(inst, data):
+def _observe_pointers(inst, data, committed=True):
     pointers = data.setdefault('pointers', {})
     current = {}
     for label, path in pointer_files(inst):
@@ -365,7 +419,8 @@ def _observe_pointers(inst, data):
         record.setdefault('commits', [])
         first = _first_line(path)
         thread = pointer_thread(first)
-        _committed_pointers(inst, path, record)
+        if committed:
+            _committed_pointers(inst, path, record)
         if thread:
             record['history'][thread] = record['history'].get(thread) or 'seen ' + inst.now()
         record.update(current=thread, line=first)
@@ -373,22 +428,23 @@ def _observe_pointers(inst, data):
     return current
 
 
-def learn_pointer_edit(inst, arguments):
-    """Before an agent edits a pointer file, record what its line 1 names now."""
-    target = arguments.get('file_path') if isinstance(arguments, dict) else None
-    if not isinstance(target, str) or not _m_common.lst(inst.cfg.get('thread_pointers')):
-        return
-    resolved = os.path.realpath(target)
-    if any(os.path.realpath(path) == resolved for _, path in pointer_files(inst)):
+def learn_pointers(inst):
+    """Before any agent tool call, record what each pointer's line 1 names now.
+
+    Every replacement path (Edit, Write, Codex apply_patch, a shell command, a script) runs
+    as a tool call, so the line it replaces is on record, under the lock, before it runs.
+    Committed history is read at send time, not here, to keep each call cheap.
+    """
+    if _m_common.lst(inst.cfg.get('thread_pointers')):
         with _state_store(inst, POINTER_FILE, {'version': 1, 'pointers': {}}) as data:
-            _observe_pointers(inst, data)
+            _observe_pointers(inst, data, committed=False)
 
 
 def pointer_send_reason(inst, arguments):
     """Refuse a send to a thread a pointer file named before but no longer names.
 
     Former pointers come from the file's committed history, plus each line 1 observed
-    before an agent edit or a send, so the first send after a replacement is refused too.
+    before any agent tool call or a send, so the first send after a replacement is refused too.
     """
     target = arguments.get('threadId') if isinstance(arguments, dict) else None
     if not _m_common.lst(inst.cfg.get('thread_pointers')) or not isinstance(target, str) or not target.strip():
@@ -418,19 +474,15 @@ def pretool_launch_reason(inst, n, data):
         return 'Launch policy state unavailable (' + str(error)[:200] + '); repair it before this call'
 
 
-EDIT_TOOLS = ('Edit', 'Write', 'MultiEdit')
-
-
 def _pretool_launch_reason(inst, n, data):
     tool = tool_base(data.get('tool_name'))
     args = data.get('tool_input')
-    if not isinstance(args, dict):
-        return None
-    if tool in EDIT_TOOLS:
+    if tool != 't3_thread_send':
         try:
-            learn_pointer_edit(inst, args)
+            learn_pointers(inst)
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-            pass  # learning a pointer never blocks an edit; the committed history still covers it
+            pass  # learning a pointer never blocks a call; the committed history still covers it
+    if not isinstance(args, dict):
         return None
     if tool == 't3_thread_send':
         return pointer_send_reason(inst, args)

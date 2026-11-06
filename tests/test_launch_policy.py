@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from unittest import mock
 
@@ -46,9 +47,9 @@ class PolicyFixture(Scenario):
         self.inst = self.m.Instance(self.root)
         self.jobs = []
 
-    def pretool(self, tool, arguments, cwd=None):
+    def pretool(self, tool, arguments, cwd=None, prefix='mcp__t3-code__'):
         data = {'cwd': str(cwd or self.root), 'session_id': 'fixture-session',
-                'tool_name': 'mcp__t3-code__' + tool, 'tool_input': arguments}
+                'tool_name': prefix + tool, 'tool_input': arguments}
         with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(data))), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.m.cmd_hook_pretool(None)
@@ -194,6 +195,51 @@ class SubscriptionAdmission(PolicyFixture):
         with self.assertRaisesRegex(ValueError, 'exhaustion'):
             self.m.require_admission(self.inst, n, 'worker', selection('main-agent', 'model-a'), '', rpc=partial, job=keys['job-a'])
 
+    def test_concurrent_core_delegations_share_one_reservation_and_never_pass_the_cap(self):
+        keys = self.ledger('job-a', 'job-b')
+        live = self.live('builder-1', 'builder-2', 'builder-3')
+        counted, calls, lock = threading.Event(), [], threading.Lock()
+        def rpc(name, args):
+            with lock:
+                calls.append(name)
+                if name == 't3_thread_list' and args.get('allProjects'):
+                    if calls.count('t3_thread_list') >= 4:  # both callers have asked for their count
+                        counted.set()
+                    return {'threads': list(live), 'total': len(live), 'nextCursor': None}
+                if name == 't3_thread_list':
+                    return {'currentThreadId': 'fixture-parent'}
+            self.assertEqual(name, 'delegate_task')
+            counted.wait(5)  # the host is slow: the other caller counts before this thread exists
+            with lock:
+                live.extend(self.live('delegated-' + args['clientRequestId'][-6:]))
+            return {'taskId': 'task-' + args['clientRequestId'][-6:]}
+        results = {}
+        def run(job):
+            try:
+                results[job] = self.m.host_delegate(
+                    self.inst, self.inst.node('app'), self.brief(keys[job]),
+                    {'providerInstanceId': 'main-agent', 'model': 'model-a', 'options': {'reasoningEffort': 'high'}},
+                    'key-' + job, rpc=rpc)
+            except ValueError as error:
+                results[job] = error
+            finally:
+                counted.set()
+        workers = [threading.Thread(target=run, args=(job,)) for job in ('job-a', 'job-b')]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(20)
+        self.assertEqual(calls.count('delegate_task'), 1)
+        refused = [r for r in results.values() if isinstance(r, ValueError)]
+        self.assertEqual(len(refused), 1)
+        self.assertIn('cap 4 is full', str(refused[0]))
+        self.assertEqual(len([t for t in live if t['providerInstanceId'] == 'main-agent']), 4)
+        # Its launch returned, so the host count holds it and the reservation no longer adds to it.
+        live.pop(0)
+        self.assertIsNone(self.m.admission_reason(self.inst, self.inst.node('app'), 'worker',
+                                                  selection('main-agent', 'model-a'), self.brief(keys['job-b']),
+                                                  'delegate', rpc=rpc))
+
 
 class DelegationRouteRecovery(PolicyFixture):
     policy = {k: v for k, v in POLICY.items() if not k.startswith('launch_cap_')}
@@ -262,6 +308,32 @@ class DelegationRouteRecovery(PolicyFixture):
             self.register()
         self.assertEqual(self.names().count('t3_thread_launch'), 1)
 
+    def test_capacity_refusal_after_confirmed_route_failure_stays_retryable_and_launches_once(self):
+        path = self.root / 'instance.md'
+        path.write_text(path.read_text().replace('---\n', '---\nlaunch_cap_code-agent: 1\n', 1))
+        self.inst = self.m.Instance(self.root)
+        key = self.ledger('job-a')['job-a']
+        counts = [[], self.live('busy-1', provider='code-agent'), []]  # the slot is taken during the refusal
+        base = self.rpc
+        def rpc(name, args):
+            if name == 't3_thread_list' and args.get('allProjects'):
+                self.calls.append((name, args))
+                rows = counts.pop(0)
+                return {'threads': rows, 'total': len(rows), 'nextCursor': None}
+            return base(name, args)
+        self.rpc = rpc
+        target = {'providerInstanceId': 'code-agent', 'model': 'model-b', 'options': {'reasoningEffort': 'high'}}
+        delegate = lambda: self.m.host_delegate(self.inst, self.inst.node('app'), self.brief(key), target, 'capped', rpc=self.rpc)
+        with self.assertRaisesRegex(ValueError, 'cap 1 is full'):
+            delegate()
+        self.assertNotIn('t3_thread_launch', self.names())
+        row = delegate()
+        self.assertEqual(row['recovery']['phase'], 'launched')
+        self.assertEqual(self.names().count('delegate_task'), 1)
+        self.assertEqual(self.names().count('t3_thread_launch'), 1)
+        self.assertEqual(delegate()['recovery']['thread'], 'visible-1')
+        self.assertEqual(self.names().count('t3_thread_launch'), 1)
+
 
 class LanderPointer(PolicyFixture):
     def point(self, line, commit=False):
@@ -295,6 +367,19 @@ class LanderPointer(PolicyFixture):
         self.assertIn('does not name one thread', self.send('thread-b'))
         self.point('Lander: thread-b')
         self.assertIsNone(self.send('thread-b'))
+
+    def test_uncommitted_pointer_replaced_by_codex_apply_patch_or_shell_refuses_the_first_send(self):
+        self.point('Lander: thread-g')
+        patch = ('*** Begin Patch\n*** Update File: nodes/app/lander.md\n@@\n-Lander: thread-g\n'
+                 '+Lander: thread-h\n*** End Patch\n')
+        self.assertIsNone(self.pretool('apply_patch', {'command': patch}, prefix=''))
+        self.point('Lander: thread-h')
+        self.assertIn('names the current one: Lander: thread-h', self.send('thread-g'))
+        self.point('Lander: thread-i')
+        self.assertIsNone(self.pretool('Bash', {'command': 'cp next-lander.md nodes/app/lander.md'}, prefix=''))
+        self.point('Lander: thread-j')
+        self.assertIn('names the current one: Lander: thread-j', self.send('thread-i'))
+        self.assertIsNone(self.send('thread-j'))
 
 
 def declared_keys():

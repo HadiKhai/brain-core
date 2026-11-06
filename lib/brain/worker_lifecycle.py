@@ -255,7 +255,7 @@ def _restart_worker(inst, n, key, rpc):
         if receipt['phase'] == 'stopping':
             usage = captured_restart_usage(fresh, current, row)
             text, selection = restart_brief(fresh, current, row)
-            _m_launch_policy.require_admission(fresh, current, 'worker', selection, text, rpc=rpc, job=key)
+            token = _m_launch_policy.require_admission(fresh, current, 'worker', selection, text, rpc=rpc, job=key)
             marker = 'native-restart: ' + identity + '-' + receipt['episode']
             receipt.update(phase='launching', usage=usage, workspace=workspace, modelSelection=selection, marker=marker)
             # Launch has no idempotency key. Persist intent FIRST, never repeat an
@@ -271,6 +271,7 @@ def _restart_worker(inst, n, key, rpc):
                 'title': row['Job'] + ' restart', 'projectId': current['local'].get('home_project') or projects[0],
                 'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace, 'branch': row['Job']},
                 'modelSelection': selection, 'message': marker + '\n\n' + text})
+            _m_launch_policy.admission_launched(fresh, token)
             if not isinstance(response.get('threadId'), str) or not response['threadId'] or response['threadId'] in inventory:
                 raise ValueError('restart launch outcome unknown; inspect native inventory before recovery')
             receipt.update(phase='launched', new=response['threadId'])
@@ -378,7 +379,7 @@ def launch_worker(inst, n, key, rpc=None):
                     if thread['worktreePath'] == workspace:
                         raise ValueError('existing unbound conversation uses this workspace; adopt it explicitly')
                 text, selection = restart_brief(fresh, current, row)
-                _m_launch_policy.require_admission(fresh, current, 'worker', selection, text, rpc=rpc, job=key)
+                token = _m_launch_policy.require_admission(fresh, current, 'worker', selection, text, rpc=rpc, job=key)
                 marker = 'native-launch: ' + identity + '-' + os.urandom(12).hex()
                 receipt = {'job': key, 'host': host, 'phase': 'launching', 'workspace': workspace,
                            'modelSelection': selection, 'marker': marker, 'at': inst.now()}
@@ -391,6 +392,7 @@ def launch_worker(inst, n, key, rpc=None):
                     'projectId': current['local'].get('home_project') or projects[0],
                     'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace, 'branch': row['Job']},
                     'modelSelection': selection, 'message': marker + '\n\n' + text})
+                _m_launch_policy.admission_launched(fresh, token)
                 new = response.get('threadId')
                 if not isinstance(new, str) or not new or new in inventory:
                     raise ValueError('initial launch outcome unknown; no repeat permitted')

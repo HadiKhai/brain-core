@@ -29,14 +29,19 @@ subagents included, minus every thread bound as a coordinator now or in a node's
 history. Core paths list them from the host before launching. The hook cannot reach the
 host, so the PostToolUse hook (`brain hook posttool`) records each complete agent
 `t3_thread_list` call (`allProjects`, `includeSubagents`, all live statuses, one page) in
-`.brain/live-threads.json`; a capped launch needs one at most 120 s old, and each launch the
-hook admits counts until the next observation. Without one the refusal says which call to make.
+`.brain/live-threads.json`; a capped launch needs one at most 120 s old. Without one the
+refusal says which call to make. Every admission, core or hook, reserves a slot in one shared
+list in the same file, under its lock, for at most 120 s: a core reservation counts until its
+launch returns (then the host lists the thread), a hook one until the next observation, and a
+host refusal frees its slot. Two concurrent launches therefore never both take the last slot.
 
 Former pointers come from every committed version of the pointer file (read once per commit)
-plus each line 1 seen before an agent `Edit`/`Write` of it or a send, kept in
+plus each line 1 seen before every agent tool call (so before an `Edit`, `Write`, Codex
+`apply_patch` or shell command replaces it) and every send, kept in
 `.brain/thread-pointers.json`. The first send to a replaced thread is refused.
 
 `brain delegate` treats only a host refusal as a confirmed route failure. It then launches
 the same work once as a visible thread in the node's home project on the same provider,
-model and options, records the intent first, never repeats an unknown launch, and does not
+model and options. A capacity refusal there leaves the failure retryable; once admitted it
+records the intent first, never repeats an unknown launch, and does not
 adopt a thread whose observed provider or model differs.
