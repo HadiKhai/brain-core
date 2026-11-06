@@ -664,32 +664,6 @@ class ReportGates(Scenario):
         self.claims = [self.claim('work_order')]
         self.assertIsNone(self.pretool(*delegate))
 
-    def test_job_drop_cannot_become_a_global_exclusion_without_standing_authority(self):
-        """R91: a one-off drop stays with its job; no write tool or patch format widens it into a rule."""
-        self.operator('Forget about the tracker integration for this redesign.')
-        self.kind = 'one_off'
-        self.claims = [self.claim('standing_exclusion', 'never use the tracker')]
-        rule = {'file_path': str(self.root / 'AGENTS.md'), 'old_string': '', 'new_string': '- never use the tracker'}
-        patch = '*** Begin Patch\n*** Update File: AGENTS.md\n@@\n+- never use the tracker\n*** End Patch\n'
-        unified = '--- a/library/instance-rules.md\n+++ b/library/instance-rules.md\n@@ -1 +1,2 @@\n+- never use the tracker\n'
-        for tool, tool_input in (('Edit', rule), ('apply_patch', {'input': patch}), ('apply_patch', {'patch': unified}),
-                                 ('exec_command', {'cmd': "apply_patch <<'EOF'\n" + patch + "EOF"}),
-                                 ('mcp__t3-code__delegate_task', {'prompt': 'Rule for all jobs: never use the tracker.'})):
-            with self.subTest(tool=tool, keys=sorted(tool_input)):
-                self.assertIn('job at hand only', self.pretool(tool, tool_input))
-        self.claims = []
-        self.assertIsNone(self.pretool('Edit', dict(rule, new_string='- skip the tracker in the redesign job only')))
-        self.judged.clear()
-        self.claims = [self.claim('standing_exclusion', 'never use the tracker')]
-        self.assertIsNone(self.pretool('Edit', {'file_path': str(self.root / 'notes.md'), 'old_string': '',
-                                                'new_string': '- never use the tracker'}))
-        self.assertIsNone(self.pretool('apply_patch', {'input': patch.replace('AGENTS.md', 'notes.md')}))
-        self.assertEqual(self.judged, [])  # only rule-file writes are judged
-        self.kind = 'standing_instruction'  # separate explicit operator authority, in a later turn
-        self.operator('From now on, never use the tracker in any job.')
-        self.assertIsNone(self.pretool('Edit', rule))
-        self.assertIsNone(self.pretool('apply_patch', {'input': patch}))
-
     def test_automated_cancellation_requires_actual_operator_message_for_operator_attribution(self):
         """R35: blame needs an actual failed call and the operator's own instruction; retries are bounded."""
         listing = ('mcp__t3-code__t3_thread_list', {})
@@ -831,22 +805,3 @@ class ReportGates(Scenario):
                                                                 'isError': False}))
         self.claims = [self.claim('live_claim', 'the page is live', support='cite')]
         self.assertIsNone(self.send('Update: the page is live.'))
-
-    def test_apply_patch_move_into_rule_file_judges_full_resulting_text(self):
-        """R91: a context-only move into a rule file is judged on the whole resulting file."""
-        (self.root / 'drafts.md').write_text('- never use the tracker\n- keep notes short\n')
-        self.operator('Forget about the tracker integration for this redesign.')
-        self.kind = 'one_off'
-        self.claims = [self.claim('standing_exclusion', 'never use the tracker')]
-        move = '*** Begin Patch\n*** Update File: drafts.md\n*** Move to: AGENTS.md\n@@\n - keep notes short\n*** End Patch\n'
-        rename = 'diff --git a/drafts.md b/AGENTS.md\nsimilarity index 100%\nrename from drafts.md\nrename to AGENTS.md\n'
-        for tool, tool_input in (('apply_patch', {'input': move}), ('apply_patch', {'patch': rename}),
-                                 ('exec_command', {'cmd': "apply_patch <<'EOF'\n" + move + "EOF"})):
-            with self.subTest(tool=tool, keys=sorted(tool_input)):
-                self.judged.clear()
-                self.assertIn('job at hand only', self.pretool(tool, tool_input))
-                self.assertIn('- keep notes short', self.judged[-1]['outgoing'])  # unchanged content is judged
-        missing = move.replace('Update File: drafts.md', 'Update File: missing.md')
-        self.assertIn('cannot read missing.md', self.pretool('apply_patch', {'input': missing}))
-        self.claims = []
-        self.assertIsNone(self.pretool('apply_patch', {'input': move}))

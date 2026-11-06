@@ -13,7 +13,6 @@ import os
 import re
 import sys
 import threading
-from pathlib import Path
 
 from . import common as _m_common
 from .ai_json import AIResponseInvalid, AIUnavailable, ai_json
@@ -24,8 +23,7 @@ _m_action_guard = _m_common.LazyModule(__package__, 'action_guard')
 MODEL = 'claude-haiku-5-5'
 TAIL = 4 * 1024 * 1024
 EVIDENCE_LIMIT, EXCERPT = 12, 1500
-CLAIM_KINDS = ['fix_claim', 'live_claim', 'cancel_blamed_on_operator', 'host_problem_report', 'work_order',
-               'standing_exclusion', 'other']
+CLAIM_KINDS = ['fix_claim', 'live_claim', 'cancel_blamed_on_operator', 'host_problem_report', 'work_order', 'other']
 CLAIM_SYSTEM = """Read one outgoing text that an agent is about to send, run or has just
 written, with the operator's own messages in this turn and the evidence (tool calls
 that succeeded earlier in the turn, with result excerpts). The user payload is
@@ -43,9 +41,6 @@ heuristics:
   work (building, changing, fixing, launching jobs), including a command that
   launches or restarts a worker, as opposed to answering, reporting, or reading
   only to answer a question.
-- standing_exclusion: makes an instruction to drop, forget, skip or exclude
-  something into a lasting or global exclusion that reaches beyond the single
-  job or task it was given for.
 For each item quote an exact, nonempty, contiguous verbatim span of the outgoing
 text. In support list the ids of the evidence entries whose results themselves
 show the claim true: for fix_claim, a source or diff read showing the fix; for
@@ -69,8 +64,6 @@ CLAIM_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['i
 
 SEND_TOOLS = ('t3_thread_send',)
 LAUNCH_TOOLS = ('t3_thread_launch', 'create_threads', 'delegate_task', 'schedule_task')
-WRITE_TOOLS = ('Edit', 'Write', 'MultiEdit', 'apply_patch')
-RULE_FILES = ('AGENTS.md', 'instance-rules.md')
 # Tool identities whose successful call is a browser observation of a page (R23).
 OBSERVATION_TOOLS = ('preview_snapshot', 'preview_navigate', 'preview_wait_for', 'preview_evaluate',
                      'device_screenshot')
@@ -378,11 +371,6 @@ def gate_problems(facts, claims, items, started=False):
                         for c in by_kind.get('work_order', [])):
         problems.append('A question or complaint is not an order: no operator message in this turn orders this '
                         'work. Answer and stop; offer the work in one line.')
-    for c in by_kind.get('standing_exclusion', []):
-        if operator and not any(i['kind'] == 'standing_instruction' for i in items or []):
-            problems.append('A drop applies to the job at hand only: the operator gave no standing instruction in '
-                            'this turn, so ' + quote(c) + ' cannot become a lasting or global exclusion. Scope it '
-                            'to this job.')
     for c in by_kind.get('cancel_blamed_on_operator', []):
         if not any(call['failed'] for call in facts['calls']) or not _quoted(c['operator_quote'], facts):
             problems.append('Only a message the operator typed counts as the operator\'s decision: no failed call with a '
@@ -414,113 +402,7 @@ def retry_reason(facts, name, args):
     return None
 
 
-def _inside(inst, path, cwd):
-    if not isinstance(path, str) or not path.strip():
-        return False
-    target = Path(path.strip())
-    if not target.is_absolute():
-        if not isinstance(cwd, str) or not Path(cwd).is_absolute():
-            return False
-        target = Path(cwd) / target
-    if target.name not in RULE_FILES:
-        return False
-    try:
-        target.resolve().relative_to(inst.root.resolve())
-    except ValueError:
-        return False
-    return True
-
-
-class RuleTextUnknown(ValueError):
-    """A write into a rule file whose resulting text cannot be read; refused, never skipped."""
-
-
-def _strip(value):
-    return value[2:] if value.startswith(('a/', 'b/')) else value
-
-
-def patch_sections(patch):
-    """Per-file sections of apply_patch or unified-diff syntax: source, target, +/- lines."""
-    sections = []
-
-    def start(source, target):
-        sections.append({'source': source, 'target': target, 'added': [], 'removed': []})
-        return sections[-1]
-    current = None
-    for line in patch.splitlines():
-        if line.startswith('*** Update File: '):
-            current = start(line[17:].strip(), line[17:].strip())
-        elif line.startswith('*** Add File: '):
-            current = start(None, line[14:].strip())
-        elif line.startswith('*** Delete File: '):
-            current = None
-        elif line.startswith('*** Move to: ') and current:
-            current['target'] = line[13:].strip()
-        elif line.startswith('diff --git '):
-            parts = line[11:].split(' ')
-            current = start(_strip(parts[0]), _strip(parts[-1])) if len(parts) >= 2 else None
-        elif line.startswith('rename from ') and current:
-            current['source'] = line[12:].strip()
-        elif line.startswith('rename to ') and current:
-            current['target'] = line[10:].strip()
-        elif line.startswith('--- '):
-            value = line[4:].strip()
-            source = None if value == '/dev/null' else _strip(value)
-            if current is None or current['added'] or current['removed']:
-                current = start(source, None)
-            elif current['source'] is None:
-                current['source'] = source
-        elif line.startswith('+++ '):
-            value = line[4:].strip()
-            current = current or start(None, None)
-            current['target'] = None if value == '/dev/null' else _strip(value)
-        elif current is not None and line.startswith('+'):
-            current['added'].append(line[1:])
-        elif current is not None and line.startswith('-'):
-            current['removed'].append(line[1:])
-    return [x for x in sections if x['target']]
-
-
-def section_text(section, cwd):
-    """Text a section leaves in its target: its added lines, or for a move the whole result."""
-    if section['source'] in (None, section['target']):
-        return '\n'.join(section['added'])
-    source = Path(section['source'])
-    if not source.is_absolute():
-        source = Path(cwd) / source if isinstance(cwd, str) and Path(cwd).is_absolute() else None
-    try:
-        lines = source.read_text().splitlines() if source else None
-    except (OSError, UnicodeDecodeError):
-        lines = None
-    if lines is None:
-        raise RuleTextUnknown('cannot read ' + section['source'] + ', which this patch moves into a rule file')
-    for line in section['removed']:
-        if line in lines:
-            lines.remove(line)
-    return '\n'.join(lines + section['added'])
-
-
-def rule_write_text(inst, name, args, cwd):
-    """New text a write tool puts into an instance rule file, else None (patch targets included)."""
-    short = tool_name(name)
-    patches = []
-    if short == 'apply_patch':
-        patches = [v for k in ('input', 'patch', 'command') if isinstance(v := args.get(k), str)]
-    elif is_shell(name) and any(os.path.basename(w[0]) == 'apply_patch' for w in shell_words(args)):
-        patches = [shell_text(args)]
-    if patches:
-        texts = [section_text(x, cwd) for p in patches for x in patch_sections(p) if _inside(inst, x['target'], cwd)]
-        return '\n'.join(texts) if any(t.strip() for t in texts) else None
-    if short not in WRITE_TOOLS or not _inside(inst, args.get('file_path') or args.get('path'), cwd):
-        return None
-    text = '\n'.join(v for k in ('new_string', 'content') if isinstance(v := args.get(k), str))
-    edits = args.get('edits')
-    if isinstance(edits, list):
-        text += '\n'.join(e.get('new_string', '') for e in edits if isinstance(e, dict) and isinstance(e.get('new_string'), str))
-    return text if text.strip() else None
-
-
-def outgoing(inst, name, args, cwd=None):
+def outgoing(inst, name, args):
     """(text, structural start, relevant kinds) for a gated tool call, else None."""
     short = tool_name(name)
     if short in SEND_TOOLS and isinstance(args.get('message'), str):
@@ -528,10 +410,7 @@ def outgoing(inst, name, args, cwd=None):
     if short in LAUNCH_TOOLS:
         text = next((args[k] for k in ('prompt', 'task', 'message', 'instructions') if isinstance(args.get(k), str)),
                     json.dumps(args, ensure_ascii=False, sort_keys=True))
-        return text, False, {'work_order', 'standing_exclusion'}
-    rule = rule_write_text(inst, name, args, cwd)
-    if rule:
-        return rule, False, {'standing_exclusion'}
+        return text, False, {'work_order'}
     if is_structural_start(name, args):
         return shell_text(args), True, {'work_order'}
     return None
@@ -565,7 +444,7 @@ def _unavailable(error):
 
 
 def pretool_reason(inst, n, data):
-    """Deny reason for a coordinator's send, launch, worker start, rule write or over-retry, else None."""
+    """Deny reason for a coordinator's send, launch, worker start or over-retry, else None."""
     name, args = data.get('tool_name'), data.get('tool_input')
     if not isinstance(name, str) or not isinstance(args, dict) or not _m_capture.coordinator(n, data):
         return None
@@ -577,10 +456,7 @@ def pretool_reason(inst, n, data):
     retry = retry_reason(facts, name, args)
     if retry:
         return 'Report gate: ' + retry
-    try:
-        gated = outgoing(inst, name, args, data.get('cwd'))
-    except RuleTextUnknown as error:
-        return 'Report gate: ' + str(error) + '; a rule-file write is judged on its full resulting text.'
+    gated = outgoing(inst, name, args)
     if not gated:
         return None
     text, started, relevant = gated
