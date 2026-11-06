@@ -471,7 +471,8 @@ class InstructionCapture(Scenario):
             value, usage = client.ai_json(self.capture.SYSTEM, provenance['synthetic_input'], self.capture.SCHEMA)
         self.assertEqual(value, result['structured_output'])
         self.assertEqual(usage['usage'], result['usage'])
-        self.assertEqual(len(self.capture.validated_classifications(provenance['synthetic_input'], value)), 2)
+        messages = [dict(message, at=None) for message in provenance['synthetic_input']]
+        self.assertEqual(len(self.capture.validated_classifications(messages, value)), 2)
         # Derive both object variants from the recorded result, including the
         # older envelope without type. Intermediate events never supply usage.
         legacy = dict(result)
