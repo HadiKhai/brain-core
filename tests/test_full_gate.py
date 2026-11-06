@@ -1,6 +1,7 @@
 """Native direct-full receipts can satisfy readiness once, without rerunning."""
 import json
 import shlex
+import site
 import sys
 from pathlib import Path
 
@@ -49,6 +50,9 @@ class IsolatedDisposition(Scenario):
 
     def prepare(self, isolate=True, compatibility=False, persistent=False, linked=False):
         from scenario import CORE
+        # Changing HOME must not hide this interpreter's pytest toolchain.
+        if site.ENABLE_USER_SITE:
+            self.env['PYTHONUSERBASE'] = site.getuserbase()
         collector = 'tests/test_brain.py' if compatibility else 'tests/test_sample.py'
         root, home = self.project(shlex.join([
             sys.executable, '-B', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', collector]))
