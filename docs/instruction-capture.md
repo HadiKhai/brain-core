@@ -43,14 +43,23 @@ message. Host adapters should retain sender metadata for forwarded messages.
 When that metadata does not reach a runtime transcript, prepare agent sends with
 `brain agent-message --message-file <file>` or `brain msg`. These commands frame
 the exact body with the fixed marker, a UTF-8 byte length and a SHA-256 digest.
-Generated automated briefs and wake prompts use the same framing. Capture skips
+Generated automated briefs, coordinator launches and wake templates use the same
+framing before host transport. Capture skips
 only complete frames covering the entire input, allowing newline separators
 between coalesced frames. Any unproven remainder before, between or after frames
 keeps the whole original input for classification. Legacy prefix-only messages,
 truncated frames and changed bodies are also classified. No host lookup or
-message-meaning heuristic runs in the hook. Existing host prompts must be
-explicitly regenerated to gain complete framing; no host schedule is changed by
-the hook or by installing the core.
+message-meaning heuristic runs in the hook. Existing host prompts need explicit
+regeneration to gain framing; no host schedule is changed by the hook or by
+installing the core. Framing alone does not prove a host-modified delivery:
+webhook data insertion and appended footers invalidate the template digest, and
+a delegated-task wrapper introduces uncovered text. Those delivered turns are
+conservatively classified in full, including untrusted webhook data, until
+complete host provenance is available. Regeneration does not solve that boundary.
+This can produce false instruction captures and adds classifier calls for those
+wakes/delegations; it never excludes a possible operator remainder. Host schedule
+definition receipts from the older unframed format also need explicit
+reconciliation before provisioning again.
 Keep operator messages in their original thread so their instructions are captured.
 
 Local historical repair accepts an explicit `--agent-batches-json` export for
@@ -61,6 +70,9 @@ untruncated text, a unique item ID and the same receiving `sourceThreadId`.
 Exactly one batch must reconstruct the whole source byte for byte; quote overlap
 alone cannot close a gap. Receipts retain the source hash and every constituent's
 original ID, record digest and text digest. No merged host item is manufactured.
+Same-receiver consistency is checked within the supplied export; historical gap
+files do not independently bind a receiving host thread. That provenance remains
+the exporter's responsibility, as with the existing single-message repair.
 The existing single-message export path remains supported. Gap bytes and inbox
 history are retained, and `--require` still reports every unmet required gap.
 

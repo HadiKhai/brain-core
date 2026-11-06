@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 import core_loader
+import importlib
 
 CORE = Path(__file__).resolve().parent.parent
 
@@ -22,6 +23,7 @@ class HostActions(unittest.TestCase):
         (self.root / 'instance.md').write_text('---\nhost: t3\nruntimes: codex\nprincipals: alice\n---\n')
         (self.root / 'node.md').write_text('---\ntitle: Sample\nowners: alice\nruntime: codex\n---\n')
         self.inst = self.m.Instance(self.root)
+        self.envelope = importlib.import_module(self.m._owners['provision_coordinator'].__package__ + '.message_envelope')
 
     def test_provision_binds_project_then_launches_once_in_node_workspace(self):
         calls = []
@@ -33,6 +35,7 @@ class HostActions(unittest.TestCase):
             self.m.provision_coordinator(self.inst, 'root', {'instanceId':'codex', 'model':'sample-model'})
         self.assertEqual([x[0] for x in calls], ['t3_project_create', 't3_thread_launch', 't3_thread_organize', 't3_thread_organize'])
         launch = calls[1][1]
+        self.assertTrue(self.envelope.fully_marked(launch['message']))
         self.assertEqual(launch['workspaceStrategy'], {'type':'root'})
         self.assertIn('Short coordinator turns', launch['message'])
         self.assertIn('before acting on rule X in detail', launch['message'])
@@ -67,9 +70,13 @@ class HostActions(unittest.TestCase):
         self.inst.save_local()
         values = [{'threadId':'thread-1'}, {'boundThreadId':'thread-1','scheduledTaskId':'task-1',
                   'webhookUrl':'https://host.example/wake/private-capability'}]
-        with mock.patch.object(self.m, 'host_call', side_effect=values) as call:
+        plan = self.m.wake_setup_plan(self.inst, self.inst.node('root'))
+        plan['host_call']['prompt'] = 'Automated turn: no operator present; cancellations are host events.\nLegacy fixture wake.'
+        with mock.patch.object(self.m, 'host_call', side_effect=values) as call, \
+                mock.patch.object(self.m, 'wake_setup_plan', return_value=plan):
             self.m.provision_wake(self.inst, 'root')
         args = call.call_args_list[1].args[2]
+        self.assertTrue(self.envelope.fully_marked(args['prompt']))
         self.assertEqual(args['schedule'], {'type':'webhook'})
         self.assertTrue(args['bindToCurrentThread'])
         self.assertEqual(self.inst.local_of('root')['wake'], values[1]['webhookUrl'])
@@ -155,6 +162,7 @@ class HostActions(unittest.TestCase):
         request = call.call_args.args[2]
         self.assertEqual(request['schedule'], {'type':'fixed_time','timeOfDay':'09:00'})
         self.assertTrue(request['prompt'].startswith('Automated turn:'))
+        self.assertTrue(self.envelope.fully_marked(request['prompt']))
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(self.inst.local['schedule_providers']['morning'], 'codex')
         with mock.patch.object(self.m, 'host_call', return_value={'threadId':'thread-1'}) as call:

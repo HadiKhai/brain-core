@@ -218,8 +218,11 @@ def agent_source_proof(items, messages, records, batches=None):
         match = next((message for message in messages if valid_agent_message(message)
                       and message['text'] in sources and item['quote'] in message['text']), None)
         if match is None:
-            covers = [proof for source in sources if item['quote'] in source
-                      for proof in [batch_source_proof(source, batches)] if proof is not None]
+            covers = []
+            for source in sources:
+                proof = batch_source_proof(source, batches) if item['quote'] in source else None
+                if proof is not None and proof not in covers:
+                    covers.append(proof)
             if len(covers) != 1:
                 return None
             if covers[0] not in proven_batches:

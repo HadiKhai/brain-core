@@ -12,7 +12,7 @@ import subprocess
 
 from . import common as _m_common
 from . import instance as _m_instance
-from .briefs import AUTOMATED_TURN_PREFIX, COORDINATOR_STARTUP
+from .briefs import AUTOMATED_TURN_PREFIX, COORDINATOR_STARTUP, automated_brief
 
 _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 _m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
@@ -115,7 +115,7 @@ def provision_coordinator(inst, nid, selection, require_no_auto_settle=False):
             if not isinstance(project.get('id'), str) or not project['id']:
                 raise ValueError('home project creation returned no id; inspect the pending operation')
             _bind(inst, nid, home_project=project['id'])
-        message = (AUTOMATED + '\nRole: coordinator of node ' + nid + '. ' + COORDINATOR_STARTUP + ' '
+        message = automated_brief('Role: coordinator of node ' + nid + '. ' + COORDINATOR_STARTUP + ' '
                    'Run brain host wake-setup ' + nid + ' from this coordinator to provision its wake binding.')
         launched = host_action_call(inst, nid, 't3_thread_launch', {'title':n['fm'].get('title', nid) + ' · coordinator',
             'projectId':inst.local_of(nid)['host_project'], 'workspaceStrategy':{'type':'root'},
@@ -161,8 +161,7 @@ def provision_wake(inst, nid):
             inst.commit([path], 'Add portable coordinator wake schedule')
     identity = hashlib.sha256((nid + '\0' + coordinator).encode()).hexdigest()
     arguments = {**plan['host_call'], 'clientRequestId':'wake-' + identity}
-    if not arguments['prompt'].startswith(AUTOMATED):
-        arguments['prompt'] = AUTOMATED + '\n' + arguments['prompt']
+    arguments['prompt'] = automated_brief(arguments['prompt'])
     result = host_action_call(inst, nid, 'schedule_task', arguments)
     sid = result.get('scheduledTaskId')
     if result.get('boundThreadId') != coordinator or not isinstance(sid, str) or not sid:
@@ -237,9 +236,7 @@ def provision_schedule(inst, nid, sid, provider=None):
             if receipt == {'definition':definition, 'coordinator':coordinator, 'task':bound, 'provider':provider}:
                 return bound
             raise ValueError('existing host schedule differs or has no receipt; reconcile it before provisioning')
-    prompt = record['brief']
-    if not prompt.startswith(AUTOMATED):
-        prompt = AUTOMATED + '\n' + prompt
+    prompt = automated_brief(record['brief'])
     key = hashlib.sha256((nid + '\0' + sid + '\0' + coordinator + '\0' + definition).encode()).hexdigest()
     result = host_action_call(inst, nid, 'schedule_task', {'title':sid, 'prompt':prompt, 'schedule':trigger,
                        'bindToCurrentThread':True, 'clientRequestId':'schedule-' + key})

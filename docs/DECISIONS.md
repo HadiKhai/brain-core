@@ -4455,3 +4455,13 @@ reconstruction and quote containment are required; ambiguous covers stay open.
 Receipts retain constituent record/text digests rather than inventing a host item.
 Schedule reconciliation also requires whole-source equality, including legacy
 marker handling, rather than trusting a leading marker on mixed input.
+
+
+Review follow-up: coordinator launch and host wake/schedule fallbacks now use the
+same complete envelope formatter. Host-inserted webhook spans/footers and delegated
+task wrappers remain unproven and are classified in full; template regeneration
+alone cannot establish provenance for those delivered bytes. This conservative
+limit may add classifier calls and false instruction gaps. Historical schedule
+definition receipts require explicit reconciliation rather than a silent rebind.
+Duplicate runtime representations of the same batch source are deduplicated
+before testing source-cover uniqueness; distinct ambiguous batches remain invalid.

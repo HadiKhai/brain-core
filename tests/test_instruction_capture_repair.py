@@ -321,6 +321,7 @@ class InstructionCaptureRepair(unittest.TestCase):
         constituents = receipt['agent_batches'][0]['messages']
         self.assertEqual([m['itemId'] for m in constituents], [m['itemId'] for m in batch['messages']])
         for original, recorded in zip(batch['messages'], constituents):
+            self.assertEqual(recorded['text_sha256'], hashlib.sha256(original['text'].encode()).hexdigest())
             self.assertEqual(recorded['host_record_sha256'],
                              hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest())
         self.assertEqual(path.read_bytes(), before)
@@ -367,6 +368,10 @@ class InstructionCaptureRepair(unittest.TestCase):
         result = self.repair.reconcile_gaps(self.root, None, agent_batches={path.name: [batch]},
                                            source_turns={path.name: [record]})
         self.assertEqual(len(result['reconciliations']), 1)
+        # Codex can emit an event and response item for one original input.
+        self.assertEqual(len(self.repair.reconcile_gaps(self.root, None,
+                         agent_batches={path.name: [batch]},
+                         source_turns={path.name: [record, dict(record)]})['reconciliations']), 1)
         gap['items'][1]['quote'] = 'Do not bypass the source check. Invented continuation.'
         path.write_text(json.dumps(gap))
         self.assertEqual(self.repair.reconcile_gaps(self.root, None, agent_batches={path.name: [batch]},
