@@ -1210,6 +1210,45 @@ class RehearsalCoverageFaultTypes(unittest.TestCase):
 
 class RehearsalCloneCaches(Scenario):
     temporary_parent = CORE.parent
+    def test_projection_proof_survives_minute_rollover(self):
+        import copy
+        from brain import events, instance, rehearse_transactions as transactions
+        start, end = '2026-01-01 12:00 +00:00', '2026-01-01 12:01 +00:00'
+        now = datetime.datetime.fromisoformat('2026-01-01T12:01:01+00:00')
+        for method in ('cap-now', 'status-commit'):
+            for written_at in (start, end):
+                with self.subTest(method=method, written_at=written_at):
+                    source = self.init(method + '-' + written_at[14:16])
+                    (source / 'status.md').write_text('# Demo\n\n## Now\n' +
+                        ''.join('- item %d\n' % i for i in range(35)))
+                    self.git('add', 'status.md', cwd=source)
+                    self.git('commit', '-qm', 'fixture status baseline', cwd=source)
+                    inst = instance.Instance(source)
+                    node = inst.node('root')
+                    with mock.patch.object(inst, 'now', return_value=start):
+                        before = transactions.projection_packet(events, inst, node)
+                    before['force'] = True
+                    with mock.patch.dict(os.environ, self.env), \
+                            mock.patch.object(inst, 'now', return_value=written_at):
+                        if method == 'cap-now':
+                            events.cap_now(inst, node)
+                        else:
+                            events.status_commit(inst, node, force=True)
+                    with mock.patch.object(inst, 'now', return_value=end):
+                        after = transactions.projection_packet(events, inst, node)
+                    self.assertEqual(start, before['at'])
+                    self.assertEqual(end, after['at'])
+                    archive, cache = transactions.projection_result(events, method, before, after, now)
+                    self.assertEqual(after['archive'], archive)
+                    self.assertEqual(bytes.fromhex(after['cache'] or ''), cache)
+                    for outside in ('2026-01-01 11:59 +00:00', '2026-01-01 12:02 +00:00'):
+                        damaged = copy.deepcopy(after)
+                        key = 'archive' if method == 'cap-now' else 'cache'
+                        damaged[key] = bytes.fromhex(damaged[key]).replace(
+                            written_at.encode(), outside.encode()).hex()
+                        with self.assertRaises(transactions.EvidenceError):
+                            transactions.projection_result(events, method, before, damaged, now)
+
     def test_frozen_aggregate_bootstrap_covers_read_and_ui_without_provider_discovery(self):
         import copy
         from brain import instance, rehearse_external, rehearse_transactions as transactions
