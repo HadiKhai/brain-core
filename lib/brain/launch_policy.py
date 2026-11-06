@@ -1,4 +1,4 @@
-"""Declared launch policy, provider admission and current-thread pointers, checked when acting.
+"""Declared launch policy and current-thread pointers, checked when acting.
 
 Every value is instance data (the nearest node.md first, within its owner boundary, then
 instance.md); the core ships no provider, model or account names. An undeclared key does
@@ -7,7 +7,6 @@ not restrict:
   launch_allow_<role>: <instanceId>/<model>, ...   role: coordinator or worker
   launch_effort_<role>: <effort>, ...
   launch_forbid: <instanceId or model>, ...
-  launch_cap_<instanceId>: <n>    admitted non-coordinator launches on that provider at once
   thread_pointers: <file>, ...    (instance.md) node files whose line 1 names a role's current thread
 
 Agent tool calls are refused in the PreToolUse hook, before the host call. Core launch
@@ -26,17 +25,12 @@ from . import common as _m_common
 
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
-_m_rotation = _m_common.LazyModule(__package__, 'rotation')
-_m_spend = _m_common.LazyModule(__package__, 'spend')
 
 
 LAUNCH_ROLES = ('coordinator', 'worker')
 LAUNCH_TOOLS = ('t3_thread_launch', 'delegate_task')
-LIVE_FILE = '.brain/live-threads.json'
 POINTER_FILE = '.brain/thread-pointers.json'
 STATE_MAX_BYTES = 256 * 1024
-LIVE_STATUSES = ('preparing', 'queued', 'starting', 'running', 'waiting')
-LIVE_SECONDS = 120
 
 
 def tool_base(name):
@@ -153,210 +147,6 @@ def _state_store(inst, name, empty):
             _m_common.atomic_write(path, after + '\n', private=True)
 
 
-def _open_job(inst, key):
-    for node in inst.nodes():
-        for row in _m_jobs.read_jobs(node) or []:
-            if not row.get('Ended') and _m_jobs.job_key(row) == key:
-                return node, row
-    return None, None
-
-
-def coordinator_threads(inst):
-    """Every thread bound as a coordinator, current or rotated out; these are never counted."""
-    out = set()
-    for node in inst.nodes():
-        out |= _m_jobs.thread_reference_ids(node['local'].get('coordinator') or '') - {''}
-        state = _m_rotation.read_rotation(inst, node) or {}
-        for old in [state, *state.get('previous', [])]:
-            if isinstance(old.get('coordinator'), str):
-                out |= _m_jobs.thread_reference_ids(old['coordinator'])
-    return out
-
-
-def _live_rows(threads):
-    rows = []
-    for t in threads:
-        if not isinstance(t, dict) or not isinstance(t.get('threadId'), str) or not t['threadId']:
-            raise ValueError('host thread inventory has a thread without identity')
-        if t.get('status') in LIVE_STATUSES:
-            rows.append({'threadId': t['threadId'], 'providerInstanceId': t.get('providerInstanceId'),
-                         'status': t['status'], 'title': str(t.get('title') or '')[:80]})
-    return rows
-
-
-def host_live_threads(rpc):
-    """Exhaustive host inventory of live threads in every project, subagents included."""
-    rows, seen, cursor, count = [], set(), None, 0
-    for _ in range(20):
-        args = {'allProjects': True, 'includeSubagents': True, 'statuses': list(LIVE_STATUSES), 'limit': 100}
-        if cursor is not None:
-            args['cursor'] = cursor
-        page = rpc('t3_thread_list', args)
-        if not isinstance(page, dict) or not isinstance(page.get('threads'), list) or type(page.get('total')) is not int:
-            raise ValueError('incomplete host thread inventory; live capacity unknown')
-        rows += _live_rows(page['threads'])
-        count += len(page['threads'])
-        cursor = page.get('nextCursor')
-        if cursor is None:
-            if count != page['total']:
-                raise ValueError('host thread inventory count does not prove exhaustion')
-            return rows
-        if type(cursor) is not int or cursor in seen:
-            raise ValueError('host thread inventory pagination did not advance')
-        seen.add(cursor)
-    raise ValueError('host thread inventory exceeds bound; live capacity unknown')
-
-
-def observed_thread_list(arguments, response):
-    """Live rows from one complete agent t3_thread_list call (PostToolUse), else None."""
-    if not isinstance(arguments, dict) or not arguments.get('allProjects') or arguments.get('projectId'):
-        return None
-    if not arguments.get('includeSubagents') or arguments.get('cursor') not in (None, 0):
-        return None
-    statuses = arguments.get('statuses')
-    if statuses is not None and not set(LIVE_STATUSES) <= set(statuses):
-        return None
-    if any(arguments.get(k) is not None for k in ('settled', 'snoozed', 'titleContains')):
-        return None
-    page = host_result(response)
-    if (not isinstance(page, dict) or not isinstance(page.get('threads'), list) or page.get('nextCursor') is not None
-            or type(page.get('total')) is not int or page['total'] != len(page['threads'])):
-        return None
-    return _live_rows(page['threads'])
-
-
-def host_result(response):
-    """A host tool result as the runtime reports it: structured content, one JSON text block, or the object."""
-    if isinstance(response, str):
-        try:
-            response = json.loads(response)
-        except ValueError:
-            return None
-    if isinstance(response, list) and len(response) == 1 and isinstance(response[0], dict) and response[0].get('type') == 'text':
-        return host_result(response[0].get('text'))
-    if isinstance(response, dict):
-        if isinstance(response.get('structuredContent'), dict):
-            return response['structuredContent']
-        if isinstance(response.get('content'), list):
-            return host_result(response['content'])
-    return response
-
-
-def record_live_observation(inst, rows):
-    with _state_store(inst, LIVE_FILE, {'version': 1}) as data:
-        # Hook admissions before this count are in it; core admissions say when their launch returned.
-        core = [a for a in data.get('admitted', []) if isinstance(a, dict) and a.get('via') == 'core']
-        data.clear()
-        data.update(version=1, observed_at=inst.now_dt().isoformat(), threads=rows, admitted=core)
-
-
-def _reservations(inst, data, now):
-    """Admissions at most LIVE_SECONDS old; older ones are dropped."""
-    kept = []
-    for a in data.get('admitted', []):
-        at = inst.parse_time(a.get('at') or '') if isinstance(a, dict) else None
-        if at and 0 <= (now - at).total_seconds() <= LIVE_SECONDS:
-            kept.append(a)
-    data['admitted'] = kept
-    return kept
-
-
-def admission_reason(inst, n, role, selection, text, kind, rpc=None, job=None):
-    """The refusal for one launch on a capped provider, or None; see `admit`."""
-    return admit(inst, n, role, selection, text, kind, rpc=rpc, job=job)[0]
-
-
-def admit(inst, n, role, selection, text, kind, rpc=None, job=None):
-    """Admit one launch on a capped provider: (refusal, None) or (None, reservation id or None).
-
-    Capacity is live host threads on that provider (preparing to waiting, subagents
-    included) minus bound or rotated-out coordinators, plus the one reservation list both
-    paths share. Core paths count the host under the lock; the hook uses the latest complete
-    agent observation if it is fresh. Every admission reserves a slot for LIVE_SECONDS: a
-    core reservation stops counting in host counts once its launch returns (`admission_launched`),
-    a hook one counts until a later observation (the hook never sees its launch return).
-    Only an ordered deliverable is admitted: an open ledger job, named by the core or by the
-    brief's job mark.
-    """
-    instance, _ = selection_identity(selection)
-    cap = policy_value(inst, n, 'launch_cap_' + instance) if instance else None
-    if not cap or role == 'coordinator':
-        return None, None
-    try:
-        limit = int(cap)
-        if limit < 0:
-            raise ValueError
-    except ValueError:
-        return f'launch_cap_{instance} must be a non-negative integer', None
-    if job is None:
-        found = _m_spend.JOB_MARK_RE.search((text or '').encode())
-        job = found.group(1).decode() if found else None
-    owner, row = _open_job(inst, job) if job else (None, None)
-    if row is None:
-        return (f'{instance} admits only ordered deliverables: the brief must carry the job mark '
-                f'(brain-job: <key>) of an open ledger job'), None
-    excluded = coordinator_threads(inst)
-    with _state_store(inst, LIVE_FILE, {'version': 1}) as data:
-        now = inst.now_dt()
-        admitted = _reservations(inst, data, now)
-        if rpc is not None:
-            threads = host_live_threads(rpc)
-            # The host lists every launch that returned; the rest are still on their way.
-            pending = [a for a in admitted if not a.get('launched_at')]
-        else:
-            at = inst.parse_time(data.get('observed_at') or '')
-            age = (now - at).total_seconds() if at else None
-            if age is None or not 0 <= age <= LIVE_SECONDS:
-                return (f'{instance} cap {limit}: no fresh host count of live threads. Call t3_thread_list with '
-                        f'allProjects, includeSubagents, statuses {list(LIVE_STATUSES)} and limit 100 (one complete '
-                        f'page), then retry within {LIVE_SECONDS} s'), None
-            threads = data.get('threads', [])
-            # The observation holds only launches that returned before it was taken.
-            pending = [a for a in admitted if not a.get('launched_at')
-                       or (inst.parse_time(a['launched_at']) or now) >= at]
-        live = sorted({t['threadId'] for t in threads if t.get('providerInstanceId') == instance} - excluded)
-        pending = [a for a in pending if a.get('instance') == instance]
-        if len(live) + len(pending) >= limit:
-            names = ', '.join(live + ['admitted ' + a['branch'] for a in pending])
-            return f'{instance} cap {limit} is full ({names}); wait for one to finish', None
-        token = os.urandom(8).hex()
-        admitted.append({'id': token, 'instance': instance, 'job': job, 'kind': kind, 'node': owner['id'],
-                         'branch': row['Job'], 'via': 'hook' if rpc is None else 'core', 'at': now.isoformat()})
-    return None, token
-
-
-def require_admission(inst, n, role, selection, text, kind='thread', rpc=None, job=None):
-    """Admit or raise; returns the reservation id (None when the provider is not capped)."""
-    reason, token = admit(inst, n, role, selection, text, kind, rpc=rpc, job=job)
-    if reason:
-        raise ValueError('launch policy refused: ' + reason)
-    return token
-
-
-def _settle_admission(inst, token, launched):
-    if not token:
-        return
-    with _state_store(inst, LIVE_FILE, {'version': 1}) as data:
-        kept = []
-        for a in data.get('admitted', []):
-            if isinstance(a, dict) and a.get('id') == token:
-                if not launched:
-                    continue
-                a = {**a, 'launched_at': inst.now_dt().isoformat()}
-            kept.append(a)
-        data['admitted'] = kept
-
-
-def admission_launched(inst, token):
-    """A core launch returned: host counts from now on list its thread."""
-    _settle_admission(inst, token, True)
-
-
-def admission_released(inst, token):
-    """The host refused the launch: nothing started, the slot is free."""
-    _settle_admission(inst, token, False)
-
-
 def pointer_thread(line):
     """Thread id from a pointer line `<Label>: <thread link or id>`; None if it isn't one."""
     match = re.fullmatch(r'[A-Za-z][\w -]{0,40}:[ \t]+(.+)', line.strip())
@@ -465,8 +255,8 @@ def pointer_send_reason(inst, arguments):
 def pretool_launch_reason(inst, n, data):
     """The PreToolUse refusal for a launch, delegation or send that breaks declared policy.
 
-    Unreadable admission or pointer state refuses the call (fail closed): an unproven
-    admission is not one. State is only read when a cap or pointer file is declared.
+    Unreadable pointer state refuses the call (fail closed). State is only read when a
+    pointer file is declared.
     """
     try:
         return _pretool_launch_reason(inst, n, data)
@@ -489,25 +279,13 @@ def _pretool_launch_reason(inst, n, data):
     if tool not in LAUNCH_TOOLS:
         return None
     if tool == 't3_thread_launch':
-        selection, text, kind = args.get('modelSelection'), args.get('message'), 'thread'
+        selection, text = args.get('modelSelection'), args.get('message')
     else:
         target = args.get('target') if isinstance(args.get('target'), dict) else {}
         selection = {k: target[k] for k in ('providerInstanceId', 'model', 'options') if k in target}
-        text, kind = args.get('task'), 'delegate'
+        text = args.get('task')
     if not isinstance(text, str):
         text = ''
-    role = launch_role(text)
-    reasons = selection_reasons(inst, n, role, selection)
-    if not reasons:
-        reason = admission_reason(inst, n, role, selection, text, kind)
-        reasons = [reason] if reason else []
+    reasons = selection_reasons(inst, n, launch_role(text), selection)
     return ('Launch policy refused this ' + tool + ': ' + '; '.join(reasons)) if reasons else None
 
-
-def posttool_observe(inst, data):
-    """PostToolUse: keep the latest complete host count of live threads for launch admission."""
-    if tool_base(data.get('tool_name')) != 't3_thread_list':
-        return
-    rows = observed_thread_list(data.get('tool_input'), data.get('tool_response'))
-    if rows is not None:
-        record_live_observation(inst, rows)
