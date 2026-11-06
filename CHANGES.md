@@ -5,6 +5,14 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Keep local CLI capture failure diagnostics
+
+Instruction capture now retains bounded raw CLI output and exact failure causes
+in private local diagnostic files, including timeout partial output and schema
+failures. Inbox gaps carry the cause and an opaque reference without private
+provider text. Successful calls keep the same public usage fields. No extra
+configuration is needed after upgrading; see the capture diagnostic format.
+
 ## 2026-11-05: Capture instructions through a Claude subscription
 
 When no API key is configured, instruction capture uses the logged-in `claude`

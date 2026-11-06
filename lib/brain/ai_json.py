@@ -1,4 +1,5 @@
 """Bounded Messages API / subscription CLI transports, without implicit retries."""
+import base64
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,58 @@ import time
 
 
 class AIUnavailable(Exception):
-    """A safe diagnostic code, never provider response text or credentials."""
+    """Safe public code; optional bounded detail is private local evidence only."""
+
+    def __init__(self, code, detail=None):
+        super().__init__(code)
+        self.detail = detail
+
+
+CLI_OUTPUT_BYTES = 4096
+CLI_DETAIL_BYTES = 16384
+CLI_FAILURE_STAGES = ('timeout', 'transport', 'nonzero_exit', 'provider_error',
+                      'response_subtype', 'json_decode', 'response_object',
+                      'structured_output_missing', 'structured_output_type',
+                      'classification_schema')
+
+
+def cli_detail(stage, started, result=None, error=None):
+    """Retain exact raw byte tails, not a lossy decode, within a fixed size."""
+    detail = {'transport': 'claude_cli', 'stage': stage,
+              'latency_seconds': time.monotonic() - started,
+              'returncode': getattr(result, 'returncode', None)}
+    for name in ('stdout', 'stderr'):
+        value = getattr(result, name, None) if result is not None else getattr(error, name, None)
+        if value is None and name == 'stdout':
+            value = getattr(error, 'output', None)
+        raw = value if isinstance(value, bytes) else (value or '').encode('utf-8', 'backslashreplace')
+        detail[name + '_tail_b64'] = base64.b64encode(raw[-CLI_OUTPUT_BYTES:]).decode('ascii')
+        detail[name + '_bytes'] = len(raw)
+        detail[name + '_truncated'] = len(raw) > CLI_OUTPUT_BYTES
+    if error is not None:
+        detail.update(error_type=type(error).__name__,
+                      error_message=str(error).encode('utf-8', 'backslashreplace')[-2048:].decode('utf-8', 'ignore'))
+        if isinstance(error, OSError):
+            detail['errno'] = error.errno
+        if isinstance(error, subprocess.TimeoutExpired):
+            detail['timeout_seconds'] = error.timeout
+    return detail
+
+
+class _CLIUsage(dict):
+    """Public usage stays unchanged; raw response survives only until validation."""
+
+    def __init__(self, value, detail):
+        super().__init__(value)
+        self.detail = detail
+
+
+def cli_schema_detail(usage, error):
+    detail = dict(getattr(usage, 'detail', {}) or {})
+    detail.update(transport='claude_cli', stage='classification_schema',
+                  error_type=type(error).__name__,
+                  error_message=str(error).encode('utf-8', 'backslashreplace')[-2048:].decode('utf-8', 'ignore'))
+    return detail
 
 
 class AIResponseInvalid(ValueError):
@@ -86,26 +138,36 @@ def cli_json(system, data, schema, model):
             '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
             '--disable-slash-commands', '--no-chrome']
     started = time.monotonic()
+    result = None
     try:
         # Do not honor a parent TMPDIR inside a project or the auth home.
         with tempfile.TemporaryDirectory(prefix='brain-capture-', dir='/tmp') as cwd:
-            result = subprocess.run(argv, input=json.dumps(data, ensure_ascii=False),
-                                    cwd=cwd, env=env, text=True, capture_output=True,
+            result = subprocess.run(argv, input=json.dumps(data, ensure_ascii=False).encode('utf-8'),
+                                    cwd=cwd, env=env, capture_output=True,
                                     timeout=20, check=False)
-    except subprocess.TimeoutExpired:
-        raise AIUnavailable('timeout') from None
-    except OSError:
-        raise AIUnavailable('transport') from None
+    except subprocess.TimeoutExpired as error:
+        raise AIUnavailable('timeout', cli_detail('timeout', started, error=error)) from None
+    except OSError as error:
+        raise AIUnavailable('transport', cli_detail('transport', started, result, error)) from None
     if result.returncode:
-        raise AIUnavailable('provider_or_network')
+        raise AIUnavailable('provider_or_network', cli_detail('nonzero_exit', started, result))
+    stage = 'json_decode'
     try:
         response = json.loads(result.stdout)
+        stage = 'response_object'
+        if not isinstance(response, dict):
+            raise ValueError('CLI response must be an object')
         if response.get('is_error') or response.get('subtype') != 'success':
-            raise AIUnavailable('provider_or_network')
+            detail = cli_detail('provider_error' if response.get('is_error') else 'response_subtype', started, result)
+            detail['response_subtype'] = str(response.get('subtype')).encode('utf-8', 'backslashreplace')[-256:].decode('utf-8', 'ignore')
+            raise AIUnavailable('provider_or_network', detail)
+        stage = 'structured_output_missing'
         value = response['structured_output']
+        stage = 'structured_output_type'
         if not isinstance(value, dict):
             raise ValueError('missing structured object')
-        return value, {'transport': 'claude_cli', 'model': model, 'usage': response.get('usage'),
-                       'latency_seconds': time.monotonic() - started}
-    except (ValueError, TypeError, KeyError, AttributeError):
-        raise AIUnavailable('cli_invalid_response') from None
+        return value, _CLIUsage({'transport': 'claude_cli', 'model': model, 'usage': response.get('usage'),
+                                'latency_seconds': time.monotonic() - started},
+                               cli_detail('classification_schema', started, result))
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise AIUnavailable('cli_invalid_response', cli_detail(stage, started, result, error)) from None

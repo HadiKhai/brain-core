@@ -10,7 +10,8 @@ import sys
 from pathlib import Path
 
 from . import common as _m_common
-from .ai_json import AIResponseInvalid, AIUnavailable, ai_json
+from .ai_json import (AIResponseInvalid, AIUnavailable, CLI_DETAIL_BYTES,
+                      CLI_FAILURE_STAGES, ai_json, cli_schema_detail)
 
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_status = _m_common.LazyModule(__package__, 'status')
@@ -197,9 +198,9 @@ def classifications(messages):
         raise CaptureRejected(str(error)) from None
     try:
         return validated_classifications(messages, value), usage
-    except CaptureRejected:
+    except CaptureRejected as error:
         if isinstance(usage, dict) and usage.get('transport') == 'claude_cli':
-            raise AIUnavailable('cli_invalid_response') from None
+            raise AIUnavailable('cli_invalid_response', cli_schema_detail(usage, error)) from None
         raise
 
 
@@ -293,11 +294,24 @@ def rule_committed(inst, n, item, baseline=None):
     return False
 
 
-def capture_gap(inst, n, key, code, items=None):
+def capture_gap(inst, n, key, code, items=None, detail=None):
     """Visible, structured and deduplicated; no raw transcript/provider body."""
     if _m_common.outward_links(inst.root):
         raise OSError('unsafe instance links')
     record = {'kind': 'instruction-capture-gap', 'code': code, 'node': n['id'], 'capture': key}
+    if detail is not None:
+        # No raw provider text or exception message crosses into the inbox.
+        encoded = json.dumps(detail, ensure_ascii=False).encode('utf-8') + b'\n'
+        if len(encoded) > CLI_DETAIL_BYTES:
+            raise ValueError('capture diagnostic exceeds bound')
+        diagnostic = hashlib.sha256(encoded).hexdigest() + '.json'
+        evidence = inst.root / '.brain/instruction-capture/diagnostics' / diagnostic
+        _m_common.atomic_write(evidence, encoded.decode('utf-8'), private=True, create=True)
+        record['diagnostic'] = 'diagnostics/' + diagnostic
+        if detail.get('stage') in CLI_FAILURE_STAGES:
+            record['cause'] = detail['stage']
+        if type(detail.get('returncode')) is int:
+            record['returncode'] = detail['returncode']
     marker = '<!-- instruction-capture-gap:' + hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest() + ' -->'
     if items:
         # Preserve escaped instructions locally for reconciliation, while the
@@ -316,10 +330,10 @@ def capture_gap(inst, n, key, code, items=None):
         _m_common.atomic_write(path, json.dumps({'line': line, 'marker': marker}) + '\n', private=True)
 
 
-def best_effort_gap(inst, n, key, code, items=None):
+def best_effort_gap(inst, n, key, code, items=None, detail=None):
     """Never turn a failed gap write into a silent outer cmd_hook exception."""
     try:
-        capture_gap(inst, n, key, code, items)
+        capture_gap(inst, n, key, code, items, detail)
     except (Exception, SystemExit):
         # An unsafe/unwritable inbox cannot be written through. Runtime hook
         # diagnostics remain visible without exposing transcript/provider text.
@@ -415,7 +429,8 @@ def capture_stop(inst, n, data):
         code = str(error) if isinstance(error, AIUnavailable) else 'capture_evidence_unavailable'
         episode = key if code == 'missing_key' else hashlib.sha256(
             (key + json.dumps(cursor or {}, sort_keys=True)).encode()).hexdigest()
-        best_effort_gap(inst, n, episode, code, pending)
+        best_effort_gap(inst, n, episode, code, pending,
+                        error.detail if isinstance(error, AIUnavailable) else None)
         try:
             if cursor is not None:
                 # A visible gap consumes the skipped batch; no automatic paid replay.

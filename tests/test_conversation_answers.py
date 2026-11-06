@@ -1,6 +1,7 @@
 """Real-shaped runtime replies retire only their exact current question episode."""
 import datetime
 import argparse
+import base64
 import contextlib
 import io
 import json
@@ -450,7 +451,7 @@ class InstructionCapture(Scenario):
             self.assertNotIn('--bare', argv)
             self.assertNotIn(self.quote, argv)
             self.assertEqual(json.loads(kw['input']), payload)
-            self.assertNotIn(self.capture.SYSTEM, kw['input'])
+            self.assertNotIn(self.capture.SYSTEM, kw['input'].decode('utf-8'))
             cwd = client.Path(kw['cwd']).resolve()
             self.assertTrue(cwd.is_dir())
             self.assertNotIn(client.Path(os.environ['HOME']).resolve(), cwd.parents)
@@ -469,6 +470,8 @@ class InstructionCapture(Scenario):
         self.assertEqual(value, json.loads(self.cli_result().stdout)['structured_output'])
         self.assertEqual(usage['transport'], 'claude_cli')
         self.assertEqual(usage['usage'], {'output_tokens': 12})
+        self.assertEqual(set(usage), {'transport', 'model', 'usage', 'latency_seconds'})
+        self.assertNotIn('detail', json.dumps(usage))
         self.assertGreaterEqual(usage['latency_seconds'], 0)
         self.assertFalse(self.cli_cwd.exists())
 
@@ -511,6 +514,7 @@ class InstructionCapture(Scenario):
                 'PATH': str(stub_dir) + os.pathsep + os.environ['PATH']}):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         self.assertFalse(marker.exists(), 'guarded child classified recursively')
+        self.assertFalse((self.root / '.brain/instruction-capture/diagnostics').exists())
         # Negative control: the same real hook dispatch reaches capture without
         # the guard, so the guarded assertion cannot pass merely on bad routing.
         env = dict(self.env, BRAIN_ROOT=str(self.root), BRAIN_NO_REEXEC='1')
@@ -523,21 +527,30 @@ class InstructionCapture(Scenario):
     def test_cli_failures_record_gap_and_allow_exit_without_private_output(self):
         client = sys.modules[self.capture.ai_json.__module__]
         failures = [
-            ('timeout', subprocess.TimeoutExpired('claude', 20)),
-            ('transport', FileNotFoundError('claude')),
-            ('provider_or_network', subprocess.CompletedProcess(['claude'], 1, '', 'private auth error')),
-            ('provider_or_network', subprocess.CompletedProcess(['claude'], 0,
+            ('timeout', 'timeout', subprocess.TimeoutExpired('claude', 20,
+                output=b'private partial stdout', stderr=b'private timeout stderr')),
+            ('transport', 'transport', FileNotFoundError(2, 'private CLI executable missing')),
+            ('provider_or_network', 'nonzero_exit', subprocess.CompletedProcess(
+                ['claude'], 3, b'private partial response', b'private auth error')),
+            ('provider_or_network', 'provider_error', subprocess.CompletedProcess(['claude'], 0,
                 json.dumps({'subtype': 'success', 'is_error': True, 'error': self.quote}), '')),
-            ('cli_invalid_response', subprocess.CompletedProcess(['claude'], 0, 'private invalid output', '')),
-            ('cli_invalid_response', subprocess.CompletedProcess(['claude'], 0, '[]', '')),
-            ('cli_invalid_response', self.cli_result({'messages': []})),
-            ('cli_invalid_response', self.cli_result({'messages': [{'id': '0', 'items': [
+            ('provider_or_network', 'response_subtype', subprocess.CompletedProcess(['claude'], 0,
+                json.dumps({'subtype': 'error_max_turns', 'is_error': False, 'error': self.quote}), '')),
+            ('cli_invalid_response', 'json_decode', subprocess.CompletedProcess(['claude'], 0,
+                b'private invalid output\xff', b'private invalid stderr')),
+            ('cli_invalid_response', 'response_object', subprocess.CompletedProcess(['claude'], 0, '[]', '')),
+            ('cli_invalid_response', 'structured_output_missing', subprocess.CompletedProcess(['claude'], 0,
+                json.dumps({'subtype': 'success', 'is_error': False}), '')),
+            ('cli_invalid_response', 'structured_output_type', subprocess.CompletedProcess(['claude'], 0,
+                json.dumps({'subtype': 'success', 'is_error': False, 'structured_output': []}), '')),
+            ('cli_invalid_response', 'classification_schema', self.cli_result({'messages': []})),
+            ('cli_invalid_response', 'classification_schema', self.cli_result({'messages': [{'id': '0', 'items': [
                 {'kind': 'unknown', 'quote': self.quote}]}]})),
-            ('cli_invalid_response', self.cli_result({'messages': [{'id': '0', 'items': [
+            ('cli_invalid_response', 'classification_schema', self.cli_result({'messages': [{'id': '0', 'items': [
                 {'kind': 'other', 'quote': 'Invented quote.'}]}]})),
         ]
         original_run = client.subprocess.run
-        for index, (code, failure) in enumerate(failures):
+        for index, (code, stage, failure) in enumerate(failures):
             with self.subTest(code=code, index=index):
                 self.data['session_id'] = 'failure-' + str(index)
                 self.n['local']['coordinator_sessions'].append(self.data['session_id'])
@@ -554,8 +567,61 @@ class InstructionCapture(Scenario):
                 self.assertIn('"code": "' + code + '"', inbox)
                 self.assertNotIn(self.quote, inbox)
                 self.assertNotIn('private', inbox)
+                line = inbox.split('from runtime: ')[-1].split(' <!--')[0]
+                record = json.loads(line)
+                self.assertEqual(record['cause'], stage)
+                self.assertEqual(set(record) - {'returncode'},
+                                 {'kind', 'code', 'node', 'capture', 'cause', 'diagnostic'})
+                path = self.root / '.brain/instruction-capture' / record['diagnostic']
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertLessEqual(path.stat().st_size, client.CLI_DETAIL_BYTES)
+                detail = json.loads(path.read_text())
+                self.assertEqual(detail['stage'], stage)
+                self.assertEqual(detail['returncode'], getattr(failure, 'returncode', None))
+                for name in ('stdout', 'stderr'):
+                    raw = getattr(failure, name, None) or b''
+                    raw = raw if isinstance(raw, bytes) else raw.encode('utf-8')
+                    self.assertEqual(base64.b64decode(detail[name + '_tail_b64']), raw)
+                    self.assertEqual(detail[name + '_bytes'], len(raw))
+                if isinstance(failure, Exception):
+                    self.assertEqual(detail['error_type'], type(failure).__name__)
+                    self.assertEqual(detail['error_message'], str(failure))
+                if stage == 'timeout':
+                    self.assertEqual(detail['timeout_seconds'], 20)
+                if stage == 'transport':
+                    self.assertEqual(detail['errno'], 2)
+                if stage in ('provider_error', 'response_subtype'):
+                    self.assertEqual(detail['response_subtype'], json.loads(failure.stdout)['subtype'])
+                if stage == 'classification_schema':
+                    self.assertEqual(detail['error_type'], 'CaptureRejected')
+                    self.assertTrue(detail['error_message'])
                 state = self.root / '.brain/instruction-capture' / (self.capture.capture_key(self.n, self.data) + '.json')
                 self.assertNotIn('rejected', json.loads(state.read_text()))
+
+    def test_cli_failure_detail_bounds_exact_byte_tails_and_survives_raised_error(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        stdout = b'private-prefix' + bytes(range(256)) * 100
+        stderr = b'private-stderr' + b'\xff' * 50000
+        failures = [subprocess.CompletedProcess(['claude'], 7, stdout, stderr),
+                    subprocess.TimeoutExpired('claude', 20, output=stdout, stderr=stderr)]
+        for failure in failures:
+            with self.subTest(kind=type(failure).__name__), \
+                    mock.patch.object(client.subprocess, 'run', side_effect=(failure if isinstance(failure, Exception)
+                        else lambda *a, **kw: failure)):
+                with self.assertRaises(client.AIUnavailable) as caught:
+                    client.cli_json(self.capture.SYSTEM, [], self.capture.SCHEMA, self.capture.MODEL)
+            detail = caught.exception.detail
+            self.assertNotIn('private', str(caught.exception))
+            self.assertLessEqual(len(json.dumps(detail, ensure_ascii=False).encode('utf-8')) + 1,
+                                 client.CLI_DETAIL_BYTES)
+            for name, raw in [('stdout', stdout), ('stderr', stderr)]:
+                self.assertEqual(base64.b64decode(detail[name + '_tail_b64']), raw[-client.CLI_OUTPUT_BYTES:])
+                self.assertEqual(detail[name + '_bytes'], len(raw))
+                self.assertTrue(detail[name + '_truncated'])
+            self.capture.capture_gap(self.inst, self.n, 'bound-probe', str(caught.exception), detail=detail)
+        for path in (self.root / '.brain/instruction-capture/diagnostics').glob('*.json'):
+            self.assertLessEqual(path.stat().st_size, client.CLI_DETAIL_BYTES)
+        self.assertNotIn('private', (self.root / 'inbox.md').read_text())
 
     def test_api_key_keeps_http_success_and_invalid_response_behavior(self):
         client = sys.modules[self.capture.ai_json.__module__]

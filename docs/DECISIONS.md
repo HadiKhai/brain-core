@@ -11,6 +11,11 @@ environment preserves HOME, PATH, USER and LOGNAME for executable and keychain
 lookup; an early stop-hook child guard prevents recursive capture.
 Both transports keep a 20-second deadline. Invalid CLI output is a visible gap
 that allows exit; the existing HTTP structural-refusal behavior is retained.
+CLI failures carry bounded private diagnostics through the exception and capture
+gap boundary. Raw byte tails use base64 so invalid UTF-8 can be inspected exactly.
+Only the failure stage, returncode and opaque diagnostic reference reach the
+inbox. Local mode-0600 files retain raw evidence within a 16-KiB limit; success
+usage and persisted state never carry those private response bytes.
 
 ## Explicit contract mode and checked arithmetic
 

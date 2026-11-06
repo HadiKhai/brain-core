@@ -66,14 +66,25 @@ durable hook inbox queue. The skipped batch is consumed after its gap is recorde
 On the HTTP transport, invalid classification structure blocks once and is
 retained without paid retries. CLI timeout, auth failure, malformed JSON,
 missing structured output or invalid classification structure instead record
-a gap and allow capture to complete, without a retry or raw error body.
+a gap and allow capture to complete, without a retry. Every CLI failure retains
+its returncode, failure stage, elapsed time and exact raw stdout/stderr byte
+tails (up to 4 KiB each, base64-encoded). Timeout records include partial output
+and the deadline; transport/parser errors include the exception class and a
+bounded message; error responses include the response subtype. Classification
+schema failures retain the original CLI output and validation cause too.
+These diagnostics are local mode-0600 files under
+`.brain/instruction-capture/diagnostics/`, at most 16 KiB per file. The inbox
+contains only a structured cause, exit status when present, and an opaque
+diagnostic reference; provider text and exception messages never enter it.
+Successful calls write no diagnostic and keep the existing public usage shape.
 The second stop rechecks any newly committed rules, records only remaining
 unconverted or unclassified work as a gap, and always allows exit, even with bad
 state or unsafe links. If an inbox cannot safely be written, structured stderr
 diagnostics record the gap instead. Replaced transcripts reset the cursor so the
 next stop can bootstrap again. Coordinators must reconcile these visible gaps; they are not evidence
 that the instructions were converted. State and usage remain local under
-`.brain/instruction-capture/`; no raw message or provider error body is logged.
+`.brain/instruction-capture/`; raw failure output stays only in the private local
+diagnostic files. No diagnostic is sent to a cloud service.
 
 The shared rule registry can replace the small structural Gate reader during
 integration. Rule sweep creation and contract/review rule tables are separate
