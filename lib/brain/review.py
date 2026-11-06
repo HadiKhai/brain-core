@@ -234,6 +234,9 @@ def review_receipt_path(n, row, head):
 
 
 def validate_review_receipt(inst, n, row, head, data, fresh=False, rules=None):
+    if isinstance(data, dict) and 'carry' in data:
+        from . import review_carry
+        return review_carry.validate_carried(inst, n, row, head, data, rules=rules)
     def refuse():
         raise ValueError('review receipt needs exact code, known builder and distinct fresh non-builder thread identities')
     if (not isinstance(data, dict) or type(data.get('version')) is not int or data['version'] != 1 or
@@ -303,6 +306,8 @@ def record_review_receipt(inst, n, branch, data):
         row = _m_jobs.open_job(_m_jobs.read_jobs(n) or [], branch)
         if not row:
             raise ValueError('review receipt needs an open job')
+        if isinstance(data, dict) and 'carry' in data:
+            raise ValueError('carried review receipts are recorded only by review carry-over')
         repo = n.get('home_path') if n.get('external') else inst.root
         from . import rule_contracts
         paths = lambda: [n['dir'] / _m_jobs.JOBS_FILE, n['dir'] / 'status.md',
@@ -347,9 +352,21 @@ def validate_ready_reviews(inst, n, branch, head, packet=None):
         return []
     if not row:
         return ['independent review receipt requires an open job']
+    missing = 'missing, stale, blocked or non-independent exact-head review receipt'
+    required_ids = '; required rule ids: ' + ', '.join(rule['id'] for rule in rules) if rules else ''
     try:
         path = review_receipt_path(n, row, head)
-        data = json.loads(path.read_text())
+        if path.exists() or path.is_symlink():
+            data = json.loads(path.read_text())
+        else:
+            # A pure rebase keeps the accepted review only when code proves the same patch and rules.
+            from . import review_carry
+            try:
+                data = review_carry.carry_candidate(inst, n, row, head, rules=rules)
+            except review_carry.NoSource:
+                raise ValueError(missing)
+            except ValueError as error:
+                return [missing + '; ' + str(error) + required_ids]
         # Keep actionable per-rule diagnostics, including the missing IDs, instead
         # of hiding them in the generic identity-receipt refusal below.
         try:
@@ -360,8 +377,7 @@ def validate_ready_reviews(inst, n, branch, head, packet=None):
         if data['verdict'] != 'pass':
             raise ValueError('review is blocked')
     except (OSError, ValueError, TypeError, KeyError):
-        return ['missing, stale, blocked or non-independent exact-head review receipt' +
-                ('; required rule ids: ' + ', '.join(rule['id'] for rule in rules) if rules else '')]
+        return [missing + required_ids]
     try:
         from . import review_findings as _m_review_findings
         findings = _m_review_findings.review_finding_state(inst, n, branch, head)

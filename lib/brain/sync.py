@@ -24,7 +24,7 @@ _m_worktrees = _m_common.LazyModule(__package__, 'worktrees')
 
 def cmd_review(a):
     """Brief an independent reviewer, or record the completed host identity receipt."""
-    if getattr(a, 'receipt_file', None):
+    if getattr(a, 'receipt_file', None) or getattr(a, 'carry', False):
         from . import instance
         instance.unlock()
     inst = _m_nodes.load()
@@ -40,6 +40,17 @@ def cmd_review(a):
         except (OSError, ValueError, TypeError) as error:
             _m_common.die(str(error))
         print('review receipt recorded (coordinator-supplied host observation; no independent live host query)')
+        return
+    if getattr(a, 'carry', False):
+        from . import review_carry
+        try:
+            path, data = review_carry.record_carried_receipt(inst, n, a.branch)
+        except (OSError, ValueError, TypeError) as error:
+            _m_common.die(str(error))
+        carry = data['carry']
+        print(f"review receipt carried to {data['head']} from {carry['source_head']} "
+              f"(patch-id stable {carry['patch_id']['stable']}, verbatim {carry['patch_id']['verbatim']}; "
+              f"rules digest {carry['rules_digest']}): {_m_common.tilde(path)}")
         return
     if getattr(a, 'reason', None):
         _m_guard.no_terms_in(n, a.reason, 'review reason')

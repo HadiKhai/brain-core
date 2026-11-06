@@ -1352,6 +1352,9 @@ def record_ready(inst, n, branch, reviews, previous=None, reverify=False, full_r
     preview_context = {'integration_base': integration_base, 'verify_scope': 'change' if change else 'full'}
     # A supplied full receipt owns the map environment. Check its preview
     # policy after adoption loads that packet; review and preflight still run.
+    # A pure rebase persists its carried review receipt here so later exact-head readers find it.
+    from . import review_carry as _m_review_carry
+    _m_review_carry.ensure_carried(inst, n, branch)
     reasons.extend(ready_policy_reasons(inst, n, branch, head, preview_context, preview=full_receipt is None))
     from . import rehearse as _m_rehearse
     rehearsal = _m_rehearse.read_evidence(n, branch, head)

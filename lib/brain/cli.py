@@ -678,6 +678,8 @@ def _main():
         opt("--fix-base", help="reviewed commit before the fixes; defaults to previous review head"),
         opt("--contract", help="contract file; defaults to the job's recorded contract"),
         opt("--receipt-file", help="completed review host-observation JSON; does not start another round"),
+        opt("--carry", action="store_true",
+            help="carry an accepted review to a rebased head with the same patch-id and rules digest"),
         opt("--same-runtime-reason", help="reason for a configured expiring same-runtime exception"))
     cmd("preview-receipt", _Command("preview_evidence", "cmd_preview_receipt"), "record rendered preview source samples", "id",
         opt("--branch", required=True), opt("--file", required=True))
