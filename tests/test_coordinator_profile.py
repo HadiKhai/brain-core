@@ -8,6 +8,9 @@ from core_loader import SourceFileLoader
 from scenario import CORE, Scenario
 
 
+SELECTION = {'instanceId': 'provider-one', 'model': 'sample-model', 'options': {'reasoningEffort': 'high'}}
+
+
 class CoordinatorProfile(Scenario):
     fixture_init_in_process = True
 
@@ -70,6 +73,7 @@ class CoordinatorProfile(Scenario):
                 self.assertNotIn('message', args)
                 self.assertEqual(args['clientRequestId'], 'coordinator-launch-ticket')
                 self.assertEqual(args['workspaceStrategy']['type'], 'worktree')
+                self.assertEqual(args['modelSelection'], SELECTION)
                 return {'threadId': 'new', 'modelSelection': {'instanceId': 'claudeAgent'}}
             if name == 't3_thread_read':
                 return {'thread': {'threadId': 'new', 'worktreePath': str(workspace), 'activeRunId': None}}
@@ -80,7 +84,8 @@ class CoordinatorProfile(Scenario):
                 return {'threadId': 'new'}
             self.fail(name)
         with mock.patch.object(self.module, 'profile_home', return_value=self.tmp):
-            result = self.module.launch_scoped(inst, inst.node('root'), rpc, 'ticket', 'Start here')
+            result = self.module.launch_scoped(inst, inst.node('root'), rpc, 'ticket', 'Start here',
+                                               {'modelSelection': SELECTION})
         self.assertEqual(result['thread'], 'new')
         self.assertEqual([name for name, _ in calls], ['t3_thread_launch', 't3_thread_read', 't3_thread_send'])
 
@@ -119,7 +124,7 @@ class CoordinatorProfile(Scenario):
             return {'threadId': 'new'}
         with mock.patch.object(self.module, 'install_profile', return_value={
                 'workspace': str(self.tmp / 'scope'), 'settings': str(self.tmp / 'scope/settings')}):
-            self.module.launch_scoped(inst, node, rpc, 'ticket', 'Start')
+            self.module.launch_scoped(inst, node, rpc, 'ticket', 'Start', {'modelSelection': SELECTION})
 
     def test_malformed_native_responses_become_bounded_value_errors(self):
         root = self.init('fixture')
@@ -128,7 +133,7 @@ class CoordinatorProfile(Scenario):
             def rpc(name, args):
                 return result if name == 't3_thread_launch' else {'thread': None}
             with self.subTest(result=result), self.assertRaises(ValueError):
-                self.module.launch_scoped(inst, inst.node('root'), rpc, 'ticket', 'Start')
+                self.module.launch_scoped(inst, inst.node('root'), rpc, 'ticket', 'Start', {'modelSelection': SELECTION})
 
     def test_running_first_input_replays_its_key_without_reinstalling_profile(self):
         root = self.init('fixture')

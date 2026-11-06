@@ -16,6 +16,7 @@ _m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
 _m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
 _m_lifecycle_identity = _m_common.LazyModule(__package__, 'lifecycle_identity')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_launch_policy = _m_common.LazyModule(__package__, 'launch_policy')
 _m_machine = _m_common.LazyModule(__package__, 'machine')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_reminders = _m_common.LazyModule(__package__, 'reminders')
@@ -51,6 +52,7 @@ def _restart_brief(inst, n, row):
         raise ValueError('restart requires an explicit configured native model selection') from None
     if not isinstance(selection, dict) or not selection.get('instanceId') or not selection.get('model'):
         raise ValueError('restart requires an explicit configured native model selection')
+    _m_launch_policy.require_selection(inst, n, 'worker', selection)
     return output.getvalue(), selection
 
 
@@ -253,6 +255,7 @@ def _restart_worker(inst, n, key, rpc):
         if receipt['phase'] == 'stopping':
             usage = captured_restart_usage(fresh, current, row)
             text, selection = restart_brief(fresh, current, row)
+            _m_launch_policy.require_admission(fresh, current, 'worker', selection, text)
             marker = 'native-restart: ' + identity + '-' + receipt['episode']
             receipt.update(phase='launching', usage=usage, workspace=workspace, modelSelection=selection, marker=marker)
             # Launch has no idempotency key. Persist intent FIRST, never repeat an
@@ -375,6 +378,7 @@ def launch_worker(inst, n, key, rpc=None):
                     if thread['worktreePath'] == workspace:
                         raise ValueError('existing unbound conversation uses this workspace; adopt it explicitly')
                 text, selection = restart_brief(fresh, current, row)
+                _m_launch_policy.require_admission(fresh, current, 'worker', selection, text)
                 marker = 'native-launch: ' + identity + '-' + os.urandom(12).hex()
                 receipt = {'job': key, 'host': host, 'phase': 'launching', 'workspace': workspace,
                            'modelSelection': selection, 'marker': marker, 'at': inst.now()}

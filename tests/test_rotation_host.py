@@ -92,6 +92,33 @@ class RotationHost(Scenario):
         scoped.assert_called_once()
         self.assertFalse(any(name == 't3_thread_launch' for name, _ in self.calls))
 
+    def declare(self, **keys):
+        path = self.root / 'instance.md'
+        path.write_text(path.read_text().replace('---\n', '---\n' + ''.join(f'{k}: {v}\n' for k, v in keys.items()), 1))
+        self.inst = self.m.Instance(self.root)
+        self.n = self.inst.node('root')
+
+    def test_successor_launch_carries_an_explicit_checked_selection(self):
+        # No declaration: the predecessor's observed model, passed explicitly, never a host default.
+        self.assertEqual(self.rotate()['state'], 'launched')
+        launch = next(args for name, args in self.calls if name == 't3_thread_launch')
+        self.assertEqual(launch['modelSelection'], {'instanceId': 'codex', 'model': 'fixture-model'})
+
+    def test_successor_uses_declared_coordinator_selection_and_refuses_a_forbidden_one(self):
+        self.declare(launch_allow_coordinator='other-agent/model-c', launch_effort_coordinator='high')
+        self.assertEqual(self.rotate()['state'], 'launched')
+        launch = next(args for name, args in self.calls if name == 't3_thread_launch')
+        self.assertEqual(launch['modelSelection'], {'instanceId': 'other-agent', 'model': 'model-c',
+                                                    'options': {'reasoningEffort': 'high'}})
+
+    def test_forbidden_declared_coordinator_selection_launches_nothing(self):
+        self.declare(launch_allow_coordinator='retired-account/model-c', launch_forbid='retired-account')
+        for _ in range(2):  # a refusal records no launch intent, so a retry is refused the same way
+            result = self.rotate()
+            self.assertEqual(result['state'], 'pending')
+            self.assertIn('forbidden', result['reason'])
+        self.assertFalse(any(name == 't3_thread_launch' for name, _ in self.calls))
+
     def test_lost_scoped_idle_launch_retries_its_original_request_key(self):
         self.threads['old']['providerInstanceId'] = 'claudeAgent'
         owner = self.m._owners['rotate_coordinator']

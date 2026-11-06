@@ -17,6 +17,7 @@ from .briefs import AUTOMATED_TURN_PREFIX, COORDINATOR_STARTUP, automated_brief
 _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 _m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
 _m_knowledge = _m_common.LazyModule(__package__, 'knowledge')
+_m_launch_policy = _m_common.LazyModule(__package__, 'launch_policy')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_schedules = _m_common.LazyModule(__package__, 'schedules')
 
@@ -90,6 +91,7 @@ def provision_coordinator(inst, nid, selection, require_no_auto_settle=False):
     n = inst.node(nid)
     if not selection.get('model') or not selection.get('instanceId') or selection['model'] == 'runtime default':
         raise ValueError('coordinator requires a configured model and provider instance')
+    _m_launch_policy.require_selection(inst, n, 'coordinator', selection)
     if n['sealed'] and not n.get('home_path'):
         raise ValueError('sealed node needs an external home before host provisioning')
     with _m_instance.brain_lock(inst):

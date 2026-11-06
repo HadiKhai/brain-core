@@ -15,6 +15,7 @@ _m_host = _m_common.LazyModule(__package__, 'host_lifecycle')
 _m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
 _m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
+_m_launch_policy = _m_common.LazyModule(__package__, 'launch_policy')
 _m_machine = _m_common.LazyModule(__package__, 'machine')
 _m_rotation = _m_common.LazyModule(__package__, 'rotation')
 _m_settlement = _m_common.LazyModule(__package__, 'settlement')
@@ -151,11 +152,14 @@ def rotate_coordinator(inst, n, rpc=None):
             workspace = old_thread.get('worktreePath')
             if not isinstance(workspace, str) or not Path(workspace).is_dir() or Path(workspace).is_symlink():
                 raise ValueError('rotation requires the observed existing coordinator workspace')
+            # The successor never inherits a host default: the declared (else observed) model, checked
+            # before any intent is recorded, so a refusal leaves no launch outcome to reconcile.
+            selection = _m_launch_policy.coordinator_selection(fresh, current, old_thread)
             ticket = os.urandom(12).hex()
             receipt = {'version': 1, 'node': n['id'], 'phase': 'launching', 'old': old, 'ticket': ticket,
                        'tasks': owned, 'projects': projects, 'at': inst.now(),
                        'old_sessions': list(current['local'].get('coordinator_sessions', [])),
-                       'workspace': workspace}
+                       'workspace': workspace, 'modelSelection': selection}
             publish(receipt)
             latest = _m_instance.Instance(inst.root).node(n['id'])
             if latest['local'].get('coordinator') != old:
@@ -168,7 +172,7 @@ def rotate_coordinator(inst, n, rpc=None):
                 'if its native environment does not provide one. This command rebinds schedules from this '
                 'thread, preserves all open/parked work and retains the old coordinator until safely terminal. '
                 'Never cancel or abandon delegated children to rotate.\n')
-            if old_thread.get('providerInstanceId') == 'claudeAgent':
+            if selection['instanceId'] == 'claudeAgent':
                 receipt.update(scoped=True, message=message)
                 publish(receipt)
                 response = _m_startup.launch_scoped(fresh, current, rpc, ticket, message, receipt, publish)
@@ -176,7 +180,8 @@ def rotate_coordinator(inst, n, rpc=None):
             else:
                 response = _m_host.host_object(rpc, 't3_thread_launch', {'title': n['id'] + ' coordinator',
                     'projectId': current['local'].get('host_project') or projects[0], 'message': message,
-                    'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace}})
+                    'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace},
+                    'modelSelection': selection})
             new = response.get('threadId')
             if not isinstance(new, str) or not new or new in inventory:
                 raise ValueError('rotation launch outcome unknown; no repeat launch permitted')

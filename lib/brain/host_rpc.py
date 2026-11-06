@@ -10,6 +10,10 @@ class HostRPCError(RuntimeError):
     """Unavailable transport, rejected operation or unknown delivery outcome."""
 
 
+class HostRPCRejected(HostRPCError):
+    """The host answered and refused the call: a confirmed failure, not an unknown outcome."""
+
+
 def call(tool_name, arguments):
     """Call the app-owned bridge and decode its JSON tool result.
 
@@ -59,11 +63,11 @@ def call(tool_name, arguments):
         raise HostRPCError(f'{tool_name}: native host returned invalid JSON; delivery outcome unknown') from None
     if isinstance(value, dict) and value.get('jsonrpc') == '2.0':
         if 'error' in value or 'result' not in value:
-            raise HostRPCError(f'{tool_name}: native host RPC rejected the request')
+            raise HostRPCRejected(f'{tool_name}: native host RPC rejected the request')
         value = value['result']
     if isinstance(value, dict):
         if value.get('isError'):
-            raise HostRPCError(f'{tool_name}: native host tool rejected the request')
+            raise HostRPCRejected(f'{tool_name}: native host tool rejected the request')
         if 'structuredContent' in value:
             return value['structuredContent']
         blocks = value.get('content')

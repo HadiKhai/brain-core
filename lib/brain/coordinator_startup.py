@@ -7,6 +7,7 @@ import re
 from . import common as _m_common
 from . import instance as _m_instance
 _m_host = _m_common.LazyModule(__package__, 'host_lifecycle')
+_m_launch_policy = _m_common.LazyModule(__package__, 'launch_policy')
 
 
 def profile_home():
@@ -86,10 +87,13 @@ def launch_scoped(inst, n, rpc, ticket, message, receipt=None, publish=None):
     """Launch idle, install per-launch settings, then deliver idempotent first input."""
     receipt = receipt if receipt is not None else {}
     if not receipt.get('new'):
+        selection = receipt.get('modelSelection') or _m_launch_policy.coordinator_selection(inst, n)
+        _m_launch_policy.require_selection(inst, n, 'coordinator', selection)
         result = _m_host.host_object(rpc, 't3_thread_launch', {'title': n['id'] + ' coordinator',
             'clientRequestId': 'coordinator-launch-' + ticket,
             'projectId': n['local'].get('host_project') or n['local'].get('home_project'),
-            'workspaceStrategy': {'type': 'worktree', 'baseRef': 'HEAD', 'startFromOrigin': False}})
+            'workspaceStrategy': {'type': 'worktree', 'baseRef': 'HEAD', 'startFromOrigin': False},
+            'modelSelection': selection})
         if not isinstance(result.get('threadId'), str) or not result['threadId']:
             raise ValueError('coordinator launch outcome unknown; retain intent')
         receipt['new'] = result['threadId']

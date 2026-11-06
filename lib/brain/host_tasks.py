@@ -13,7 +13,9 @@ _m_briefs = _m_common.LazyModule(__package__, 'briefs')
 _m_host_observations = _m_common.LazyModule(__package__, 'host_observations')
 _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 _m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
+_m_launch_policy = _m_common.LazyModule(__package__, 'launch_policy')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
+_m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 
 
@@ -73,24 +75,89 @@ def host_delegate(inst, n, task, target, key, rpc=None):
     payload = {'task': _m_briefs.automated_brief(task), 'target': target,
                'mode': 'async', 'clientRequestId': 'brain-delegate-' + identity}
     digest = _m_hosts.wake_binding(json.dumps(payload, sort_keys=True))
+    selection = {k: target[k] for k in ('providerInstanceId', 'model', 'options') if k in target}
+    _m_launch_policy.require_selection(inst, n, 'worker', selection)
+    prior = host_task_read(inst)['tasks'].get(identity)
+    if prior and prior.get('input_digest') != digest:
+        raise ValueError('delegation key already names different work')
+    if prior and prior.get('taskId'):
+        return dict(prior)
+    if prior and prior.get('recovery'):
+        return delegation_recovery(inst, n, identity, payload, rpc)
+    _m_launch_policy.require_admission(inst, n, 'worker', selection, payload['task'], 'delegate')
     with host_task_store(inst) as data:
         row = data['tasks'].get(identity)
         if row and row.get('input_digest') != digest:
             raise ValueError('delegation key already names different work')
-        if row and row.get('taskId'):
+        if row and (row.get('taskId') or row.get('recovery')):
             return dict(row)
         data['tasks'][identity] = {'node': n['id'], 'parent_thread': parent,
                                   'clientRequestId': payload['clientRequestId'], 'input_digest': digest,
                                   'created_at': inst.now(), 'taskId': None}
     if inst.__class__(inst.root).node(n['id'])['local'].get('coordinator') != parent:
         raise ValueError('parent binding changed before delegation')
-    result = rpc('delegate_task', payload)  # no automatic mutation retry, no instance writer lock
+    try:
+        result = rpc('delegate_task', payload)  # no automatic mutation retry, no instance writer lock
+    except _m_rpc.HostRPCRejected as error:
+        # Only the host's own refusal is a confirmed route failure; unknown outcomes still raise.
+        with host_task_store(inst) as data:
+            data['tasks'][identity]['route_failure'] = {'at': inst.now(), 'error': str(error)[:200]}
+        return delegation_recovery(inst, n, identity, payload, rpc)
     if not isinstance(result, dict) or not isinstance(result.get('taskId'), str) or not result['taskId']:
         raise ValueError('delegation outcome unknown; retry explicitly with the same stable key')
     with host_task_store(inst) as data:
         row = data['tasks'][identity]
         row.update(taskId=result['taskId'], childThreadId=result.get('childThreadId'))
         return dict(row)
+
+
+def delegation_recovery(inst, n, identity, payload, rpc):
+    """After a confirmed route failure, run the same work once as a visible thread on the same model.
+
+    Intent is recorded before the launch; an unknown launch outcome is never repeated, the
+    provider and model are never switched, and the returned thread's identity is checked.
+    """
+    target = payload['target']
+    marker = 'delegate-recovery: ' + identity
+    selection = {'instanceId': target['providerInstanceId'], 'model': target['model'],
+                 **({'options': target['options']} if 'options' in target else {})}
+    with host_task_store(inst) as data:
+        row = data['tasks'][identity]
+        recovery = row.get('recovery')
+        if recovery and recovery.get('phase') == 'launched':
+            return dict(row)
+        if recovery and recovery.get('phase') == 'mismatch':
+            raise ValueError('route recovery thread ran a different provider or model; not adopted, no repeat')
+        if recovery:
+            raise ValueError('route recovery launch outcome unknown; inspect the host for ' + marker + ', no repeat')
+        if not row.get('route_failure'):
+            raise ValueError('route recovery requires a confirmed delegation failure')
+        row['recovery'] = {'phase': 'launching', 'marker': marker, 'at': inst.now()}
+    _m_launch_policy.require_admission(inst, n, 'worker', selection, payload['task'], 'delegate')
+    current = inst.__class__(inst.root).node(n['id'])['local']
+    project = current.get('home_project') or current.get('host_project')
+    if current.get('coordinator') != n['local'].get('coordinator') or not project:
+        raise ValueError('route recovery needs the same bound parent and a recorded home project')
+    try:
+        response = rpc('t3_thread_launch', {'title': n['id'] + ' delegated work (route recovery)',
+            'projectId': project, 'workspaceStrategy': {'type': 'root'},
+            'modelSelection': selection, 'message': marker + '\n\n' + payload['task']})
+    except Exception:
+        raise ValueError('route recovery launch outcome unknown; intent retained, no repeat') from None
+    thread = response.get('threadId') if isinstance(response, dict) else None
+    if not isinstance(thread, str) or not thread:
+        raise ValueError('route recovery launch outcome unknown; intent retained, no repeat')
+    observed = rpc('t3_thread_read', {'threadId': thread, 'limit': 1})
+    observed = observed.get('thread') if isinstance(observed, dict) else None
+    same = (isinstance(observed, dict) and observed.get('threadId') == thread and
+            observed.get('providerInstanceId') == selection['instanceId'] and observed.get('model') == selection['model'])
+    with host_task_store(inst) as data:
+        row = data['tasks'][identity]
+        row['recovery'].update(phase='launched' if same else 'mismatch', thread=thread)
+        result = dict(row)
+    if not same:
+        raise ValueError('route recovery thread does not run the requested provider and model; it was not adopted')
+    return result
 
 
 def host_task_refresh(inst, rpc=None):
@@ -187,6 +254,6 @@ def cmd_delegate(a):
         task = open(a.task_file).read()
         target = json.loads(open(a.target_file).read())
         result = host_delegate(inst, inst.node(a.id), task, target, a.key)
-        print(result['taskId'])
+        print(result.get('taskId') or 'route failed; same work running as visible thread ' + result['recovery']['thread'])
     except (Exception, SystemExit):
         _m_common.die('delegation unavailable or outcome unknown; retain the stable key for explicit retry')

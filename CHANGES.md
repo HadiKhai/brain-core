@@ -5,6 +5,20 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Refuse launches and sends that break declared launch policy
+
+New optional instance keys (`docs/launch-policy.md`) declare which provider/model and
+effort each role may launch on, forbidden models or accounts, a cap on admitted
+non-coordinator launches per provider, and pointer files whose line 1 names a role's
+current thread. The PreToolUse hook refuses a `t3_thread_launch` or `delegate_task` that
+breaks them, a capped launch without an open job's `brain-job:` mark, and a
+`t3_thread_send` to a thread its pointer file no longer names. Coordinator provisioning,
+rotation and native worker launches check the same policy before their host call;
+rotation now always passes an explicit model selection. `brain delegate` recovers a
+host-refused delegation once as a visible thread on the same model. Nothing changes until
+keys are declared. After upgrading: declare the keys your rules require in instance.md
+(and per node where a node restricts its builders).
+
 ## 2026-11-06: Carry accepted reviews across pure rebases
 
 A job rebased onto a newer main keeps its accepted review when code proves the

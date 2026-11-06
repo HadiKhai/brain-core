@@ -15,6 +15,7 @@ from . import common as _m_common
 from . import instance as _m_instance
 
 _m_guard = _m_common.LazyModule(__package__, 'guard')
+_m_launch_policy = _m_common.LazyModule(__package__, 'launch_policy')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
@@ -166,12 +167,16 @@ def cmd_hook_pretool(a):
                       (Path(p).resolve() == Path(cwd).resolve() or Path(p).resolve() in Path(cwd).resolve().parents)]
             if depths:
                 matches.append((max(depths), n))
-        if not matches:
+        nearest = [n for depth, n in matches if depth == max(d for d, _ in matches)] if matches else []
+        # Launch, delegation and send policy binds wherever the call is made: outside a node, the root's.
+        policy = nearest[0] if len(nearest) == 1 else inst.node('root')
+        reason = _m_launch_policy.pretool_launch_reason(inst, policy, data)
+        if reason:
+            print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',
+                  'permissionDecision': 'deny', 'permissionDecisionReason': _m_guard.redact(reason, _m_guard.never_terms(policy))}}))
             return
-        nearest = [n for depth, n in matches if depth == max(d for d, _ in matches)]
         if len(nearest) != 1:
             return
-        reason = None
         sender = data.get('session_id')
         if isinstance(sender, str) and sender.strip():
             from . import messages as _m_messages
