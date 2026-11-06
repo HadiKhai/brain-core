@@ -22,6 +22,16 @@ section prefaces and reference pointers are not separate rule declarations.
 Inline comments stay verbatim in the brief but do not hide bullets or change
 their content IDs. Source wording, including comments, still binds the digest.
 
+Briefs preserve instruction prose verbatim. In structural `Gate:` and `Applies:`
+annotations only, explicit references to a different home render as `other home`.
+Own-home gates, unowned relative gates, `all`, spacing outside replaced metadata,
+and instruction prose remain unchanged. Fenced examples and comments are not
+treated as annotation declarations. The normal naming guard still checks the
+entire resulting brief; a forbidden name in prose is never exempted.
+The single existing digest remains bound to canonical source rules, including
+their original metadata. Brief generation, receipt validation and readiness use
+that same definition; the privacy projection creates no alternate digest.
+
 Every review returns the JSON `rule_checks` table described in
 [the review skill](../skills/review/SKILL.md). Copy the brief's `rules_digest` and
 table into the existing review identity receipt submitted with

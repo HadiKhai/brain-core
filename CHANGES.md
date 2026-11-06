@@ -5,6 +5,13 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Render cross-home rule annotations privately
+
+Generated rule sections replace explicit foreign-home Gate/Applies metadata
+with neutral placeholders while retaining instruction prose and own-home refs.
+The naming guard remains active. Canonical rule digests and complete per-rule
+receipt checks keep the same shared definition; no rule-file edits are needed.
+
 ## 2026-11-06: Keep local CLI capture failure diagnostics
 
 Instruction capture now retains bounded raw CLI output and exact failure causes

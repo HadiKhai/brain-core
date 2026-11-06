@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 
-from .rule_syntax import markdown_structure as _structure, node_rule_id
+from .rule_syntax import gate_references, markdown_structure as _structure, node_rule_id
 
 RULES_START = '<!-- brain:applicable-rules -->'
 RULES_END = '<!-- brain:applicable-rules:end -->'
@@ -120,6 +120,49 @@ def checked_rules(n):
         common.die('cannot assemble applicable rules: ' + str(error))
 
 
+def rendered_rule_text(text, node_id):
+    """Project only structural annotations; prose and the canonical digest stay intact.
+
+    Explicit owners identify homes without inspecting rule meaning or consulting
+    the naming guard. Foreign references hide their entire location/selector so
+    those fields cannot repeat a home name. Unowned and own-home refs stay exact.
+    """
+    visible = _structure(text)
+    fields = list(re.finditer(r'(?:^|[ \t])(Gate|Applies):[ \t]*([^\r\n]*?)'
+                              r'(?=[ \t]+(?:Gate|Applies):|\r?$)', visible, re.M))
+    for field in reversed(fields):
+        start, end = field.span(2)
+        original = text[start:end]
+        if original != visible[start:end]:
+            # Embedded comments are not owner metadata. Preserve ambiguous fields
+            # intact and let the ordinary guard refuse any private name.
+            continue
+        value = original.strip()
+        if field[1] == 'Gate':
+            try:
+                refs = gate_references(value)
+            except ValueError:
+                continue  # A prose label is not a structurally valid Gate ref.
+            if not refs:  # none (reason) is metadata, but has no foreign owner.
+                continue
+            entries = value.split('; ')
+            rendered = '; '.join(entry if owner in (None, node_id) else 'other home'
+                                 for entry, (owner, _, _) in zip(entries, refs))
+        else:
+            entries = re.split(r'(,[ \t]*)', value)
+            for i in range(0, len(entries), 2):
+                if entries[i].strip() not in ('all', node_id):
+                    entries[i] = 'other home'
+            rendered = ''.join(entries)
+        if rendered != value:
+            # Preserve surrounding spaces, CRLF and every byte outside metadata.
+            leading = len(original) - len(original.lstrip())
+            trailing = len(original) - len(original.rstrip())
+            text = text[:start] + original[:leading] + rendered + (
+                original[len(original) - trailing:] if trailing else '') + text[end:]
+    return text
+
+
 def rules_lines(n, rules=None):
     rules = checked_rules(n) if rules is None else rules
     if not rules:
@@ -130,7 +173,8 @@ def rules_lines(n, rules=None):
            'Rules digest: ' + rules_digest(rules), '']
     for rule in rules:
         out += ['### Rule ' + rule['id'], '',
-                'Source: ' + rule['source'] + ':' + str(rule['line']), '', rule['text'], '']
+                'Source: ' + rule['source'] + ':' + str(rule['line']), '',
+                rendered_rule_text(rule['text'], n['id']), '']
     return out + [RULES_END, '']
 
 

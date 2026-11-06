@@ -392,6 +392,63 @@ class RuleReviewContracts(Scenario):
         self.assertIn('"status": "pass|fail|n/a"', text)
         self.assertNotIn('### Rule R02\n', text)
 
+    def test_foreign_annotation_projection_preserves_prose_guard_and_single_digest(self):
+        root, home, wt = self.job()
+        m = core_loader.SourceFileLoader('foreign_rule_projection', str(_test_verify.CORE / 'bin/brain')).load_module()
+        index = root / 'AGENTS.md'
+        prose = '- R01 **Keep  exact wording:** café and `code`.\r\n'
+        annotations = ('  Gate: elsewhere:tests/test_gate.py::test_elsewhere; '
+                       'a:tests/test_local.py::test_local Applies: a, elsewhere\r\n')
+        index.write_bytes(index.read_bytes() + (prose + annotations).encode('utf-8'))
+        (root / 'library/instance-rules.md').write_text(
+            '<!-- rule:R01 -->\n- Complete instruction.\nApplies: all\n')
+        (root / 'nodes/a/never-name.txt').write_text('elsewhere\n')
+        n = m.Instance(root).node('a')
+        rules = m.applicable_rules(n)
+        self.assertEqual(len(rules), 1)
+        canonical = rules[0]['text']
+        digest = m.rules_digest(rules)
+        text = '\n'.join(m.rules_lines(n, rules=rules))
+        self.assertIn(prose, text)
+        self.assertIn('Gate: other home; a:tests/test_local.py::test_local Applies: a, other home\r\n', text)
+        self.assertNotIn('elsewhere', text)
+        m.no_terms_in(n, text, 'rendered fixture rules')
+        self.assertIn('Rules digest: ' + digest, text)
+        self.assertIn('rules_digest: ' + digest, '\n'.join(m.review_rule_lines(n, rules=rules)))
+        self.assertEqual(m.applicable_rules(n)[0]['text'], canonical)
+        good = {'verdict': 'pass', 'rules_digest': digest, 'rule_checks': [
+            {'id': 'R01', 'status': 'pass', 'evidence': ['calc.py:1']}]}
+        m.validate_rule_checks(n, good)
+        with self.assertRaisesRegex(ValueError, 'missing rule ids: R01'):
+            m.validate_rule_checks(n, dict(good, rule_checks=[]))
+        # Native brief generation must still run the naming guard, on both paths.
+        for command, args in [('brief', ['--small', '--task', 'Inspect the calculation']),
+                              ('review', ['--branch', 'job', '--built-by', 'claude'])]:
+            output = self.b(root, command, 'a', *args)
+            self.assertNotIn('elsewhere', output)
+            self.assertIn(prose.rstrip('\r\n'), output)
+            self.assertIn(digest, output)
+
+    def test_own_annotations_and_nonmetadata_prose_remain_verbatim(self):
+        root, home, wt = self.job()
+        m = core_loader.SourceFileLoader('own_rule_projection', str(_test_verify.CORE / 'bin/brain')).load_module()
+        owner = m.rules_lines.__globals__['rendered_rule_text']
+        own = ('- Preserve  exact prose. Gate: a:tests/test_a.py::test_a; '
+               'tests/test_b.py::test_b Applies: a\r\n')
+        self.assertEqual(owner(own, 'a'), own)
+        prose_label = '- Preserve the Gate: explanatory prose exactly.\n'
+        self.assertEqual(owner(prose_label, 'a'), prose_label)
+        examples = ('- The prose names elsewhere and must remain intact.\n'
+                    '```text\nGate: elsewhere:tests/test_a.py::test_a\nApplies: elsewhere\n```\n'
+                    '<!-- Gate: elsewhere:tests/test_a.py::test_a -->\n')
+        self.assertEqual(owner(examples, 'a'), examples)
+        commented = '- Preserve prose. Gate: elsewhere:tests/test_a.py::test_a <!-- keep this comment -->\n'
+        self.assertEqual(owner(commented, 'a'), commented)
+        (root / 'nodes/a/never-name.txt').write_text('elsewhere\n')
+        n = m.Instance(root).node('a')
+        with self.assertRaises(SystemExit):
+            m.no_terms_in(n, owner(examples, 'a'), 'unmodified prose')
+
     def test_recorded_contract_contains_rules_and_regeneration_replaces_snapshot(self):
         root, home, wt = self.job()
         rule, node_rule = self.rules(root)

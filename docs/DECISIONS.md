@@ -1,5 +1,14 @@
 # Code decisions
 
+## Private rendering of cross-home rule annotations
+
+Rule applicability and digests continue to use canonical source text. Only the
+rendered values of structural Gate/Applies fields replace explicit foreign-home
+references with a neutral placeholder. Own-home and unowned gates remain exact;
+instruction prose, fenced examples and comments remain unchanged. Every rendered
+brief still passes through the normal naming guard. The display projection does
+not create a second digest or exempt private names in instruction prose.
+
 ## Subscription transport for instruction capture
 
 An API key selects the existing isolated stdlib HTTP client. Without one,
