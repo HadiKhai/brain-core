@@ -2296,3 +2296,37 @@ class JobPreviewReceipts(Scenario):
                     m.record_preview_receipt(inst, n, 'job', data)
                 state.assert_not_called()
                 git.assert_not_called()
+
+
+class AgentGitCommands(Scenario):
+    """R74: a directory-changing compound before git is refused at the tool call, per runtime adapter."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = core_loader.SourceFileLoader('git_shape_fixture', str(CORE / 'bin/brain')).load_module()
+        self.root = self.init('alice')
+
+    def hook(self, tool, tool_input):
+        payload = {'cwd': str(self.root), 'session_id': 'fixture-agent', 'tool_name': tool, 'tool_input': tool_input}
+        with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.m.cmd_hook_pretool(argparse.Namespace())
+        return json.loads(out.getvalue())['hookSpecificOutput'] if out.getvalue().strip() else None
+
+    def test_directory_changing_compound_git_is_denied_and_git_dash_c_is_allowed(self):
+        refused = ['cd /tmp/app && git status', 'cd /tmp/app; git commit -m "a && b"', 'cd /tmp/app || exit 1\ngit push',
+                   '(cd /tmp/app && git log -1)', 'pushd /tmp/app >/dev/null && FOO=1 git diff',
+                   'cd /tmp/app && /usr/bin/git status']
+        allowed = ['git -C /tmp/app status', 'git status && cd /tmp', 'echo "cd /tmp/app && git status"',
+                   'cd /tmp/app && ls', 'git -C /tmp/app commit -m "cd x && git y"']
+        for tool, key in (('Bash', 'command'), ('exec_command', 'cmd')):
+            for command in refused:
+                with self.subTest(tool=tool, command=command):
+                    decision = self.hook(tool, {key: command})
+                    self.assertIsNotNone(decision)
+                    self.assertEqual(decision['permissionDecision'], 'deny')
+                    self.assertIn('git -C <dir>', decision['permissionDecisionReason'])
+            for command in allowed:
+                with self.subTest(tool=tool, command=command):
+                    self.assertIsNone(self.hook(tool, {key: command}))
+        self.assertIsNone(self.hook('Bash', {'command': 'cd "/tmp/unbalanced && git status'}))  # unparseable: fails open

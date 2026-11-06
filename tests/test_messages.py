@@ -538,3 +538,190 @@ class NativeDispatcher(Scenario):
             self.assertEqual(m.dispatch_if_enabled(inst)['accepted'], 1)
         self.assertEqual(pending[0].read_bytes(), before[pending[0]])
         self.assertEqual(len(list(m.wake_directory(inst, inst.node('root')).glob('*.pending'))), 2)
+
+
+class ReportGates(Scenario):
+    """Coordinator reports and work starts, gated at the tool call or stop that makes them.
+
+    The AI judges are fixtures: meaning is the stub's answer, and the gate only compares
+    that answer's structure with structural turn provenance (operator input, prior tools).
+    """
+    fixture_init_in_process = True
+
+    def setUp(self):
+        import core_loader
+        super().setUp()
+        self.root = self.init('meadow').resolve()  # the hooks resolve their working folder
+        self.m = core_loader.SourceFileLoader('report_gate_fixture', str(CORE / 'bin/brain')).load_module()
+        self.inst = self.m.Instance(self.root)
+        self.inst.local_of('root').update(coordinator='host-coordinator', coordinator_sessions=['runtime-coordinator'])
+        self.inst.save_local()
+        self.n = self.inst.node('root')
+        self.path = self.tmp / 'turns.jsonl'
+        self.records, self.claims, self.kind, self.judged = [], [], 'question', []
+
+    def write(self, *records):
+        import json
+        self.records.extend(records)
+        self.path.write_text(''.join(json.dumps(r) + '\n' for r in self.records))
+
+    def operator(self, text):
+        self.write({'type': 'user', 'timestamp': '2026-01-15T12:00:00Z', 'message': {'role': 'user', 'content': text}})
+
+    def automated(self, text='Wake: check the queue.'):
+        self.write({'type': 'user', 'message': {'role': 'user', 'content': self.m.AUTOMATED_TURN_PREFIX + '\n\n' + text}})
+
+    def tool(self, name, tool_input):
+        self.write({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'call-' + str(len(self.records)),
+                                                                   'name': name, 'input': tool_input}]}},
+                   {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'call-' + str(len(self.records)),
+                                                             'content': 'ok'}]}})
+
+    def ai(self, system, data, schema, **kw):
+        """Fixture judge for both schemas; claim quotes are taken from the judged text."""
+        if 'messages' in schema['properties']:
+            return {'messages': [{'id': row['id'], 'items': [{'kind': self.kind, 'quote': row['text']}]}
+                                 for row in data]}, {}
+        self.judged.append(data['message'])
+        return {'items': [{'kind': kind, 'quote': data['message'] if quote is None else quote}
+                          for kind, quote in self.claims]}, {}
+
+    def stubbed(self):
+        import contextlib
+        from unittest import mock
+        stack = contextlib.ExitStack()
+        for owner in {id(o): o for o in self.m._owners.values()}.values():
+            if hasattr(owner, 'ai_json'):
+                stack.enter_context(mock.patch.object(owner, 'ai_json', side_effect=self.ai))
+        return stack
+
+    def pretool(self, tool, tool_input, session='runtime-coordinator'):
+        import argparse, contextlib, io, json, sys
+        from unittest import mock
+        payload = {'cwd': str(self.root), 'session_id': session, 'transcript_path': str(self.path),
+                   'tool_name': tool, 'tool_input': tool_input}
+        with self.stubbed(), mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.m.cmd_hook_pretool(argparse.Namespace())
+        if not out.getvalue().strip():
+            return None
+        decision = json.loads(out.getvalue())['hookSpecificOutput']
+        self.assertEqual(decision['permissionDecision'], 'deny')
+        return decision['permissionDecisionReason']
+
+    def stop(self, last_message, session='runtime-coordinator'):
+        import argparse, contextlib, io, json, sys
+        from unittest import mock
+        payload = {'cwd': str(self.root), 'session_id': session, 'transcript_path': str(self.path),
+                   'last_assistant_message': last_message}
+        with self.stubbed(), mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                mock.patch.object(self.m, 'capture_hook_questions'), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.m.hook_stop(argparse.Namespace(event='stop'))
+        lines = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+        return next((line['reason'] for line in lines if line.get('decision') == 'block'), None)
+
+    def send(self, message):
+        return self.pretool('mcp__t3-code__t3_thread_send', {'threadId': 'peer-thread', 'message': message})
+
+    def test_question_or_complaint_cannot_start_widen_or_restart_work(self):
+        """R04: launch authority needs an operator order in the turn; meaning comes from the AI only."""
+        self.operator('Why are the tests this slow?')
+        self.claims = [('work_order', None)]
+        prompt = {'prompt': 'Rebuild the test runner.'}
+        self.assertIn('not an order', self.pretool('mcp__t3-code__delegate_task', prompt))
+        self.assertIn('not an order', self.send('Start the runner rebuild now.'))
+        self.claims = []
+        self.assertIn('not an order', self.pretool('Bash', {'command': 'brain lifecycle restart app --job-key k'}))
+        self.assertIsNone(self.send('The tests are slow because each one starts a fresh store.'))
+        self.kind = 'one_off'  # the AI reads an explicit order in the next turn
+        self.operator('Rebuild the test runner now.')
+        self.claims = [('work_order', None)]
+        self.assertIsNone(self.pretool('mcp__t3-code__delegate_task', prompt))
+        self.assertIsNone(self.pretool('Bash', {'command': 'brain lifecycle restart app --job-key k'}))
+        self.kind = 'question'
+        self.automated()  # ordered work started by an automated wake is outside this rule
+        self.assertIsNone(self.pretool('mcp__t3-code__delegate_task', prompt))
+
+    def test_job_drop_cannot_become_a_global_exclusion_without_standing_authority(self):
+        """R91: a drop recorded by the AI as one-off stays with its job; rule writes cannot widen it."""
+        self.operator('Forget about the tracker integration for this redesign.')
+        self.kind = 'one_off'
+        self.claims = [('standing_exclusion', 'never use the tracker')]
+        rule = {'file_path': str(self.root / 'AGENTS.md'), 'old_string': '', 'new_string': '- never use the tracker'}
+        self.assertIn('job at hand only', self.pretool('Edit', rule))
+        self.assertIn('job at hand only', self.pretool('mcp__t3-code__delegate_task',
+                                                       {'prompt': 'Rule for all jobs: never use the tracker.'}))
+        self.claims = []
+        self.assertIsNone(self.pretool('Edit', dict(rule, new_string='- skip the tracker in the redesign job only')))
+        self.judged.clear()
+        self.claims = [('standing_exclusion', 'never use the tracker')]
+        self.assertIsNone(self.pretool('Edit', {'file_path': str(self.root / 'notes.md'), 'old_string': '',
+                                                'new_string': '- never use the tracker'}))
+        self.assertEqual(self.judged, [])  # only rule files are judged
+        self.kind = 'standing_instruction'  # separate explicit operator authority, in a later turn
+        self.operator('From now on, never use the tracker in any job.')
+        self.assertIsNone(self.pretool('Edit', rule))
+
+    def test_automated_cancellation_requires_actual_operator_message_for_operator_attribution(self):
+        """R35: without operator input in the turn, a cancelled tool call cannot be reported as his decision."""
+        self.automated()
+        self.tool('mcp__t3-code__t3_thread_list', {})
+        self.claims = [('cancel_blamed_on_operator', 'you rejected the thread list')]
+        reason = self.send('Status: you rejected the thread list, so I stopped.')
+        self.assertIn('host cancelled', reason)
+        self.assertIn('retry once', reason)
+        self.claims = []
+        self.assertIsNone(self.send('Status: the host cancelled t3_thread_list; I used brain due instead.'))
+        self.operator('Stop listing threads.')
+        self.claims = [('cancel_blamed_on_operator', 'you rejected the thread list')]
+        self.assertIsNone(self.send('Status: you rejected the thread list, so I stopped.'))
+
+    def test_fix_report_requires_a_prior_source_or_diff_read_in_the_reporting_turn(self):
+        """R79: a fix claim is refused before any read, after a read in an older turn, and passes after one now."""
+        self.operator('Is the gate fixed?')
+        self.tool('Bash', {'command': 'git -C /tmp/app diff main -- lib/gate.py'})
+        self.operator('Report the fix to the node.')
+        self.kind = 'one_off'
+        self.claims = [('fix_claim', 'the gate is fixed')]
+        self.assertIn('Read the diff or file', self.send('Done: the gate is fixed, 42 of 42 pass.'))
+        self.tool('Bash', {'command': 'brain status app'})
+        self.assertIn('Read the diff or file', self.send('Done: the gate is fixed, 42 of 42 pass.'))
+        for name, tool_input in (('Read', {'file_path': '/tmp/app/lib/gate.py'}),
+                                 ('exec_command', {'cmd': 'git -C /tmp/app show HEAD -- lib/gate.py'})):
+            with self.subTest(tool=name):
+                self.operator('Report the fix to the node.')
+                self.tool(name, tool_input)
+                self.assertIsNone(self.send('Done: the gate is fixed, 42 of 42 pass.'))
+        self.operator('And the final message?')
+        self.assertIn('Read the diff or file', self.stop('The gate is fixed: the gate is fixed.'))
+
+    def test_live_claim_requires_current_browser_observation_and_unseen_build_is_unproven(self):
+        """R23: "live" needs a page observation in this turn, at the send and at an operator turn's stop."""
+        self.operator('Is the new page live?')
+        self.claims = [('live_claim', 'the page is live')]
+        self.assertIn('seen working on the page', self.send('Update: the page is live.'))
+        self.assertIn('seen working on the page', self.stop('Yes, the page is live.'))
+        self.tool('mcp__t3-code__preview_snapshot', {'tabId': 'fixture'})
+        self.assertIsNone(self.send('Update: the page is live.'))
+        self.assertIsNone(self.stop('Yes, the page is live.'))
+        self.claims = []
+        self.operator('And now?')
+        self.assertIsNone(self.stop('It is on main but not proven yet: nobody has seen it working.'))
+
+    def test_judge_structure_scope_and_fast_automated_stops(self):
+        """Invented quotes fail open; workers and automated stops never call the judge."""
+        import time
+        self.operator('Is the new page live?')
+        self.claims = [('live_claim', 'an invented span')]
+        self.assertIsNone(self.send('Update: the page is live.'))
+        self.claims = [('live_claim', 'the page is live')]
+        self.judged.clear()
+        self.assertIsNone(self.pretool('mcp__t3-code__t3_thread_send', {'threadId': 'p', 'message': 'Update: the page is live.'},
+                                       session='some-worker'))
+        self.assertEqual(self.judged, [])
+        self.automated()
+        started = time.monotonic()
+        self.assertIsNone(self.stop('Yes, the page is live.'))
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(self.judged, [])

@@ -24,6 +24,7 @@ _m_briefs = _m_common.LazyModule(__package__, 'briefs')
 _m_conversation_answers = _m_common.LazyModule(__package__, 'conversation_answers')
 _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_instruction_capture = _m_common.LazyModule(__package__, 'instruction_capture')
+_m_report_gates = _m_common.LazyModule(__package__, 'report_gates')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_status = _m_common.LazyModule(__package__, 'status')
@@ -1718,12 +1719,22 @@ def hook_stop(a):
         pass  # question bookkeeping must not suppress existing reminders or fail a turn
     reasons = []
     try:
+        report = _m_report_gates.stop_reason_async(inst, n, data)  # runs beside capture's classification
+    except (Exception, SystemExit):
+        report = None
+    try:
         reason = _m_instruction_capture.capture_stop(inst, n, data)
         if reason:
             reasons.append(reason)
     except (Exception, SystemExit):
         _m_instruction_capture.best_effort_gap(inst, n, _m_instruction_capture.capture_key(n, data),
                                              'capture_unexpected_error')
+    try:
+        reason = report() if report else None
+        if reason:
+            reasons.append(reason)
+    except (Exception, SystemExit):
+        pass  # the report gate fails open, as other hook bookkeeping does
     last_message = data.get("last_assistant_message")
     if not data.get("stop_hook_active") and isinstance(data.get("transcript_path"), str):
         try:

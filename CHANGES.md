@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Refuse git directory compounds and unsupported coordinator reports at the tool call
+
+The PreToolUse hook denies any shell command that changes directory (`cd`, `pushd`)
+and then runs git; run `git -C <dir> ...` instead. For a bound coordinator session, sends,
+launches, `brain lifecycle launch|restart` and rule-file writes are checked: an AI judge
+(fixed schema, exact quotes) reads the outgoing text and the capture classifier reads the
+operator's messages in the turn. Refused: starting work in a turn whose operator
+messages order nothing; widening a one-off drop into a standing rule; attributing a
+cancelled tool to the operator in a turn without an operator message; a fix claim with no diff or
+file read earlier in the turn; a live claim with no browser observation in the turn. An
+operator turn's Stop applies the last two to its final message; automated stops never
+call the judge. An unavailable judge fails open. Nothing to do after upgrading.
+
 ## 2026-11-06: Refuse evidence-rule breaks where they happen
 
 `brain evidence <node> --branch <b> --kind <kind> --file <json>` records

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -58,6 +59,58 @@ def tool_action(data):
     return {'tool': tool, 'arguments': args, 'cwd': cwd}
 
 
+SHELL_SEPARATORS = {';', '&', '&&', '|', '||', '|&', '(', ')', '\n', ';;'}
+
+
+def shell_segments(command):
+    """Simple commands as word lists, split on shell control operators (syntax only).
+
+    Unparseable input yields no segments: the guard fails open, as hook errors do.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()\n')
+    lexer.whitespace, lexer.whitespace_split = ' \t\r', True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    segments, words = [], []
+    for token in tokens + ['\n']:
+        if token in SHELL_SEPARATORS:
+            if words:
+                segments.append(words)
+            words = []
+        else:
+            words.append(token)
+    return segments
+
+
+def command_words(words):
+    """The command word and its arguments, after leading NAME=value assignments."""
+    i = 0
+    while i < len(words) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[i], re.S):
+        i += 1
+    return words[i:]
+
+
+def directory_changing_git(command):
+    """True when a compound changes directory (cd/pushd) and then runs git."""
+    moved = False
+    for words in shell_segments(command):
+        words = command_words(words)
+        if not words:
+            continue
+        name = os.path.basename(words[0])
+        if name in ('cd', 'pushd'):
+            moved = True
+        elif moved and name == 'git':
+            return True
+    return False
+
+
+GIT_DIRECTORY_REASON = ('Run git as `git -C <dir> ...`, never `cd <dir> && git ...` or `cd <dir>; git ...`: '
+                        'that compound waits on a host approval nobody sees, which is a stall. Rewrite the command.')
+
+
 def action_fingerprint(action):
     return hashlib.sha256(json.dumps(action, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
@@ -102,6 +155,8 @@ def matching_action(rules, action):
 
 def pretool_decision(inst, n, data):
     action = tool_action(data)
+    if action['tool'] == 'shell' and directory_changing_git(action['command']):
+        return GIT_DIRECTORY_REASON
     rules = forbidden_actions(n)
     if not matching_action(rules, action):
         return None
@@ -184,6 +239,9 @@ def cmd_hook_pretool(a):
             if guard:
                 reason = guard(inst, sender, data.get('tool_name'), data.get('tool_input'))
         reason = reason or pretool_decision(inst, nearest[0], data)
+        if not reason:
+            from . import report_gates as _m_report_gates
+            reason = _m_report_gates.pretool_reason(inst, nearest[0], data)
         if reason:
             print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',
                   'permissionDecision': 'deny', 'permissionDecisionReason': _m_guard.redact(reason, _m_guard.never_terms(nearest[0]))}}))
