@@ -780,3 +780,73 @@ class ReportGates(Scenario):
         self.assertIsNone(self.stop('Yes, the page is live.'))
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(self.judged, [])
+
+    def codex(self, name, arguments, output):
+        """A Codex rollout call and its native output, paired by call_id."""
+        import json
+        ident = 'codex-' + str(self.calls)
+        self.calls += 1
+        self.write({'type': 'response_item', 'payload': {'type': 'function_call', 'call_id': ident, 'name': name,
+                                                         'arguments': json.dumps(arguments)}},
+                   {'type': 'response_item', 'payload': {'type': 'function_call_output', 'call_id': ident,
+                                                         'output': output}})
+
+    def test_codex_nonzero_exit_and_mcp_is_error_are_never_evidence(self):
+        """R79/R23: every native error outcome, and any unknown one, fails closed as evidence."""
+        import json
+        diff = ('exec_command', {'cmd': 'git -C /tmp/app diff main -- lib/gate.py'})
+        snapshot = 'mcp__t3-code__preview_snapshot'
+        mcp_error = json.dumps({'content': [{'type': 'text', 'text': 'Tab not found'}], 'isError': True})
+        failing_reads = [json.dumps({'exit_code': 1, 'output': 'fatal'}),
+                         'Chunk ID: a1\nWall time: 0.1 seconds\nProcess exited with code 128\nOutput:\nfatal: bad revision',
+                         'Exit code: 1\nWall time: 0.1 seconds\nOutput:\nfatal: bad revision',
+                         [{'type': 'input_text', 'text': 'Script completed\nOutput:\n'},
+                          {'type': 'input_text', 'text': json.dumps({'exit_code': 2, 'output': ''})}],
+                         'fatal: not a git repository']  # no native outcome marker: unknown
+        self.kind = 'one_off'
+        for output in failing_reads:
+            with self.subTest(read=output):
+                self.operator('Report the fix.')
+                self.codex(diff[0], diff[1], output)
+                self.claims = [self.claim('fix_claim', 'the gate is fixed', support='cite')]
+                self.assertIn('Read the diff or file', self.send('Done: the gate is fixed.'))
+        for record in ('codex', 'claude'):
+            with self.subTest(observation=record):
+                self.operator('Is the page live?')
+                if record == 'codex':
+                    self.codex(snapshot, {'tabId': 'fixture'}, mcp_error)
+                else:
+                    self.tool(snapshot, {'tabId': 'fixture'}, result=mcp_error)  # is_error false, isError true
+                self.claims = [self.claim('live_claim', 'the page is live', support='cite')]
+                self.assertIn('seen working on the page', self.send('Update: the page is live.'))
+        for output in ('Chunk ID: a2\nWall time: 0.1 seconds\nProcess exited with code 0\nOutput:\n+fixed line',
+                       json.dumps({'exit_code': 0, 'output': '+fixed line'})):
+            with self.subTest(success=output):
+                self.operator('Report the fix.')
+                self.codex(diff[0], diff[1], output)
+                self.claims = [self.claim('fix_claim', 'the gate is fixed', support='cite')]
+                self.assertIsNone(self.send('Done: the gate is fixed.'))
+        self.operator('Is the page live?')
+        self.codex(snapshot, {'tabId': 'fixture'}, json.dumps({'content': [{'type': 'text', 'text': 'Orders table'}],
+                                                                'isError': False}))
+        self.claims = [self.claim('live_claim', 'the page is live', support='cite')]
+        self.assertIsNone(self.send('Update: the page is live.'))
+
+    def test_apply_patch_move_into_rule_file_judges_full_resulting_text(self):
+        """R91: a context-only move into a rule file is judged on the whole resulting file."""
+        (self.root / 'drafts.md').write_text('- never use the tracker\n- keep notes short\n')
+        self.operator('Forget about the tracker integration for this redesign.')
+        self.kind = 'one_off'
+        self.claims = [self.claim('standing_exclusion', 'never use the tracker')]
+        move = '*** Begin Patch\n*** Update File: drafts.md\n*** Move to: AGENTS.md\n@@\n - keep notes short\n*** End Patch\n'
+        rename = 'diff --git a/drafts.md b/AGENTS.md\nsimilarity index 100%\nrename from drafts.md\nrename to AGENTS.md\n'
+        for tool, tool_input in (('apply_patch', {'input': move}), ('apply_patch', {'patch': rename}),
+                                 ('exec_command', {'cmd': "apply_patch <<'EOF'\n" + move + "EOF"})):
+            with self.subTest(tool=tool, keys=sorted(tool_input)):
+                self.judged.clear()
+                self.assertIn('job at hand only', self.pretool(tool, tool_input))
+                self.assertIn('- keep notes short', self.judged[-1]['outgoing'])  # unchanged content is judged
+        missing = move.replace('Update File: drafts.md', 'Update File: missing.md')
+        self.assertIn('cannot read missing.md', self.pretool('apply_patch', {'input': missing}))
+        self.claims = []
+        self.assertIsNone(self.pretool('apply_patch', {'input': move}))

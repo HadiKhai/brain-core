@@ -10,6 +10,7 @@ or failed before. Hook errors and an unavailable judge fail open, as other hooks
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -75,8 +76,6 @@ OBSERVATION_TOOLS = ('preview_snapshot', 'preview_navigate', 'preview_wait_for',
                      'device_screenshot')
 READ_TOOLS = ('Read',)
 FILE_READERS = ('cat', 'sed', 'head', 'tail', 'nl', 'less', 'bat')
-# Patch-format target headers (syntax of the apply_patch and unified-diff formats).
-PATCH_TARGETS = ('*** Add File: ', '*** Update File: ', '*** Move to: ', '+++ ')
 RETRIES = 1  # one retry or other route after a failed call, then a host-problem report
 
 
@@ -179,16 +178,53 @@ def _text(value):
     return json.dumps(value, ensure_ascii=False) if value is not None else ''
 
 
-def _codex_failed(output):
-    """Structured Codex outcome: an error field or a nonzero exit code; plain text is undecided."""
-    try:
-        value = json.loads(output) if isinstance(output, str) else output
-    except ValueError:
-        return False
+# Native outcome markers in a runtime's own tool-result protocol (structure, never wording):
+# Codex exec text forms "Process exited with code N" / "Exit code: N".
+EXIT_LINE = re.compile(r'^(?:Process exited with code|Exit code:) (-?[0-9]+)$', re.M)
+
+
+def _structured(value):
+    """failed: True, success: False, unknown: None, from one parsed JSON result object."""
     if not isinstance(value, dict):
-        return False
-    code = value.get('metadata', {}).get('exit_code') if isinstance(value.get('metadata'), dict) else value.get('exit_code')
-    return bool(value.get('error')) or type(code) is int and code != 0
+        return None
+    if value.get('isError') is True or value.get('is_error') is True or value.get('error'):
+        return True
+    metadata = value.get('metadata') if isinstance(value.get('metadata'), dict) else {}
+    code = metadata.get('exit_code', value.get('exit_code'))
+    if type(code) is int:
+        return code != 0
+    if value.get('isError') is False or isinstance(value.get('content'), list):
+        return False  # an MCP result; isError absent means success in that protocol
+    return None
+
+
+def _blocks(output):
+    if isinstance(output, list):
+        return [b.get('text') for b in output if isinstance(b, dict) and isinstance(b.get('text'), str)]
+    if isinstance(output, dict):
+        return [json.dumps(output)]
+    return [output] if isinstance(output, str) else []
+
+
+def outcome(output, flagged=False):
+    """Fail closed: True failed, False known success, None unknown (never evidence).
+
+    Any native error marker in any block fails the call; success needs a recognized
+    success marker. A Claude tool_result passes flagged=is_error and treats unknown
+    as success, since that protocol flags every error.
+    """
+    if flagged:
+        return True
+    found = []
+    for text in _blocks(output):
+        try:
+            found.append(_structured(json.loads(text)))
+        except ValueError:
+            pass
+        found.extend(int(code) != 0 for code in EXIT_LINE.findall(text))
+    if any(f is True for f in found):
+        return True
+    return False if any(f is False for f in found) else None
 
 
 def _events(record):
@@ -203,7 +239,9 @@ def _events(record):
     if kind == 'user':
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get('type') == 'tool_result':
-                yield 'result', block.get('tool_use_id'), bool(block.get('is_error')), _text(block.get('content'))
+                content = block.get('content')
+                failed = outcome(content, bool(block.get('is_error')))
+                yield 'result', block.get('tool_use_id'), False if failed is None else failed, _text(content)
     item = record.get('payload') if kind == 'response_item' else None
     if not isinstance(item, dict):
         return
@@ -217,7 +255,7 @@ def _events(record):
         yield 'call', item.get('call_id'), item.get('name'), {'input': item.get('input')}
     elif item.get('type') in ('function_call_output', 'custom_tool_call_output'):
         output = item.get('output')
-        yield 'result', item.get('call_id'), _codex_failed(output), _text(output)
+        yield 'result', item.get('call_id'), outcome(output), _text(output)
 
 
 def call_fingerprint(name, args):
@@ -227,8 +265,8 @@ def call_fingerprint(name, args):
 def turn_facts(path):
     """Structural facts of the current turn: after the last operator or automated input.
 
-    Each call is paired with its result; only a call whose result came back without
-    an error can be evidence, and a call without a result yet is no evidence.
+    Each call is paired with its result; only a call whose result is a known success
+    can be evidence. A failed, unknown or still pending outcome is no evidence.
     """
     records = _records(path)
     start = next((i for i in range(len(records) - 1, -1, -1)
@@ -393,18 +431,73 @@ def _inside(inst, path, cwd):
     return True
 
 
-def patch_targets(patch):
-    targets = []
+class RuleTextUnknown(ValueError):
+    """A write into a rule file whose resulting text cannot be read; refused, never skipped."""
+
+
+def _strip(value):
+    return value[2:] if value.startswith(('a/', 'b/')) else value
+
+
+def patch_sections(patch):
+    """Per-file sections of apply_patch or unified-diff syntax: source, target, +/- lines."""
+    sections = []
+
+    def start(source, target):
+        sections.append({'source': source, 'target': target, 'added': [], 'removed': []})
+        return sections[-1]
+    current = None
     for line in patch.splitlines():
-        for header in PATCH_TARGETS:
-            if line.startswith(header):
-                value = line[len(header):].strip()
-                targets.append(value[2:] if header == '+++ ' and value.startswith(('a/', 'b/')) else value)
-    return [t for t in targets if t and t != '/dev/null']
+        if line.startswith('*** Update File: '):
+            current = start(line[17:].strip(), line[17:].strip())
+        elif line.startswith('*** Add File: '):
+            current = start(None, line[14:].strip())
+        elif line.startswith('*** Delete File: '):
+            current = None
+        elif line.startswith('*** Move to: ') and current:
+            current['target'] = line[13:].strip()
+        elif line.startswith('diff --git '):
+            parts = line[11:].split(' ')
+            current = start(_strip(parts[0]), _strip(parts[-1])) if len(parts) >= 2 else None
+        elif line.startswith('rename from ') and current:
+            current['source'] = line[12:].strip()
+        elif line.startswith('rename to ') and current:
+            current['target'] = line[10:].strip()
+        elif line.startswith('--- '):
+            value = line[4:].strip()
+            source = None if value == '/dev/null' else _strip(value)
+            if current is None or current['added'] or current['removed']:
+                current = start(source, None)
+            elif current['source'] is None:
+                current['source'] = source
+        elif line.startswith('+++ '):
+            value = line[4:].strip()
+            current = current or start(None, None)
+            current['target'] = None if value == '/dev/null' else _strip(value)
+        elif current is not None and line.startswith('+'):
+            current['added'].append(line[1:])
+        elif current is not None and line.startswith('-'):
+            current['removed'].append(line[1:])
+    return [x for x in sections if x['target']]
 
 
-def patch_added(patch):
-    return '\n'.join(line[1:] for line in patch.splitlines() if line.startswith('+') and not line.startswith('+++'))
+def section_text(section, cwd):
+    """Text a section leaves in its target: its added lines, or for a move the whole result."""
+    if section['source'] in (None, section['target']):
+        return '\n'.join(section['added'])
+    source = Path(section['source'])
+    if not source.is_absolute():
+        source = Path(cwd) / source if isinstance(cwd, str) and Path(cwd).is_absolute() else None
+    try:
+        lines = source.read_text().splitlines() if source else None
+    except (OSError, UnicodeDecodeError):
+        lines = None
+    if lines is None:
+        raise RuleTextUnknown('cannot read ' + section['source'] + ', which this patch moves into a rule file')
+    for line in section['removed']:
+        if line in lines:
+            lines.remove(line)
+    return '\n'.join(lines + section['added'])
 
 
 def rule_write_text(inst, name, args, cwd):
@@ -416,7 +509,7 @@ def rule_write_text(inst, name, args, cwd):
     elif is_shell(name) and any(os.path.basename(w[0]) == 'apply_patch' for w in shell_words(args)):
         patches = [shell_text(args)]
     if patches:
-        texts = [patch_added(p) for p in patches if any(_inside(inst, t, cwd) for t in patch_targets(p))]
+        texts = [section_text(x, cwd) for p in patches for x in patch_sections(p) if _inside(inst, x['target'], cwd)]
         return '\n'.join(texts) if any(t.strip() for t in texts) else None
     if short not in WRITE_TOOLS or not _inside(inst, args.get('file_path') or args.get('path'), cwd):
         return None
@@ -484,7 +577,10 @@ def pretool_reason(inst, n, data):
     retry = retry_reason(facts, name, args)
     if retry:
         return 'Report gate: ' + retry
-    gated = outgoing(inst, name, args, data.get('cwd'))
+    try:
+        gated = outgoing(inst, name, args, data.get('cwd'))
+    except RuleTextUnknown as error:
+        return 'Report gate: ' + str(error) + '; a rule-file write is judged on its full resulting text.'
     if not gated:
         return None
     text, started, relevant = gated
