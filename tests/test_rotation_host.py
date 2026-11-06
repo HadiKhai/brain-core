@@ -76,6 +76,22 @@ class RotationHost(Scenario):
         self.assertIn('handover.md', message)
         self.assertNotIn('Preserve every open and parked task.', message)
 
+    def test_claude_successor_gets_a_scoped_idle_launch_before_start(self):
+        self.threads['old']['providerInstanceId'] = 'claudeAgent'
+        owner = self.m._owners['rotate_coordinator']
+        def launch(inst, node, rpc, ticket, message, receipt, publish):
+            self.assertEqual(node['id'], 'root')
+            self.assertIn('native-rotation: ' + ticket, message)
+            self.threads['new'] = self.thread('new', 'running', 'new-run')
+            receipt.update(new='new', workspace=str(self.root))
+            publish(receipt)
+            return {'thread': 'new'}
+        with mock.patch.object(owner._m_startup, 'launch_scoped', side_effect=launch) as scoped:
+            result = self.rotate()
+        self.assertEqual(result['state'], 'launched')
+        scoped.assert_called_once()
+        self.assertFalse(any(name == 't3_thread_launch' for name, _ in self.calls))
+
     def test_live_children_are_listed_first_and_preserved_without_launch(self):
         self.threads['child'] = self.thread('child', 'running', 'child-run', 'old')
         self.assertEqual(self.rotate()['state'], 'pending')

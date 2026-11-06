@@ -147,6 +147,9 @@ def cmd_rotate(a):
     for warning in warnings:
         print(_m_guard.redact(warning, _m_guard.never_terms(n)))
     print("1. Launch a fresh coordinator thread in the node's project with this handover.")
+    print("   Claude: launch an idle native worktree first, read its path, then prepare "
+          f"brain coordinator-profile {n['id']} --workspace <path> before sending the brief.")
+    print(f"   State stays in {_m_common.tilde(n['dir'])}; use absolute state paths there, not in the private launch checkout.")
     print(f"2. brain set {n['id']} coordinator=<new>; brain set {n['id']} coordinator_sessions=<new runtime session id> (appends and selects it).")
     print("3. Rebind every schedule and wake task; reconcile host pending requests and open workers.")
     print("4. Tell the old thread to stop, confirm it has stopped, then settle it through the host.")

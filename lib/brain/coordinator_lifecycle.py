@@ -19,6 +19,7 @@ _m_machine = _m_common.LazyModule(__package__, 'machine')
 _m_rotation = _m_common.LazyModule(__package__, 'rotation')
 _m_settlement = _m_common.LazyModule(__package__, 'settlement')
 _m_worker = _m_common.LazyModule(__package__, 'worker_lifecycle')
+_m_startup = _m_common.LazyModule(__package__, 'coordinator_startup')
 
 
 def rotation_packet(inst, n):
@@ -116,6 +117,12 @@ def rotate_coordinator(inst, n, rpc=None):
                 if receipt['old'] != old:
                     raise ValueError('rotation binding changed; preserve in-flight receipt')
                 if receipt['phase'] == 'launching':
+                    if receipt.get('scoped') and receipt.get('new'):
+                        _m_startup.launch_scoped(fresh, current, rpc, receipt['ticket'],
+                                               receipt['message'], receipt, publish)
+                        receipt['phase'] = 'launched'
+                        publish(receipt)
+                        return {'state': 'launched', 'ticket': receipt['ticket'], 'thread': receipt['new']}
                     matches = []
                     for tid in sorted(inventory):
                         if tid == old:
@@ -161,9 +168,15 @@ def rotate_coordinator(inst, n, rpc=None):
                 'if its native environment does not provide one. This command rebinds schedules from this '
                 'thread, preserves all open/parked work and retains the old coordinator until safely terminal. '
                 'Never cancel or abandon delegated children to rotate.\n')
-            response = _m_host.host_object(rpc, 't3_thread_launch', {'title': n['id'] + ' coordinator',
-                'projectId': current['local'].get('host_project') or projects[0], 'message': message,
-                'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace}})
+            if old_thread.get('providerInstanceId') == 'claudeAgent':
+                receipt.update(scoped=True, message=message)
+                publish(receipt)
+                response = _m_startup.launch_scoped(fresh, current, rpc, ticket, message, receipt, publish)
+                response = {'threadId': response['thread']}
+            else:
+                response = _m_host.host_object(rpc, 't3_thread_launch', {'title': n['id'] + ' coordinator',
+                    'projectId': current['local'].get('host_project') or projects[0], 'message': message,
+                    'workspaceStrategy': {'type': 'existing_worktree', 'worktreePath': workspace}})
             new = response.get('threadId')
             if not isinstance(new, str) or not new or new in inventory:
                 raise ValueError('rotation launch outcome unknown; no repeat launch permitted')

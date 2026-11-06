@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Scope coordinator launch capabilities privately
+
+Claude coordinators can start idle in a host-created private worktree, run
+`brain coordinator-profile <node> --workspace <path>`, then receive their first
+brief. Connectors and user plugin/skill listings are disabled only there;
+Brain skills and t3-code remain. Canonical state stays in the original instance
+through BRAIN_ROOT and explicit state paths. Native Claude rotation follows
+this sequence; other runtime launches keep their existing route. Preparation
+waits retain the idle thread and launch intent. Follow the T3 adapter's startup
+steps after upgrading. Never apply this profile to a shared project directory.
+Instance rule indexes retain their bullets; canonical Gate/Applies annotations
+remain in the rule library. Summary diffs use a separate summary baseline.
+
 ## 2026-11-06: Keep coordinator startup inventories compact
 
 Coordinator startup now uses `brain due <node> --summary` for counts by node

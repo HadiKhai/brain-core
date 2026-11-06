@@ -29,6 +29,8 @@ Read `node.md` for the node identity and the current request/limits in `brief.md
 `brain due <id> --summary` and `brain inbox <id> --new` to choose this turn's decision.
 The summary counts every item by node and kind. Open `brain due <id>` (or `--json`)
 for the current decision's full evidence; counts do not acknowledge delivered wake reasons.
+Show the summary directly at startup. If keeping a later diff, use a private summary
+baseline; never compare a summary with a full due inventory.
 Read `status.md`'s Now/Next and unresolved needs when resuming work. Do not load the whole
 node, handover, backlog or rule library at startup. A handover is an index: open only the
 section needed for the current decision; retain the rest for later turns.

@@ -35,4 +35,7 @@ visible until resumed, and use exact requirements and decision references.
 
 ## Instance rules
 
+Keep one index line per rule. Full wording and Gate/Applies annotations belong in
+`library/instance-rules.md`; read the complete rule before acting on it in detail.
+
 <!-- Rules for every node in this instance that aren't in the core model. -->

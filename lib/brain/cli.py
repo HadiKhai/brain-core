@@ -128,7 +128,7 @@ READ_ONLY = {"cmd_agent_message", "cmd_show", "cmd_tree", "cmd_status", "cmd_now
              "cmd_brief", "cmd_hire", "cmd_reports", "cmd_brains", "cmd_use", "cmd_machine", "cmd_usable",
              "cmd_item_list", "cmd_item_show", "cmd_wt_list", "cmd_selftest", "cmd_init", "cmd_hook", "cmd_hook_pretool", "cmd_hook_approve", "cmd_help",
              "cmd_dashboard", "cmd_ready", "cmd_usage", "cmd_scan", "cmd_scrub", "cmd_history",
-             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_heavy_run", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton", "cmd_task_apply_plan"}
+             "cmd_digest", "cmd_model_fit", "cmd_launch_check", "cmd_events", "cmd_gate_lock", "cmd_version", "cmd_connect", "cmd_recall", "cmd_proposals", "cmd_changes", "cmd_heavy", "cmd_heavy_run", "cmd_rehearse", "cmd_policy", "cmd_preview", "cmd_preview_receipt_skeleton", "cmd_task_apply_plan", "cmd_coordinator_profile"}
 
 
 def writes(a):
@@ -474,6 +474,9 @@ def _main():
         opt("--ticket", help="accept only this exact confirmed rotation launch"),
         opt("--session-id", help="replacement runtime actual session identity; never a host thread ID substitute"))
     cmd("rotate", _Command("rotation", "cmd_rotate"), "prepare a file-based coordinator handover; prints host steps", "id")
+    cmd('coordinator-profile', _Command('coordinator_startup', 'cmd_coordinator_profile'),
+        'prepare coordinator-only settings in a host-created idle private worktree',
+        'id', opt('--workspace', required=True))
     cmd("due", _Command("status", "cmd_due"), "coordinator actions and machine holds; empty means no output",
         opt('--summary', action='store_true', help='startup counts by node and kind; full text remains available without this flag'),
         opt("--since-wake", action="store_true", help="new file-only wake items compared with the wake before the latest delivery"),
