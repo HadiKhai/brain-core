@@ -314,7 +314,7 @@ def validate_model_selection(inst, n, row, head, contract, data):
     candidates = data.get('candidates')
     if not isinstance(candidates, list) or len(candidates) < 2:
         raise ValueError('model selection needs at least two measured candidates')
-    seen = set()
+    seen, blob = set(), scorer_blob(inst, n, head, scored['scorer'])
     for candidate in candidates:
         if (not isinstance(candidate, dict) or not all(text(candidate.get(k)) for k in ('provider', 'model', 'run_ref'))
                 or not SHA256.fullmatch(str(candidate.get('run_sha256'))) or
@@ -335,6 +335,11 @@ def validate_model_selection(inst, n, row, head, contract, data):
                 run.get('model') != candidate['model'] or run.get('items') != data['items'] or
                 run.get('test_set_sha256') != scored['test_set_sha256']):
             raise ValueError('candidate identity, items and test set must match its own run receipt')
+        if any(not number(run.get(k)) or run[k] != candidate[k] for k in ('score', 'cost_usd', 'latency_s')):
+            raise ValueError('candidate score, cost_usd and latency_s must be the ones its run receipt measured')
+        if blob is None or run.get('scorer') != {'path': scored['scorer'], 'blob': blob}:
+            raise ValueError('every candidate run is scored by the contract scorer with its blob at this head '
+                             '(run scorer {path, blob})')
     providers = {provider for provider, _ in seen}
     if len(providers) < int(scored.get('providers', '2')):
         raise ValueError('a model choice is measured across providers: ' + str(len(providers)) + ' provider(s) '
@@ -342,6 +347,19 @@ def validate_model_selection(inst, n, row, head, contract, data):
     chosen = data.get('chosen')
     if not isinstance(chosen, dict) or (chosen.get('provider'), chosen.get('model')) not in seen:
         raise ValueError('the chosen model must be one of the measured candidates')
+
+
+def set_members(inst, n, scored):
+    """Item identities of the frozen test set: the sha256 of each non-blank line."""
+    with open(local_file(inst, n, scored['test_set']), 'rb') as stream:
+        return {hashlib.sha256(line.rstrip(b'\r\n')).hexdigest() for line in stream if line.strip()}
+
+
+def recorded_inputs(inst, n, result):
+    """The (input_sha256, output_sha256) pairs the real result's stored run recorded."""
+    outputs = stored_run(inst, n, result).get('outputs')
+    return {(o.get('input_sha256'), o.get('output_sha256')) for o in outputs if isinstance(o, dict)} \
+        if isinstance(outputs, list) else set()
 
 
 def scorer_blob(inst, n, head, path):
@@ -373,11 +391,7 @@ def validate_score_read(inst, n, row, head, contract, data):
         raise ValueError('score read needs 3 distinct real cases')
     # Membership by stored identity: each input is an item (line) of the frozen
     # test set, and each input/output pair is one the bound run recorded.
-    with open(local_file(inst, n, scored['test_set']), 'rb') as stream:
-        members = {hashlib.sha256(line.rstrip(b'\r\n')).hexdigest() for line in stream if line.strip()}
-    outputs = stored_run(inst, n, result).get('outputs')
-    pairs = {(o.get('input_sha256'), o.get('output_sha256')) for o in outputs if isinstance(o, dict)} \
-        if isinstance(outputs, list) else set()
+    members, pairs = set_members(inst, n, scored), recorded_inputs(inst, n, result)
     for case in cases:
         if case['input_sha256'] not in members:
             raise ValueError('each case input must be an item of the frozen test set (sha256 of its line)')
@@ -552,17 +566,26 @@ def handback_problems(inst, n, row, a):
             problems.append('a score is reported only after reading its scorer and 3 real cases: `brain evidence ' +
                             n['id'] + ' --branch ' + row['Job'] + ' --kind score-read --file <json>`, or hand '
                             'back without --result and name the number as unread')
+        elif measured and result is not None and a.result != result['score']:
+            # The score read cites this head's real result; any other number was not read.
+            problems.append('--result ' + format(a.result, 'g') + ' is not the score the score read covers (' +
+                            format(result['score'], 'g') + ', this head\'s real result): report that number, or '
+                            'record a real result and score read for the other one')
     except (OSError, ValueError) as error:
         problems.append(str(error))
     # Any state that hands a result up (done, a measured shortfall, or a head
     # with a recorded real run) leads with quality; a pre-run setup block does not.
     if a.state == 'done' or measured or result is not None:
-        problems += quality_problems(getattr(a, 'report', None))
+        problems += quality_problems(getattr(a, 'report', None), lambda examples: example_problems(
+            inst, n, scored, result, examples))
     return problems
 
 
-def quality_problems(report):
-    """The report opens with what was removed / kept, sorted right and wrong with examples."""
+def quality_problems(report, references=None):
+    """The report opens with what was removed / kept, sorted right and wrong with examples.
+
+    ``references`` checks the examples' Ref/Source identities once the structure holds.
+    """
     from .dissection import MAX_REPORT
     try:
         path = Path(report).expanduser() if report else None
@@ -609,6 +632,34 @@ def quality_problems(report):
         problems.append('### Right needs numbered examples: N. Ref: <item>; Source: <source>; Kept|Removed: <why>')
     if not groups['wrong'] and not groups['none']:
         problems.append('### Wrong needs numbered examples, or "None found: <how the items were read>"')
+    if not problems and references:
+        problems += references([(group, index, example) for group in ('right', 'wrong')
+                                for index, example in enumerate(groups[group], 1)])
+    return problems
+
+
+def example_problems(inst, n, scored, result, examples):
+    """Each example's Ref is an item of the frozen set the bound run recorded; Source is a stored file.
+
+    Whether the item was rightly kept or removed against that source stays the reviewer's judgement.
+    """
+    if result is None:
+        return ['quality examples cite items of this head\'s real result: record it first with `brain evidence ' +
+                n['id'] + ' --branch <branch> --kind real-result --file <json>`']
+    try:
+        items = set_members(inst, n, scored) & {given for given, _ in recorded_inputs(inst, n, result)}
+    except (OSError, TypeError, ValueError) as error:
+        return [str(error)]
+    problems = []
+    for group, index, (ref, source, _, _) in examples:
+        where = '### ' + group.capitalize() + ' example ' + str(index)
+        if ref not in items:
+            problems.append(where + ' Ref is not an item the bound real run recorded (Ref: <sha256 of the item\'s '
+                            'line in the frozen test set>)')
+        path, at, digest = source.rpartition('@')
+        file = local_file(inst, n, path) if at else None
+        if file is None or not SHA256.fullmatch(digest) or sha256_file(file) != digest:
+            problems.append(where + ' Source is not a stored file with its sha256 (Source: <path>@<sha256>)')
     return problems
 
 

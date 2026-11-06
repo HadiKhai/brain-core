@@ -13,9 +13,12 @@ exact-head job evidence: `real-result`, `model-selection`, `score-read`,
 (frozen `test_set` + `test_set_sha256`, `threshold`, `cap`, `scorer`, optional
 `model_choice: yes` with `data_class`) makes `brain review` refuse until a
 capped real result on that set passes (a zero goes to the inbox at once) and,
-for a model choice, until two or more providers are measured on it. Scored
-hand-backs need a score-read receipt for `--result` and, when done, a report
-opening with `## What was removed / kept`. `## Design reference` contracts are
+for a model choice, until two or more providers are measured on it (each
+candidate's score, cost and latency are the ones its stored run recorded, with
+the contract scorer). Scored hand-backs need a score-read receipt for
+`--result`, which must be that real result's score, and, when done, a report
+opening with `## What was removed / kept` whose examples cite run items and
+stored sources by sha256. `## Design reference` contracts are
 not ready without paired screenshots of every screen and a checklist from a
 different runtime. `contract_reading_list=required` makes contracts carry
 `## Reading list` and `## Proven`. Relaunch briefs refuse inherited no-retry

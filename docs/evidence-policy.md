@@ -38,7 +38,7 @@ setup_corrections: 0                # optional: no setup correction for this job
 | `brain brief` relaunching a job with work | task or shared context carrying an inherited no-retry, attempt-spent or stop clause (AI judge; operator or contract limits pass; unavailable judge passes). The text is sent to the judge only when the node sets `ai_judge_egress=allowed`, no node up the tree is sealed, and every shared-context file is inside the node's home; otherwise the brief says the check did not run |
 | `brain jobs --contract-file` | invalid scored-work, design-reference or required reading-list declarations |
 | `brain review` on scored work | no real result at this head, a zero or a score below threshold; with `model_choice`, no cross-provider selection |
-| `brain handback` on scored work | `--result` without a score-read receipt; `done` without a report opening with `## What was removed / kept` |
+| `brain handback` on scored work | `--result` without a score-read receipt, or a `--result` other than the score of the real result that receipt reads; `done` without a report opening with `## What was removed / kept`, or with examples whose Ref or Source does not resolve |
 | `brain evidence --kind setup-correction` | a second correction, a selector not in the source, anything but a selector or start-format fix, expanded bounds, `setup_corrections: 0` |
 | ready state | a design-referenced job without a design check, or with a failed checklist row |
 
@@ -50,8 +50,9 @@ setup_corrections: 0                # optional: no setup correction for this job
   `head`, `test_set_sha256`, `items`, `score` and `scorer {path, blob}`.
 - `model-selection`: `test_set_sha256`, `items`, `data_class`, `candidates`
   (`provider`, `model`, `run_ref`, `run_sha256`, `score`, `cost_usd`,
-  `latency_s`; each run receipt names the same provider, model, items and set),
-  `chosen`.
+  `latency_s`; each run receipt records the same provider, model, items, set,
+  `score`, `cost_usd` and `latency_s`, scored by the contract `scorer
+  {path, blob}` at the head), `chosen`.
 - `score-read`: `scorer {path, blob}` (blob at the head), the real result's
   `run_ref` + `run_sha256`, 3 distinct `cases` (`input_ref` + `input_sha256`,
   `output_ref` + `output_sha256` as stored files, `check`), `measures`,
@@ -69,13 +70,17 @@ setup_corrections: 0                # optional: no setup correction for this job
 ```
 ## What was removed / kept
 ### Right
-1. Ref: item-4; Source: set:4; Removed: duplicate of item-3
+1. Ref: <item sha256>; Source: docs/source.txt@<sha256>; Removed: duplicate of another item
 ### Wrong
-1. Ref: item-9; Source: set:9; Removed: a pronoun fragment; name the subject instead
+1. Ref: <item sha256>; Source: docs/source.txt@<sha256>; Removed: a pronoun fragment; name the subject instead
 ```
 
 Only a `# title` may come before this section. It is required for `done`, for
 any hand-back with `--result`, and for any hand-back on a head with a recorded
-real result. `None found: <how the items were read>` may replace Wrong examples. Code checks
-only this structure and its place before any other section; whether each
-example is judged right against its source is the reviewer's judgement.
+real result. `None found: <how the items were read>` may replace Wrong examples.
+Each `Ref` is the sha256 of an item's line in the frozen test set that this
+head's real-result run recorded (`outputs[].input_sha256`); each `Source` is a
+stored file (absolute or home-relative) with the sha256 of its bytes. Code
+checks this structure, its place before any other section and that every
+reference resolves; whether each example is judged right against its source is
+the reviewer's judgement.

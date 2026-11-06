@@ -10,8 +10,6 @@ from scenario import CORE, Scenario
 
 SECTIONS = "mode: untimed\n\n" + "".join("## " + field + "\nSynthetic scope.\n\n" for field in
                                          ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means"))
-QUALITY = ('## What was removed / kept\n### Right\n1. Ref: item-4; Source: set:4; Removed: duplicate of item-3\n'
-           '### Wrong\nNone found: read all removed items against the set\n\n')
 CHECKLIST = ('buttons', 'spacing', 'links', 'validation', 'navigation', 'consistency')
 
 
@@ -128,14 +126,18 @@ class EvidencePolicy(Scenario):
 
     # R61: models across providers
 
-    def selection(self, r, wt, test_set, providers):
-        candidates = []
+    def selection(self, r, wt, test_set, providers, run=None, drop=()):
+        candidates, blob = [], self.git('rev-parse', 'HEAD:score.py', cwd=wt).strip()
         for i, (provider, model) in enumerate(providers):
-            run = self.tmp / ('run-' + str(i) + '.json')
-            run.write_text(json.dumps({'provider': provider, 'model': model, 'items': 10,
-                                       'test_set_sha256': sha(test_set)}))
-            candidates.append({'provider': provider, 'model': model, 'run_ref': str(run), 'run_sha256': sha(run),
-                               'score': 0.8 + i / 100, 'cost_usd': 0.1, 'latency_s': 2.0})
+            measured = {'score': 0.8 + i / 100, 'cost_usd': 0.1, 'latency_s': 2.0}
+            record = {'provider': provider, 'model': model, 'items': 10, 'test_set_sha256': sha(test_set),
+                      'scorer': {'path': 'score.py', 'blob': blob}, **measured, **(run or {})}
+            for key in drop:
+                record.pop(key)
+            path = self.tmp / ('run-' + str(len(list(self.tmp.glob('run-*.json')))) + '.json')
+            path.write_text(json.dumps(record))
+            candidates.append({'provider': provider, 'model': model, 'run_ref': str(path), 'run_sha256': sha(path),
+                               **measured})
         return self.receipt(r, wt, 'model_selection', test_set_sha256=sha(test_set), items=10, data_class='public',
                             candidates=candidates, chosen={'provider': providers[0][0], 'model': providers[0][1]})
 
@@ -159,6 +161,21 @@ class EvidencePolicy(Scenario):
         self.assertIn('never leave', self.evidence(r, 'model-selection', {**good, 'data_class': 'restricted'},
                                                    ok=False))
 
+    def test_candidate_metrics_and_scorer_are_the_ones_each_stored_run_measured(self):
+        r, home, wt = self.job()
+        test_set = self.fixed_set()
+        self.contract(r, self.scored(test_set, 'model_choice: yes\ndata_class: public'))
+        self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.9))
+        pairs = [('vendor-a', 'alpha-1'), ('vendor-b', 'beta-1')]
+        # Hashed runs that measured something else, or nothing, cannot carry the supplied numbers.
+        invented = self.selection(r, wt, test_set, pairs, run={'score': 0.1, 'cost_usd': 20.0, 'latency_s': 60.0})
+        self.assertIn('the ones its run receipt measured', self.evidence(r, 'model-selection', invented, ok=False))
+        unmeasured = self.selection(r, wt, test_set, pairs, drop=('score', 'cost_usd', 'latency_s'))
+        self.assertIn('the ones its run receipt measured', self.evidence(r, 'model-selection', unmeasured, ok=False))
+        other = self.selection(r, wt, test_set, pairs, run={'scorer': {'path': 'score.py', 'blob': '0' * 40}})
+        self.assertIn('contract scorer with its blob', self.evidence(r, 'model-selection', other, ok=False))
+        self.evidence(r, 'model-selection', self.selection(r, wt, test_set, pairs))
+
     # R66: read a number before reporting it
 
     def dissected(self, extra=''):
@@ -167,6 +184,14 @@ class EvidencePolicy(Scenario):
                         '1. Ref: case-a; One.\n2. Ref: case-b; Two.\n3. Ref: case-c; Three.\n'
                         '### Fixes\n1. Repair.\n2. Retain.\nRecommendation: 1\n')
         return path
+
+    def quality(self, test_set, wrong=None):
+        source = self.tmp / 'source-document.txt'
+        source.write_text('Invented source document the items were read against.\n')
+        item = hashlib.sha256(test_set.read_text().splitlines()[0].encode()).hexdigest()
+        return ('## What was removed / kept\n### Right\n1. Ref: ' + item + '; Source: ' + str(source) + '@' +
+                sha(source) + '; Removed: duplicate of another item\n### Wrong\n' +
+                (wrong or 'None found: read all removed items against the set') + '\n\n')
 
     def artifact(self, name, body):
         path = self.tmp / name
@@ -241,7 +266,7 @@ class EvidencePolicy(Scenario):
         test_set = self.fixed_set()
         self.contract(r, self.scored(test_set))
         handback = ('handback', 'a', '--branch', 'job', '--state', 'blocked', '--summary', 'below target on real data',
-                    '--result', '0.5', '--target', '0.8', '--report', str(self.dissected(QUALITY)))
+                    '--result', '0.5', '--target', '0.8', '--report', str(self.dissected(self.quality(test_set))))
         self.assertIn('only after reading its scorer and 3 real cases', self.b(r, *handback, ok=False))
         run = self.real_result(r, wt, test_set, 0.5)
         self.evidence(r, 'real-result', run)
@@ -261,6 +286,17 @@ class EvidencePolicy(Scenario):
         self.evidence(r, 'score-read', read)
         self.assertNotIn('only after reading its scorer', self.b(r, *handback))
 
+    def test_reported_result_is_the_score_its_score_read_covers(self):
+        r, test_set, read = self.score_read_fixture()  # the real result and its read are 0.5
+        self.evidence(r, 'score-read', read)
+        report = self.dissected(self.quality(test_set))
+
+        def handback(value):
+            return ('handback', 'a', '--branch', 'job', '--state', 'blocked', '--summary', 'below target on real data',
+                    '--result', value, '--target', '0.8', '--report', str(report))
+        self.assertIn('is not the score the score read covers', self.b(r, *handback('0.99'), ok=False))
+        self.assertNotIn('score read covers', self.b(r, *handback('0.5')))
+
     # R69: quality before counts
 
     def test_scored_done_handback_opens_with_source_judged_removed_and_kept_examples(self):
@@ -275,7 +311,7 @@ class EvidencePolicy(Scenario):
                                 '### Wrong\nNone found: read all 12 removed items against the set\n')
         self.assertIn('before any totals', self.b(r, *done, '--report', str(counts_first), ok=False))
         preamble = self.tmp / 'preamble.md'
-        preamble.write_text('Dropped 228 of 300.\n\n' + QUALITY)
+        preamble.write_text('Dropped 228 of 300.\n\n' + self.quality(test_set))
         self.assertIn('before any totals', self.b(r, *done, '--report', str(preamble), ok=False))
         # A blocked or failed result is still a result: it also leads with quality.
         for state in ('blocked', 'failed'):
@@ -287,12 +323,39 @@ class EvidencePolicy(Scenario):
         out = self.b(r, *done, '--report', str(missing), ok=False)
         self.assertIn('### Right needs numbered examples', out)
         self.assertIn('### Wrong needs numbered examples', out)
+        self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.9))
         good = self.tmp / 'good.md'
-        good.write_text('# Filter run\n\n## What was removed / kept\n### Right\n'
-                        '1. Ref: item-4; Source: set:4; Removed: duplicate of item-3\n'
-                        '### Wrong\n1. Ref: item-9; Source: set:9; Removed: a pronoun fragment; name the subject instead\n'
-                        '\n## Totals\nDropped 2 of 10.\n')
+        quality = self.quality(test_set, wrong='1. Ref: ' + hashlib.sha256(
+            test_set.read_text().splitlines()[1].encode()).hexdigest() + '; Source: ' + str(self.tmp / 'source-document.txt') +
+            '@' + sha(self.tmp / 'source-document.txt') + '; Removed: a pronoun fragment; name the subject instead')
+        good.write_text('# Filter run\n\n' + quality + '## Totals\nDropped 2 of 10.\n')
         self.assertNotIn('What was removed / kept', self.b(r, *done, '--report', str(good), ok=None))
+
+    def test_quality_examples_cite_items_of_the_bound_run_and_stored_sources(self):
+        r, home, wt = self.job()
+        test_set = self.fixed_set()
+        self.contract(r, self.scored(test_set))
+        done = ('handback', 'a', '--branch', 'job', '--state', 'done', '--summary', 'filter run finished',
+                '--reviews', '1', '--lessons', 'none: fixture')
+        labels = self.tmp / 'labels.md'
+        labels.write_text('## What was removed / kept\n### Right\n'
+                          '1. Ref: nonexistent-item; Source: nonexistent-source; Kept: reads fine\n'
+                          '### Wrong\nNone found: read all items against the set\n')
+        self.assertIn("this head's real result", self.b(r, *done, '--report', str(labels), ok=False))
+        self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.9))
+        out = self.b(r, *done, '--report', str(labels), ok=False)
+        self.assertIn('is not an item the bound real run recorded', out)
+        self.assertIn('is not a stored file with its sha256', out)
+        good = self.tmp / 'bound.md'
+        good.write_text(self.quality(test_set))
+        stranger = hashlib.sha256(b'{"input": "not in the set"}').hexdigest()
+        unrecorded = self.tmp / 'unrecorded.md'
+        unrecorded.write_text(good.read_text().replace(good.read_text().split('Ref: ')[1].split(';')[0], stranger))
+        self.assertIn('is not an item the bound real run recorded', self.b(r, *done, '--report', str(unrecorded),
+                                                                             ok=False))
+        self.assertNotIn('bound real run', self.b(r, *done, '--report', str(good), ok=None))
+        (self.tmp / 'source-document.txt').write_text('The source changed after it was cited.\n')
+        self.assertIn('is not a stored file with its sha256', self.b(r, *done, '--report', str(good), ok=False))
 
     # R58: one task-local setup correction
 
