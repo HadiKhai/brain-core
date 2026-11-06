@@ -13,7 +13,7 @@ AGENT_MESSAGE_PREFIX = "Agent message: sent by another agent, not the operator."
 
 def agent_message(text):
     """Tool-generated provenance at character zero; preserve the entire body."""
-    return text if text.startswith(AGENT_MESSAGE_PREFIX) else AGENT_MESSAGE_PREFIX + "\n\n" + text
+    return text if text.startswith(AGENT_MESSAGE_PREFIX + "\n\n") else AGENT_MESSAGE_PREFIX + "\n\n" + text
 
 
 def cmd_agent_message(a):

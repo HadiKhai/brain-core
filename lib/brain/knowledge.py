@@ -842,13 +842,15 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
     nobody watches its thread, and a launched thread doesn't wake whoever launched it."""
     from . import messages as _m_messages
     how = host_send(inst, n, to)
+    formatter = "brain msg " + shlex.quote(n["id"])
+    question = f'`{formatter} question "<question>"`'
     if who == "reviewer":  # a reviewer changes nothing, not even the inbox
         return job_mark_lines(n, branch) + ["## Questions and hand-back", "",
                 "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
-                f"- **A question you can't go on without:** {how} with the question, then end your turn with the "
-                "question as your last line.",
-                f"- **When you finish**, {how} with `done: <n> findings, <n> blockers` and put the findings in "
-                "your final message. Write no file.", ""]
+                f"- **A question you can't go on without:** run {question} and send its marked message unchanged via "
+                f"{how}, then end your turn with the question as your last line.",
+                f'- **When you finish**, run `{formatter} done "<n> findings, <n> blockers"` and send its marked '
+                f"message unchanged via {how}. Put the findings in your final message. Write no file.", ""]
     inbox = "" if n["sealed"] else f" and append `- <time from brain now> from {who}: question: <it>` " \
                                      f"to `{_m_common.tilde(n['dir'] / 'inbox.md')}`"
     if branch:
@@ -874,15 +876,17 @@ def handback_lines(inst, n, to=None, who="worker", branch=None):
                 "For question state also supply --question '<one-line choice>'. Questions also append to inbox; "
                 "for a blocked human need add `--need-human '<need>'`. Legacy failed is also accepted.",
                 "- End your turn after recording the hand-back. The coordinator reads it with brain due; "
-                f"a host message is optional notification ({how}) and need only link the record. Do not duplicate Lessons "
+                f'a host notification is optional: run `{formatter} <kind> "<one-line result>"` and send its marked '
+                f"message unchanged via {how}, linking the record. Do not duplicate Lessons "
                 "in a message or report; --lessons carries your proposals.", ""]
     return ["## Questions and hand-back", "", _m_messages.MESSAGE_PROTOCOL, "",
             "- **Never ask the operator, and never wait for an answer in this thread**: nobody is watching it.",
             "- **A choice** the task, rules or brief settle: make it and list it under Decisions I made.",
             "- **Your report must have a Lessons section:** list each lesson, or `none: <reason>`.",
-            f"- **A question you can't go on without:** {how} with the question{inbox}, then end your turn.",
-            f"- **When you finish, fail or get blocked**, tell your coordinator straight away: {how} with "
-            "`<kind>: <one line>. Report: <path>` using the message protocol above. Then end your turn.", ""]
+            f"- **A question you can't go on without:** run {question} and send its marked message unchanged via "
+            f"{how}{inbox}, then end your turn.",
+            f'- **When you finish, fail or get blocked**, run `{formatter} <kind> "<one line>" --report <path>` '
+            f"and send its marked message unchanged via {how}, using the message protocol above. Then end your turn.", ""]
 
 
 def report_lines(job=False):

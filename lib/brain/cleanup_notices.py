@@ -9,6 +9,7 @@ from pathlib import Path
 from . import common as _m_common
 
 _m_rpc = _m_common.LazyModule(__package__, 'host_rpc')
+_m_messages = _m_common.LazyModule(__package__, 'messages')
 
 
 def cleanup_notice(inst, n, job_key, identity, workspace, rpc):
@@ -46,8 +47,9 @@ def cleanup_notice(inst, n, job_key, identity, workspace, rpc):
         try:
             reply = rpc('t3_thread_send', dict(threadId=identity, mode='auto',
                 clientRequestId=data['client_request_id'],
-                message='This job is closed and its checkout is awaiting cleanup. Return any final hand-back now; '
-                        'do not begin follow-on work here. Cleanup will wait for terminal state and reconciled requests.'))
+                message=_m_messages.agent_message(
+                    'This job is closed and its checkout is awaiting cleanup. Return any final hand-back now; '
+                    'do not begin follow-on work here. Cleanup will wait for terminal state and reconciled requests.')))
             if (not isinstance(reply, dict) or reply.get('threadId') != identity
                     or reply.get('delivery') not in ('started', 'queued', 'steered', 'restarted')
                     or not isinstance(reply.get('messageId'), str) or not reply['messageId']

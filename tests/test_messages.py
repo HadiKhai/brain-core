@@ -74,6 +74,32 @@ class WorkerMessages(Scenario):
         self.b(root, 'agent-message', '', ok=False)
         self.b(root, 'agent-message', body, '--message-file', str(path), ok=False)
 
+    def test_generated_worker_and_reviewer_send_lines_require_formatter(self):
+        import core_loader
+        root = self.init('alice')
+        m = core_loader.SourceFileLoader('send_brief_fixture', str(CORE / 'bin/brain')).load_module()
+        inst = m.Instance(root)
+        node = inst.node('root')
+        for who in ('worker', 'reviewer'):
+            for branch in (None, 'job/sample'):
+                lines = m.handback_lines(inst, node, to='fixture-parent', who=who, branch=branch)
+                sends = [line for line in lines if 'host `send`' in line]
+                self.assertTrue(sends, (who, branch))
+                for line in sends:
+                    with self.subTest(who=who, branch=branch, line=line):
+                        self.assertIn('brain msg root ', line)
+                        self.assertIn('unchanged', line)
+
+    def test_single_newline_marker_body_gets_canonical_envelope(self):
+        import core_loader
+        m = core_loader.SourceFileLoader('marker_envelope_fixture', str(CORE / 'bin/brain')).load_module()
+        messages = m._owners['worker_message_guard']
+        body = AGENT_MARKER + '\ndone: Synthetic result'
+        prepared = messages.agent_message(body)
+        self.assertTrue(prepared.startswith(AGENT_HEADER))
+        self.assertEqual(prepared[len(AGENT_HEADER):], body)
+        self.assertEqual(messages.agent_message(prepared), prepared)
+
     def test_peer_threads_and_coordinator_duty(self):
         root, _ = self.job()
         line = "Coordinate shared-commit changes directly with thread `thread-peer`."

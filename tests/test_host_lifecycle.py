@@ -210,6 +210,12 @@ class HostLifecycle(Scenario):
             return self.rpc(tool, args)
         self.assertFalse(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=rpc, tell=True))
         self.assertEqual(len(sends), 1)
+        capture = self.m._owners['capture_stop']
+        marker = capture.AGENT_MESSAGE_PREFIX + '\n\n'
+        self.assertTrue(sends[0]['message'].startswith(marker))
+        self.assertIn('This job is closed', sends[0]['message'][len(marker):])
+        self.assertIsNone(capture.operator_text({'type': 'user', 'promptSource': 'sdk',
+                         'turnOrigin': 'sdk', 'message': {'role': 'user', 'content': sends[0]['message']}}))
         self.assertEqual(self.settled_calls(), [])
         self.threads['fixture-worker'].update(status='completed', activeRunId=None)
         self.assertTrue(self.m.worktree_thread_hook(self.inst, self.n, cleanup, rpc=rpc, tell=True))
