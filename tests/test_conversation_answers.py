@@ -4,6 +4,7 @@ import argparse
 import base64
 import contextlib
 import io
+import hashlib
 import json
 import os
 import subprocess
@@ -431,11 +432,85 @@ class InstructionCapture(Scenario):
         self.assertEqual(call.call_args.kwargs['cwd'], CORE / 'lib/brain')
         self.assertEqual(call.call_args.kwargs['env'], {'ANTHROPIC_API_KEY': 'synthetic-secret'})
 
+    def cli_events(self):
+        return json.loads((CORE / 'tests/fixtures/claude-cli/2.1.312-events.json').read_text())
+
     def cli_result(self, value=None, **overrides):
         value = value if value is not None else self.answer([{'id': '0', 'text': self.quote}], 'other')[0]
-        return subprocess.CompletedProcess(['claude'], 0, json.dumps(dict(
-            subtype='success', is_error=False, structured_output=value, usage={'output_tokens': 12},
-            **overrides)), '')
+        result = next(event for event in reversed(self.cli_events()) if event['type'] == 'result')
+        result.update(structured_output=value, **overrides)
+        return subprocess.CompletedProcess(['claude'], 0, json.dumps(result), '')
+
+    def test_cli_recorded_array_fixture_through_stub_and_every_fixture_has_known_shape(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        folder = CORE / 'tests/fixtures/claude-cli'
+        provenance = json.loads((folder / 'provenance.json').read_text())
+        self.assertEqual((folder / 'version.txt').read_text().strip(), provenance['cli_version'])
+        self.assertEqual(provenance['cli_version'], '2.1.312 (Claude Code)')
+        self.assertEqual(hashlib.sha256(self.capture.SYSTEM.encode()).hexdigest(), provenance['system_sha256'])
+        self.assertEqual(hashlib.sha256(json.dumps(self.capture.SCHEMA).encode()).hexdigest(), provenance['schema_sha256'])
+        # New stored protocol fixtures must join this explicit known-shape inventory.
+        self.assertEqual({p.name for p in folder.glob('*.json')} - {'provenance.json'},
+                         {provenance['fixture']})
+        raw = (folder / provenance['fixture']).read_bytes()
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), provenance['fixture_sha256'])
+        self.assertEqual(provenance['shape'], 'event_array')
+        events = json.loads(raw)
+        self.assertIsInstance(events, list)
+        result = next(event for event in reversed(events) if event['type'] == 'result')
+        stub_dir = self.tmp / 'recorded-cli-bin'
+        stub_dir.mkdir()
+        stub = stub_dir / 'claude'
+        stub.write_text('#!' + sys.executable + '\nimport json, sys\n'
+            'from pathlib import Path\n'
+            'assert json.load(sys.stdin) == ' + repr(provenance['synthetic_input']) + '\n'
+            'sys.stdout.buffer.write(Path(' + repr(str(folder / provenance['fixture'])) + ').read_bytes())\n')
+        stub.chmod(0o700)
+        with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': '',
+                'PATH': str(stub_dir) + os.pathsep + os.environ['PATH']}):
+            value, usage = client.ai_json(self.capture.SYSTEM, provenance['synthetic_input'], self.capture.SCHEMA)
+        self.assertEqual(value, result['structured_output'])
+        self.assertEqual(usage['usage'], result['usage'])
+        self.assertEqual(len(self.capture.validated_classifications(provenance['synthetic_input'], value)), 2)
+        # Derive both object variants from the recorded result, including the
+        # older envelope without type. Intermediate events never supply usage.
+        legacy = dict(result)
+        legacy.pop('type')
+        earlier_error = dict(result, is_error=True)
+        for response in (result, legacy, [earlier_error] + events + [events[0]]):
+            with self.subTest(shape=type(response).__name__), mock.patch.object(client.subprocess,
+                    'run', return_value=subprocess.CompletedProcess(['claude'], 0, json.dumps(response), '')):
+                parsed, metadata = client.cli_json(self.capture.SYSTEM, [], self.capture.SCHEMA, self.capture.MODEL)
+            self.assertEqual(parsed, value)
+            self.assertEqual(metadata['usage'], result['usage'])
+
+    def test_cli_unseen_shapes_fail_named_with_exact_cause_and_raw_diagnostics(self):
+        client = sys.modules[self.capture.ai_json.__module__]
+        events = self.cli_events()
+        result = events[-1]
+        # Fault injections derived from the captured protocol, never extra fixtures.
+        unknown = [None, True, 7, 'result', {'events': events}, events[:-1], [None] + events]
+        for key in ('subtype', 'is_error', 'structured_output'):
+            unknown.append({k: v for k, v in result.items() if k != key})
+        unknown.extend([dict(result, type='assistant'), dict(result, is_error='false'),
+                        dict(result, subtype=False), dict(result, structured_output=[])])
+        for response in unknown:
+            variants = [response]
+            if isinstance(response, dict) and response.get('type') == 'result':
+                variants.append([response])
+            for shape in variants:
+                raw = json.dumps(shape).encode()
+                with self.subTest(shape=type(shape).__name__), mock.patch.object(client.subprocess,
+                        'run', return_value=subprocess.CompletedProcess(['claude'], 0, raw, b'')):
+                    with self.assertRaises(client.AIUnavailable) as caught:
+                        client.cli_json(self.capture.SYSTEM, [], self.capture.SCHEMA, self.capture.MODEL)
+                self.assertEqual(str(caught.exception), 'cli_unknown_shape')
+                detail = caught.exception.detail
+                self.assertEqual(detail['stage'], 'unknown_shape')
+                self.assertEqual(detail['error_type'], 'ValueError')
+                self.assertTrue(detail['error_message'])
+                self.assertEqual(base64.b64decode(detail['stdout_tail_b64']), raw[-client.CLI_OUTPUT_BYTES:])
+                self.assertEqual(detail['stdout_bytes'], len(raw))
 
     def test_cli_argv_stdin_environment_and_disposable_cwd(self):
         client = sys.modules[self.capture.ai_json.__module__]
@@ -469,7 +544,7 @@ class InstructionCapture(Scenario):
             value, usage = client.ai_json(self.capture.SYSTEM, payload, self.capture.SCHEMA)
         self.assertEqual(value, json.loads(self.cli_result().stdout)['structured_output'])
         self.assertEqual(usage['transport'], 'claude_cli')
-        self.assertEqual(usage['usage'], {'output_tokens': 12})
+        self.assertEqual(usage['usage'], json.loads(self.cli_result().stdout)['usage'])
         self.assertEqual(set(usage), {'transport', 'model', 'usage', 'latency_seconds'})
         self.assertNotIn('detail', json.dumps(usage))
         self.assertGreaterEqual(usage['latency_seconds'], 0)
@@ -538,11 +613,15 @@ class InstructionCapture(Scenario):
                 json.dumps({'subtype': 'error_max_turns', 'is_error': False, 'error': self.quote}), '')),
             ('cli_invalid_response', 'json_decode', subprocess.CompletedProcess(['claude'], 0,
                 b'private invalid output\xff', b'private invalid stderr')),
-            ('cli_invalid_response', 'response_object', subprocess.CompletedProcess(['claude'], 0, '[]', '')),
-            ('cli_invalid_response', 'structured_output_missing', subprocess.CompletedProcess(['claude'], 0,
+            ('cli_unknown_shape', 'unknown_shape', subprocess.CompletedProcess(['claude'], 0, '[]', '')),
+            ('cli_unknown_shape', 'unknown_shape', subprocess.CompletedProcess(['claude'], 0,
                 json.dumps({'subtype': 'success', 'is_error': False}), '')),
-            ('cli_invalid_response', 'structured_output_type', subprocess.CompletedProcess(['claude'], 0,
+            ('cli_unknown_shape', 'unknown_shape', subprocess.CompletedProcess(['claude'], 0,
                 json.dumps({'subtype': 'success', 'is_error': False, 'structured_output': []}), '')),
+            ('cli_unknown_shape', 'unknown_shape', subprocess.CompletedProcess(['claude'], 0,
+                json.dumps(self.cli_events()[:-1]), '')),
+            ('provider_or_network', 'provider_error', subprocess.CompletedProcess(['claude'], 0,
+                json.dumps(self.cli_events()[:-1] + [dict(self.cli_events()[-1], is_error=True)]), '')),
             ('cli_invalid_response', 'classification_schema', self.cli_result({'messages': []})),
             ('cli_invalid_response', 'classification_schema', self.cli_result({'messages': [{'id': '0', 'items': [
                 {'kind': 'unknown', 'quote': self.quote}]}]})),
@@ -581,7 +660,7 @@ class InstructionCapture(Scenario):
                 for name in ('stdout', 'stderr'):
                     raw = getattr(failure, name, None) or b''
                     raw = raw if isinstance(raw, bytes) else raw.encode('utf-8')
-                    self.assertEqual(base64.b64decode(detail[name + '_tail_b64']), raw)
+                    self.assertEqual(base64.b64decode(detail[name + '_tail_b64']), raw[-client.CLI_OUTPUT_BYTES:])
                     self.assertEqual(detail[name + '_bytes'], len(raw))
                 if isinstance(failure, Exception):
                     self.assertEqual(detail['error_type'], type(failure).__name__)
@@ -591,7 +670,12 @@ class InstructionCapture(Scenario):
                 if stage == 'transport':
                     self.assertEqual(detail['errno'], 2)
                 if stage in ('provider_error', 'response_subtype'):
-                    self.assertEqual(detail['response_subtype'], json.loads(failure.stdout)['subtype'])
+                    response = json.loads(failure.stdout)
+                    response = response[-1] if isinstance(response, list) else response
+                    self.assertEqual(detail['response_subtype'], response['subtype'])
+                if stage == 'unknown_shape':
+                    self.assertEqual(detail['error_type'], 'ValueError')
+                    self.assertTrue(detail['error_message'])
                 if stage == 'classification_schema':
                     self.assertEqual(detail['error_type'], 'CaptureRejected')
                     self.assertTrue(detail['error_message'])

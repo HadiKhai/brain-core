@@ -20,7 +20,7 @@ class AIUnavailable(Exception):
 CLI_OUTPUT_BYTES = 4096
 CLI_DETAIL_BYTES = 16384
 CLI_FAILURE_STAGES = ('timeout', 'transport', 'nonzero_exit', 'provider_error',
-                      'response_subtype', 'json_decode', 'response_object',
+                      'response_subtype', 'json_decode', 'unknown_shape', 'response_object',
                       'structured_output_missing', 'structured_output_type',
                       'classification_schema')
 
@@ -154,20 +154,30 @@ def cli_json(system, data, schema, model):
     stage = 'json_decode'
     try:
         response = json.loads(result.stdout)
-        stage = 'response_object'
+        stage = 'unknown_shape'
+        if isinstance(response, list):
+            if any(not isinstance(event, dict) or not isinstance(event.get('type'), str)
+                   for event in response):
+                raise ValueError('CLI event array contains an unknown event shape')
+            response = next((event for event in reversed(response) if event['type'] == 'result'), None)
+            if response is None:
+                raise ValueError('CLI event array has no result event')
         if not isinstance(response, dict):
-            raise ValueError('CLI response must be an object')
+            raise ValueError('CLI response must be a result object or event array')
+        if ('type' in response and response['type'] != 'result' or
+                not isinstance(response.get('subtype'), str) or
+                not isinstance(response.get('is_error'), bool)):
+            raise ValueError('CLI result requires a subtype string and is_error boolean')
         if response.get('is_error') or response.get('subtype') != 'success':
             detail = cli_detail('provider_error' if response.get('is_error') else 'response_subtype', started, result)
             detail['response_subtype'] = str(response.get('subtype')).encode('utf-8', 'backslashreplace')[-256:].decode('utf-8', 'ignore')
             raise AIUnavailable('provider_or_network', detail)
-        stage = 'structured_output_missing'
-        value = response['structured_output']
-        stage = 'structured_output_type'
+        value = response.get('structured_output')
         if not isinstance(value, dict):
-            raise ValueError('missing structured object')
+            raise ValueError('CLI successful result requires a structured_output object')
         return value, _CLIUsage({'transport': 'claude_cli', 'model': model, 'usage': response.get('usage'),
                                 'latency_seconds': time.monotonic() - started},
                                cli_detail('classification_schema', started, result))
     except (ValueError, TypeError, KeyError, AttributeError) as error:
-        raise AIUnavailable('cli_invalid_response', cli_detail(stage, started, result, error)) from None
+        code = 'cli_unknown_shape' if stage == 'unknown_shape' else 'cli_invalid_response'
+        raise AIUnavailable(code, cli_detail(stage, started, result, error)) from None

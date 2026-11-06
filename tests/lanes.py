@@ -89,11 +89,13 @@ OUTSIDE_JOB_LANES = {
     'ui-checks.js': 'browser assertions; separate browser verification',
     'ui-fitness.js': 'browser layout assertions; separate browser verification',
 }
-SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'tempdirs.py', 'lanes.py', 'check_lanes.py', 'per_change_gate.py', 'dashboard_acceptance.py')
+SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'tempdirs.py', 'lanes.py', 'check_lanes.py', 'per_change_gate.py', 'dashboard_acceptance.py',
+           'fixtures/claude-cli/2.1.312-events.json', 'fixtures/claude-cli/provenance.json',
+           'fixtures/claude-cli/version.txt')
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
-EXTRA_INPUTS = {'check': ('tools/check_rule_index.py',), 'watch': ('tools/watcher_approval.py', 'tools/check_watcher_approval.py'), 'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py')}
+EXTRA_INPUTS = {'check': ('tools/check_rule_index.py',), 'watch': ('tools/watcher_approval.py', 'tools/check_watcher_approval.py'), 'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py'), 'reminders': ('tests/fixtures/claude-cli/**',)}
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (

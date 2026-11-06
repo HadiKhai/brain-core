@@ -1,0 +1,58 @@
+{
+  "cli_version": "2.1.312 (Claude Code)",
+  "fixture": "2.1.312-events.json",
+  "shape": "event_array",
+  "source": "one real subscription call through unchanged cli_json",
+  "model": "claude-haiku-5-5",
+  "synthetic_input": [
+    {
+      "id": "0",
+      "text": "For every future report, use metric units."
+    },
+    {
+      "id": "1",
+      "text": "Sort the toy blocks by color."
+    }
+  ],
+  "system_sha256": "955791b60a45a0a4e5cf3521d2e7eac87cd24c236554f9a30901c9960aae48fc",
+  "schema_sha256": "e3e663dce3dacd672d93179b34778b20169fa03f34198b557adcf77a18b77292",
+  "raw_stdout_sha256": "ded00b0ed94a9305cdba649a019e06908459f3ff376a75886903337cb3680b47",
+  "fixture_sha256": "602f8509771b26cd80e764970b87d783490600e6580a162a78844af18c85506b",
+  "sanitized_fields": [
+    "/0/cwd",
+    "/0/session_id",
+    "/0/uuid",
+    "/0/original_cwd",
+    "/0/messaging_socket_path",
+    "/1/session_id",
+    "/1/uuid",
+    "/2/session_id",
+    "/2/uuid",
+    "/3/message/id",
+    "/3/message/content/0/signature",
+    "/3/session_id",
+    "/3/uuid",
+    "/3/timestamp",
+    "/3/request_id",
+    "/4/message/id",
+    "/4/message/content/0/id",
+    "/4/session_id",
+    "/4/uuid",
+    "/4/timestamp",
+    "/4/request_id",
+    "/5/message/content/0/tool_use_id",
+    "/5/session_id",
+    "/5/uuid",
+    "/5/timestamp",
+    "/5/tool_result_meta/0/id",
+    "/6/rate_limit_info/resetsAt",
+    "/6/rate_limit_info/utilization",
+    "/6/rate_limit_info/unifiedWindows/seven_day/utilization",
+    "/6/rate_limit_info/unifiedWindows/seven_day/resetsAt",
+    "/6/uuid",
+    "/6/session_id",
+    "/7/session_id",
+    "/7/uuid"
+  ],
+  "sanitization": "Stable identifier aliases; fixed runtime paths and timestamps; account utilization reset to 0.0. No fields, events or model answers added or removed."
+}
