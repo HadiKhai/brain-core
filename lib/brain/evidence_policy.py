@@ -279,8 +279,27 @@ def validate_real_result(inst, n, row, head, contract, data):
         raise ValueError('real result needs test_set_check {reference_score, method}: proof the test data can pass')
     if check['reference_score'] < data['threshold']:
         raise ValueError('the fixed test set cannot reach its own threshold; repair the test set before scoring')
-    if not text(data.get('run_ref')):
-        raise ValueError('real result needs run_ref: the stored run output it was scored from')
+    run = stored_run(inst, n, data)
+    blob = scorer_blob(inst, n, head, scored['scorer'])
+    if (run.get('head') != head or run.get('test_set_sha256') != scored['test_set_sha256'] or
+            run.get('items') != data['items'] or run.get('score') != data['score'] or
+            run.get('scorer') != {'path': scored['scorer'], 'blob': blob} or blob is None):
+        raise ValueError('the stored run must record this head, the frozen test set, the same items and score, '
+                         'and the contract scorer with its blob at this head')
+
+
+def stored_run(inst, n, data):
+    """The run artifact a receipt cites: a readable JSON file whose bytes match run_sha256."""
+    path = local_file(inst, n, data.get('run_ref'))
+    if path is None or not SHA256.fullmatch(str(data.get('run_sha256'))) or sha256_file(path) != data['run_sha256']:
+        raise ValueError('run_ref must be the stored run output file, with its run_sha256')
+    try:
+        run = json.loads(path.read_text())
+    except (OSError, ValueError, UnicodeError):
+        raise ValueError('the stored run output must be JSON') from None
+    if not isinstance(run, dict):
+        raise ValueError('the stored run output must be a JSON object')
+    return run
 
 
 def validate_model_selection(inst, n, row, head, contract, data):
@@ -338,13 +357,46 @@ def validate_score_read(inst, n, row, head, contract, data):
         raise ValueError('the contract scorer ' + scored['scorer'] + ' is not in the head; a score needs its scorer')
     if not isinstance(scorer, dict) or scorer.get('path') != scored['scorer'] or scorer.get('blob') != blob:
         raise ValueError('score read must name the contract scorer and its blob at this head (git rev-parse <head>:<path>)')
+    result = read_receipt(inst, n, row, 'real_result', head)
+    if result is None or data.get('run_ref') != result['run_ref'] or data.get('run_sha256') != result['run_sha256']:
+        raise ValueError('score read cites the run behind this head\'s real result (run_ref and run_sha256)')
     cases = data.get('cases')
     if (not isinstance(cases, list) or len(cases) != 3 or
-            any(not isinstance(c, dict) or not all(text(c.get(k)) for k in ('input_ref', 'output_ref', 'check'))
-                for c in cases) or len({c['input_ref'] for c in cases}) != 3):
-        raise ValueError('score read needs exactly 3 real cases, each with distinct input_ref, output_ref and check')
+            any(not isinstance(c, dict) or not text(c.get('check')) for c in cases)):
+        raise ValueError('score read needs exactly 3 real cases, each with input and output artifacts and check')
+    for case in cases:
+        for side in ('input', 'output'):
+            path = local_file(inst, n, case.get(side + '_ref'))
+            if path is None or case.get(side + '_sha256') != sha256_file(path):
+                raise ValueError('each case ' + side + '_ref must be a stored file with its ' + side + '_sha256')
+    if len({c['input_sha256'] for c in cases}) != 3:
+        raise ValueError('score read needs 3 distinct real cases')
     if not text(data.get('measures')) or not text(data.get('does_not_measure')):
         raise ValueError('score read needs measures and does_not_measure in plain words')
+
+
+def selector_exists(inst, n, head, selector):
+    """A pytest node id resolves through the module's own syntax tree, part by part."""
+    import ast
+    file, separator, rest = selector.partition('::')
+    parts = rest.split('::') if separator else []
+    if not file.endswith('.py') or not parts or any(not p for p in parts):
+        return False
+    parts[-1] = parts[-1].split('[', 1)[0]
+    source = _m_common.git('show', head + ':' + file, cwd=repo_of(inst, n))
+    if source.returncode:
+        return False
+    try:
+        scope = ast.parse(source.stdout).body
+    except (SyntaxError, ValueError):
+        return False
+    for index, part in enumerate(parts):
+        kinds = (ast.ClassDef,) if index < len(parts) - 1 else (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        found = next((node for node in scope if isinstance(node, kinds) and node.name == part), None)
+        if found is None:
+            return False
+        scope = getattr(found, 'body', [])
+    return True
 
 
 def validate_setup_correction(inst, n, row, head, contract, data):
@@ -360,13 +412,9 @@ def validate_setup_correction(inst, n, row, head, contract, data):
         raise ValueError('a setup correction is a selector or start_format fix only')
     if not text(data.get('before')) or not text(data.get('after')) or data['before'] == data['after']:
         raise ValueError('a setup correction needs a different before and after')
-    if data['correction'] == 'selector':
-        file, separator, name = data['after'].partition('::')
-        source = _m_common.git('show', head + ':' + file, cwd=repo_of(inst, n)) if separator else None
-        last = name.split('::')[-1].split('[')[0]
-        if (source is None or source.returncode or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', last) or
-                not re.search(r'^\s*(?:async\s+)?(?:def|class)\s+' + re.escape(last) + r'\b', source.stdout, re.M)):
-            raise ValueError('the corrected selector must exist in the source at this head (path::name)')
+    if data['correction'] == 'selector' and not selector_exists(inst, n, head, data['after']):
+        raise ValueError('the corrected selector must exist in the source at this head: every path::Class::name '
+                         'part, in a Python test file')
     if data.get('bounds') != 'original':
         raise ValueError('a setup correction runs within the original bounds (bounds: original)')
 
@@ -482,16 +530,20 @@ def handback_problems(inst, n, row, a):
     scored = scored_work(contract_text(n, row))
     if scored is None or a.state not in ('done', 'blocked', 'failed'):
         return []
-    problems = []
+    problems, measured = [], getattr(a, 'result', None) is not None
+    result = None
     try:
         head = branch_head(inst, n, row['Job'])
-        if getattr(a, 'result', None) is not None and read_receipt(inst, n, row, 'score_read', head) is None:
+        result = read_receipt(inst, n, row, 'real_result', head)
+        if measured and read_receipt(inst, n, row, 'score_read', head) is None:
             problems.append('a score is reported only after reading its scorer and 3 real cases: `brain evidence ' +
                             n['id'] + ' --branch ' + row['Job'] + ' --kind score-read --file <json>`, or hand '
                             'back without --result and name the number as unread')
     except (OSError, ValueError) as error:
         problems.append(str(error))
-    if a.state == 'done':
+    # Any state that hands a result up (done, a measured shortfall, or a head
+    # with a recorded real run) leads with quality; a pre-run setup block does not.
+    if a.state == 'done' or measured or result is not None:
         problems += quality_problems(getattr(a, 'report', None))
     return problems
 
@@ -507,7 +559,12 @@ def quality_problems(report):
     if not body:
         return ['a scored hand-back needs --report opening with "' + QUALITY_HEADING + '"']
     first, group, fence, groups = None, None, None, {'right': [], 'wrong': [], 'none': []}
+    preamble = []  # a single leading "# title" is allowed; any other text precedes the quality section
     for line in body.splitlines():
+        if first is None and not line.startswith('## '):
+            if line.strip():
+                preamble.append(None if line.startswith('# ') and not preamble else line)
+            continue
         stripped = line.lstrip()
         if stripped.startswith(('```', '~~~')):
             fence = None if fence == stripped[0] else (fence or stripped[0])
@@ -531,8 +588,9 @@ def quality_problems(report):
             groups[group].append(example.groups())
         elif group == 'wrong' and re.fullmatch(r'None found:\s*\S.*', line.strip()):
             groups['none'].append(line)
-    if first != QUALITY_HEADING:
-        return ['a scored hand-back report opens (first ## section, before any totals) with "' + QUALITY_HEADING + '"']
+    if first != QUALITY_HEADING or any(line is not None for line in preamble):
+        return ['a scored hand-back report opens (first ## section, before any totals) with "' + QUALITY_HEADING + '"'
+                '; only a # title may come before it']
     problems = []
     if not groups['right']:
         problems.append('### Right needs numbered examples: N. Ref: <item>; Source: <source>; Kept|Removed: <why>')
@@ -568,27 +626,56 @@ def inherited_judge(data):
     return value
 
 
-def relaunch_problems(brief_text, judge=None):
+NO_EGRESS_LINE = ("Inherited-text check not run: brief text leaves this machine only where the node sets "
+                  "ai_judge_egress=allowed, is not sealed and shares context from its home. Recheck inherited "
+                  "conclusions yourself.")
+
+
+def judge_egress(inst, n, context_paths):
+    """Brief text reaches the cloud judge only with explicit authority, never from sealed or private sources."""
+    node = n
+    while node:
+        if node.get('sealed'):
+            return False
+        node = node.get('parent')
+    cfg = inst.cfg if isinstance(inst.cfg, dict) else {}
+    if str(n['fm'].get('ai_judge_egress', cfg.get('ai_judge_egress', ''))).lower() != 'allowed':
+        return False
+    home = n.get('home_path') if n.get('external') else None
+    if context_paths and home is None:
+        return False
+    for value in context_paths:
+        try:
+            Path(value).resolve(strict=True).relative_to(Path(home).resolve(strict=True))
+        except (OSError, RuntimeError, ValueError):
+            return False
+    return True
+
+
+def relaunch_problems(inst, n, brief_text, context_paths=(), judge=None):
     """Refuse a relaunch brief that carries an inherited no-retry or stop clause.
 
-    An unavailable or malformed judgement lets the brief through; the brief's own
-    resume section still says inherited conclusions are context, not proof.
+    Returns (problems, notes). Without egress authority the judge is never
+    called. An unavailable or malformed judgement lets the brief through; the
+    brief's own resume section still says inherited conclusions are context.
     """
     if not text(brief_text):
-        return []
+        return [], []
+    if not judge_egress(inst, n, list(context_paths)):
+        return [], [NO_EGRESS_LINE]
     try:
         value = (judge or inherited_judge)({'brief': brief_text})
     except Exception:
-        return []
+        return [], []
     if (not isinstance(value, dict) or type(value.get('restricts')) is not bool or
             value.get('authority') not in ('inherited', 'operator', 'none') or not isinstance(value.get('quote'), str)):
-        return []
+        return [], []
     quote = value['quote'].strip()
     if value['restricts'] and value['authority'] == 'inherited' and quote and quote in brief_text:
         return ['a relaunch brief is context, not proof: remove the inherited restriction "' + quote[:160] +
                 '" (the new builder re-checks inherited conclusions against the code), or cite the operator decision '
-                'or contract field it comes from']
-    return []
+                'or contract field it comes from'], []
+    return [], []
 
 
 RESUME_LINE = ("Inherited conclusions are context, not proof: before building on one your change depends on, "

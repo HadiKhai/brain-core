@@ -35,7 +35,7 @@ setup_corrections: 0                # optional: no setup correction for this job
 
 | Moment | Refuses |
 | --- | --- |
-| `brain brief` relaunching a job with work | task or shared context carrying an inherited no-retry, attempt-spent or stop clause (AI judge; operator or contract limits pass; unavailable judge passes) |
+| `brain brief` relaunching a job with work | task or shared context carrying an inherited no-retry, attempt-spent or stop clause (AI judge; operator or contract limits pass; unavailable judge passes). The text is sent to the judge only when the node sets `ai_judge_egress=allowed`, no node up the tree is sealed, and every shared-context file is inside the node's home; otherwise the brief says the check did not run |
 | `brain jobs --contract-file` | invalid scored-work, design-reference or required reading-list declarations |
 | `brain review` on scored work | no real result at this head, a zero or a score below threshold; with `model_choice`, no cross-provider selection |
 | `brain handback` on scored work | `--result` without a score-read receipt; `done` without a report opening with `## What was removed / kept` |
@@ -45,15 +45,20 @@ setup_corrections: 0                # optional: no setup correction for this job
 ## Receipt fields
 
 - `real-result`: `test_set_sha256`, `items` (1..cap), `score`, `threshold`
-  (the contract's), `test_set_check {reference_score >= threshold, method}`, `run_ref`.
+  (the contract's), `test_set_check {reference_score >= threshold, method}`,
+  `run_ref` + `run_sha256`: the stored run output JSON, which records the same
+  `head`, `test_set_sha256`, `items`, `score` and `scorer {path, blob}`.
 - `model-selection`: `test_set_sha256`, `items`, `data_class`, `candidates`
   (`provider`, `model`, `run_ref`, `run_sha256`, `score`, `cost_usd`,
   `latency_s`; each run receipt names the same provider, model, items and set),
   `chosen`.
-- `score-read`: `scorer {path, blob}` (blob at the head), 3 `cases`
-  (`input_ref`, `output_ref`, `check`), `measures`, `does_not_measure`.
+- `score-read`: `scorer {path, blob}` (blob at the head), the real result's
+  `run_ref` + `run_sha256`, 3 distinct `cases` (`input_ref` + `input_sha256`,
+  `output_ref` + `output_sha256` as stored files, `check`), `measures`,
+  `does_not_measure`.
 - `setup-correction`: `contract_sha256`, `correction` (`selector` or
-  `start_format`), `before`, `after` (a selector exists at the head), `bounds: original`.
+  `start_format`), `before`, `after` (every part of a Python `path::Class::name`
+  selector exists in the file's syntax tree at the head), `bounds: original`.
 - `design-check`: `screens` (`screen`, `reference {path, sha256}`,
   `build {path, sha256}`), `checklist` (buttons, spacing, links, validation,
   navigation, consistency: `verdict`, `note`), `checker {threadId, runtime, model}`
@@ -69,6 +74,8 @@ setup_corrections: 0                # optional: no setup correction for this job
 1. Ref: item-9; Source: set:9; Removed: a pronoun fragment; name the subject instead
 ```
 
-`None found: <how the items were read>` may replace Wrong examples. Code checks
+Only a `# title` may come before this section. It is required for `done`, for
+any hand-back with `--result`, and for any hand-back on a head with a recorded
+real result. `None found: <how the items were read>` may replace Wrong examples. Code checks
 only this structure and its place before any other section; whether each
 example is judged right against its source is the reviewer's judgement.

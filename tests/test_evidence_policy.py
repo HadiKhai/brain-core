@@ -10,6 +10,8 @@ from scenario import CORE, Scenario
 
 SECTIONS = "mode: untimed\n\n" + "".join("## " + field + "\nSynthetic scope.\n\n" for field in
                                          ("Outcome", "Authorized", "Discretion", "Stop when", "Needs consent", "Done means"))
+QUALITY = ('## What was removed / kept\n### Right\n1. Ref: item-4; Source: set:4; Removed: duplicate of item-3\n'
+           '### Wrong\nNone found: read all removed items against the set\n\n')
 CHECKLIST = ('buttons', 'spacing', 'links', 'validation', 'navigation', 'consistency')
 
 
@@ -21,7 +23,9 @@ class EvidencePolicy(Scenario):
     def job(self):
         r = self.init('alice')
         home = self.repo(self.tmp / 'app', {'calc.py': 'value = 1\n',
-                                            'test_calc.py': 'def test_value():\n    assert True\n',
+                                            'test_calc.py': 'def test_value():\n    assert True\n\n\n'
+                                                            'class TestCalc:\n    def test_value(self):\n'
+                                                            '        assert True\n',
                                             'score.py': 'def score(expected, got):\n    return float(expected == got)\n'})
         self.b(r, 'new', 'a', '--title', 'A', '--home', str(home))
         self.b(r, 'set', 'a', 'runtime=claude')
@@ -67,10 +71,16 @@ class EvidencePolicy(Scenario):
         return {'version': 1, 'kind': kind, 'node': 'a', 'branch': 'job', 'job_key': m.job_key(row),
                 'head': self.head(wt), **fields}
 
-    def real_result(self, r, wt, test_set, score, **fields):
+    def real_result(self, r, wt, test_set, score, run=None, **fields):
+        head = self.head(wt)
+        record = {'head': head, 'test_set_sha256': sha(test_set), 'items': 10, 'score': score,
+                  'scorer': {'path': 'score.py', 'blob': self.git('rev-parse', 'HEAD:score.py', cwd=wt).strip()}}
+        record.update(run or {})
+        path = self.tmp / ('real-run-' + head[:12] + '-' + str(score) + '.json')
+        path.write_text(json.dumps(record))
         data = self.receipt(r, wt, 'real_result', test_set_sha256=sha(test_set), items=10, score=score,
                             threshold=0.8, test_set_check={'reference_score': 1.0, 'method': 'gold answers scored'},
-                            run_ref='runs/real-1.jsonl')
+                            run_ref=str(path), run_sha256=sha(path))
         data.update(fields)
         return data
 
@@ -90,6 +100,14 @@ class EvidencePolicy(Scenario):
             r, wt, test_set, 0.9, test_set_check={'reference_score': 0.5, 'method': 'gold answers scored'}), ok=False))
         self.assertIn('contract cap', self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0.9, items=21),
                                                     ok=False))
+        # A receipt must cite the stored run that produced its number, at this head.
+        self.assertIn('stored run output file', self.evidence(r, 'real-result', self.real_result(
+            r, wt, test_set, 0.9, run_ref=str(self.tmp / 'no-such-run.json')), ok=False))
+        self.assertIn('same items and score', self.evidence(r, 'real-result', self.real_result(
+            r, wt, test_set, 0.9, run={'score': 0.1}), ok=False))
+        self.assertIn('same items and score', self.evidence(r, 'real-result', self.real_result(
+            r, wt, test_set, 0.9, run={'head': '0' * 40}), ok=False))
+        self.assertIn('no review before a real result', self.review(r, ok=False))
         self.evidence(r, 'real-result', self.real_result(r, wt, test_set, 0))
         self.assertIn('zero real score for job', (r / 'nodes/a/inbox.md').read_text())
         self.assertIn('real score is zero', self.review(r, ok=False))
@@ -142,20 +160,37 @@ class EvidencePolicy(Scenario):
                         '### Fixes\n1. Repair.\n2. Retain.\nRecommendation: 1\n')
         return path
 
+    def artifact(self, name, body):
+        path = self.tmp / name
+        path.write_text(body)
+        return {'ref': str(path), 'sha256': sha(path)}
+
     def test_scored_handback_reports_a_number_only_after_scorer_and_three_cases_are_read(self):
         r, home, wt = self.job()
         test_set = self.fixed_set()
         self.contract(r, self.scored(test_set))
         handback = ('handback', 'a', '--branch', 'job', '--state', 'blocked', '--summary', 'below target on real data',
-                    '--result', '0.5', '--target', '0.8', '--report', str(self.dissected()))
+                    '--result', '0.5', '--target', '0.8', '--report', str(self.dissected(QUALITY)))
         self.assertIn('only after reading its scorer and 3 real cases', self.b(r, *handback, ok=False))
+        run = self.real_result(r, wt, test_set, 0.5)
+        self.evidence(r, 'real-result', run)
         blob = self.git('rev-parse', 'HEAD:score.py', cwd=wt).strip()
-        cases = [{'input_ref': 'set:' + str(i), 'output_ref': 'run:' + str(i), 'check': 'exact match'} for i in range(3)]
+        cases = []
+        for i in range(3):
+            given, got = self.artifact('in-' + str(i), 'invented input ' + str(i)), self.artifact('out-' + str(i), 'out')
+            cases.append({'input_ref': given['ref'], 'input_sha256': given['sha256'], 'output_ref': got['ref'],
+                          'output_sha256': got['sha256'], 'check': 'exact match'})
         read = self.receipt(r, wt, 'score_read', scorer={'path': 'score.py', 'blob': blob}, cases=cases,
+                            run_ref=run['run_ref'], run_sha256=run['run_sha256'],
                             measures='exact string equality per item', does_not_measure='near-miss spellings')
         self.assertIn('exactly 3 real cases', self.evidence(r, 'score-read', {**read, 'cases': cases[:2]}, ok=False))
         self.assertIn('its blob at this head', self.evidence(
             r, 'score-read', {**read, 'scorer': {'path': 'score.py', 'blob': '0' * 40}}, ok=False))
+        # Case references must be stored artifacts, not labels.
+        unbound = [{**case, 'input_ref': 'set:' + str(i)} for i, case in enumerate(cases)]
+        self.assertIn('input_ref must be a stored file', self.evidence(r, 'score-read', {**read, 'cases': unbound},
+                                                                       ok=False))
+        self.assertIn('cites the run behind', self.evidence(r, 'score-read', {**read, 'run_sha256': '0' * 64}, ok=False))
         self.evidence(r, 'score-read', read)
         self.assertNotIn('only after reading its scorer', self.b(r, *handback))
 
@@ -172,13 +207,21 @@ class EvidencePolicy(Scenario):
                                 '1. Ref: item-4; Source: set:4; Removed: duplicate of item-3\n'
                                 '### Wrong\nNone found: read all 12 removed items against the set\n')
         self.assertIn('before any totals', self.b(r, *done, '--report', str(counts_first), ok=False))
+        preamble = self.tmp / 'preamble.md'
+        preamble.write_text('Dropped 228 of 300.\n\n' + QUALITY)
+        self.assertIn('before any totals', self.b(r, *done, '--report', str(preamble), ok=False))
+        # A blocked or failed result is still a result: it also leads with quality.
+        for state in ('blocked', 'failed'):
+            shortfall = ('handback', 'a', '--branch', 'job', '--state', state, '--summary', 'below target',
+                         '--result', '0.5', '--target', '0.8', '--report', str(self.dissected('Dropped 228 of 300.\n')))
+            self.assertIn('before any totals', self.b(r, *shortfall, ok=False))
         missing = self.tmp / 'missing.md'
         missing.write_text('## What was removed / kept\n### Right\nSeveral were fine.\n')
         out = self.b(r, *done, '--report', str(missing), ok=False)
         self.assertIn('### Right needs numbered examples', out)
         self.assertIn('### Wrong needs numbered examples', out)
         good = self.tmp / 'good.md'
-        good.write_text('Answer first.\n\n## What was removed / kept\n### Right\n'
+        good.write_text('# Filter run\n\n## What was removed / kept\n### Right\n'
                         '1. Ref: item-4; Source: set:4; Removed: duplicate of item-3\n'
                         '### Wrong\n1. Ref: item-9; Source: set:9; Removed: a pronoun fragment; name the subject instead\n'
                         '\n## Totals\nDropped 2 of 10.\n')
@@ -192,9 +235,12 @@ class EvidencePolicy(Scenario):
         m = self.core(r)
         contract = m.contract_file(m.Instance(r).node('a'), m.open_job(m.read_jobs(m.Instance(r).node('a')), 'job'))
         correction = self.receipt(r, wt, 'setup_correction', contract_sha256=sha(contract), correction='selector',
-                                  before='test_calc.py::test_values', after='test_calc.py::test_value', bounds='original')
-        self.assertIn('must exist in the source', self.evidence(
-            r, 'setup-correction', {**correction, 'after': 'test_calc.py::test_missing'}, ok=False))
+                                  before='test_calc.py::test_values', after='test_calc.py::TestCalc::test_value',
+                                  bounds='original')
+        for wrong in ('test_calc.py::test_missing', 'test_calc.py::MissingClass::test_value',
+                      'test_calc.py::test_value::test_value', 'calc.py::value'):
+            self.assertIn('must exist in the source', self.evidence(
+                r, 'setup-correction', {**correction, 'after': wrong}, ok=False))
         self.assertIn('original bounds', self.evidence(r, 'setup-correction', {**correction, 'bounds': 'doubled'},
                                                        ok=False))
         self.assertIn('selector or start_format fix only', self.evidence(
@@ -243,7 +289,21 @@ class EvidencePolicy(Scenario):
         verdict.write_text(json.dumps({'restricts': True, 'authority': 'inherited',
                                        'quote': 'the sole attempt spent: do not retry the migration'}))
         self.env['BRAIN_JUDGE_FIXTURE'] = str(verdict)
+        # Without explicit egress authority the brief text never reaches the judge.
+        self.assertIn('Inherited-text check not run', self.b(r, *brief))
+        self.b(r, 'set', 'a', 'ai_judge_egress=allowed')
         self.assertIn('context, not proof', self.b(r, *brief, ok=False))
+        private = self.tmp / 'private-trace.md'
+        private.write_text('Earlier transcript excerpt.\n')
+        self.assertIn('Inherited-text check not run', self.b(r, *brief, '--context-file', str(private)))
+        m = self.core(r)
+        policy = importlib.import_module(m.read_jobs.__module__.rsplit('.', 1)[0] + '.evidence_policy')
+        def leaked(data):
+            raise AssertionError('sealed brief text reached the judge')
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            inst = m.Instance(r)
+            sealed = {**inst.node('a'), 'sealed': True}
+            self.assertEqual(policy.relaunch_problems(inst, sealed, task, [], judge=leaked)[1], [policy.NO_EGRESS_LINE])
         verdict.write_text(json.dumps({'restricts': True, 'authority': 'operator', 'quote': 'do not retry the migration'}))
         out = self.b(r, *brief)
         self.assertIn('Inherited conclusions are context, not proof', out)

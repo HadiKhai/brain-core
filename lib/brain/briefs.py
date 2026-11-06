@@ -371,9 +371,10 @@ def cmd_brief(a):
                     "Job ledger state: " + json.dumps(row, ensure_ascii=False), ""]
             inputs.append(("Resume context", json.dumps(row, ensure_ascii=False)))
             inherited = "\n\n".join(body for label, body in inputs if label in ("Task", "Shared context") and body)
-            refused = _m_evidence.relaunch_problems(inherited)
+            refused, notes = _m_evidence.relaunch_problems(inst, n, inherited, context_inputs)
             if refused:
                 _m_common.die(_m_guard.redact("; ".join(refused), _m_guard.never_terms(n)))
+            out[-1:-1] = notes
     inputs += contract_inputs(n, a.branch)
     contract = _m_jobs.contract_lines(inst, n, a.branch)
     from . import tasks as _m_tasks
