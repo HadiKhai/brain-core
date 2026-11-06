@@ -131,3 +131,36 @@ class ReviewCarryOver(Scenario):
         self.assertIn('review receipt needs exact code', reasons[0])
         self.assertIn('review carry-over refused', self.b(r, 'review', 'a', '--branch', 'other', '--carry', ok=False))
         self.assertFalse(m.review_receipt_path(n, row, head).exists())
+
+    def gitlink(self, wt, sha, amend=False):
+        self.git('update-index', '--add', '--cacheinfo', '160000,' + sha + ',vendor/lib', cwd=wt)
+        self.git('commit', '-q', *(['--amend', '--no-edit'] if amend else ['-m', 'pin vendor']), cwd=wt)
+        return self.git('rev-parse', 'HEAD', cwd=wt).strip()
+
+    def test_hidden_gitlink_change_refuses_under_ignore_submodules_config(self):
+        r, wt, m, inst, n, receipt = _review.IndependentReviewReceipts.context(self)
+        home = self.tmp / 'app'
+        receipt['head'] = self.gitlink(wt, '1' * 40)
+        rows = m.read_jobs(n)
+        rows[-1]['Review rules digest'] = m.rules_digest(m.applicable_rules(n))
+        m.write_jobs(inst, n, rows)
+        n = inst.node('a')
+        m.record_review_receipt(inst, n, 'job', receipt)
+        self.move_main_and_rebase(wt)
+        head = self.gitlink(wt, '2' * 40, amend=True)  # only the gitlink differs from the reviewed patch
+        self.git('config', 'diff.ignoreSubmodules', 'all', cwd=home)
+        reasons = m.validate_ready_reviews(inst, n, 'job', head)
+        self.assertEqual(len(reasons), 1)
+        self.assertIn('review carry-over refused: receipt at ' + receipt['head'][:12] + ': patch differs', reasons[0])
+        self.assertIn('patch differs', self.b(r, 'review', 'a', '--branch', 'job', '--carry', ok=False))
+        row = m.open_job(m.read_jobs(n), 'job')
+        self.assertFalse(m.review_receipt_path(n, row, head).exists())
+
+    def test_non_object_source_receipt_is_a_refusal_not_a_crash(self):
+        r, wt, m, inst, n, receipt, source = self.reviewed()
+        head = self.move_main_and_rebase(wt)
+        source.write_text(json.dumps([receipt]))
+        reasons = m.validate_ready_reviews(inst, n, 'job', head)
+        self.assertEqual(len(reasons), 1)
+        self.assertIn('review carry-over refused: receipt at ' + receipt['head'][:12] + ': not a JSON object', reasons[0])
+        self.assertIn('not a JSON object', self.b(r, 'review', 'a', '--branch', 'job', '--carry', ok=False))

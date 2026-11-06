@@ -18,7 +18,8 @@ CARRY_KEYS = ('source_head', 'source_receipt', 'source_sha256', 'source_base', '
               'base', 'patch_id', 'rules_digest')
 # Pin every option that shapes the patch text, so user configuration cannot change an id.
 DIFF = ('diff', '--binary', '--full-index', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames',
-        '--no-relative', '--diff-algorithm=myers', '--indent-heuristic', '--src-prefix=a/', '--dst-prefix=b/', '-U3')
+        '--no-relative', '--diff-algorithm=myers', '--indent-heuristic', '--src-prefix=a/', '--dst-prefix=b/', '-U3',
+        '--ignore-submodules=none', '--submodule=short')
 
 
 class NoSource(ValueError):
@@ -118,7 +119,10 @@ def carry_candidate(inst, n, row, head, rules=None):
         except (OSError, ValueError) as error:
             refusals.append(label + ': unreadable (' + str(error) + ')')
             continue
-        if isinstance(source, dict) and 'carry' in source:
+        if not isinstance(source, dict):
+            refusals.append(label + ': not a JSON object')
+            continue
+        if 'carry' in source:
             continue  # a carried receipt is never a source; its original stays in this folder
         matches.append((path, raw, source))
     if not matches and not refusals:
@@ -131,8 +135,8 @@ def carry_candidate(inst, n, row, head, rules=None):
     for path, raw, source in matches:
         label = 'receipt at ' + path.stem[:12]
         try:
-            if not isinstance(source, dict) or source.get('rules_digest') != current:
-                raise ValueError('rules digest ' + str((source or {}).get('rules_digest'))[:12] +
+            if source.get('rules_digest') != current:
+                raise ValueError('rules digest ' + str(source.get('rules_digest'))[:12] +
                                  ' differs from current ' + current[:12])
             _m_review.validate_review_receipt(inst, n, row, path.stem, source, rules=rules)
             source_base = merge_base(repo, path.stem, main)
