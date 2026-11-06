@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-06: Carry accepted reviews across pure rebases
+
+A job rebased onto a newer main keeps its accepted review when code proves the
+patch is unchanged: `git patch-id --stable` and `--verbatim` of merge-base..head
+equal those of the reviewed range, and the receipt's rules digest equals the
+job's current `Review rules digest`. Readiness persists the carried receipt at
+the new head (or run `brain review <node> --branch B --carry`); it records the
+source head, source receipt path and sha256, both bases and patch-ids, and the
+rules digest, and leaves the original receipt untouched. Anything else is
+refused with the exact reason: a changed byte, changed rules, a blocked latest
+review of the patch, or another job's receipt. Preview receipts stay
+exact-head. Nothing to do after upgrading.
+
 ## 2026-11-06: Scope coordinator launch capabilities privately
 
 Claude coordinators can start idle in a host-created private worktree, run
