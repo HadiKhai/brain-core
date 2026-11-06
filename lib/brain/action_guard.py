@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import sys
 from pathlib import Path
 
@@ -65,24 +64,54 @@ SHELL_CONTROL_CHARS = ';&|()\n'
 def shell_segments(command):
     """Simple commands as word lists, split on shell control operators (syntax only).
 
-    Unparseable input yields no segments: the guard fails open, as hook errors do.
+    POSIX quoting decides what is an operator: a control character inside quotes or
+    after a backslash is part of a word, so printed text never becomes a command,
+    and every unquoted one separates, whatever follows it (`&&` then a newline).
+    Unparseable input (an unclosed quote) yields no segments: the guard fails open,
+    as hook errors do.
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=SHELL_CONTROL_CHARS)
-    lexer.whitespace, lexer.whitespace_split = ' \t\r', True
-    try:
-        tokens = list(lexer)
-    except ValueError:
-        return []
-    segments, words = [], []
-    # shlex yields a maximal run of control characters as one token (`&&` then a
-    # newline is '&&\n'), so a token made only of them is one or more operators.
-    for token in tokens + ['\n']:
-        if token and set(token) <= set(SHELL_CONTROL_CHARS):
-            if words:
+    segments, words, word, started = [], [], '', False
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "'":
+            end = command.find("'", i + 1)
+            if end < 0:
+                return []
+            word, started, i = word + command[i + 1:end], True, end + 1
+        elif c == '"':
+            i += 1
+            while i < n and command[i] != '"':
+                if command[i] == '\\' and i + 1 < n and command[i + 1] in '$`"\\\n':
+                    word += command[i + 1] if command[i + 1] != '\n' else ''
+                    i += 2
+                else:
+                    word += command[i]
+                    i += 1
+            if i >= n:
+                return []
+            started, i = True, i + 1
+        elif c == '\\':
+            if i + 1 >= n or command[i + 1] != '\n':  # backslash-newline continues the line
+                word, started = word + (command[i + 1:i + 2] or '\\'), True
+            i += 2
+        elif c == '#' and not started:  # a comment starts only at a word boundary
+            while i < n and command[i] != '\n':
+                i += 1
+        elif c in ' \t\r' or c in SHELL_CONTROL_CHARS:
+            if started:
+                words.append(word)
+            word, started = '', False
+            if c in SHELL_CONTROL_CHARS and words:
                 segments.append(words)
-            words = []
+                words = []
+            i += 1
         else:
-            words.append(token)
+            word, started, i = word + c, True, i + 1
+    if started:
+        words.append(word)
+    if words:
+        segments.append(words)
     return segments
 
 

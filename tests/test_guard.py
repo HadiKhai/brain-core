@@ -2331,3 +2331,21 @@ class AgentGitCommands(Scenario):
                 with self.subTest(tool=tool, command=command):
                     self.assertIsNone(self.hook(tool, {key: command}))
         self.assertIsNone(self.hook('Bash', {'command': 'cd "/tmp/unbalanced && git status'}))  # unparseable: fails open
+
+    def test_quoted_or_escaped_control_characters_are_arguments_not_separators(self):
+        """Only unquoted, unescaped control characters split commands, for the hook and report evidence."""
+        gates = importlib.import_module(self.m._owners['cmd_hook_pretool'].__package__ + '.report_gates')
+        printed = ["printf '%s\\n' '()' cat lib/gate.py", "printf '%s\\n' '()' git -C /tmp/app diff",
+                   "printf '%s\\n' \"&&\" cat lib/gate.py", "echo \; git -C /tmp/app show", "echo '|' brain preview demo"]
+        for command in printed:
+            with self.subTest(command=command):
+                self.assertEqual(len(self.m.shell_segments(command)), 1)
+                self.assertFalse(gates.is_source_read('Bash', {'command': command}))
+                self.assertFalse(gates.is_observation('Bash', {'command': command}))
+        self.assertTrue(gates.is_source_read('Bash', {'command': "printf '%s\\n' x; cat lib/gate.py"}))
+        self.assertTrue(gates.is_observation('Bash', {'command': 'echo x &&\nbrain preview demo'}))
+        for tool, key in (('Bash', 'command'), ('exec_command', 'cmd')):
+            for command in ('cd /tmp/app && echo "()" git status', "cd /tmp/app && echo ';' git status",
+                            'cd /tmp/app && echo \\&\\& git status', "cd /tmp/app && printf '%s\\n' '\n' git status"):
+                with self.subTest(tool=tool, command=command):
+                    self.assertIsNone(self.hook(tool, {key: command}))
