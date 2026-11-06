@@ -185,7 +185,8 @@ def snapshot(path, state):
         records = records[cut:]
     # Codex emits an event and a response item for one input. Prefer its clean event
     # representation; equal text in separate events is still two messages.
-    clean = any(r.get('type') == 'event_msg' and operator_text(r) is not None for r in records)
+    clean = any(r.get('type') == 'event_msg' and operator_text(r, include_automated=True) is not None
+                for r in records)
     messages = []
     for i, record in enumerate(records):
         if clean and record.get('type') == 'response_item':
@@ -227,7 +228,7 @@ def validated_classifications(messages, value):
                     or not isinstance(item['quote'], str) or not item['quote']
                     or item['quote'] not in message['text']):
                 raise CaptureRejected('capture quote is not an exact nonempty substring, or kind is invalid')
-            output.append(dict(item, at=message['at']))
+            output.append(dict(item, at=message['at'], source_text=message['text']))
     if found != set(expected):
         raise CaptureRejected('capture response omitted an operator message')
     return output

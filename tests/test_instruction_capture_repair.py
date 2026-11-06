@@ -39,10 +39,12 @@ class InstructionCaptureRepair(unittest.TestCase):
     def save_local(self):
         (self.root / '.brain/local.json').write_text(json.dumps(self.local))
 
-    def gap(self, name, *quotes):
+    def gap(self, name, *quotes, source_text=None):
         path = self.gaps / (name + '.json')
         path.write_text(json.dumps({'kind': 'instruction-capture-gap', 'code': 'second_stop_unconverted',
-                                   'items': [{'kind': 'standing_instruction', 'quote': q} for q in quotes]}))
+                                   'items': [dict(kind='standing_instruction', quote=q,
+                                                  **({'source_text': source_text} if source_text is not None else {}))
+                                             for q in quotes]}))
         return path
 
     def test_plan_joins_all_recorded_nodes_and_preserves_exact_prompt_bodies(self):
@@ -61,13 +63,76 @@ class InstructionCaptureRepair(unittest.TestCase):
         plan = self.repair.marker_plan(self.root, self.tasks)
         self.assertFalse(plan['complete'])
         self.assertEqual(plan['missing'], ['task-other-wake'])
-        with self.assertRaisesRegex(ValueError, 'duplicate'):
-            self.repair.marker_plan(self.root, self.tasks + [self.tasks[0]])
+        duplicate = self.repair.marker_plan(self.root, self.tasks + [self.tasks[0]])
+        self.assertIn('task-tick', duplicate['missing'])
+        self.assertEqual(len(duplicate['skipped']), 2)
+        self.assertTrue(all('duplicate' in row['reason'] for row in duplicate['skipped']))
+        self.assertNotIn('task-tick', [row['scheduledTaskId'] for row in duplicate['updates']])
+
+    def test_bad_export_rows_warn_and_skip_both_duplicates_without_stopping_good_gaps(self):
+        self.gap('scheduled-episode', 'Read current work.', source_text=self.tasks[1]['prompt'])
+        bad = self.tasks + [dict(self.tasks[0]), {'scheduledTaskId': 'other', 'prompt': '', 'enabled': True},
+                            {'prompt': 'Missing id'}, 'invalid row']
+        for result in (self.repair.marker_plan(self.root, bad), self.repair.reconcile_gaps(self.root, bad)):
+            self.assertFalse(result['complete'])
+            self.assertEqual(len(result['skipped']), 5)
+            self.assertEqual(len(result['warnings']), 5)
+            self.assertIn('task-tick', result['missing'])
+        result = self.repair.reconcile_gaps(self.root, bad)
+        self.assertEqual([r['gap'] for r in result['reconciliations']], ['scheduled-episode.json'])
+        self.assertEqual({row['row'] for row in result['skipped'] if 'duplicate' in row['reason']}, {0, 5})
+
+    def test_plan_lists_unbound_exported_schedules_without_changing_them(self):
+        plan = self.repair.marker_plan(self.root, self.tasks)
+        self.assertEqual(plan['unbound'], [dict(self.tasks[-1], status='unbound, not changed')])
+        self.assertNotIn('unrecorded-task', [r['scheduledTaskId'] for r in plan['updates']])
+
+    def test_operator_quote_overlap_is_kept_but_proven_source_turns_reconcile(self):
+        prompt = self.tasks[1]['prompt']
+        self.gap('operator', 'Read current work.', source_text='For this run: Read current work. Then summarize.')
+        self.gap('no-source', 'Read current work.')
+        self.gap('exact-turn', 'Read current work.', source_text=prompt)
+        self.gap('marked-turn', 'Read current work.', source_text=self.repair.AUTOMATED_TURN_PREFIX + '\n' + prompt)
+        result = self.repair.reconcile_gaps(self.root, self.tasks, dry_run=False)
+        self.assertEqual({r['gap'] for r in result['reconciliations']}, {'exact-turn.json', 'marked-turn.json'})
+        self.assertEqual({r['gap'] for r in result['kept']}, {'operator.json', 'no-source.json'})
+        self.assertTrue(all(row['status'] == 'kept: not provably automated' for row in result['kept']))
+        self.assertFalse((self.gaps.parent / 'reconciliations/operator.json').exists())
+        self.assertFalse((self.gaps.parent / 'reconciliations/no-source.json').exists())
+
+    def test_legacy_source_records_must_match_original_timestamp_and_whole_turn(self):
+        path = self.gap('legacy', 'Read current work.')
+        gap = json.loads(path.read_text())
+        gap['items'][0]['at'] = '2026-01-15T12:00:00Z'
+        path.write_text(json.dumps(gap))
+        record = {'type': 'user', 'timestamp': gap['items'][0]['at'], 'promptSource': 'sdk',
+                  'turnOrigin': 'sdk', 'message': {'role': 'user', 'content': self.tasks[1]['prompt']}}
+        for source in (dict(record, timestamp='2026-01-15T12:01:00Z'),
+                       dict(record, message={'content': 'Operator repeats: Read current work.'})):
+            result = self.repair.reconcile_gaps(self.root, self.tasks, source_turns={path.name: [source]})
+            self.assertEqual(result['reconciliations'], [])
+            self.assertEqual(result['kept'][0]['status'], 'kept: not provably automated')
+        result = self.repair.reconcile_gaps(self.root, self.tasks, source_turns={path.name: [record]})
+        self.assertEqual([r['gap'] for r in result['reconciliations']], [path.name])
+        self.assertEqual(len(result['reconciliations'][0]['source_turn_sha256']), 1)
+
+    def test_marked_source_must_contain_quote_and_every_item_needs_source_proof(self):
+        path = self.gap('mixed-sources', 'Read current work.', 'Role: root fixture.',
+                        source_text=self.repair.AUTOMATED_TURN_PREFIX + '\n' + self.tasks[1]['prompt'])
+        gap = json.loads(path.read_text())
+        gap['items'][1]['source_text'] = 'Operator asks: Role: root fixture.'
+        path.write_text(json.dumps(gap))
+        self.gap('invented-source', 'Read current work.', source_text=self.repair.AUTOMATED_TURN_PREFIX + '\nOther data.')
+        result = self.repair.reconcile_gaps(self.root, self.tasks)
+        self.assertEqual(result['reconciliations'], [])
+        self.assertEqual(len(result['kept']), 2)
 
     def test_reconciliation_is_exact_whole_gap_dry_run_and_idempotent(self):
-        matched = self.gap('scheduled', 'Run the recurring fixture.', 'Keep its exact whitespace.  ')
-        disabled = self.gap('historical', 'A disabled historical fixture.')
-        retired = self.gap('retired', 'An unrelated host task.')
+        matched = self.gap('scheduled', 'Run the recurring fixture.', 'Keep its exact whitespace.  ',
+                           source_text=self.tasks[0]['prompt'])
+        disabled = self.gap('historical', 'A disabled historical fixture.', source_text=self.tasks[3]['prompt'])
+        retired = self.gap('retired', 'An unrelated host task.',
+                           source_text=self.repair.AUTOMATED_TURN_PREFIX + '\n' + self.tasks[4]['prompt'])
         self.gap('mixed', 'Run the recurring fixture.', 'Always retain operator instructions.')
         self.gap('split', 'Run the recurring fixture.', 'Read current work.')
         self.gap('paraphrase', 'run the recurring fixture.')
@@ -97,7 +162,7 @@ class InstructionCaptureRepair(unittest.TestCase):
 
     def test_bad_gap_is_reported_while_other_gaps_continue(self):
         (self.gaps / 'bad.json').write_text('{')
-        self.gap('good', 'Read current work.')
+        self.gap('good', 'Read current work.', source_text=self.tasks[1]['prompt'])
         result = self.repair.reconcile_gaps(self.root, self.tasks)
         self.assertEqual(len(result['warnings']), 1)
         self.assertEqual(len(result['reconciliations']), 1)
@@ -115,7 +180,7 @@ class InstructionCaptureRepair(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(len(json.loads(plan.read_text())['updates']), 2)
         self.assertEqual(plan.stat().st_mode & 0o777, 0o600)
-        self.gap('candidate', 'Read current work.')
+        self.gap('candidate', 'Read current work.', source_text=self.tasks[1]['prompt'])
         run = subprocess.run(args + ['reconcile'] + options + ['--dry-run'],
                              env=env, text=True, capture_output=True, timeout=10)
         self.assertEqual(run.returncode, 0, run.stderr)
@@ -127,3 +192,23 @@ class InstructionCaptureRepair(unittest.TestCase):
                              env=env, text=True, capture_output=True, timeout=10)
         self.assertEqual(run.returncode, 1, run.stderr)
         self.assertEqual(json.loads(plan.read_text())['missing'], ['missing-task'])
+        tasks.write_text(json.dumps(self.tasks + [self.tasks[0], {'scheduledTaskId': 'other', 'prompt': '',
+                                                                 'enabled': True}]))
+        run = subprocess.run(args + ['reconcile'] + options + ['--dry-run'],
+                             env=env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        result = json.loads(run.stdout)
+        self.assertEqual(result['reconciliations'][0]['gap'], 'candidate.json')
+        self.assertEqual(len(result['skipped']), 3)
+        candidate = self.gaps / 'candidate.json'
+        gap = json.loads(candidate.read_text())
+        gap['items'][0].pop('source_text')
+        gap['items'][0]['at'] = '2026-01-15T12:00:00Z'
+        candidate.write_text(json.dumps(gap))
+        source = self.root / 'source-turns.json'
+        source.write_text(json.dumps({'candidate.json': [{'type': 'user', 'timestamp': gap['items'][0]['at'],
+                          'message': {'content': self.tasks[1]['prompt']}}]}))
+        run = subprocess.run(args + ['reconcile'] + options + ['--dry-run', '--source-turns-json', str(source)],
+                             env=env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(run.returncode, 1, run.stderr)  # unrelated malformed export rows still reported
+        self.assertEqual(json.loads(run.stdout)['reconciliations'][0]['gap'], 'candidate.json')

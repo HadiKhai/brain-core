@@ -304,6 +304,23 @@ class InstructionCapture(Scenario):
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('replayed old operator message')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
 
+    def test_automated_codex_event_still_suppresses_user_response_item_context(self):
+        self.records = [
+            {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+             'content': [{'type': 'input_text', 'text': 'Fixture environment and supplied rules.'}]}},
+            {'type': 'event_msg', 'payload': {'type': 'user_message',
+             'message': self.capture.AUTOMATED_TURN_PREFIX + '\nFixture wake'}}]
+        self.path.write_text(''.join(json.dumps(row) + '\n' for row in self.records))
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('automated context called AI')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        self.assertNotIn('instruction-capture-gap', (self.root / 'inbox.md').read_text())
+
+    def test_capture_preserves_source_turn_for_safe_gap_reconciliation(self):
+        self.assertIn(self.quote, self.stop())
+        self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True})
+        gap, = (self.root / '.brain/instruction-capture/gaps').glob('*.json')
+        self.assertEqual(json.loads(gap.read_text())['items'][0]['source_text'], self.quote)
+
     def test_second_stop_escapes_and_records_unconverted_gap_without_ai(self):
         self.assertIn(self.quote, self.stop())
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('second stop called AI')):
