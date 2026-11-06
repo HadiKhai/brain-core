@@ -12,7 +12,7 @@ import subprocess
 
 from . import common as _m_common
 from . import instance as _m_instance
-from .briefs import COORDINATOR_STARTUP
+from .briefs import AUTOMATED_TURN_PREFIX, COORDINATOR_STARTUP
 
 _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 _m_host_instances = _m_common.LazyModule(__package__, 'host_instances')
@@ -21,7 +21,7 @@ _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 _m_schedules = _m_common.LazyModule(__package__, 'schedules')
 
 
-AUTOMATED = 'Automated turn: no operator present; cancellations are host events.'
+AUTOMATED = AUTOMATED_TURN_PREFIX
 
 
 def host_call(inst, tool, arguments):
@@ -161,7 +161,8 @@ def provision_wake(inst, nid):
             inst.commit([path], 'Add portable coordinator wake schedule')
     identity = hashlib.sha256((nid + '\0' + coordinator).encode()).hexdigest()
     arguments = {**plan['host_call'], 'clientRequestId':'wake-' + identity}
-    arguments['prompt'] = AUTOMATED + '\n' + arguments['prompt']
+    if not arguments['prompt'].startswith(AUTOMATED):
+        arguments['prompt'] = AUTOMATED + '\n' + arguments['prompt']
     result = host_action_call(inst, nid, 'schedule_task', arguments)
     sid = result.get('scheduledTaskId')
     if result.get('boundThreadId') != coordinator or not isinstance(sid, str) or not sid:

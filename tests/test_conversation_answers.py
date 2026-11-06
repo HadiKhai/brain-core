@@ -261,6 +261,49 @@ class InstructionCapture(Scenario):
         self.assertEqual(self.capture.operator_text(self.records[0]), self.quote)
         self.assertEqual(self.capture.operator_text(dict(self.records[0], promptSource='sdk', turnOrigin='sdk')), self.quote)
 
+    def test_automated_exact_prefix_skips_classification_and_creates_no_gap(self):
+        self.records = []
+        self.message(self.capture.AUTOMATED_TURN_PREFIX + '\nRun the scheduled fixture.',
+                     promptSource='sdk', turnOrigin='sdk')
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('automated turn called AI')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True}))
+        self.assertNotIn('instruction-capture-gap', (self.root / 'inbox.md').read_text())
+        self.assertFalse(list((self.root / '.brain/instruction-capture/gaps').glob('*.json')))
+
+    def test_marker_mid_text_whitespace_and_partial_prefix_remain_operator_input(self):
+        marker = self.capture.AUTOMATED_TURN_PREFIX
+        for text in ('Keep this literal: ' + marker, ' ' + marker, '\n' + marker, marker[:-1]):
+            with self.subTest(text=text):
+                self.records = []
+                self.message(text, promptSource='sdk', turnOrigin='sdk')
+                state = self.root / '.brain/instruction-capture' / (self.capture.capture_key(self.n, self.data) + '.json')
+                if state.exists():
+                    state.unlink()
+                with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw:
+                                       self.answer(data)) as call:
+                    self.assertIn(json.dumps(text), self.capture.capture_stop(self.inst, self.n, self.data))
+                call.assert_called_once()
+
+    def test_exact_prefix_applies_to_claude_blocks_and_codex_user_shapes(self):
+        marker = self.capture.AUTOMATED_TURN_PREFIX
+        for text in (marker + '\nFixture', 'Operator quotes ' + marker):
+            records = [
+                {'type': 'user', 'message': {'content': [{'type': 'text', 'text': text}]}},
+                {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': text}},
+                {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
+                 'content': [{'type': 'input_text', 'text': text}]}},
+                {'type': 'event_msg', 'payload': {'type': 'item_completed',
+                 'item': {'type': 'UserMessage', 'content': text}}}]
+            for record in records:
+                self.assertEqual(self.capture.operator_text(record), None if text == marker + '\nFixture' else text)
+
+    def test_automated_bootstrap_does_not_replay_previous_completed_operator_turn(self):
+        self.records.append({'type': 'assistant', 'message': {'stop_reason': 'end_turn'}})
+        self.message(self.capture.AUTOMATED_TURN_PREFIX + '\nFixture wake')
+        with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('replayed old operator message')):
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+
     def test_second_stop_escapes_and_records_unconverted_gap_without_ai(self):
         self.assertIn(self.quote, self.stop())
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('second stop called AI')):

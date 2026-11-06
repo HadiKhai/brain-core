@@ -12,6 +12,7 @@ from pathlib import Path
 from . import common as _m_common
 from .ai_json import (AIResponseInvalid, AIUnavailable, CLI_DETAIL_BYTES,
                       CLI_FAILURE_STAGES, ai_json, cli_schema_detail)
+from .briefs import AUTOMATED_TURN_PREFIX
 
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_status = _m_common.LazyModule(__package__, 'status')
@@ -64,12 +65,13 @@ def coordinator(n, data):
         _m_jobs.thread_reference_ids(thread).intersection(_m_jobs.thread_reference_ids(bound))))
 
 
-def operator_text(record):
+def operator_text(record, *, include_automated=False):
     """Claude user / Codex user-message fields; explicit nonoperator origins excluded.
 
     Native user records have no sender in older runtimes. SDK user messages use
     the same role; explicit sender metadata always overrides that legacy default.
-    No body inspection decides provenance.
+    Our exact generated prefix is also explicit nonoperator provenance; text
+    elsewhere in a message never decides provenance.
     """
     kind = record.get('type')
     item = record.get('payload') if kind in ('event_msg', 'response_item') else record
@@ -115,7 +117,9 @@ def operator_text(record):
             return None
         content = '\n'.join(b['text'] for b in content if isinstance(b, dict)
                             and b.get('type') in ('text', 'input_text') and isinstance(b.get('text'), str))
-    return content if isinstance(content, str) and content else None
+    if isinstance(content, str) and content and (include_automated or not content.startswith(AUTOMATED_TURN_PREFIX)):
+        return content
+    return None
 
 
 def snapshot(path, state):
@@ -162,8 +166,10 @@ def snapshot(path, state):
         # Bootstrap only the current turn, using explicit runtime end markers.
         # Keep all messages (including steering) after the previous completed turn.
         cut = 0
+        # A marked automated input still starts a turn. Otherwise bootstrapping
+        # a scheduled turn can replay the previous, completed operator turn.
         last_operator = next((i for i in range(len(records) - 1, -1, -1)
-                              if operator_text(records[i]) is not None), -1)
+                              if operator_text(records[i], include_automated=True) is not None), -1)
         for i in range(last_operator - 1, -1, -1):
             record = records[i]
             item = record.get('payload', {})

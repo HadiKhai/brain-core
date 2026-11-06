@@ -67,7 +67,7 @@ LANE_TESTS.update({
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py', 'test_throughput.py', 'test_job_adoption.py', 'test_host_lifecycle.py', 'test_worker_lifecycle.py'),
     'knowledge': ('test_knowledge.py', 'test_semantic_recall.py', 'test_recurrence.py', 'test_learning_loop.py', 'test_feedback.py', 'test_teach.py'),
     'status': ('test_status.py', 'test_inbox_noise.py', 'test_status_projection.py'),
-    'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py'),
+    'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py', 'test_instruction_capture_repair.py'),
     'worktrees': ('test_worktrees.py', 'test_t3_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py', 'test_prune_thread_targets.py', 'test_job_env.py', 'test_lock_sites.py', 'test_atomic_durability.py'),
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py', 'test_rehearse_external.py'),
     'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py', 'test_digest.py', 'test_ui_fill.py'),
@@ -99,6 +99,7 @@ EXTRA_INPUTS = {'check': ('tools/check_rule_index.py',), 'watch': ('tools/watche
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
+    'lib/brain/instruction_capture_repair.py',
     'lib/brain/failure_ledger.py',
     'lib/brain/rehearse_external.py', 'lib/brain/rehearse_transactions.py',
     'lib/brain/launch_receipts.py',
