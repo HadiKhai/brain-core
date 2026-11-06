@@ -9,14 +9,17 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 The PreToolUse hook denies any shell command that changes directory (`cd`, `pushd`)
 and then runs git; run `git -C <dir> ...` instead. For a bound coordinator session, sends,
-launches, `brain lifecycle launch|restart` and rule-file writes are checked: an AI judge
-(fixed schema, exact quotes) reads the outgoing text and the capture classifier reads the
-operator's messages in the turn. Refused: starting work in a turn whose operator
-messages order nothing; widening a one-off drop into a standing rule; attributing a
-cancelled tool to the operator in a turn without an operator message; a fix claim with no diff or
-file read earlier in the turn; a live claim with no browser observation in the turn. An
-operator turn's Stop applies the last two to its final message; automated stops never
-call the judge. An unavailable judge fails open. Nothing to do after upgrading.
+launches, `brain lifecycle launch|restart` and rule-file writes (including `apply_patch`
+targets) are checked: an AI judge (fixed schema, exact quotes, cited evidence ids) reads
+the outgoing text with the turn's operator messages and successful evidence, and the
+capture classifier reads the operator's messages. Refused: starting work no operator
+order in the turn covers; widening a one-off drop into a standing rule; blaming the
+operator for a cancel without an actual failed call and their own instruction; reporting
+a host problem before one retry or another route, and a third identical failed call in
+an automated turn; a fix claim no successful diff or file read in the turn shows; a live
+claim no successful browser observation in the turn shows. An operator turn's Stop
+applies the last two to its final message; automated stops never call the judge. An
+unavailable judge fails open. Nothing to do after upgrading.
 
 ## 2026-11-06: Refuse evidence-rule breaks where they happen
 

@@ -558,7 +558,7 @@ class ReportGates(Scenario):
         self.inst.save_local()
         self.n = self.inst.node('root')
         self.path = self.tmp / 'turns.jsonl'
-        self.records, self.claims, self.kind, self.judged = [], [], 'question', []
+        self.records, self.claims, self.kind, self.judged, self.calls = [], [], 'question', [], 0
 
     def write(self, *records):
         import json
@@ -571,20 +571,29 @@ class ReportGates(Scenario):
     def automated(self, text='Wake: check the queue.'):
         self.write({'type': 'user', 'message': {'role': 'user', 'content': self.m.AUTOMATED_TURN_PREFIX + '\n\n' + text}})
 
-    def tool(self, name, tool_input):
-        self.write({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': 'call-' + str(len(self.records)),
+    def tool(self, name, tool_input, failed=False, result='ok'):
+        """A paired call and result; a failed result is the host's error (cancelled, ENOENT)."""
+        ident = 'call-' + str(self.calls)
+        self.calls += 1
+        self.write({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': ident,
                                                                    'name': name, 'input': tool_input}]}},
-                   {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'call-' + str(len(self.records)),
-                                                             'content': 'ok'}]}})
+                   {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': ident,
+                                                             'is_error': failed, 'content': result}]}})
+
+    def claim(self, kind, quote=None, support=(), operator_quote=''):
+        """support='cite' cites every evidence entry the gate offered the judge."""
+        return {'kind': kind, 'quote': quote, 'support': support, 'operator_quote': operator_quote}
 
     def ai(self, system, data, schema, **kw):
-        """Fixture judge for both schemas; claim quotes are taken from the judged text."""
+        """Fixture judge for both schemas; meaning is the fixture's answer."""
         if 'messages' in schema['properties']:
             return {'messages': [{'id': row['id'], 'items': [{'kind': self.kind, 'quote': row['text']}]}
                                  for row in data]}, {}
-        self.judged.append(data['message'])
-        return {'items': [{'kind': kind, 'quote': data['message'] if quote is None else quote}
-                          for kind, quote in self.claims]}, {}
+        self.judged.append(data)
+        cited = [e['id'] for e in data['evidence']]
+        return {'items': [dict(c, quote=data['outgoing'] if c['quote'] is None else c['quote'],
+                               support=cited if c['support'] == 'cite' else list(c['support']))
+                          for c in self.claims]}, {}
 
     def stubbed(self):
         import contextlib
@@ -625,84 +634,130 @@ class ReportGates(Scenario):
         return self.pretool('mcp__t3-code__t3_thread_send', {'threadId': 'peer-thread', 'message': message})
 
     def test_question_or_complaint_cannot_start_widen_or_restart_work(self):
-        """R04: launch authority needs an operator order in the turn; meaning comes from the AI only."""
+        """R04: the AI must tie this exact work to an operator order in the turn; any one-off is not enough."""
+        delegate = ('mcp__t3-code__delegate_task', {'prompt': 'Rebuild the test runner.'})
+        restart = ('Bash', {'command': 'brain lifecycle restart app --job-key k'})
         self.operator('Why are the tests this slow?')
-        self.claims = [('work_order', None)]
-        prompt = {'prompt': 'Rebuild the test runner.'}
-        self.assertIn('not an order', self.pretool('mcp__t3-code__delegate_task', prompt))
+        self.claims = [self.claim('work_order')]
+        self.assertIn('not an order', self.pretool(*delegate))
         self.assertIn('not an order', self.send('Start the runner rebuild now.'))
         self.claims = []
-        self.assertIn('not an order', self.pretool('Bash', {'command': 'brain lifecycle restart app --job-key k'}))
+        self.assertIn('not an order', self.pretool(*restart))  # a worker start is work even if unjudged
         self.assertIsNone(self.send('The tests are slow because each one starts a fresh store.'))
-        self.kind = 'one_off'  # the AI reads an explicit order in the next turn
+        # An unrelated one-off (an explanation request) authorises no rebuild.
+        self.kind = 'one_off'
+        self.operator('Explain why the tests are slow.')
+        self.claims = [self.claim('work_order')]
+        self.assertIn('not an order', self.pretool(*delegate))
+        self.claims = [self.claim('work_order', operator_quote='an invented order')]
+        self.assertIn('not an order', self.pretool(*delegate))
+        # The AI cites the operator's order for this work, inside a span capture classified as an order.
         self.operator('Rebuild the test runner now.')
-        self.claims = [('work_order', None)]
-        self.assertIsNone(self.pretool('mcp__t3-code__delegate_task', prompt))
-        self.assertIsNone(self.pretool('Bash', {'command': 'brain lifecycle restart app --job-key k'}))
+        self.claims = [self.claim('work_order', operator_quote='Rebuild the test runner now.')]
+        self.assertIsNone(self.pretool(*delegate))
+        self.assertIsNone(self.pretool(*restart))
         self.kind = 'question'
+        self.operator('Rebuild the test runner now?')
+        self.claims = [self.claim('work_order', operator_quote='Rebuild the test runner now?')]
+        self.assertIn('not an order', self.pretool(*delegate))  # quoted span is a question, not an order
         self.automated()  # ordered work started by an automated wake is outside this rule
-        self.assertIsNone(self.pretool('mcp__t3-code__delegate_task', prompt))
+        self.claims = [self.claim('work_order')]
+        self.assertIsNone(self.pretool(*delegate))
 
     def test_job_drop_cannot_become_a_global_exclusion_without_standing_authority(self):
-        """R91: a drop recorded by the AI as one-off stays with its job; rule writes cannot widen it."""
+        """R91: a one-off drop stays with its job; no write tool or patch format widens it into a rule."""
         self.operator('Forget about the tracker integration for this redesign.')
         self.kind = 'one_off'
-        self.claims = [('standing_exclusion', 'never use the tracker')]
+        self.claims = [self.claim('standing_exclusion', 'never use the tracker')]
         rule = {'file_path': str(self.root / 'AGENTS.md'), 'old_string': '', 'new_string': '- never use the tracker'}
-        self.assertIn('job at hand only', self.pretool('Edit', rule))
-        self.assertIn('job at hand only', self.pretool('mcp__t3-code__delegate_task',
-                                                       {'prompt': 'Rule for all jobs: never use the tracker.'}))
+        patch = '*** Begin Patch\n*** Update File: AGENTS.md\n@@\n+- never use the tracker\n*** End Patch\n'
+        unified = '--- a/library/instance-rules.md\n+++ b/library/instance-rules.md\n@@ -1 +1,2 @@\n+- never use the tracker\n'
+        for tool, tool_input in (('Edit', rule), ('apply_patch', {'input': patch}), ('apply_patch', {'patch': unified}),
+                                 ('exec_command', {'cmd': "apply_patch <<'EOF'\n" + patch + "EOF"}),
+                                 ('mcp__t3-code__delegate_task', {'prompt': 'Rule for all jobs: never use the tracker.'})):
+            with self.subTest(tool=tool, keys=sorted(tool_input)):
+                self.assertIn('job at hand only', self.pretool(tool, tool_input))
         self.claims = []
         self.assertIsNone(self.pretool('Edit', dict(rule, new_string='- skip the tracker in the redesign job only')))
         self.judged.clear()
-        self.claims = [('standing_exclusion', 'never use the tracker')]
+        self.claims = [self.claim('standing_exclusion', 'never use the tracker')]
         self.assertIsNone(self.pretool('Edit', {'file_path': str(self.root / 'notes.md'), 'old_string': '',
                                                 'new_string': '- never use the tracker'}))
-        self.assertEqual(self.judged, [])  # only rule files are judged
+        self.assertIsNone(self.pretool('apply_patch', {'input': patch.replace('AGENTS.md', 'notes.md')}))
+        self.assertEqual(self.judged, [])  # only rule-file writes are judged
         self.kind = 'standing_instruction'  # separate explicit operator authority, in a later turn
         self.operator('From now on, never use the tracker in any job.')
         self.assertIsNone(self.pretool('Edit', rule))
+        self.assertIsNone(self.pretool('apply_patch', {'input': patch}))
 
     def test_automated_cancellation_requires_actual_operator_message_for_operator_attribution(self):
-        """R35: without operator input in the turn, a cancelled tool call cannot be reported as his decision."""
+        """R35: blame needs an actual failed call and the operator's own instruction; retries are bounded."""
+        listing = ('mcp__t3-code__t3_thread_list', {})
+        blame = 'Status: you rejected the thread list, so I stopped.'
         self.automated()
-        self.tool('mcp__t3-code__t3_thread_list', {})
-        self.claims = [('cancel_blamed_on_operator', 'you rejected the thread list')]
-        reason = self.send('Status: you rejected the thread list, so I stopped.')
+        self.claims = [self.claim('cancel_blamed_on_operator', 'you rejected the thread list')]
+        self.assertIn('host cancelled', self.send(blame))  # no cancellation happened at all
+        self.tool(*listing, failed=True, result="The user doesn't want to take this action right now.")
+        reason = self.send(blame)
         self.assertIn('host cancelled', reason)
         self.assertIn('retry once', reason)
-        self.claims = []
-        self.assertIsNone(self.send('Status: the host cancelled t3_thread_list; I used brain due instead.'))
+        self.claims = [self.claim('host_problem_report', 'the host cancelled t3_thread_list')]
+        self.assertIn('Retry once', self.send('Status: the host cancelled t3_thread_list.'))
+        self.tool(*listing, failed=True, result="The user doesn't want to take this action right now.")
+        self.assertIn('already failed 2 times', self.pretool(*listing))  # a third identical try is refused
+        self.assertIsNone(self.send('Status: the host cancelled t3_thread_list twice; reporting a host problem.'))
+        # An operator message that is not the operator's own cancellation does not license blame.
+        self.operator('Why was that cancelled?')
+        self.tool(*listing, failed=True, result='cancelled')
+        self.claims = [self.claim('cancel_blamed_on_operator', 'you rejected the thread list')]
+        self.assertIn('host cancelled', self.send(blame))
         self.operator('Stop listing threads.')
-        self.claims = [('cancel_blamed_on_operator', 'you rejected the thread list')]
-        self.assertIsNone(self.send('Status: you rejected the thread list, so I stopped.'))
+        self.tool(*listing, failed=True, result='rejected')
+        self.claims = [self.claim('cancel_blamed_on_operator', 'you rejected the thread list',
+                                  operator_quote='Stop listing threads.')]
+        self.assertIsNone(self.send(blame))
 
     def test_fix_report_requires_a_prior_source_or_diff_read_in_the_reporting_turn(self):
-        """R79: a fix claim is refused before any read, after a read in an older turn, and passes after one now."""
+        """R79: only a successful, AI-cited diff or file read earlier in this turn supports a fix claim."""
+        report = 'Done: the gate is fixed, 42 of 42 pass.'
         self.operator('Is the gate fixed?')
-        self.tool('Bash', {'command': 'git -C /tmp/app diff main -- lib/gate.py'})
+        self.tool('Bash', {'command': 'git -C /tmp/app diff main -- lib/gate.py'}, result='+fixed line')
         self.operator('Report the fix to the node.')
         self.kind = 'one_off'
-        self.claims = [('fix_claim', 'the gate is fixed')]
-        self.assertIn('Read the diff or file', self.send('Done: the gate is fixed, 42 of 42 pass.'))
+        self.claims = [self.claim('fix_claim', 'the gate is fixed', support='cite')]
+        self.assertIn('Read the diff or file', self.send(report))  # the read was in an older turn
         self.tool('Bash', {'command': 'brain status app'})
-        self.assertIn('Read the diff or file', self.send('Done: the gate is fixed, 42 of 42 pass.'))
+        self.assertIn('Read the diff or file', self.send(report))
+        self.tool('Read', {'file_path': '/tmp/app/lib/missing.py'}, failed=True,
+                  result='ENOENT: no such file or directory')
+        self.assertIn('Read the diff or file', self.send(report))  # a failed read is no evidence
+        self.claims = [self.claim('fix_claim', 'the gate is fixed', support=['e1'])]
+        self.assertIn('Read the diff or file', self.send(report))  # citing the failed call does not count
         for name, tool_input in (('Read', {'file_path': '/tmp/app/lib/gate.py'}),
                                  ('exec_command', {'cmd': 'git -C /tmp/app show HEAD -- lib/gate.py'})):
             with self.subTest(tool=name):
                 self.operator('Report the fix to the node.')
-                self.tool(name, tool_input)
-                self.assertIsNone(self.send('Done: the gate is fixed, 42 of 42 pass.'))
+                self.tool(name, tool_input, result='def gate(): return fixed')
+                self.claims = [self.claim('fix_claim', 'the gate is fixed')]  # the AI finds no support
+                self.assertIn('Read the diff or file', self.send(report))
+                self.claims = [self.claim('fix_claim', 'the gate is fixed', support='cite')]
+                self.assertIsNone(self.send(report))
         self.operator('And the final message?')
         self.assertIn('Read the diff or file', self.stop('The gate is fixed: the gate is fixed.'))
 
     def test_live_claim_requires_current_browser_observation_and_unseen_build_is_unproven(self):
-        """R23: "live" needs a page observation in this turn, at the send and at an operator turn's stop."""
+        """R23: "live" needs a successful, AI-cited page observation in this turn, at the send and the stop."""
         self.operator('Is the new page live?')
-        self.claims = [('live_claim', 'the page is live')]
+        self.claims = [self.claim('live_claim', 'the page is live', support='cite')]
         self.assertIn('seen working on the page', self.send('Update: the page is live.'))
         self.assertIn('seen working on the page', self.stop('Yes, the page is live.'))
-        self.tool('mcp__t3-code__preview_snapshot', {'tabId': 'fixture'})
+        self.tool('mcp__t3-code__preview_snapshot', {'tabId': 'fixture'}, failed=True, result='Tab not found')
+        self.assertIn('seen working on the page', self.send('Update: the page is live.'))
+        self.assertIn('seen working on the page', self.stop('Yes, the page is live.'))
+        self.tool('mcp__t3-code__preview_snapshot', {'tabId': 'fixture'}, result='heading "Orders" table 3 rows')
+        self.claims = [self.claim('live_claim', 'the page is live')]  # rendered, but the AI finds it unshown
+        self.assertIn('seen working on the page', self.send('Update: the page is live.'))
+        self.claims = [self.claim('live_claim', 'the page is live', support='cite')]
         self.assertIsNone(self.send('Update: the page is live.'))
         self.assertIsNone(self.stop('Yes, the page is live.'))
         self.claims = []
@@ -713,9 +768,9 @@ class ReportGates(Scenario):
         """Invented quotes fail open; workers and automated stops never call the judge."""
         import time
         self.operator('Is the new page live?')
-        self.claims = [('live_claim', 'an invented span')]
+        self.claims = [self.claim('live_claim', 'an invented span')]
         self.assertIsNone(self.send('Update: the page is live.'))
-        self.claims = [('live_claim', 'the page is live')]
+        self.claims = [self.claim('live_claim', 'the page is live')]
         self.judged.clear()
         self.assertIsNone(self.pretool('mcp__t3-code__t3_thread_send', {'threadId': 'p', 'message': 'Update: the page is live.'},
                                        session='some-worker'))
