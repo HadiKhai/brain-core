@@ -4438,3 +4438,20 @@ Failed output or acknowledgement publication cannot authorize another transport.
 Bodies use fixed cause counts. Peer-owned terminal work and explicitly disabled
 sources remain held while independent questions can proceed. A same-binding
 outstanding episode is checked before provider sync and revalidation scans.
+
+
+## 2026-11-06: Bound nonoperator text and explicit repair batches
+
+Agent and automated message formatters bind UTF-8 body bytes with length and
+SHA-256 metadata. Capture excludes only complete whole-input frame coverage;
+uncovered SDK coalescing text and legacy prefixes reach ordinary classification.
+Brief framing happens after policy and accounting text, and schedules frame only
+after Markdown continuation assembly. No existing host prompt is changed implicitly.
+
+Historical coalesced repair takes caller-ordered original host records bound to
+the exact runtime-source digest and newline separator. Each constituent needs
+untruncated MCP agent provenance, a unique ID and the same receiver. Full-source
+reconstruction and quote containment are required; ambiguous covers stay open.
+Receipts retain constituent record/text digests rather than inventing a host item.
+Schedule reconciliation also requires whole-source equality, including legacy
+marker handling, rather than trusting a leading marker on mixed input.

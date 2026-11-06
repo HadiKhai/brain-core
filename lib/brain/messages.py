@@ -3,17 +3,15 @@ from pathlib import Path
 import re
 
 from . import common as _m_common
+from .message_envelope import AGENT_MESSAGE_PREFIX, marked_message, unmarked_message
 
 _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
-AGENT_MESSAGE_PREFIX = "Agent message: sent by another agent, not the operator."
-
-
 def agent_message(text):
-    """Tool-generated provenance at character zero; preserve the entire body."""
-    return text if text.startswith(AGENT_MESSAGE_PREFIX + "\n\n") else AGENT_MESSAGE_PREFIX + "\n\n" + text
+    """Frame the exact body so a coalesced operator remainder cannot be hidden."""
+    return marked_message(text, AGENT_MESSAGE_PREFIX)
 
 
 def cmd_agent_message(a):
@@ -62,8 +60,12 @@ def worker_message_guard(inst, sender_thread, tool, args):
     if len(target) != 1 or not target.intersection(coordinators):
         return None  # peer coordination and unknown targets are not parent chatter
     message = args.get('message')
-    if isinstance(message, str) and message.startswith(AGENT_MESSAGE_PREFIX + "\n\n"):
-        message = message[len(AGENT_MESSAGE_PREFIX) + 2:]
+    if isinstance(message, str):
+        body = unmarked_message(message, AGENT_MESSAGE_PREFIX)
+        if body is not None:
+            message = body
+        elif message.startswith(AGENT_MESSAGE_PREFIX + "\n\n"):
+            message = message[len(AGENT_MESSAGE_PREFIX) + 2:]
     if isinstance(message, str) and re.match(r'^\s*(start|done|blocked|question)\s*:\s*\S', message, re.I):
         return None
     return ('Worker messages to a coordinator require start:, done:, blocked: or question:. '

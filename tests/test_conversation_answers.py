@@ -261,9 +261,49 @@ class InstructionCapture(Scenario):
         self.assertEqual(self.capture.operator_text(self.records[0]), self.quote)
         self.assertEqual(self.capture.operator_text(dict(self.records[0], promptSource='sdk', turnOrigin='sdk')), self.quote)
 
+    def automated(self, text):
+        from importlib import import_module
+        return import_module(self.capture.__package__ + '.briefs').automated_brief(text)
+
+    def agent(self, text):
+        from importlib import import_module
+        return import_module(self.capture.__package__ + '.messages').agent_message(text)
+
+    def test_coalesced_turns_classify_every_unproven_remainder(self):
+        instruction = 'Always preserve original source evidence.'
+        a, b = self.agent('First agent send.'), self.agent('Second agent send.')
+        cases = (a + '\n' + instruction, instruction + '\n' + a,
+                 a + '\n' + instruction + '\n' + b,
+                 self.automated('Wake fixture.') + '\n' + instruction,
+                 self.capture.AUTOMATED_TURN_PREFIX + '\nWake fixture.\n' + instruction,
+                 self.capture.AGENT_MESSAGE_PREFIX + '\n\nLegacy send.\n' + instruction)
+        for text in cases:
+            with self.subTest(text=text):
+                self.records = []
+                self.message(text, promptSource='sdk', turnOrigin='sdk')
+                state = self.root / '.brain/instruction-capture' / (self.capture.capture_key(self.n, self.data) + '.json')
+                if state.exists():
+                    state.unlink()
+                def classify(system, data, schema, **kw):
+                    self.assertEqual([row['text'] for row in data], [text])
+                    return self.answer(data)
+                with mock.patch.object(self.capture, 'ai_json', side_effect=classify) as call:
+                    self.capture.capture_stop(self.inst, self.n, self.data)
+                call.assert_called_once()
+
+    def test_complete_batches_skip_but_broken_frames_are_classified(self):
+        a, b = self.agent('Unicode fixture: café.\n\nEmbedded marker.'), self.automated('Wake fixture.')
+        for text in (a, a + '\n' + b, a + '\n\n' + b + '\n'):
+            record = {'type': 'user', 'message': {'content': text}}
+            self.assertIsNone(self.capture.operator_text(record))
+            self.assertEqual(self.capture.operator_text(record, include_automated=True), text)
+        for text in (a[:-1], a.replace('café', 'cafe'), a + ' ', a + '\nUncovered text.',
+                     self.capture.AGENT_MESSAGE_PREFIX + '\n\nLegacy text.'):
+            self.assertEqual(self.capture.operator_text({'type': 'user', 'message': {'content': text}}), text)
+
     def test_automated_exact_prefix_skips_classification_and_creates_no_gap(self):
         self.records = []
-        self.message(self.capture.AUTOMATED_TURN_PREFIX + '\nRun the scheduled fixture.',
+        self.message(self.automated('Run the scheduled fixture.'),
                      promptSource='sdk', turnOrigin='sdk')
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('automated turn called AI')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
@@ -287,7 +327,7 @@ class InstructionCapture(Scenario):
 
     def test_exact_prefix_applies_to_claude_blocks_and_codex_user_shapes(self):
         marker = self.capture.AUTOMATED_TURN_PREFIX
-        for text in (marker + '\nFixture', 'Operator quotes ' + marker):
+        for text in (self.automated('Fixture'), 'Operator quotes ' + marker):
             records = [
                 {'type': 'user', 'message': {'content': [{'type': 'text', 'text': text}]}},
                 {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': text}},
@@ -296,12 +336,12 @@ class InstructionCapture(Scenario):
                 {'type': 'event_msg', 'payload': {'type': 'item_completed',
                  'item': {'type': 'UserMessage', 'content': text}}}]
             for record in records:
-                self.assertEqual(self.capture.operator_text(record), None if text == marker + '\nFixture' else text)
+                self.assertEqual(self.capture.operator_text(record), None if text == self.automated('Fixture') else text)
 
     def test_agent_marker_skips_only_at_zero_and_operator_relay_still_captures(self):
         marker = self.capture.AGENT_MESSAGE_PREFIX
         instruction = 'No resource bypass or foreign cleanup.'
-        marked = marker + '\n\n' + instruction
+        marked = self.agent(instruction)
         for text in (marked, instruction, 'Operator relays: ' + marked, ' ' + marked, marker[:-1]):
             records = [
                 {'type': 'user', 'promptSource': 'sdk', 'turnOrigin': 'sdk',
@@ -325,7 +365,7 @@ class InstructionCapture(Scenario):
     def test_agent_bootstrap_and_codex_duplicate_keep_current_turn_boundary(self):
         marker = self.capture.AGENT_MESSAGE_PREFIX
         self.records.append({'type': 'assistant', 'message': {'stop_reason': 'end_turn'}})
-        self.message(marker + '\n\nFixture agent send')
+        self.message(self.agent('Fixture agent send'))
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('replayed operator input')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         state = self.root / '.brain/instruction-capture' / (self.capture.capture_key(self.n, self.data) + '.json')
@@ -333,14 +373,14 @@ class InstructionCapture(Scenario):
         self.records = [
             {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
              'content': [{'type': 'input_text', 'text': 'Fixture environment.'}]}},
-            {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': marker + '\n\nFixture'}}]
+            {'type': 'event_msg', 'payload': {'type': 'user_message', 'message': self.agent('Fixture')}}]
         self.path.write_text(''.join(json.dumps(row) + '\n' for row in self.records))
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('agent context called AI')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
 
     def test_automated_bootstrap_does_not_replay_previous_completed_operator_turn(self):
         self.records.append({'type': 'assistant', 'message': {'stop_reason': 'end_turn'}})
-        self.message(self.capture.AUTOMATED_TURN_PREFIX + '\nFixture wake')
+        self.message(self.automated('Fixture wake'))
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('replayed old operator message')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
 
@@ -349,7 +389,7 @@ class InstructionCapture(Scenario):
             {'type': 'response_item', 'payload': {'type': 'message', 'role': 'user',
              'content': [{'type': 'input_text', 'text': 'Fixture environment and supplied rules.'}]}},
             {'type': 'event_msg', 'payload': {'type': 'user_message',
-             'message': self.capture.AUTOMATED_TURN_PREFIX + '\nFixture wake'}}]
+             'message': self.automated('Fixture wake')}}]
         self.path.write_text(''.join(json.dumps(row) + '\n' for row in self.records))
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('automated context called AI')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))

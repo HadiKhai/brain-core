@@ -26,6 +26,9 @@ class WorkerMessageGuard(Scenario):
             self.assertIsNone(self.guard(kind + ': fixture result'))
             marked = 'Agent message: sent by another agent, not the operator.\n\n'
             self.assertIsNone(self.guard(marked + kind + ': fixture result'))
+            framed = self.m._owners['worker_message_guard'].agent_message(kind + ': fixture result')
+            self.assertIsNone(self.guard(framed))
+            self.assertIsNotNone(self.guard(self.m._owners['worker_message_guard'].agent_message('progress: still working')))
             self.assertIsNotNone(self.guard(marked + 'progress: still working'))
         self.assertIsNotNone(self.guard('progress: still working'))
         self.assertIsNotNone(self.guard('FYI: no action requested'))

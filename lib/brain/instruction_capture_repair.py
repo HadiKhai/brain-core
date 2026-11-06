@@ -26,6 +26,11 @@ of raw T3 user_message items (createdBy=agent, creationSource=mcp, nonempty
 senderThreadId). Their entire untruncated text must equal each original input.
 This local export is caller-supplied evidence; repair never queries the host.
 Schedule export is optional for agent-only reconciliation.
+
+Coalesced inputs require --agent-batches-json, a gap-filename map to an array of
+explicit batches: {"source_turn_sha256": "...", "separator": "\n", "messages":
+[original host items in SDK order]}. Only the SDK newline join is accepted. The
+entire source must match exactly one complete batch, never an inferred subset.
 """
 import argparse
 import datetime
@@ -38,7 +43,7 @@ from urllib.parse import unquote, urlsplit
 
 from . import common
 from . import instruction_capture as _m_capture
-from .briefs import AUTOMATED_TURN_PREFIX
+from .briefs import AUTOMATED_TURN_PREFIX, automated_brief
 
 
 REASON = 'automated scheduled prompt (no marker at the time); operator_text accepted sdk origin'
@@ -100,9 +105,8 @@ def known_tasks(root, exported, include_unbound=False):
 def marker_plan(root, exported):
     inventory = known_tasks(root, exported)
     tasks, missing = inventory['tasks'], inventory['missing']
-    updates = [{'scheduledTaskId': row['scheduledTaskId'],
-                'prompt': AUTOMATED_TURN_PREFIX + '\n' + row['prompt']}
-               for row in tasks if row['enabled'] and not row['prompt'].startswith(AUTOMATED_TURN_PREFIX)]
+    updates = [{'scheduledTaskId': row['scheduledTaskId'], 'prompt': automated_brief(row['prompt'])}
+               for row in tasks if row['enabled'] and automated_brief(row['prompt']) != row['prompt']]
     return {'tasks': tasks, 'updates': updates, 'missing': missing, 'unbound': inventory['unbound'],
             'skipped': inventory['skipped'], 'warnings': inventory['skipped'],
             'complete': not (missing or inventory['skipped'])}
@@ -136,7 +140,8 @@ def schedule_source_matches(source, prompt):
     """Plan application order changes only the one generated marker line."""
     marker = AUTOMATED_TURN_PREFIX + '\n'
     prompts = (prompt, prompt[len(marker):]) if prompt.startswith(marker) else (prompt,)
-    return any(source == value or webhook_source_matches(source, value) for value in prompts)
+    sources = (source, source[len(marker):]) if source.startswith(marker) else (source,)
+    return any(text == value or webhook_source_matches(text, value) for text in sources for value in prompts)
 
 
 def automated_source_hashes(items, task, recorded_ids, records):
@@ -153,42 +158,81 @@ def automated_source_hashes(items, task, recorded_ids, records):
                     if text is not None:
                         sources.append(text)
         source = next((text for text in sources if item['quote'] in text and (
-            text.startswith(AUTOMATED_TURN_PREFIX) or
-            task['scheduledTaskId'] in recorded_ids and schedule_source_matches(text, task['prompt']))), None)
+            (task['scheduledTaskId'] in recorded_ids or text.startswith(AUTOMATED_TURN_PREFIX + '\n'))
+            and schedule_source_matches(text, task['prompt']))), None)
         if source is None:
             return None
         hashes.add(hashlib.sha256(source.encode()).hexdigest())
     return sorted(hashes)
 
 
-def agent_source_proof(items, messages, records):
-    """Bind every original whole input to an explicit host agent send, never quote overlap."""
-    if not isinstance(messages, list):
+def valid_agent_message(message):
+    return (isinstance(message, dict) and message.get('type') == 'user_message'
+            and message.get('createdBy') == 'agent' and message.get('creationSource') == 'mcp'
+            and message.get('textTruncated') is False
+            and all(isinstance(message.get(key), str) and message[key]
+                    for key in ('senderThreadId', 'sourceThreadId', 'itemId', 'text')))
+
+
+def agent_message_proof(message, source):
+    proof = {key: message[key] for key in ('itemId', 'sourceThreadId', 'senderThreadId')}
+    proof['source_turn_sha256'] = hashlib.sha256(source.encode()).hexdigest()
+    proof['host_record_sha256'] = hashlib.sha256(json.dumps(message, sort_keys=True).encode()).hexdigest()
+    proof['text_sha256'] = hashlib.sha256(message['text'].encode()).hexdigest()
+    return proof
+
+
+def batch_source_proof(source, batches):
+    """Exactly one caller-ordered complete cover; no subset or substring search."""
+    if not isinstance(batches, list):
         return None
-    proven = []
+    matches = []
+    for batch in batches:
+        if (not isinstance(batch, dict) or set(batch) != {'source_turn_sha256', 'separator', 'messages'}
+                or batch['separator'] != '\n' or not isinstance(batch['messages'], list)
+                or len(batch['messages']) < 2):
+            continue
+        messages = batch['messages']
+        if (not all(valid_agent_message(message) for message in messages)
+                or len({m['itemId'] for m in messages}) != len(messages)
+                or len({m['sourceThreadId'] for m in messages}) != 1):
+            continue
+        if (batch['source_turn_sha256'] != hashlib.sha256(source.encode()).hexdigest()
+                or '\n'.join(m['text'] for m in messages) != source):
+            continue
+        matches.append({'source_turn_sha256': batch['source_turn_sha256'], 'separator': '\n',
+                        'messages': [agent_message_proof(m, source) for m in messages]})
+    return matches[0] if len(matches) == 1 else None
+
+
+def agent_source_proof(items, messages, records, batches=None):
+    """Bind every original whole input to an explicit host agent send, never quote overlap."""
+    messages = messages if isinstance(messages, list) else []
+    proven, proven_batches = [], []
     for item in items:
         sources = [item['source_text']] if isinstance(item.get('source_text'), str) else []
         if not sources and isinstance(records, list) and isinstance(item.get('at'), str) and item['at']:
             sources = [text for record in records if isinstance(record, dict)
                        and record.get('timestamp') == item['at']
                        for text in [_m_capture.operator_text(record, include_automated=True)] if text is not None]
-        match = next((message for message in messages if isinstance(message, dict)
-                      and message.get('type') == 'user_message' and message.get('createdBy') == 'agent'
-                      and message.get('creationSource') == 'mcp' and message.get('textTruncated') is False
-                      and all(isinstance(message.get(key), str) and message[key]
-                              for key in ('senderThreadId', 'sourceThreadId', 'itemId', 'text'))
+        match = next((message for message in messages if valid_agent_message(message)
                       and message['text'] in sources and item['quote'] in message['text']), None)
         if match is None:
-            return None
-        proof = {key: match[key] for key in ('itemId', 'sourceThreadId', 'senderThreadId')}
-        proof['source_turn_sha256'] = hashlib.sha256(match['text'].encode()).hexdigest()
-        proof['host_record_sha256'] = hashlib.sha256(json.dumps(match, sort_keys=True).encode()).hexdigest()
+            covers = [proof for source in sources if item['quote'] in source
+                      for proof in [batch_source_proof(source, batches)] if proof is not None]
+            if len(covers) != 1:
+                return None
+            if covers[0] not in proven_batches:
+                proven_batches.append(covers[0])
+            continue
+        proof = agent_message_proof(match, match['text'])
         if proof not in proven:
             proven.append(proof)
-    return proven
+    return {'messages': proven, 'batches': proven_batches}
 
 
-def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None, agent_messages=None):
+def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None, agent_messages=None,
+                   agent_batches=None):
     """Require a proven scheduled turn or host agent input for every quoted item.
 
     No meaning is inferred, and no partial match can close a mixed operator gap.
@@ -206,6 +250,9 @@ def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None
     agent_messages = {} if agent_messages is None else agent_messages
     if not isinstance(agent_messages, dict):
         raise ValueError('agent messages JSON must map gap filenames to raw host message records')
+    agent_batches = {} if agent_batches is None else agent_batches
+    if not isinstance(agent_batches, dict):
+        raise ValueError('agent batches JSON must map gap filenames to explicit ordered batches')
     base = root / '.brain/instruction-capture'
     matches, warnings, kept, satisfied = [], list(inventory['skipped']), [], set()
     paths = sorted((base / 'gaps').glob('*.json'))
@@ -230,7 +277,8 @@ def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None
                 if source_hashes:
                     task = row
                     break
-            agent_proof = agent_source_proof(items, agent_messages.get(path.name), source_turns.get(path.name))
+            agent_proof = agent_source_proof(items, agent_messages.get(path.name), source_turns.get(path.name),
+                                            agent_batches.get(path.name))
             if task is None and not agent_proof:
                 kept.append({'gap': path.name, 'status': 'kept: not provably automated'})
                 continue
@@ -251,8 +299,11 @@ def reconcile_gaps(root, exported, dry_run=True, source_turns=None, require=None
                 record.update(scheduledTaskId=task['scheduledTaskId'], source_turn_sha256=source_hashes,
                               prompt_sha256=hashlib.sha256(task['prompt'].encode()).hexdigest())
             else:
-                record.update(agent_messages=agent_proof,
-                              source_turn_sha256=sorted({proof['source_turn_sha256'] for proof in agent_proof}))
+                record.update(agent_messages=agent_proof['messages'],
+                              source_turn_sha256=sorted({proof['source_turn_sha256'] for proof in
+                                  agent_proof['messages'] + agent_proof['batches']}))
+                if agent_proof['batches']:
+                    record['agent_batches'] = agent_proof['batches']
             if not dry_run:
                 if path.read_bytes() != raw:
                     raise ValueError('gap changed during reconciliation')
@@ -281,29 +332,32 @@ def repair_main(argv=None):
     parser.add_argument('--source-turns-json', type=Path, help='legacy gap filename to raw timestamped runtime records')
     parser.add_argument('--agent-messages-json', type=Path,
                         help='gap filename to raw T3 user_message items with explicit agent sender provenance')
+    parser.add_argument('--agent-batches-json', type=Path,
+                        help='gap filename to explicit ordered whole-source host batches')
     parser.add_argument('--dry-run', action='store_true', help='list reconciliation candidates without writing sidecars')
     parser.add_argument('--require', nargs='+', default=[], metavar='GAP_ID',
                         help='require these gap filenames or unambiguous id prefixes to reconcile')
     args = parser.parse_args(argv)
     if args.action == 'plan' and (not args.output or not args.tasks_json):
         parser.error('plan requires --output and --tasks-json')
-    if not args.tasks_json and not args.agent_messages_json:
-        parser.error('reconcile requires --tasks-json or --agent-messages-json')
+    if not args.tasks_json and not args.agent_messages_json and not args.agent_batches_json:
+        parser.error('reconcile requires --tasks-json, --agent-messages-json or --agent-batches-json')
     try:
         # Agent-only repair does not depend on the unrelated schedule inventory.
         exported = json.loads(args.tasks_json.read_text()) if args.tasks_json else None
         agent_messages = json.loads(args.agent_messages_json.read_text()) if args.agent_messages_json else None
+        agent_batches = json.loads(args.agent_batches_json.read_text()) if args.agent_batches_json else None
         source_turns = json.loads(args.source_turns_json.read_text()) if args.source_turns_json else None
         if args.action == 'plan':
             result = marker_plan(args.root, exported)
         elif args.dry_run:
             result = reconcile_gaps(args.root, exported, source_turns=source_turns,
-                                    require=args.require, agent_messages=agent_messages)
+                                    require=args.require, agent_messages=agent_messages, agent_batches=agent_batches)
         else:
             from .instance import Instance, brain_lock
             with brain_lock(Instance(args.root)):
                 result = reconcile_gaps(args.root, exported, dry_run=False, source_turns=source_turns,
-                                        require=args.require, agent_messages=agent_messages)
+                                        require=args.require, agent_messages=agent_messages, agent_batches=agent_batches)
         encoded = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
         if args.output:
             common.atomic_write(args.output, encoded, private=True, create=True)

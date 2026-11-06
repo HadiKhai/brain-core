@@ -2,6 +2,12 @@
 import re
 
 from scenario import consume_fixture_wake, Scenario, CORE
+import importlib
+import core_loader
+
+_fixture = core_loader.SourceFileLoader('message_envelope_fixture', str(CORE / 'bin/brain')).load_module()
+_envelope = importlib.import_module(_fixture._owners['worker_message_guard'].__package__ + '.message_envelope')
+marked_message, unmarked_message = _envelope.marked_message, _envelope.unmarked_message
 
 AGENT_MARKER = "Agent message: sent by another agent, not the operator."
 AGENT_HEADER = AGENT_MARKER + "\n\n"
@@ -20,13 +26,13 @@ class WorkerMessages(Scenario):
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "Synthetic message", "--branch", "job/sample")
             self.assertIn("NOT SENT: use the host send", out)
-            self.assertTrue(out.startswith(AGENT_HEADER + kind + ": Synthetic message"), out)
+            self.assertTrue(out.startswith(AGENT_HEADER + "Brain-Envelope: "), out)
 
     def test_formatter_and_briefs(self):
         root, _ = self.job()
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "One\nline", "--branch", "job/sample", "--report", "~/reports/example.md")
-            self.assertEqual(out.strip(), AGENT_HEADER + kind + ": One line [branch: job/sample; report: ~/reports/example.md]\nNOT SENT: use the host send")
+            self.assertEqual(out.strip(), marked_message(kind + ": One line [branch: job/sample; report: ~/reports/example.md]", AGENT_MARKER) + "\nNOT SENT: use the host send")
         out = self.b(root, "msg", "a", "question", "What next?", "--branch", "job/sample")
         self.assertIn("job-handbacks/", out)
         self.b(root, "msg", "a", "progress", "Working", "--branch", "job/sample", ok=False)
@@ -47,29 +53,29 @@ class WorkerMessages(Scenario):
             folder = run_in.replace("~", str(self.tmp), 1)
             for kind in ("start", "done", "blocked", "question"):
                 output = self.run_(["msg", "a", kind, "Made-up result"], cwd=folder, brain=CORE / "bin/brain")
-                self.assertTrue(output.startswith(AGENT_HEADER + kind + ": Made-up result"), output)
+                self.assertTrue(output.startswith(AGENT_HEADER + "Brain-Envelope: "), output)
                 if options == ("--branch", "job/sample"):
                     self.assertIn("[branch: job/sample; report:", output)
                 else:
-                    self.assertEqual(output.strip(), AGENT_HEADER + kind + ": Made-up result [branch: main]\nNOT SENT: use the host send")
+                    self.assertEqual(output.strip(), marked_message(kind + ": Made-up result [branch: main]", AGENT_MARKER) + "\nNOT SENT: use the host send")
         # A generic worker may be outside Git entirely, with no ledger job or report.
         plain = self.tmp / "plain"
         plain.mkdir()
         for kind in ("start", "done", "blocked", "question"):
             output = self.run_(["msg", "a", kind, "Made-up result"], cwd=plain, brain=CORE / "bin/brain")
-            self.assertEqual(output, AGENT_HEADER + kind + ": Made-up result\nNOT SENT: use the host send\n")
+            self.assertEqual(output, marked_message(kind + ": Made-up result", AGENT_MARKER) + "\nNOT SENT: use the host send\n")
         self.assertEqual(self.b(root, "msg", "a", "done", "Result", "--branch", "other").strip(),
-                         AGENT_HEADER + "done: Result [branch: other]\nNOT SENT: use the host send")
+                         marked_message("done: Result [branch: other]", AGENT_MARKER) + "\nNOT SENT: use the host send")
 
     def test_freeform_agent_formatter_preserves_bytes_and_never_sends(self):
         root = self.init('alice')
         body = 'Keep original evidence.\n  Preserve indentation and spaces.  '
         path = self.tmp / 'message.txt'
         path.write_text(body)
-        expected = AGENT_HEADER + body + '\n'
+        expected = marked_message(body, AGENT_MARKER) + '\n'
         self.assertEqual(self.b(root, 'agent-message', '--message-file', str(path)), expected)
         self.assertEqual(self.b(root, 'agent-message', body), expected)
-        self.assertEqual(self.b(root, 'agent-message', AGENT_HEADER + body), expected)
+        self.assertEqual(self.b(root, 'agent-message', expected[:-1]), expected)
         self.b(root, 'agent-message', ok=False)
         self.b(root, 'agent-message', '', ok=False)
         self.b(root, 'agent-message', body, '--message-file', str(path), ok=False)
@@ -97,7 +103,7 @@ class WorkerMessages(Scenario):
         body = AGENT_MARKER + '\ndone: Synthetic result'
         prepared = messages.agent_message(body)
         self.assertTrue(prepared.startswith(AGENT_HEADER))
-        self.assertEqual(prepared[len(AGENT_HEADER):], body)
+        self.assertEqual(unmarked_message(prepared, AGENT_MARKER), body)
         self.assertEqual(messages.agent_message(prepared), prepared)
 
     def test_peer_threads_and_coordinator_duty(self):
@@ -152,8 +158,13 @@ class AutomatedBriefAttribution(Scenario):
             self.assertTrue(m.wake_setup_plan(inst, inst.node('root'))['host_call']['prompt'].startswith(marker))
             schedule = m.prepare_schedule(inst, 'fixture', 'hourly', 'root', 'Inspect current work')
             self.assertIn('brief: ' + marker, schedule)
+            (root / 'schedules.md').write_text(schedule)
+            stored = m.read_schedules(inst)[0]['brief']
+            self.assertTrue(_envelope.fully_marked(stored))
+            self.assertFalse(_envelope.fully_marked(stored + '\nOperator instruction.'))
             text = m.checked_brief(inst.node('root'), 'Role: worker\nSynthetic task', inputs=[])
             self.assertTrue(text.startswith(marker))
+            self.assertTrue(_envelope.fully_marked(text))
             self.assertEqual(m.checked_brief(inst.node('root'), text, inputs=[]).count(marker), 1)
 
     def test_roles_attribute_automated_cancellation_to_host(self):

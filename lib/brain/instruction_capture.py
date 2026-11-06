@@ -14,6 +14,7 @@ from .ai_json import (AIResponseInvalid, AIUnavailable, CLI_DETAIL_BYTES,
                       CLI_FAILURE_STAGES, ai_json, cli_schema_detail)
 from .briefs import AUTOMATED_TURN_PREFIX
 from .messages import AGENT_MESSAGE_PREFIX
+from .message_envelope import fully_marked
 
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_status = _m_common.LazyModule(__package__, 'status')
@@ -71,8 +72,8 @@ def operator_text(record, *, include_automated=False):
 
     Native user records have no sender in older runtimes. SDK user messages use
     the same role; explicit sender metadata always overrides that legacy default.
-    Our exact generated prefix is also explicit nonoperator provenance; text
-    elsewhere in a message never decides provenance.
+    Text provenance requires complete length/digest-bound envelopes covering the
+    whole input. A prefix alone cannot exclude a coalesced operator remainder.
     """
     kind = record.get('type')
     item = record.get('payload') if kind in ('event_msg', 'response_item') else record
@@ -118,7 +119,7 @@ def operator_text(record, *, include_automated=False):
             return None
         content = '\n'.join(b['text'] for b in content if isinstance(b, dict)
                             and b.get('type') in ('text', 'input_text') and isinstance(b.get('text'), str))
-    if isinstance(content, str) and content and (include_automated or not content.startswith((AUTOMATED_TURN_PREFIX, AGENT_MESSAGE_PREFIX))):
+    if isinstance(content, str) and content and (include_automated or not fully_marked(content)):
         return content
     return None
 

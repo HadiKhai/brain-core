@@ -41,11 +41,28 @@ may omit it. These use the runtime's user role as the provenance boundary;
 the hook cannot independently authenticate a human behind an unlabelled SDK
 message. Host adapters should retain sender metadata for forwarded messages.
 When that metadata does not reach a runtime transcript, prepare agent sends with
-`brain agent-message --message-file <file>` or `brain msg`. These commands prepend
-the fixed agent-message marker; capture excludes it only at character zero, just
-like the automated wake marker. A quoted, partial or indented marker is still
-operator input. No host lookup or message-meaning heuristic runs in the hook.
+`brain agent-message --message-file <file>` or `brain msg`. These commands frame
+the exact body with the fixed marker, a UTF-8 byte length and a SHA-256 digest.
+Generated automated briefs and wake prompts use the same framing. Capture skips
+only complete frames covering the entire input, allowing newline separators
+between coalesced frames. Any unproven remainder before, between or after frames
+keeps the whole original input for classification. Legacy prefix-only messages,
+truncated frames and changed bodies are also classified. No host lookup or
+message-meaning heuristic runs in the hook. Existing host prompts must be
+explicitly regenerated to gain complete framing; no host schedule is changed by
+the hook or by installing the core.
 Keep operator messages in their original thread so their instructions are captured.
+
+Local historical repair accepts an explicit `--agent-batches-json` export for
+coalesced agent sends. Map each gap filename to an array of objects containing
+`source_turn_sha256`, `separator` (exactly one newline), and `messages` (original
+host items in order). Every item must have explicit MCP agent provenance,
+untruncated text, a unique item ID and the same receiving `sourceThreadId`.
+Exactly one batch must reconstruct the whole source byte for byte; quote overlap
+alone cannot close a gap. Receipts retain the source hash and every constituent's
+original ID, record digest and text digest. No merged host item is manufactured.
+The existing single-message export path remains supported. Gap bytes and inbox
+history are retained, and `--require` still reports every unmet required gap.
 
 A private per-session cursor records complete-line offsets and an inode/anchor
 fingerprint. Every new message since the preceding stop is included, including

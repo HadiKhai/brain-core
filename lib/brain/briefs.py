@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import common as _m_common
 from . import instance as _m_instance
+from .message_envelope import AUTOMATED_TURN_PREFIX, marked_message, unmarked_message
 
 _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_history = _m_common.LazyModule(__package__, 'history')
@@ -65,11 +66,8 @@ def contract_inputs(n, branch):
     return []
 
 
-AUTOMATED_TURN_PREFIX = "Automated turn: no operator present; cancellations are host events."
-
-
 def automated_brief(text):
-    return text if text.startswith(AUTOMATED_TURN_PREFIX) else AUTOMATED_TURN_PREFIX + "\n\n" + text
+    return marked_message(text, AUTOMATED_TURN_PREFIX)
 
 
 def checked_brief(n, text, worker=True, inputs=None, rules=None):
@@ -78,6 +76,9 @@ def checked_brief(n, text, worker=True, inputs=None, rules=None):
     Legacy callers without provenance conservatively charge the entire output.
     """
     from . import rule_contracts
+    body = unmarked_message(text, AUTOMATED_TURN_PREFIX)
+    if body is not None:
+        text = body
     text = rule_contracts.without_rules(text)
     # Injected safety instructions are mandatory overhead, not task allowance.
     if inputs is None:
@@ -87,7 +88,6 @@ def checked_brief(n, text, worker=True, inputs=None, rules=None):
     except (OSError, UnicodeError, ValueError) as error:
         _m_common.die('cannot assemble applicable rules: ' + str(error))
     text += '\n' + '\n'.join(rules) + '\n' if rules else ''
-    text = automated_brief(text)
     if worker:
         text += "\n" + COMPACTION_POLICY + "\n"
     _m_guard.no_terms_in(n, text, "the brief")
@@ -100,11 +100,11 @@ def checked_brief(n, text, worker=True, inputs=None, rules=None):
     inputs = [("Unclassified task/context", text)] if inputs is None else inputs
     sections = [(len(body.encode("utf-8")), name) for name, body in inputs]
     charge = sum(size for size, name in sections)
-    total = len(text.encode("utf-8"))
+    total = len(automated_brief(text).encode("utf-8"))
     # Include the accounting line itself in the absolute byte total.
     while True:
         note = f"\nBrief bytes: chargeable={charge}; total={total}; absolute ceiling={BRIEF_ABSOLUTE_BYTES}.\n"
-        measured = len((text + note).encode("utf-8"))
+        measured = len(automated_brief(text + note).encode("utf-8"))
         if measured == total:
             break
         total = measured
@@ -118,7 +118,7 @@ def checked_brief(n, text, worker=True, inputs=None, rules=None):
         _m_common.die("refused: " + message)
     if charge > kb * 1024:
         print("warning: " + message, file=sys.stderr)
-    return text + note
+    return automated_brief(text + note)
 
 
 def restart_acknowledged(n, row, signal):

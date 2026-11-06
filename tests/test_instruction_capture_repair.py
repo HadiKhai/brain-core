@@ -1,5 +1,7 @@
 """Synthetic local schedules and gaps; no host calls or operator data."""
 import importlib
+import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -51,10 +53,11 @@ class InstructionCaptureRepair(unittest.TestCase):
         plan = self.repair.marker_plan(self.root, {'tasks': self.tasks})
         self.assertTrue(plan['complete'])
         self.assertEqual(len(plan['tasks']), 4)
-        self.assertEqual({r['scheduledTaskId'] for r in plan['updates']}, {'task-tick', 'scheduled-task:root-wake'})
+        self.assertEqual({r['scheduledTaskId'] for r in plan['updates']},
+                         {'task-tick', 'scheduled-task:root-wake', 'scheduled-task:sample-wake'})
         originals = {r['scheduledTaskId']: r['prompt'] for r in self.tasks}
         for row in plan['updates']:
-            self.assertEqual(row['prompt'], self.repair.AUTOMATED_TURN_PREFIX + '\n' + originals[row['scheduledTaskId']])
+            self.assertEqual(row['prompt'], self.repair.automated_brief(originals[row['scheduledTaskId']]))
         self.assertNotIn('secret', json.dumps(plan))
 
     def test_plan_reports_missing_binding_and_handles_provisioned_wake_ids(self):
@@ -290,6 +293,91 @@ class InstructionCaptureRepair(unittest.TestCase):
         self.assertEqual(len(result['reconciliations']), 1)
         self.assertFalse(result['complete'])
 
+    def batch_fixture(self):
+        messages = [{'type': 'user_message', 'createdBy': 'agent', 'creationSource': 'mcp',
+                     'senderThreadId': 'fixture-worker-' + str(i), 'sourceThreadId': 'fixture-parent',
+                     'itemId': 'fixture-message-' + str(i), 'text': text, 'textTruncated': False}
+                    for i, text in enumerate(('Retain original evidence.', 'Do not bypass the source check.'))]
+        source = '\n'.join(m['text'] for m in messages)
+        batch = {'source_turn_sha256': hashlib.sha256(source.encode()).hexdigest(),
+                 'separator': '\n', 'messages': messages}
+        path = self.gap('agent-batch', messages[0]['text'], messages[1]['text'], source_text=source)
+        return path, source, batch
+
+    def test_explicit_batch_reconstructs_whole_source_and_retains_each_original_digest(self):
+        path, source, batch = self.batch_fixture()
+        before, inbox = path.read_bytes(), self.inbox.read_bytes()
+        proof = {path.name: [batch]}
+        # The original single-message export remains insufficient for a batch.
+        single = self.repair.reconcile_gaps(self.root, None, agent_messages={path.name: batch['messages']},
+                                           require=['agent-batch'])
+        self.assertEqual(single['required_unmet'], ['agent-batch'])
+        result = self.repair.reconcile_gaps(self.root, None, dry_run=False,
+                                           agent_batches=proof, require=['agent-batch'])
+        self.assertTrue(result['complete'])
+        receipt = result['reconciliations'][0]
+        self.assertEqual(receipt['source_turn_sha256'], [batch['source_turn_sha256']])
+        self.assertEqual(receipt['agent_messages'], [])
+        constituents = receipt['agent_batches'][0]['messages']
+        self.assertEqual([m['itemId'] for m in constituents], [m['itemId'] for m in batch['messages']])
+        for original, recorded in zip(batch['messages'], constituents):
+            self.assertEqual(recorded['host_record_sha256'],
+                             hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest())
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.inbox.read_bytes(), inbox)
+        self.assertEqual(self.repair.reconcile_gaps(self.root, None, dry_run=False,
+                         agent_batches=proof, require=['agent-batch'])['reconciliations'], [])
+
+    def test_batches_refuse_partial_mixed_changed_order_separator_or_ambiguous_cover(self):
+        path, source, batch = self.batch_fixture()
+        invalid = []
+        for field, value in (('createdBy', 'user'), ('creationSource', 'web'), ('textTruncated', True),
+                             ('sourceThreadId', 'other-receiver'), ('itemId', 'fixture-message-0'),
+                             ('senderThreadId', ''), ('text', 'Only a partial quote.')):
+            changed = copy.deepcopy(batch)
+            changed['messages'][1][field] = value
+            invalid.append([changed])
+        invalid.extend(([dict(batch, messages=batch['messages'][:1])],
+                        [dict(batch, messages=list(reversed(batch['messages'])))],
+                        [dict(batch, separator='\n\n')],
+                        [dict(batch, source_turn_sha256='0' * 64)], [batch, batch]))
+        for batches in invalid:
+            with self.subTest(batches=batches):
+                result = self.repair.reconcile_gaps(self.root, None, agent_batches={path.name: batches},
+                                                   require=['agent-batch'])
+                self.assertEqual(result['reconciliations'], [])
+                self.assertEqual(result['required_unmet'], ['agent-batch'])
+        for text in ('Operator text.\n' + source, source + '\nUncovered text.', source.replace('\n', '\n\n')):
+            changed = json.loads(path.read_text())
+            for item in changed['items']:
+                item['source_text'] = text
+            path.write_text(json.dumps(changed))
+            candidate = dict(batch, source_turn_sha256=hashlib.sha256(text.encode()).hexdigest())
+            self.assertEqual(self.repair.reconcile_gaps(self.root, None,
+                             agent_batches={path.name: [candidate]})['reconciliations'], [])
+
+    def test_batch_legacy_sources_and_every_quote_require_complete_cover(self):
+        path, source, batch = self.batch_fixture()
+        gap = json.loads(path.read_text())
+        for item in gap['items']:
+            del item['source_text']
+            item['at'] = '2026-01-15T12:00:00Z'
+        path.write_text(json.dumps(gap))
+        record = {'type': 'user', 'timestamp': gap['items'][0]['at'], 'message': {'content': source}}
+        result = self.repair.reconcile_gaps(self.root, None, agent_batches={path.name: [batch]},
+                                           source_turns={path.name: [record]})
+        self.assertEqual(len(result['reconciliations']), 1)
+        gap['items'][1]['quote'] = 'Do not bypass the source check. Invented continuation.'
+        path.write_text(json.dumps(gap))
+        self.assertEqual(self.repair.reconcile_gaps(self.root, None, agent_batches={path.name: [batch]},
+                         source_turns={path.name: [record]})['reconciliations'], [])
+
+    def test_marked_schedule_plus_operator_remainder_is_not_schedule_proof(self):
+        self.gap('mixed-marked', 'Read current work.',
+                 source_text=self.repair.AUTOMATED_TURN_PREFIX + '\n' + self.tasks[1]['prompt']
+                 + '\nAdditional operator instruction.')
+        self.assertEqual(self.repair.reconcile_gaps(self.root, self.tasks)['reconciliations'], [])
+
     def test_cli_fixture_plan_and_dry_run_are_local_and_private(self):
         tasks = self.root / 'tasks.json'
         tasks.write_text(json.dumps({'tasks': self.tasks}))
@@ -300,7 +388,7 @@ class InstructionCaptureRepair(unittest.TestCase):
         run = subprocess.run(args + ['plan'] + options + ['--output', str(plan)],
                              env=env, text=True, capture_output=True, timeout=10)
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(len(json.loads(plan.read_text())['updates']), 2)
+        self.assertEqual(len(json.loads(plan.read_text())['updates']), 3)
         self.assertEqual(plan.stat().st_mode & 0o777, 0o600)
         self.gap('candidate', 'Read current work.', source_text=self.tasks[1]['prompt'])
         run = subprocess.run(args + ['reconcile'] + options + ['--dry-run'],

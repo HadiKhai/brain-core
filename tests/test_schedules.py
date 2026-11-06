@@ -106,8 +106,8 @@ class Schedules(Scenario):
         before = f.read_bytes()
         out = self.b(r, "schedule", "list", "--verbose")
         prefix = "Automated turn: no operator present; cancellations are host events."
-        brief = prefix + "  Check work. Report blockers."
-        self.assertIn("brief: " + brief + "\n", out)
+        brief = "Check work. Report blockers."
+        self.assertIn(brief + "\n", out)
         self.assertNotIn(brief + " provider:", out)
         self.assertEqual(out.count(prefix), 1)
         self.assertEqual(f.read_bytes(), before)
@@ -116,7 +116,7 @@ class Schedules(Scenario):
         module = importlib.util.module_from_spec(spec)
         loader.exec_module(module)
         schedule = module.read_schedules(module.Instance(r))[0]
-        self.assertEqual(schedule['brief'], brief)
+        self.assertEqual(schedule['brief'], module._owners['checked_brief'].automated_brief(brief))
         self.assertEqual(schedule['provider'], 'codex')
 
     def test_invalid_provider_refuses_before_writing(self):
