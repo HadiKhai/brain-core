@@ -7,26 +7,30 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 
-A coordinator's send, launch or worker start is refused as unordered only in an operator turn,
-and who is speaking is now the capture AI's reading: each item carries `speaker`
-(`operator`, `agent`, `runtime`, `unknown`) and a verbatim `speaker_evidence`. A turn
-started by a host notice (a pull-request watch notice, a task notification) or by another
-agent's message (a hand-back, a parent coordinator's order) is not an operator turn,
-whatever the runtime record looks like; `unknown` keeps the check. Stop-time capture
-asks for a rule commit only for the operator's own standing instructions; an unknown
-speaker's goes to the inbox as a gap.
+A coordinator's send, launch or worker start is refused as unordered only in an operator turn.
+Every new input starts a turn: an agent message with a host sender thread, a host system
+prompt, a task notification or a scheduled wake ends an earlier operator turn. Inputs with
+explicit nonoperator provenance are never the operator's; an input the runtime marks as
+human always is. Where structure cannot tell, the capture AI judges: each item carries
+`speaker` (`operator`, `agent`, `runtime`, `unknown`) and a verbatim `speaker_evidence`.
+A turn started by a host notice or by another agent's message is not an operator turn;
+`unknown` keeps the check. Stop-time capture no longer asks for a rule commit for another
+agent's or the host's words; `unknown` standing instructions stay pending as before.
 
 In an operator turn: the judge's quoted order and capture's order item need only overlap
 in the same message; the routine steps of an ordered piece of work (tests, docs,
 re-measures, hand-back) are covered by it; both AIs get the agent's last reply before the
 turn, so a short "yes" or "go" answers that offer, and lines that quote it back are marked
-by bytes; an order relayed in a verified agent-message envelope counts as the turn's
-order; and the refusal names the failing check and quote. A fix claim is news to its
-reader: telling a builder its own fix was accepted is not one.
+by bytes; a message whose host sender thread is the parent node's bound coordinator counts
+as the turn's order, while in an unmarked input only words capture reads as the operator's
+(or cannot attribute) order work, so an envelope coalesced with operator text carries no
+relay authority; and the refusal names the failing check and quote. A fix claim is
+news to its reader: telling a builder its own fix was accepted is not one.
 
 `report_gate_held_turns` (node or instance setting, default 0: no change) keeps a refused
-send's turn order for that many later turns, so the same send passes on the operator's
-next message unless the judge reads that message as cancelling it.
+send's turn order for that many later turns, bound to the node, session, tool, recipient,
+transcript and exact text, so the same send passes on the operator's next message. A
+judge reading of the new message as cancelling it revokes the hold at once.
 
 When any PreToolUse refusal hits a coordinator's `t3_thread_send` to its parent node's
 coordinator, the message is filed as is in the parent's inbox (or the hook queue when the

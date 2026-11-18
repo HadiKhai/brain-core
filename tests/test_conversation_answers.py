@@ -159,9 +159,9 @@ class InstructionCapture(Scenario):
                                                           'speaker': speaker, 'speaker_evidence': row['text']}]}
                              for row in data['messages']]}, {'model': 'fixture', 'usage': {}}
 
-    def stop(self, kind='standing_instruction', data=None, quote=None):
+    def stop(self, kind='standing_instruction', data=None, quote=None, speaker='operator'):
         with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw:
-                               self.answer(data, kind, quote)):
+                               self.answer(data, kind, quote, speaker)):
             return self.capture.capture_stop(self.inst, self.n, data or self.data)
 
     def commit_rule(self, gate='Gate: tests/test_sample.py::test_evidence', quote=None):
@@ -176,6 +176,25 @@ class InstructionCapture(Scenario):
         reason = self.stop()
         self.assertIn(self.quote, reason)
         self.assertIn('same-turn citing rule commit', reason)
+
+    def test_unknown_speaker_standing_instruction_stays_pending_without_a_rule_commit(self):
+        """Review finding 5: a speaker the AI cannot tell keeps the declared protection."""
+        reason = self.stop(speaker='unknown')
+        self.assertIn(self.quote, reason)
+        self.assertIn('same-turn citing rule commit', reason)
+        self.commit_rule()
+        self.assertIsNone(self.stop(speaker='unknown'))
+
+    def test_runtime_human_marker_outranks_the_ai_speaker(self):
+        """Review finding 5: structural human provenance comes before the AI's attribution."""
+        self.records = []
+        self.message(self.quote, turnOrigin='human')
+        reason = self.stop(speaker='agent')
+        self.assertIn(self.quote, reason)
+        self.assertIn('same-turn citing rule commit', reason)
+
+    def test_agent_speaker_standing_instruction_is_not_the_operators(self):
+        self.assertIsNone(self.stop(speaker='agent'))
 
     def test_citing_instance_commit_with_gate_passes(self):
         self.commit_rule()

@@ -90,14 +90,13 @@ def coordinator(n, data):
         _m_jobs.thread_reference_ids(thread).intersection(_m_jobs.thread_reference_ids(bound))))
 
 
-def operator_text(record, *, include_automated=False):
-    """Claude user / Codex user-message fields; explicit nonoperator origins excluded.
+META = ('isMeta', 'isCompactSummary', 'isSidechain')
+SENDER_THREAD_KEYS = ('senderThreadId', 'sourceThreadId', 'sender_thread_id')
+HUMAN = ('human', 'user', 'operator')
 
-    Native user records have no sender in older runtimes. SDK user messages use
-    the same role; explicit sender metadata always overrides that legacy default.
-    Text provenance requires complete length/digest-bound envelopes covering the
-    whole input. A prefix alone cannot exclude a coalesced operator remainder.
-    """
+
+def _input(record):
+    """(provenance sources, text) of one user input record, Claude or Codex, before any origin check."""
     kind = record.get('type')
     item = record.get('payload') if kind in ('event_msg', 'response_item') else record
     if not isinstance(item, dict):
@@ -106,22 +105,8 @@ def operator_text(record, *, include_automated=False):
         item = item.get('item', {})
     if not isinstance(item, dict):
         return None
-    for source in (record, item, item.get('internal_chat_message_metadata_passthrough', {})):
-        if not isinstance(source, dict):
-            continue
-        if any(source.get(k) for k in ('isMeta', 'isCompactSummary', 'isSidechain')):
-            return None
-        if source.get('promptSource') == 'system':
-            return None
-        if source.get('turnOrigin') not in (None, 'human', 'user', 'operator', 'sdk'):
-            return None
-        if source.get('origin') not in (None, 'human', 'user', 'operator', 'sdk'):
-            return None
-        if any(source.get(k) for k in ('senderThreadId', 'sourceThreadId', 'sender_thread_id')):
-            return None
-        sender = source.get('sender')
-        if sender is not None and sender not in ('human', 'user', 'operator'):
-            return None
+    sources = [s for s in (record, item, item.get('internal_chat_message_metadata_passthrough', {}))
+               if isinstance(s, dict)]
     message = record.get('message') if kind == 'user' else item
     if not isinstance(message, dict):
         return None
@@ -142,7 +127,64 @@ def operator_text(record, *, include_automated=False):
             return None
         content = '\n'.join(b['text'] for b in content if isinstance(b, dict)
                             and b.get('type') in ('text', 'input_text') and isinstance(b.get('text'), str))
-    if isinstance(content, str) and content and (include_automated or not fully_marked(content)):
+    return (sources, content) if isinstance(content, str) and content else None
+
+
+def _nonoperator(sources):
+    """Explicit structural provenance of a nonoperator input: host system prompts, other
+    origins, sender threads and nonhuman senders."""
+    for source in sources:
+        if source.get('promptSource') == 'system':
+            return True
+        if source.get('turnOrigin') not in (None, 'sdk') + HUMAN or source.get('origin') not in (None, 'sdk') + HUMAN:
+            return True
+        if any(source.get(k) for k in SENDER_THREAD_KEYS):
+            return True
+        if source.get('sender') is not None and source.get('sender') not in HUMAN:
+            return True
+    return False
+
+
+def input_text(record):
+    """Text of any new input (operator, agent, host or automated): the structural turn boundary.
+
+    Meta records (hook feedback, attachments, compaction summaries, sidechains) are no input.
+    """
+    found = _input(record)
+    if found is None or any(s.get(k) for s in found[0] for k in META):
+        return None
+    return found[1]
+
+
+def sender_threads(record):
+    """Host sender thread ids carried by an input record (structure)."""
+    found = _input(record)
+    return [s[k] for s in found[0] for k in SENDER_THREAD_KEYS
+            if isinstance(s.get(k), str) and s[k]] if found else []
+
+
+def human_provenance(record):
+    """The runtime itself marks this input as typed by a human (structure, ahead of any AI reading)."""
+    found = _input(record)
+    return bool(found) and not _nonoperator(found[0]) and any(
+        s.get('turnOrigin') in HUMAN or s.get('origin') in HUMAN or s.get('sender') in HUMAN for s in found[0])
+
+
+def operator_text(record, *, include_automated=False):
+    """Claude user / Codex user-message fields; explicit nonoperator origins excluded.
+
+    Native user records have no sender in older runtimes. SDK user messages use
+    the same role; explicit sender metadata always overrides that legacy default.
+    Text provenance requires complete length/digest-bound envelopes covering the
+    whole input. A prefix alone cannot exclude a coalesced operator remainder.
+    """
+    found = _input(record)
+    if found is None:
+        return None
+    sources, content = found
+    if any(s.get(k) for s in sources for k in META) or _nonoperator(sources):
+        return None
+    if include_automated or not fully_marked(content):
         return content
     return None
 
@@ -218,7 +260,8 @@ def snapshot(path, state):
             continue
         text = operator_text(record)
         if text is not None:
-            messages.append({'id': str(i), 'text': text, 'at': record.get('timestamp')})
+            messages.append({'id': str(i), 'text': text, 'at': record.get('timestamp'),
+                             'human': human_provenance(record)})
     return messages, {'offset': end, 'file': identity, 'anchor': anchor}
 
 
@@ -274,7 +317,9 @@ def validated_classifications(messages, value):
                                for k in ('quote', 'speaker_evidence'))):
                 raise CaptureRejected('capture quote or speaker evidence is not an exact nonempty substring, '
                                       'or kind or speaker is invalid')
-            output.append(dict(item, id=row['id'], at=message['at'], source_text=message['text']))
+            # The runtime's own human marker outranks the AI's speaker reading.
+            speaker = 'operator' if message.get('human') else item['speaker']
+            output.append(dict(item, speaker=speaker, id=row['id'], at=message['at'], source_text=message['text']))
     if found != set(expected):
         raise CaptureRejected('capture response omitted an operator message')
     return output
@@ -467,14 +512,10 @@ def capture_stop(inst, n, data):
             raise AIUnavailable('transcript_path_unavailable')
         messages, cursor = snapshot(data['transcript_path'], state)
         items, usage = classifications(messages) if messages else ([], None)
-        standing = [i for i in items if i['kind'] == 'standing_instruction']
-        # Only the operator's own rules wait for a rule commit; another agent's or the
-        # host's words never do. An unknown speaker is a visible gap, not a block.
-        pending = state.get('pending', []) + [i for i in standing if i['speaker'] == 'operator']
-        unknown = [i for i in standing if i['speaker'] == 'unknown']
-        if unknown:
-            best_effort_gap(inst, n, hashlib.sha256((key + json.dumps(cursor, sort_keys=True)).encode()).hexdigest(),
-                            'speaker_unknown', unknown)
+        # Another agent's or the host's words never wait for a rule commit; the operator's
+        # and any whose speaker the AI could not tell stay pending until converted.
+        pending = state.get('pending', []) + [i for i in items if i['kind'] == 'standing_instruction'
+                                              and i['speaker'] in ('operator', 'unknown')]
         baseline = state.get('head')
         missing = [i for i in pending if not rule_committed(inst, n, i, baseline)]
         cursor.update(pending=missing, usage=usage, head=baseline)

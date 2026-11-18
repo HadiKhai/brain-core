@@ -62,24 +62,15 @@ def fully_marked(text):
     return bool(frames(text))
 
 
-def leading_frames(text):
-    """((prefix, body), ...) of the complete frames that open an input, and the byte end they reach.
-
-    The remainder after them, if any, is unmarked input and stays operator text.
-    """
+def frames(text):
+    """(prefix, body) of every frame when the whole input is fully marked, else []."""
     raw, offset, found = text.encode('utf-8'), 0, []
     while offset < len(raw):
         frame = read_envelope(raw, offset)
         if frame is None:
-            break
+            return []
         found.append(frame[:2])
         offset = frame[2]
         while offset < len(raw) and raw[offset:offset + 1] == b'\n':
             offset += 1
-    return found, offset
-
-
-def frames(text):
-    """(prefix, body) of every frame when the whole input is fully marked, else []."""
-    found, end = leading_frames(text)
-    return found if end == len(text.encode('utf-8')) else []
+    return found

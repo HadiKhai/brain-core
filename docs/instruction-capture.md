@@ -35,10 +35,13 @@ agent's last reply before the batch (`preceding_assistant_text`, empty at stop
 time) and, per message, the lines that repeat that reply byte for byte
 (`quoted_from_preceding`). Code checks complete message coverage, types, enums
 and nonempty verbatim substrings; it does not classify meaning with keywords.
-Only `operator` standing instructions wait for a rule commit; an `unknown`
-speaker's standing instruction is recorded as a `speaker_unknown` gap instead.
-The report gate reads the same items: a turn with no `operator` or `unknown`
-item is not an operator turn.
+An input the runtime itself marks as human (`turnOrigin`, `origin` or `sender`
+of human, user or operator) is the operator's whatever the AI reads. Standing
+instructions of `operator` or `unknown` speakers wait for a rule commit; another
+agent's or the host's never do. The report gate reads the same items: a turn
+with no `operator` or `unknown` item is not an operator turn, and in an operator
+turn only an `operator` or `unknown` order item (or one in a parent relay proven
+by the host sender thread) authorizes work.
 
 Provenance uses Claude's user role, content block types, `isMeta`,
 `isCompactSummary`, `isSidechain`, `promptSource`, `turnOrigin`, origin and sender

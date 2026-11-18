@@ -301,7 +301,7 @@ def _preceding(records, start):
     """The agent's last reply before the turn's input: its final text message, whole (structure)."""
     found, ident = [], None
     for record in reversed(records[:max(start, 0)]):
-        if _m_capture.operator_text(record, include_automated=True) is not None and found:
+        if _m_capture.input_text(record) is not None and found:
             break
         piece = _assistant_text(record)
         if piece is None:
@@ -313,16 +313,15 @@ def _preceding(records, start):
     return '\n'.join(found)
 
 
-def _relayed(record):
-    """Bodies of verified agent-message envelopes opening an input (F1-f, structure).
-
-    A fully marked input is not operator input at all; in a coalesced batch the frames
-    are another agent's relay and the unmarked remainder stays the operator's.
-    """
-    text = _m_capture.operator_text(record, include_automated=True)
-    if text is None:
+def _relayed(record, parent):
+    """The parent coordinator's relayed order (F1-f): only an input whose host sender thread is
+    the parent node's bound coordinator. An envelope alone proves bytes, not who sent them."""
+    text = _m_capture.input_text(record)
+    senders = set().union(*[_m_capture._m_jobs.thread_reference_ids(t) for t in _m_capture.sender_threads(record)])
+    if text is None or not parent or not senders.intersection(parent):
         return []
-    return [body for prefix, body in _m_envelope.leading_frames(text)[0] if prefix == _m_envelope.AGENT_MESSAGE_PREFIX]
+    framed = [body for prefix, body in _m_envelope.frames(text) if prefix == _m_envelope.AGENT_MESSAGE_PREFIX]
+    return framed or [text]
 
 
 def _turn_heads(records):
@@ -331,14 +330,17 @@ def _turn_heads(records):
     for record in records:
         if _ended(record):
             ended = True
-        elif ended and _m_capture.operator_text(record, include_automated=True) is not None:
+        elif ended and _m_capture.input_text(record) is not None:
             heads.append(record.get('timestamp'))
             ended = False
     return heads
 
 
-def turn_facts(path):
-    """Structural facts of the current turn: after the last operator or automated input.
+def turn_facts(path, parent=()):
+    """Structural facts of the current turn: after the last input of any origin.
+
+    parent: thread reference ids of the parent node's bound coordinator, whose messages
+    (by host sender thread) carry its orders into this turn.
 
     Each call is paired with its result; only a call whose result is a known success
     can be evidence. A failed, unknown or still pending outcome is no evidence.
@@ -346,15 +348,15 @@ def turn_facts(path):
     a fact here: the runtime gives an operator, an agent and a host notice one shape.
     """
     records = _records(path)
-    start = next((i for i in range(len(records) - 1, -1, -1)
-                  if _m_capture.operator_text(records[i], include_automated=True) is not None), -1)
+    # The boundary is any new input; who typed it is a separate question (operator_text).
+    start = next((i for i in range(len(records) - 1, -1, -1) if _m_capture.input_text(records[i]) is not None), -1)
     turn = records[start + 1:] if start >= 0 else records
     head = [records[start]] if start >= 0 else []
     inputs = list(enumerate(head + turn))  # ids relative to the turn: stable as the tail window moves
-    operator = [{'id': str(i), 'text': text, 'at': r.get('timestamp')} for i, r in inputs
-                if (text := _m_capture.operator_text(r)) is not None]
+    operator = [{'id': str(i), 'text': text, 'at': r.get('timestamp'), 'human': _m_capture.human_provenance(r)}
+                for i, r in inputs if (text := _m_capture.operator_text(r)) is not None]
     relayed = [{'id': 'r' + str(i) + '.' + str(j), 'text': body, 'at': r.get('timestamp'), 'relayed': True}
-               for i, r in inputs for j, body in enumerate(_relayed(r))]
+               for i, r in inputs for j, body in enumerate(_relayed(r, parent))]
     calls, by_id = [], {}
     for record in turn:
         for event in _events(record):
@@ -423,7 +425,8 @@ def operator_items(inst, facts):
     if not facts['operator']:
         return None
     preceding = facts.get('preceding', '')
-    key = hashlib.sha256(json.dumps([[[m['id'], m['text']] for m in messages], preceding]).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps([[[m['id'], m['text'], bool(m.get('human'))] for m in messages],
+                                     preceding]).encode()).hexdigest()
     path = inst.root / '.brain/report-gates' / (key + '.json')
     try:
         _m_common.safe_target(path)
@@ -451,8 +454,8 @@ def operator_turn(facts, items):
     A turn started by a host notice or another agent's message is not an operator turn,
     whatever the runtime's record shape says; marked envelopes never are.
     """
-    if items is None:
-        return bool(facts['operator'])
+    if items is None or any(m.get('human') for m in facts['operator']):
+        return bool(facts['operator'])  # the runtime's human marker is structure, ahead of the AI
     unmarked = {m['id'] for m in facts['operator']}
     return any(i['speaker'] in OPERATOR_SPEAKERS and i['id'] in unmarked for i in items)
 
@@ -469,12 +472,17 @@ def _quoted(span, messages):
     return bool(span) and any(span in m['text'] for m in messages)
 
 
-def _ordered(span, items, messages):
-    """The AI's order span overlaps, by position in the same message, an item capture read as an order."""
+def _ordered(span, items, messages, anyone=False):
+    """The AI's order span overlaps, by position in the same message, an item capture read as an order.
+
+    In an unmarked input only the operator's words (or words capture could not attribute) order
+    work; another speaker's words count only in a parent relay the host sender thread proves.
+    """
     for m in messages:
         mine = _spans(m['text'], span)
         for item in items or []:
-            if item['kind'] in ORDER_KINDS and item.get('id') == m['id'] and any(
+            if item['kind'] in ORDER_KINDS and item.get('id') == m['id'] and (
+                    anyone or m.get('relayed') or item.get('speaker') in OPERATOR_SPEAKERS) and any(
                     a < d and c < b for a, b in mine for c, d in _spans(m['text'], item['quote'])):
                 return True
     return False
@@ -488,10 +496,16 @@ def order_problem(claim, items, messages):
         return 'the judge found no message in this turn that orders ' + what
     if not _quoted(said, messages):
         return 'the words cited for ' + what + ' are not verbatim in any message of this turn'
+    cited = json.dumps(said, ensure_ascii=False)
+    if _ordered(said, items, messages, anyone=True) and not _ordered(said, items, messages):
+        who = sorted({i.get('speaker') for m in messages if said in m['text'] for i in items or []
+                      if i.get('id') == m['id'] and _ordered(said, [i], [m], anyone=True)})
+        return ('capture read the cited words ' + cited + ' as an order from ' + ', '.join(who)
+                + ', not the operator, and no host sender thread proves a parent relay')
     if not _ordered(said, items, messages):
         read = sorted({i['kind'] for m in messages if said in m['text'] for i in items or []
-                       if i.get('id') == m['id'] and _ordered(said, [dict(i, kind='one_off')], [m])})
-        return ('capture did not read the cited words ' + json.dumps(said, ensure_ascii=False) + ' as an order'
+                       if i.get('id') == m['id'] and _ordered(said, [dict(i, kind='one_off')], [m], anyone=True)})
+        return ('capture did not read the cited words ' + cited + ' as an order'
                 + (' (it read them as ' + ', '.join(read) + ')' if read else ''))
     return None
 
@@ -606,40 +620,73 @@ def held_turns(inst, n):
         return 0
 
 
-def _held_path(inst, text):
-    return inst.root / '.brain/report-gates/held' / (hashlib.sha256(text.encode()).hexdigest() + '.json')
+def held_scope(n, data, name, args, text):
+    """What a held order is bound to (structure): node, runtime session, tool, recipient,
+    transcript and the exact outgoing text. Nothing else may reuse it."""
+    recipient = next((args[k] for k in ('threadId', 'thread_id', 'target') if isinstance(args.get(k), str)), None)
+    return {'node': n['id'], 'session': data.get('session_id') or data.get('thread_id'), 'tool': tool_name(name),
+            'recipient': recipient, 'transcript': data.get('transcript_path'),
+            'text_sha256': hashlib.sha256(text.encode()).hexdigest()}
 
 
-def held_order(inst, text, facts, window):
-    """A refused send's earlier order, when this exact text was held 1..window turns ago (structure)."""
-    path = _held_path(inst, text)
+def _held_path(inst, scope):
+    digest = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
+    return inst.root / '.brain/report-gates/held' / (digest + '.json')
+
+
+def _revoke(path):
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def held_order(inst, scope, facts, window):
+    """A refused send's earlier order, when this exact scoped send was held 1..window turns ago.
+
+    A receipt whose stored scope or digest disagrees with its path, or with this call, is refused.
+    """
+    path = _held_path(inst, scope)
     try:
         _m_common.safe_target(path)
         record = json.loads(path.read_text()) if path.exists() else None
     except (OSError, ValueError):
         return None
-    if (not isinstance(record, dict) or not isinstance(record.get('turn_at'), str)
+    if record is None:
+        return None
+    if (not isinstance(record, dict) or record.get('sha256') != path.stem or record.get('scope') != scope
+            or not isinstance(record.get('turn_at'), str)
             or not _cached_items(record.get('items')) or not isinstance(record.get('messages'), list)
             or not all(isinstance(m, dict) and isinstance(m.get('id'), str) and isinstance(m.get('text'), str)
+                       and isinstance(m.get('relayed', False), bool)
                        for m in record['messages'])):
         return None
     later = sum(1 for at in facts['heads'] if isinstance(at, str) and at > record['turn_at'])
-    return record if 1 <= later <= window else None
+    if later > window:
+        _revoke(path)  # expired
+        return None
+    return dict(record, path=path) if later >= 1 else None
 
 
-def hold(inst, text, facts, items):
+def hold(inst, scope, facts, items):
     """Keep a refused send's turn order for the declared window (F1-d); the first refusal wins."""
-    path = _held_path(inst, text)
+    path = _held_path(inst, scope)
     if path.exists() or not isinstance(facts.get('head_at'), str):
         return
-    record = {'sha256': path.stem, 'turn_at': facts['head_at'], 'at': None,
-              'messages': [{'id': 'p' + m['id'], 'text': m['text']} for m in turn_messages(facts)],
-              'items': [dict(i, id='p' + i['id']) for i in items or []]}
     try:
-        record['at'] = inst.now()
+        record = {'sha256': path.stem, 'scope': scope, 'turn_at': facts['head_at'], 'at': inst.now(),
+                  'messages': [{'id': 'p' + m['id'], 'text': m['text'], 'relayed': bool(m.get('relayed'))}
+                               for m in turn_messages(facts)],
+                  'items': [dict(i, id='p' + i['id']) for i in items or []]}
         _m_common.atomic_write(path, json.dumps(record, ensure_ascii=False) + '\n', private=True, create=True)
     except (OSError, ValueError):
         pass  # an unwritten hold only means the next turn judges without it
+
+
+def _parent_ids(n):
+    parent = n.get('parent')
+    bound = parent['local'].get('coordinator') if parent else None
+    return _m_capture._m_jobs.thread_reference_ids(bound) if isinstance(bound, str) and bound else set()
 
 
 def pretool_reason(inst, n, data):
@@ -648,7 +695,7 @@ def pretool_reason(inst, n, data):
     if not isinstance(name, str) or not isinstance(args, dict) or not _m_capture.coordinator(n, data):
         return None
     try:
-        facts = turn_facts(data.get('transcript_path'))
+        facts = turn_facts(data.get('transcript_path'), _parent_ids(n))
     except OSError as error:
         _unavailable(error)
         return None
@@ -660,7 +707,8 @@ def pretool_reason(inst, n, data):
         return None
     text, started, relevant = gated
     window = held_turns(inst, n)
-    prior = held_order(inst, text, facts, window) if window and text and facts['operator'] else None
+    scope = held_scope(n, data, name, args, text) if window and text else None
+    prior = held_order(inst, scope, facts, window) if scope and facts['operator'] else None
     try:
         verdict, items = _parallel(lambda: judge_claims(text, facts, prior) if text else
                                    {'items': [], 'prior_cancelled': False},
@@ -668,19 +716,19 @@ def pretool_reason(inst, n, data):
     except (OSError, AIUnavailable, ClaimsRejected, ValueError) as error:
         _unavailable(error)
         return None
+    cancelled = bool(prior) and verdict['prior_cancelled']
+    if cancelled:
+        _revoke(prior['path'])  # revoked first: a cancelled order never returns in a later turn
+        prior = None
     claims = verdict['items']
     if relevant is not None:
         claims = [c for c in claims if c['kind'] in relevant]
-    if prior and verdict['prior_cancelled']:
-        prior = None
     problems = gate_problems(facts, claims, items, started=started, prior=prior)
-    if window and text and any(p.startswith('A question or complaint') for p in problems):
-        hold(inst, text, facts, items)
-    elif prior:
-        try:
-            _held_path(inst, text).unlink()
-        except OSError:
-            pass
+    refused = any(p.startswith('A question or complaint') for p in problems)
+    if scope and refused and not cancelled:
+        hold(inst, scope, facts, items)
+    elif prior and not refused:
+        _revoke(prior['path'])  # used: the held send has gone out
     return _report(problems, 'Report gate:')
 
 
