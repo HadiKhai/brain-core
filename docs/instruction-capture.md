@@ -29,8 +29,16 @@ the latter makes a recursively invoked stop hook return before reading stdin
 or looking for an instance. The same 20-second deadline covers CLI execution.
 
 The AI returns one or more `standing_instruction`, `one_off`, `question` or
-`other` items per message. Code checks complete message coverage, types, enums
+`other` items per message, each with its `speaker` (`operator`, `agent`, `runtime`
+or `unknown`) and a verbatim `speaker_evidence`. The payload also carries the
+agent's last reply before the batch (`preceding_assistant_text`, empty at stop
+time) and, per message, the lines that repeat that reply byte for byte
+(`quoted_from_preceding`). Code checks complete message coverage, types, enums
 and nonempty verbatim substrings; it does not classify meaning with keywords.
+Only `operator` standing instructions wait for a rule commit; an `unknown`
+speaker's standing instruction is recorded as a `speaker_unknown` gap instead.
+The report gate reads the same items: a turn with no `operator` or `unknown`
+item is not an operator turn.
 
 Provenance uses Claude's user role, content block types, `isMeta`,
 `isCompactSummary`, `isSidechain`, `promptSource`, `turnOrigin`, origin and sender

@@ -154,9 +154,10 @@ class InstructionCapture(Scenario):
                                  message={'role': 'user', 'content': text}, **metadata))
         self.path.write_text(''.join(json.dumps(r) + '\n' for r in self.records))
 
-    def answer(self, data, kind='standing_instruction', quote=None):
-        return {'messages': [{'id': row['id'], 'items': [{'kind': kind, 'quote': quote or row['text']}]}
-                             for row in data]}, {'model': 'fixture', 'usage': {}}
+    def answer(self, data, kind='standing_instruction', quote=None, speaker='operator'):
+        return {'messages': [{'id': row['id'], 'items': [{'kind': kind, 'quote': quote or row['text'],
+                                                          'speaker': speaker, 'speaker_evidence': row['text']}]}
+                             for row in data['messages']]}, {'model': 'fixture', 'usage': {}}
 
     def stop(self, kind='standing_instruction', data=None, quote=None):
         with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw:
@@ -207,9 +208,10 @@ class InstructionCapture(Scenario):
     def test_all_messages_and_mixed_items_checked_in_one_call(self):
         self.message('How many rows?')
         def classify(system, data, schema, **kw):
-            self.assertEqual([row['text'] for row in data], [self.quote, 'How many rows?'])
+            self.assertEqual([row['text'] for row in data['messages']], [self.quote, 'How many rows?'])
             value, usage = self.answer(data)
-            value['messages'][0]['items'].append({'kind': 'one_off', 'quote': 'evidence'})
+            value['messages'][0]['items'].append({'kind': 'one_off', 'quote': 'evidence', 'speaker': 'operator',
+                                                  'speaker_evidence': 'evidence'})
             value['messages'][1]['items'][0]['kind'] = 'question'
             return value, usage
         with mock.patch.object(self.capture, 'ai_json', side_effect=classify) as call:
@@ -285,7 +287,7 @@ class InstructionCapture(Scenario):
                 if state.exists():
                     state.unlink()
                 def classify(system, data, schema, **kw):
-                    self.assertEqual([row['text'] for row in data], [text])
+                    self.assertEqual([row['text'] for row in data['messages']], [text])
                     return self.answer(data)
                 with mock.patch.object(self.capture, 'ai_json', side_effect=classify) as call:
                     self.capture.capture_stop(self.inst, self.n, self.data)
@@ -530,7 +532,7 @@ class InstructionCapture(Scenario):
         self.message('Use green for this chart.')
         self.message('How many rows?')
         def classify(system, data, schema, **kw):
-            self.assertEqual([row['text'] for row in data], ['Use green for this chart.', 'How many rows?'])
+            self.assertEqual([row['text'] for row in data['messages']], ['Use green for this chart.', 'How many rows?'])
             return self.answer(data, 'one_off')
         with mock.patch.object(self.capture, 'ai_json', side_effect=classify) as call:
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
@@ -585,10 +587,10 @@ class InstructionCapture(Scenario):
         self.assertEqual(call.call_args.kwargs['env'], {'ANTHROPIC_API_KEY': 'synthetic-secret'})
 
     def cli_events(self):
-        return json.loads((CORE / 'tests/fixtures/claude-cli/2.1.312-events.json').read_text())
+        return json.loads((CORE / 'tests/fixtures/claude-cli/2.1.325-events.json').read_text())
 
     def cli_result(self, value=None, **overrides):
-        value = value if value is not None else self.answer([{'id': '0', 'text': self.quote}], 'other')[0]
+        value = value if value is not None else self.answer({'messages': [{'id': '0', 'text': self.quote}]}, 'other')[0]
         result = next(event for event in reversed(self.cli_events()) if event['type'] == 'result')
         result.update(structured_output=value, **overrides)
         return subprocess.CompletedProcess(['claude'], 0, json.dumps(result), '')
@@ -598,7 +600,7 @@ class InstructionCapture(Scenario):
         folder = CORE / 'tests/fixtures/claude-cli'
         provenance = json.loads((folder / 'provenance.json').read_text())
         self.assertEqual((folder / 'version.txt').read_text().strip(), provenance['cli_version'])
-        self.assertEqual(provenance['cli_version'], '2.1.312 (Claude Code)')
+        self.assertEqual(provenance['cli_version'], '2.1.325 (Claude Code)')
         self.assertEqual(hashlib.sha256(self.capture.SYSTEM.encode()).hexdigest(), provenance['system_sha256'])
         self.assertEqual(hashlib.sha256(json.dumps(self.capture.SCHEMA).encode()).hexdigest(), provenance['schema_sha256'])
         # New stored protocol fixtures must join this explicit known-shape inventory.
@@ -623,7 +625,7 @@ class InstructionCapture(Scenario):
             value, usage = client.ai_json(self.capture.SYSTEM, provenance['synthetic_input'], self.capture.SCHEMA)
         self.assertEqual(value, result['structured_output'])
         self.assertEqual(usage['usage'], result['usage'])
-        messages = [dict(message, at=None) for message in provenance['synthetic_input']]
+        messages = [dict(message, at=None) for message in provenance['synthetic_input']['messages']]
         self.assertEqual(len(self.capture.validated_classifications(messages, value)), 2)
         # Derive both object variants from the recorded result, including the
         # older envelope without type. Intermediate events never supply usage.
@@ -735,7 +737,8 @@ class InstructionCapture(Scenario):
             assert result.stdout == '', result.stdout
             print(json.dumps({'subtype': 'success', 'is_error': False,
                 'structured_output': {'messages': [{'id': row['id'], 'items': [
-                    {'kind': 'other', 'quote': row['text']}]} for row in payload]}}))
+                    {'kind': 'other', 'quote': row['text'], 'speaker': 'operator',
+                     'speaker_evidence': row['text']}]} for row in payload['messages']]}}))
         ''').replace('HOOK', repr(hook)).replace('DATA', repr(json.dumps(self.data)))
             .replace('__ROOT__', repr(str(self.root))))
         stub.chmod(0o700)
@@ -863,7 +866,7 @@ class InstructionCapture(Scenario):
 
     def test_api_key_keeps_http_success_and_invalid_response_behavior(self):
         client = sys.modules[self.capture.ai_json.__module__]
-        value = self.answer([{'id': '0', 'text': self.quote}], 'other')[0]
+        value = self.answer({'messages': [{'id': '0', 'text': self.quote}]}, 'other')[0]
         response = {'stop_reason': 'end_turn', 'model': 'fixture-model', 'usage': {'output_tokens': 8},
                     'content': [{'type': 'text', 'text': json.dumps(value)}]}
         with mock.patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'synthetic-secret'}), \

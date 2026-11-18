@@ -1,23 +1,28 @@
 {
-  "cli_version": "2.1.312 (Claude Code)",
-  "fixture": "2.1.312-events.json",
+  "cli_version": "2.1.325 (Claude Code)",
+  "fixture": "2.1.325-events.json",
   "shape": "event_array",
   "source": "one real subscription call through unchanged cli_json",
   "model": "claude-haiku-5-5",
-  "synthetic_input": [
-    {
-      "id": "0",
-      "text": "For every future report, use metric units."
-    },
-    {
-      "id": "1",
-      "text": "Sort the toy blocks by color."
-    }
-  ],
-  "system_sha256": "955791b60a45a0a4e5cf3521d2e7eac87cd24c236554f9a30901c9960aae48fc",
-  "schema_sha256": "e3e663dce3dacd672d93179b34778b20169fa03f34198b557adcf77a18b77292",
-  "raw_stdout_sha256": "ded00b0ed94a9305cdba649a019e06908459f3ff376a75886903337cb3680b47",
-  "fixture_sha256": "602f8509771b26cd80e764970b87d783490600e6580a162a78844af18c85506b",
+  "synthetic_input": {
+    "preceding_assistant_text": "",
+    "messages": [
+      {
+        "id": "0",
+        "text": "For every future report, use metric units.",
+        "quoted_from_preceding": []
+      },
+      {
+        "id": "1",
+        "text": "Sort the toy blocks by color.",
+        "quoted_from_preceding": []
+      }
+    ]
+  },
+  "system_sha256": "cd5b9889803c416f66fb8d0855ab81ec40f4ac228747f71db0c978275cfbcbd6",
+  "schema_sha256": "dfff2e46222168bbb4c83a14b994ff2e8b046c7cd772d18d6dc19b78e7b9a5bb",
+  "raw_stdout_sha256": "5dc10c3c68ea06fae6c8f3a33dcad89ee0f3aae525c425c2132d83d3faad7add",
+  "fixture_sha256": "368728896563bce195c2b9f99dcdcd8fbb5aa392e21a7e9cb38683b0193169b2",
   "sanitized_fields": [
     "/0/cwd",
     "/0/session_id",

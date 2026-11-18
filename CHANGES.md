@@ -5,6 +5,34 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
+
+A coordinator's send, launch or worker start is refused as unordered only in an operator turn,
+and who is speaking is now the capture AI's reading: each item carries `speaker`
+(`operator`, `agent`, `runtime`, `unknown`) and a verbatim `speaker_evidence`. A turn
+started by a host notice (a pull-request watch notice, a task notification) or by another
+agent's message (a hand-back, a parent coordinator's order) is not an operator turn,
+whatever the runtime record looks like; `unknown` keeps the check. Stop-time capture
+asks for a rule commit only for the operator's own standing instructions; an unknown
+speaker's goes to the inbox as a gap.
+
+In an operator turn: the judge's quoted order and capture's order item need only overlap
+in the same message; the routine steps of an ordered piece of work (tests, docs,
+re-measures, hand-back) are covered by it; both AIs get the agent's last reply before the
+turn, so a short "yes" or "go" answers that offer, and lines that quote it back are marked
+by bytes; an order relayed in a verified agent-message envelope counts as the turn's
+order; and the refusal names the failing check and quote. A fix claim is news to its
+reader: telling a builder its own fix was accepted is not one.
+
+`report_gate_held_turns` (node or instance setting, default 0: no change) keeps a refused
+send's turn order for that many later turns, so the same send passes on the operator's
+next message unless the judge reads that message as cancelling it.
+
+When any PreToolUse refusal hits a coordinator's `t3_thread_send` to its parent node's
+coordinator, the message is filed as is in the parent's inbox (or the hook queue when the
+inbox is busy) and the refusal says where. Nothing to do after upgrading; set
+`report_gate_held_turns` only if your instance wants held orders to carry over.
+
 ## 2026-11-06: Refuse git directory compounds and unsupported coordinator reports at the tool call
 
 The PreToolUse hook denies any shell command that changes directory (`cd`, `pushd`) and

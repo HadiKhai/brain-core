@@ -270,9 +270,12 @@ def cmd_hook_pretool(a):
             if guard:
                 reason = guard(inst, sender, data.get('tool_name'), data.get('tool_input'))
         reason = reason or pretool_decision(inst, nearest[0], data)
+        from . import report_gates as _m_report_gates
         if not reason:
-            from . import report_gates as _m_report_gates
             reason = _m_report_gates.pretool_reason(inst, nearest[0], data)
+        if reason:
+            # A refusal is never silent: a refused send to the parent coordinator is filed there.
+            reason += _m_report_gates.refused_parent_note(inst, nearest[0], data) or ''
         if reason:
             print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',
                   'permissionDecision': 'deny', 'permissionDecisionReason': _m_guard.redact(reason, _m_guard.never_terms(nearest[0]))}}))

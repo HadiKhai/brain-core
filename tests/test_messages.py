@@ -559,6 +559,7 @@ class ReportGates(Scenario):
         self.n = self.inst.node('root')
         self.path = self.tmp / 'turns.jsonl'
         self.records, self.claims, self.kind, self.judged, self.calls = [], [], 'question', [], 0
+        self.speaker, self.capture_items, self.classified, self.prior_cancelled = 'operator', None, [], False
 
     def write(self, *records):
         import json
@@ -566,7 +567,9 @@ class ReportGates(Scenario):
         self.path.write_text(''.join(json.dumps(r) + '\n' for r in self.records))
 
     def operator(self, text):
-        self.write({'type': 'user', 'timestamp': '2026-01-15T12:00:00Z', 'message': {'role': 'user', 'content': text}})
+        at = len(self.records)  # later inputs carry later times, as the runtime records them
+        self.write({'type': 'user', 'timestamp': '2026-01-15T%02d:%02d:%02dZ' % (12 + at // 3600, at // 60 % 60, at % 60),
+                    'message': {'role': 'user', 'content': text}})
 
     def automated(self, text='Wake: check the queue.'):
         """An automated turn as the host delivers it: the production length/digest envelope."""
@@ -588,11 +591,19 @@ class ReportGates(Scenario):
     def ai(self, system, data, schema, **kw):
         """Fixture judge for both schemas; meaning is the fixture's answer."""
         if 'messages' in schema['properties']:
-            return {'messages': [{'id': row['id'], 'items': [{'kind': self.kind, 'quote': row['text']}]}
-                                 for row in data]}, {}
+            self.classified.append(data)
+            if self.capture_items is not None:
+                return {'messages': [{'id': row['id'], 'items': [dict(i, speaker_evidence=i['quote'])
+                                                                 for i in self.capture_items(row)]}
+                                     for row in data['messages']]}, {}
+            return {'messages': [{'id': row['id'], 'items': [{'kind': self.kind, 'quote': row['text'],
+                                                              'speaker': self.speaker,
+                                                              'speaker_evidence': row['text']}]}
+                                 for row in data['messages']]}, {}
         self.judged.append(data)
         cited = [e['id'] for e in data['evidence']]
-        return {'items': [dict(c, quote=data['outgoing'] if c['quote'] is None else c['quote'],
+        return {'prior_cancelled': self.prior_cancelled,
+                'items': [dict(c, quote=data['outgoing'] if c['quote'] is None else c['quote'],
                                support=cited if c['support'] == 'cite' else list(c['support']))
                           for c in self.claims]}, {}
 
@@ -605,10 +616,10 @@ class ReportGates(Scenario):
                 stack.enter_context(mock.patch.object(owner, 'ai_json', side_effect=self.ai))
         return stack
 
-    def pretool(self, tool, tool_input, session='runtime-coordinator'):
+    def pretool(self, tool, tool_input, session='runtime-coordinator', cwd=None):
         import argparse, contextlib, io, json, sys
         from unittest import mock
-        payload = {'cwd': str(self.root), 'session_id': session, 'transcript_path': str(self.path),
+        payload = {'cwd': str(cwd or self.root), 'session_id': session, 'transcript_path': str(self.path),
                    'tool_name': tool, 'tool_input': tool_input}
         with self.stubbed(), mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
@@ -755,6 +766,164 @@ class ReportGates(Scenario):
         self.assertIsNone(self.stop('Yes, the page is live.'))
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(self.judged, [])
+
+    def reply(self, text):
+        """The agent's final reply of a turn: its text and the runtime's end-of-turn marker."""
+        self.write({'type': 'assistant', 'message': {'id': 'reply-' + str(len(self.records)), 'stop_reason': 'end_turn',
+                                                     'content': [{'type': 'text', 'text': text}]}})
+
+    def items_by_text(self, table):
+        """Capture fixture: table maps a message text to [(kind, quote, speaker)]; others are operator questions."""
+        for cached in (self.root / '.brain/report-gates').glob('*.json'):
+            cached.unlink()  # a new fixture answer replaces capture's per-turn cache
+        self.capture_items = lambda row: [{'kind': k, 'quote': q, 'speaker': who}
+                                          for k, q, who in table.get(row['text'], [('question', row['text'], 'operator')])]
+
+    def test_overlapping_order_spans_pass_and_each_refusal_names_its_cause(self):
+        """F1-a/F1-e (R1, R3): the two AIs' spans need only overlap; a refusal says which check failed."""
+        order = 'yes lets go ahead with both 20k lines and cli'
+        self.operator(order)
+        self.items_by_text({order: [('one_off', 'lets go ahead with both 20k lines and cli', 'operator')]})
+        relay = 'Ordered: build both, the 20k-line split and the cli, then re-measure and update the README.'
+        self.claims = [self.claim('work_order', operator_quote='yes lets go ahead with both')]
+        self.assertIsNone(self.send(relay))  # R1: partial overlap, neither span contains the other
+        self.items_by_text({order: [('other', 'yes', 'operator'), ('one_off', 'both 20k lines and cli', 'operator')]})
+        self.claims = [self.claim('work_order', operator_quote='yes lets go')]
+        reason = self.send(relay)
+        self.assertIn('capture did not read the cited words "yes lets go" as an order (it read them as other)', reason)
+        self.items_by_text({order: [('one_off', order, 'operator')]})
+        self.claims = [self.claim('work_order', operator_quote=order),
+                       self.claim('work_order', 'then re-measure and update the README')]
+        reason = self.send(relay)  # R3: one unquoted follow-through item is named, not a generic refusal
+        self.assertIn('the judge found no message in this turn that orders "then re-measure and update the README"',
+                      reason)
+        self.claims = [self.claim('work_order', operator_quote='an order nobody typed')]
+        self.assertIn('are not verbatim in any message of this turn', self.send(relay))
+        self.claims = [self.claim('work_order', operator_quote=order)]
+        self.assertIsNone(self.send(relay))  # R3 as the judge now reads it: one relay, one order
+
+    def test_both_ais_get_the_preceding_offer_and_quoted_back_lines(self):
+        """F1-c (R9, R11): a short "yes" answers the agent's own offer; quoted-back lines are marked by bytes."""
+        offer = 'Want me to have the review coordinator start the third review now?'
+        self.reply('The second review is back.\n' + offer)
+        answer = 'yes also can you check what updates we have for the other two nodes?'
+        self.operator(answer)
+        self.items_by_text({answer: [('one_off', 'yes', 'operator'),
+                                     ('question', 'also can you check what updates we have for the other two nodes?',
+                                      'operator')]})
+        self.claims = [self.claim('work_order', operator_quote='yes')]
+        self.assertIsNone(self.send('Start the third review now.'))
+        self.assertEqual(self.classified[-1]['preceding_assistant_text'], 'The second review is back.\n' + offer)
+        self.assertEqual(self.judged[-1]['preceding_assistant_text'], 'The second review is back.\n' + offer)
+        self.reply('Release status: the 0.3.0 npm release needs your go, and I will ask you then.')
+        quoted = '> the 0.3.0 npm release needs your go, and I will ask you then.\ngo ahead dont wait for me'
+        self.operator(quoted)
+        self.items_by_text({quoted: [('one_off', 'go ahead dont wait for me', 'operator')]})
+        self.claims = [self.claim('work_order', operator_quote='go ahead dont wait for me')]
+        self.assertIsNone(self.send('Release 0.3.0 now.'))
+        self.assertEqual(self.classified[-1]['messages'][0]['quoted_from_preceding'],
+                         ['> the 0.3.0 npm release needs your go, and I will ask you then.'])
+
+    def test_held_send_replays_on_a_later_turn_only_when_declared(self):
+        """F1-d (R7): a refused send keeps its turn's order for the declared window; default 0 keeps today's rule."""
+        relay = 'Ordered: ship the no-name posts as text only for now.'
+        order = 'Yes lets do no name posts as text only for now'
+
+        def turn(text, quote):
+            self.operator(text)
+            self.items_by_text({order: [('one_off', order, 'operator')],
+                                text: [('question', text, 'operator')] if text != order else [('one_off', order, 'operator')]})
+            self.claims = [self.claim('work_order', operator_quote=quote)]
+            reason = self.send(relay)
+            self.reply('Answered.')
+            return reason
+        self.assertIn('not an order', turn(order, ''))  # the judge missed it: refused in its own turn
+        self.assertIn('not an order', turn('why did it block? the app looks great', order))  # default 0
+        self.assertEqual(list((self.root / '.brain/report-gates').glob('held/*')), [])
+        self.b(self.root, 'set', 'root', 'report_gate_held_turns=1')
+        self.assertIn('not an order', turn(order, ''))
+        self.assertEqual(len(list((self.root / '.brain/report-gates/held').glob('*.json'))), 1)
+        self.prior_cancelled = True
+        self.assertIn('not an order', turn('why did it block? the app looks great', order))
+        self.assertIn('prior_operator_messages', self.judged[-1])
+        self.prior_cancelled = False
+        self.records = [r for r in self.records if r.get('message', {}).get('content') != 'why did it block? the app looks great']
+        self.assertIsNone(turn('why did it block? the app looks great', order))  # R7: the next turn sends it
+        self.assertEqual(self.judged[-1]['prior_operator_messages'], [order])
+        self.assertEqual(list((self.root / '.brain/report-gates/held').glob('*.json')), [])
+        self.assertIn('not an order', turn(order, ''))
+        turn('first later turn', '')
+        self.assertIn('not an order', turn('second later turn', order))  # past the window
+        self.assertNotIn('prior_operator_messages', self.judged[-1])
+
+    def test_host_notice_turn_is_not_an_operator_turn(self):
+        """Item 2, today's fixture A: a turn a host notice started never asks for an operator quote."""
+        notice = ('Update on pull request #12 (https://example.invalid/pull/12), which the host is watching for you:\n'
+                  '- Checks failed on 0a1b2c3:\n  - Unit tests\n'
+                  'Look into each item and act on it as your task requires.\n'
+                  'This PR stays linked and watched, so do not link, watch, or list it again.')
+        self.operator(notice)
+        self.items_by_text({notice: [('other', 'Update on pull request #12', 'runtime'),
+                                     ('one_off', 'Look into each item and act on it as your task requires.', 'runtime'),
+                                     ('standing_instruction', 'This PR stays linked and watched, so do not link, '
+                                                              'watch, or list it again.', 'runtime')]})
+        relay = 'Ordered work for #12: the unit test fails on the record card; fix it in one push and hand back.'
+        self.claims = [self.claim('work_order')]
+        self.assertIsNone(self.send(relay))
+        self.assertIsNone(self.pretool('mcp__t3-code__delegate_task', {'prompt': relay}))
+        for speaker in ('operator', 'unknown'):  # the gate still holds when the AI reads (or cannot rule out) the operator
+            with self.subTest(speaker=speaker):
+                self.items_by_text({notice: [('other', notice, speaker)]})
+                self.assertIn('the judge found no message in this turn that orders', self.send(relay))
+
+    def test_parent_coordinators_order_reaches_the_child(self):
+        """Item 2 and F1-f, today's fixture B: a parent's order, plain or enveloped, is not an operator question."""
+        order = ('Parent coordinator to the child coordinator. ORDER: every item below is ordered work; send and start '
+                 'them now. 1. Send every held relay to its builder. This message is your order for each send.')
+        self.operator(order)
+        self.items_by_text({order: [('one_off', order, 'agent')]})
+        relay = ('Ordered work for #7 (head 0a1b2c3). Your fixes are read and accepted. One more push: make the filter '
+                 'row one line, re-capture the side-by-side, cheap gates before push, hand back with the head sha.')
+        self.claims = [self.claim('work_order')]
+        self.assertIsNone(self.send(relay))
+        self.reply('Sent.')
+        # A coalesced batch: the parent's enveloped relay, then the operator's own line. The relayed
+        # order counts as the turn's order; the operator's question does not.
+        batch = self.m.marked_message(order, self.m.AGENT_MESSAGE_PREFIX) + '\nwhy is this taking so long?'
+        self.write({'type': 'user', 'message': {'role': 'user', 'content': batch}})
+        self.items_by_text({order: [('one_off', 'every item below is ordered work; send and start them now', 'agent')],
+                            batch: [('other', order, 'agent'),
+                                    ('question', 'why is this taking so long?', 'operator')]})
+        self.claims = [self.claim('work_order', operator_quote='send and start them now')]
+        self.assertIsNone(self.send(relay))
+        self.assertEqual([m['relayed'] for m in self.judged[-1]['turn_messages']], [False, True])
+        self.claims = [self.claim('work_order', operator_quote='why is this taking so long?')]
+        self.assertIn('as an order (it read them as question)', self.send(relay))
+
+    def test_refused_send_to_the_parent_is_filed_in_its_inbox(self):
+        """F5: a child coordinator's refused send to its parent is filed as is there, and the refusal says where."""
+        self.b(self.root, 'new', 'child', '--title', 'Synthetic child')
+        self.inst = self.m.Instance(self.root)
+        self.inst.local_of('child').update(coordinator='child-host', coordinator_sessions=['child-runtime'])
+        self.inst.save_local()
+        child = self.inst.node('child')['dir']
+        self.operator('Why is the build slow?')
+        self.claims = [self.claim('work_order')]
+        ask = 'Child coordinator: please launch the second builder for the order you gave at noon.'
+        reason = self.pretool('mcp__t3-code__t3_thread_send', {'threadId': 'host-coordinator', 'message': ask},
+                              session='child-runtime', cwd=child)
+        self.assertIn('not an order', reason)
+        self.assertIn("filed as is in root's inbox", reason)
+        inbox = (self.root / 'inbox.md').read_text()
+        self.assertIn(ask, inbox)
+        self.assertIn('from child coordinator', inbox)
+        again = self.pretool('mcp__t3-code__t3_thread_send', {'threadId': 'host-coordinator', 'message': ask},
+                             session='child-runtime', cwd=child)
+        self.assertIn('filed as is', again)
+        self.assertEqual((self.root / 'inbox.md').read_text().count(ask), 1)  # one filing per message
+        other = self.pretool('mcp__t3-code__t3_thread_send', {'threadId': 'peer-thread', 'message': ask},
+                             session='child-runtime', cwd=child)
+        self.assertNotIn('filed as is', other)  # only a send to the parent's coordinator is filed
 
     def codex(self, name, arguments, output):
         """A Codex rollout call and its native output, paired by call_id."""

@@ -92,7 +92,7 @@ OUTSIDE_JOB_LANES = {
     'ui-fitness.js': 'browser layout assertions; separate browser verification',
 }
 SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'tempdirs.py', 'lanes.py', 'check_lanes.py', 'per_change_gate.py', 'dashboard_acceptance.py',
-           'fixtures/claude-cli/2.1.312-events.json', 'fixtures/claude-cli/provenance.json',
+           'fixtures/claude-cli/2.1.325-events.json', 'fixtures/claude-cli/provenance.json',
            'fixtures/claude-cli/version.txt')
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
