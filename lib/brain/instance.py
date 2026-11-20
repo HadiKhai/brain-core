@@ -202,14 +202,26 @@ class Instance:
                 return n
         _m_common.die(f"no node '{nid}'")
 
-    def items(self):
-        out = []
+    def library_directories(self):
+        """Discover libraries without entering native execution artifacts.
+
+        A run may contain a copied instance/library or continually written logs;
+        neither is instance knowledge, even when its basename is `library`.
+        Attempt state is read by its ledger-derived JSON path separately.
+        """
         for d, subdirs, _ in os.walk(self.root):  # never into .git (git may be writing there), core or .brain
             subdirs[:] = sorted(s for s in subdirs if s not in (".git", ".brain") and
-                                not (s == "core" and Path(d) == self.root))
-            if Path(d).name != "library":
-                continue
-            for f in sorted(Path(d).glob("*.md")):
+                                not (s == "core" and Path(d) == self.root) and
+                                not (s in ('full-gates', 'spec-runs', 'job-attempts', 'job-handbacks',
+                                           'job-trains', 'handback-queue') and
+                                     not (Path(d).name == 'nodes' and (Path(d) / s / 'node.md').is_file())))
+            if Path(d).name == "library":
+                yield Path(d)
+
+    def items(self):
+        out = []
+        for directory in self.library_directories():
+            for f in sorted(directory.glob("*.md")):
                 if f.name.lower() == "readme.md":
                     continue
                 fm, _ = _m_common.read_fm(f)
@@ -392,7 +404,7 @@ def settings(inst):
 
 @contextlib.contextmanager
 def held(root):
-    """Retain final-attempt admission policy; projections still release ownership.
+    """Retain final-attempt admission policy and physical writer ownership.
 
     Settings are frozen before the attempt loads any: an editor outside the
     lock may change them, and a held refresh then refuses as before.
@@ -622,9 +634,9 @@ def released(inst, node=None, extra=(), local_keys=(), retry=False, projection=F
     Readers, hook descendants and nested unlocked scopes retain main's lock-free
     behavior. Only the enclosing writer owns validation and the binding reload.
     """
-    # Even a contended refresh must prepare read-only projections without
-    # physical writer ownership. Its caller still fences and bounds retries.
-    if _LOCK["fh"] is None or (_LOCK.get("hold") and not projection):
+    # Ordinary projections release ownership. A final contended status refresh
+    # retains it, so cooperating writers cannot starve publication indefinitely.
+    if _LOCK["fh"] is None or _LOCK.get("hold"):
         yield
         return
     with brain_lock(inst):

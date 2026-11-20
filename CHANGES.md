@@ -5,6 +5,19 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-20: Status refresh ignores execution output and retains final writer ownership
+
+`brain status <node> --refresh` no longer treats native run folders, unrelated attempt
+logs or unreferenced verification logs as displayed state. Attempt and handback JSON,
+referenced input maps, current inbox episode identities, and pending wake membership
+remain checked. Retired inbox generations for absent sources and atomic replacements
+of unchanged directory members no longer force a rebuild.
+
+Ordinary refresh projections still release the instance lock. After repeated contention,
+the final admitted attempt retains that existing lock so cooperating writers cannot
+continually overtake publication. Policy edits and external changes to relevant inputs
+still refuse stale publication. No configuration or instance migration is needed.
+
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 
 A coordinator's send, launch or worker start is refused as unordered only in an operator turn.

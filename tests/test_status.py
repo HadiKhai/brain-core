@@ -912,7 +912,13 @@ while not stop.exists():
         try:
             with mock.patch.dict(os.environ, self.env), instance.brain_lock(inst), refresh.invocation(), \
                     mock.patch.object(events, '_snapshot_view', side_effect=foreign):
-                events.reconcile(inst, node=inst.node('app'), snapshot=True)
+                # Renaming the pending job now changes its exact attempt input
+                # path. Refuse that discovery drift before reconciliation can
+                # adopt any foreign bytes; decisions still reach lease checks.
+                refusal = (self.assertRaisesRegex(SystemExit, 'state changed')
+                           if relative.endswith('job-ledger.md') else contextlib.nullcontext())
+                with refusal:
+                    events.reconcile(inst, node=inst.node('app'), snapshot=True)
             self.assertTrue(held)
             self.assertFalse(any(row['kind'] == 'reconcile' for row in events.read(inst)[start:]))
             self.assertEqual(events.replay(inst)[0], baseline)
@@ -1211,7 +1217,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         builds = []
         def changed(current, target):
             self.assertTrue(refresh.instance.holding())
-            self.assertIsNone(refresh.instance._LOCK['fh'])
+            self.assertIsNotNone(refresh.instance._LOCK['fh'])
             head = refresh.common.git('rev-parse', 'HEAD', cwd=wt).stdout.strip()
             if not builds:  # a worker commit lands in its worktree during the held build
                 (wt / 'concurrent.txt').write_text('relevant branch change\n')
@@ -1238,7 +1244,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             builds.append(head)
             return head
         with mock.patch.dict(os.environ, self.env), refresh.instance.held(root):
-            with self.assertRaisesRegex(SystemExit, 'kept changing through 3 unlocked builds'):
+            with self.assertRaisesRegex(SystemExit, 'kept changing through 3 locked builds'):
                 refresh.compute(inst, inst.node('app'), churn)
         self.assertEqual(len(builds), refresh.HELD_BUILDS)
 
@@ -1406,13 +1412,12 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertEqual(terminal['kind'], 'commit')
         self.assertTrue(terminal['data']['maintenance_ok'])
 
-    def test_contended_refresh_refuses_churn_without_rendering_under_the_lock(self):
+    def test_contended_refresh_finishes_under_the_existing_lock(self):
         root = self.init('alice')
         self.b(root, 'status', 'root', '--refresh')
         m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_locked')
         inbox = root / 'inbox.md'
         facts, locked = status.status_facts, []
-        published = self.stable_facts(root)
         def contended(*args, **kwargs):
             result = facts(*args, **kwargs)
             if instance._LOCK['fh'] is None:
@@ -1427,16 +1432,196 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
                 mock.patch.object(status, 'status_facts', side_effect=contended), \
                 mock.patch('random.uniform', return_value=0), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            with self.assertRaisesRegex(SystemExit, 'kept changing through 3 unlocked builds'):
-                cli.main()
+            cli.main()
         self.assertIn(f'contended {cli.REFRESH_TRIES} times; retrying with bounded admission', err.getvalue())
-        self.assertEqual(locked, [])
+        self.assertTrue(locked)
+        self.assertTrue(all(locked))
         self.assertFalse(instance.holding())
         records = events.read(m.Instance(root))[start:]
         self.assertEqual(len([r for r in records if r['kind'] == 'begin' and r['data'].get('command') == 'status']),
                          cli.REFRESH_TRIES + 1)
-        self.assertEqual(self.stable_facts(root), published)
-        self.assertEqual(records[-1]['kind'], 'abort')
+        self.assertEqual(records[-1]['kind'], 'commit')
+        self.assertTrue(records[-1]['data']['maintenance_ok'])
+
+    def test_final_refresh_lock_excludes_a_real_writer_and_releases_promptly(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_process_lock')
+        timing = importlib.import_module(cli.__package__ + '.timings')
+        script = '''import sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from brain import instance
+root=Path(sys.argv[2])
+for line in sys.stdin:
+    with instance.brain_lock(root):
+        with (root/'inbox.md').open('a') as stream: stream.write('\\n- concurrent item\\n')
+    print('written',flush=True)
+'''
+        writer = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(root)],
+                                  env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        facts, record, holds, blocked, hooks = status.status_facts, timing.record, [], [], []
+        transcript = self.tmp / 'automated-turn.jsonl'
+        transcript.write_text(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': [
+            {'type': 'tool_result', 'tool_use_id': 'fixture', 'content': 'Fixture output.'}]}}) + '\n')
+        def measure(name, seconds):
+            if name == 'lock_hold':
+                holds.append(seconds)
+            return record(name, seconds)
+        def contended(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            if instance._LOCK['fh'] is None:
+                writer.stdin.write('write\n')
+                writer.stdin.flush()
+                self.assertEqual(writer.stdout.readline().strip(), 'written')
+            elif not blocked:
+                # A hook/other command must wait for this final publication,
+                # then run immediately after the lock is released.
+                writer.stdin.write('write\n')
+                writer.stdin.flush()
+                blocked.append(time.monotonic())
+                started = time.monotonic()
+                hook = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'hook', 'stop'],
+                    cwd=root, env={**self.env, 'BRAIN_NO_REEXEC': '1', 'ANTHROPIC_API_KEY': ''},
+                    input=json.dumps({'cwd': str(root), 'session_id': 'fixture-worker',
+                                      'transcript_path': str(transcript), 'last_assistant_message': 'Done.'}),
+                    capture_output=True, text=True, timeout=timing.SLOW_SECONDS)
+                hooks.append(time.monotonic() - started)
+                self.assertEqual(hook.returncode, 0, hook.stderr)
+                self.assertLess(hooks[-1], 1.0)  # existing StopHookTiming budget
+            return result
+        try:
+            with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                    mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                    mock.patch.object(status, 'status_facts', side_effect=contended), \
+                    mock.patch.object(timing, 'record', side_effect=measure), \
+                    mock.patch('random.uniform', return_value=0), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                cli.main()
+            self.assertTrue(blocked)
+            self.assertEqual(writer.stdout.readline().strip(), 'written')
+            wait = time.monotonic() - blocked[0]
+            self.assertLess(wait, timing.SLOW_SECONDS)
+            self.assertLess(max(holds), timing.SLOW_SECONDS)
+            print('refresh-lock-proof: ' + json.dumps(dict(max_hold_s=max(holds), writer_wait_s=wait,
+                                                          hook_s=hooks)))
+            terminal = events.read(m.Instance(root))[-1]
+            self.assertEqual(terminal['kind'], 'commit')
+            self.assertTrue(terminal['data']['maintenance_ok'])
+        finally:
+            writer.stdin.close()
+            writer.wait(timeout=5)
+            writer.stdout.close()
+            error = writer.stderr.read()
+            writer.stderr.close()
+        self.assertEqual(writer.returncode, 0, error)
+
+    def test_refresh_still_fences_a_new_ledger_attempt_record(self):
+        root, home, wt = self.project()
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_attempt_record')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        node = inst.node('app')
+        row = m.read_jobs(node)[0]
+        path = m.attempt_path(node, row)
+        self.assertIn(path, refresh.input_paths(inst, node))
+        def prepare(current, target):
+            path.parent.mkdir(exist_ok=True)
+            path.write_text('{}\n')
+        with mock.patch.dict(os.environ, self.env), self.assertRaisesRegex(SystemExit, 'state changed'):
+            refresh.compute(inst, node, prepare)
+
+    def test_refresh_ignores_concurrent_run_output(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_run_output')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        outputs = [root / 'job-attempts/logs/worker.log', root / 'job-handbacks/worker.log',
+                   root / 'job-trains/logs/worker.log', root / 'handback-queue/logs/worker.log',
+                   root / 'full-gates/trial/library/output.md',
+                   root / 'spec-runs/trial/library/output.md',
+                   root / 'reports/spec-runs/trial/library/output.md']
+        for path in outputs:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('initial output\n')
+        go, done = threading.Event(), threading.Event()
+        def writer():
+            go.wait()
+            for path in outputs:
+                path.write_text('concurrent output\n')
+                path.with_name('new-output.log').write_text('new output\n')
+            done.set()
+        worker = threading.Thread(target=writer)
+        worker.start()
+        observed = []
+        def prepare(current, node):
+            observed.extend(refresh.input_paths(current, node))
+            go.set()
+            self.assertTrue(done.wait(5), 'concurrent output writer did not finish')
+            return m.refreshed_text(current, node)
+        try:
+            with mock.patch.dict(os.environ, self.env):
+                refresh.compute(m.Instance(root), m.Instance(root).node('root'), prepare)
+        finally:
+            go.set()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(all(path not in observed for path in outputs))
+
+    def test_refresh_fences_visible_lifecycle_and_ignores_absent_retirement_output(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retired_output')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        reminders = importlib.import_module(cli.__package__ + '.reminders')
+        inst = m.Instance(root)
+        node = inst.node('root')
+        line = '- Worker question: choose an option.\n'
+        key = reminders.inbox_source_id(node, line.strip())
+        path = root / '.brain/wake/lifecycle.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = reminders.lifecycle_empty()
+        data['inbox_retired'] = {'root': {key: 'a' * 24}}
+        path.write_text(json.dumps(data))
+        before = refresh.generation([path])
+        def prepare(current, target):
+            data['inbox_retired']['root'][key] = 'b' * 24
+            m.atomic_write(path, json.dumps(data))
+            return m.refreshed_text(current, target)
+        with mock.patch.dict(os.environ, self.env), refresh.invocation():
+            refresh.compute(inst, node, prepare)
+            self.assertEqual(before, refresh.generation([path]))
+            # A reappearing question depends on that retirement generation;
+            # changing it must still invalidate the prepared episode identity.
+            (root / 'inbox.md').write_text(line)
+            self.assertNotEqual(before, refresh.generation([path]))
+            data['inbox_retired']['root'][key] = 'a' * 24
+            path.write_text(json.dumps(data))
+            with self.assertRaisesRegex(SystemExit, 'state changed'):
+                refresh.compute(inst, node, prepare)
+
+    def test_refresh_membership_ignores_wake_output_and_fences_new_pending(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_wake_membership')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        directory = root / '.brain/wake/fixture'
+        directory.mkdir(parents=True)
+        path = directory / 'output.log'
+        path.write_text('first')
+        before = refresh.generation([directory], shallow=True)
+        m.atomic_write(path, 'second')
+        (directory / 'another.log').write_text('output')
+        self.assertEqual(before, refresh.generation([directory], shallow=True))
+        (directory / ('a' * 64 + '.pending')).write_text('{}')
+        self.assertNotEqual(before, refresh.generation([directory], shallow=True))
+
+    def test_run_output_names_do_not_hide_a_declared_node_library(self):
+        root = self.init('alice')
+        self.b(root, 'new', 'spec-runs', '--title', 'Fixture node')
+        m, cli, status, events, instance = self.refresh_cli(root, 'refresh_named_node')
+        library = root / 'nodes/spec-runs/library'
+        library.mkdir(exist_ok=True)
+        item = library / 'fixture.md'
+        item.write_text('---\nid: fixture\n---\nFixture knowledge.\n')
+        self.assertIn(item, [record['path'] for record in m.Instance(root).items()])
 
     def test_contended_events_source_refresh_keeps_its_committed_view(self):
         root = self.init('alice')

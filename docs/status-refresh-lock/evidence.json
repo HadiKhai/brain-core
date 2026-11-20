@@ -1,0 +1,208 @@
+{
+  "base": "4316cbfb",
+  "real": [
+    {
+      "exit": 0,
+      "wall_s": 6.091269209,
+      "output_writes": 732,
+      "max_sampled_own_hold_s": 3.47957875,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 6.00167,
+          "lock_hold_s": 4.156947,
+          "lock_wait_s": 0.008506,
+          "phases": {
+            "dispatch": 5.998093,
+            "file_state": 0.39266,
+            "lock_hold": 4.156947,
+            "lock_wait": 0.008506,
+            "pending_imports": 0.018049,
+            "refresh_compute": 1.509722,
+            "refresh_revalidate": 0.142476,
+            "refresh_write": 0.001797,
+            "runaway_checks": 1.4e-05,
+            "status_facts": 0.796191,
+            "usage_read": 0.006176
+          }
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "wall_s": 5.550614583000001,
+      "output_writes": 663,
+      "max_sampled_own_hold_s": 2.844612999999999,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 5.458218,
+          "lock_hold_s": 3.489688,
+          "lock_wait_s": 0.008237,
+          "phases": {
+            "dispatch": 5.454932,
+            "file_state": 0.389364,
+            "lock_hold": 3.489688,
+            "lock_wait": 0.008237,
+            "pending_imports": 0.017055,
+            "refresh_compute": 1.61446,
+            "refresh_revalidate": 0.132639,
+            "refresh_write": 0.001595,
+            "runaway_checks": 1.2e-05,
+            "status_facts": 0.84096,
+            "usage_read": 0.001923
+          }
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "wall_s": 5.429717083,
+      "output_writes": 615,
+      "max_sampled_own_hold_s": 2.746263959,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 5.340363,
+          "lock_hold_s": 3.503463,
+          "lock_wait_s": 0.008915,
+          "phases": {
+            "dispatch": 5.337211,
+            "file_state": 0.325206,
+            "lock_hold": 3.503463,
+            "lock_wait": 0.008915,
+            "pending_imports": 0.016537,
+            "refresh_compute": 1.441146,
+            "refresh_revalidate": 0.257248,
+            "refresh_write": 0.001544,
+            "runaway_checks": 1.2e-05,
+            "status_facts": 0.800185,
+            "usage_read": 0.001709
+          }
+        }
+      ]
+    }
+  ],
+  "real_summary": {
+    "runs": 3,
+    "passed": 3,
+    "wall_min_s": 5.429717083,
+    "wall_max_s": 6.091269209,
+    "output_writes": 2010,
+    "max_sampled_own_hold_s": 3.47957875
+  },
+  "fallback_and_hook": {
+    "max_hold_s": 0.7106987120000006,
+    "writer_wait_s": 0.36937620800000026,
+    "hook_s": [
+      0.2055039999999999
+    ]
+  },
+  "exact_focused": {
+    "passed": 16,
+    "skipped": 0,
+    "duration_s": 11.25
+  },
+  "hook_test": {
+    "passed": 1,
+    "skipped": 0,
+    "duration_s": 3.63
+  },
+  "prior_affected_candidate": {
+    "passed": 297,
+    "skipped": 2,
+    "duration_s": 209.63
+  },
+  "installed_baseline": [
+    {
+      "exit": 1,
+      "wall_s": 34.290869708,
+      "output_writes": 3942,
+      "bounded_admission": true,
+      "status_timing_records": [
+        {
+          "success": false,
+          "elapsed_s": 33.976323,
+          "lock_hold_s": 8.365662,
+          "lock_wait_s": 0.012448,
+          "phases": {
+            "dispatch": 33.961222,
+            "file_state": 5.410504,
+            "lock_hold": 8.365662,
+            "lock_wait": 0.012448,
+            "pending_imports": 0.20376,
+            "refresh_compute": 22.543587,
+            "runaway_checks": 0.021285,
+            "status_facts": 8.032431,
+            "usage_read": 0.010001
+          }
+        }
+      ],
+      "input_churn_error": true
+    },
+    {
+      "exit": 1,
+      "wall_s": 30.645667208000006,
+      "output_writes": 3516,
+      "bounded_admission": true,
+      "status_timing_records": [
+        {
+          "success": false,
+          "elapsed_s": 30.486659,
+          "lock_hold_s": 9.835211,
+          "lock_wait_s": 0.024474,
+          "phases": {
+            "dispatch": 30.470877,
+            "file_state": 4.75038,
+            "lock_hold": 9.835211,
+            "lock_wait": 0.024474,
+            "pending_imports": 0.091922,
+            "refresh_compute": 17.244648,
+            "runaway_checks": 0.005054,
+            "status_facts": 2.452285,
+            "usage_read": 0.009197
+          }
+        }
+      ],
+      "input_churn_error": true
+    },
+    {
+      "exit": 1,
+      "wall_s": 34.223871167,
+      "output_writes": 3876,
+      "bounded_admission": true,
+      "status_timing_records": [
+        {
+          "success": false,
+          "elapsed_s": 34.054076,
+          "lock_hold_s": 8.197634,
+          "lock_wait_s": 0.649556,
+          "phases": {
+            "dispatch": 34.047956,
+            "file_state": 5.41018,
+            "lock_hold": 8.197634,
+            "lock_wait": 0.649556,
+            "pending_imports": 0.156227,
+            "refresh_compute": 21.894361,
+            "runaway_checks": 0.021652,
+            "status_facts": 8.008013,
+            "usage_read": 0.007276
+          }
+        }
+      ],
+      "input_churn_error": true
+    }
+  ],
+  "source_sha256": {
+    "lib/brain/status_refresh.py": "6ce07a857e3abe293d899f4a731b7000e6c47a657ccddd0449e45d4d12dd587c",
+    "lib/brain/instance.py": "717b262715a7d6f48954a0bf1c617fb4eaa5f435224cd297788febcd569d055d",
+    "lib/brain/cli.py": "926b52f5f6efce5bd9716c63bc700a7e49b817a1a2505da59a28664f681952ba"
+  },
+  "ai_provider_spend_usd": 0
+}

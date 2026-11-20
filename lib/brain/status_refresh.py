@@ -20,7 +20,8 @@ _VIEW_FENCES = ContextVar('brain_status_refresh_view_fences', default=None)
 @contextlib.contextmanager
 def invocation():
     """One refresh's immutable observations; never retained by a later command."""
-    token = _INVOCATION.set({'views': {}, 'git': {}, 'reads': {}, 'contents': {}, 'dirty': set(), 'layouts': {}})
+    token = _INVOCATION.set({'views': {}, 'git': {}, 'reads': {}, 'contents': {}, 'dirty': set(), 'layouts': {},
+                             'lifecycle': {}})
     try:
         yield
     finally:
@@ -36,12 +37,86 @@ def requested(inst):
     return any(op.command == 'status' and op.inst.root == inst.root for op in events._CURRENT)
 
 
+def lifecycle_identity(path):
+    """Retirement receipts for absent inbox sources are scan output, not facts.
+
+    Preserve every other lifecycle field, and retirement generations for every
+    currently visible source. The same readers select those sources; no new
+    text classification or acknowledgement semantics live in this fence.
+    """
+    from . import reminders, status
+    current = instance.Instance(path.parents[2])
+    nodes = current.nodes()
+    sources = [node['dir'] / 'inbox.md' for node in nodes]
+    sources.extend(status.hook_question_queue(node) for node in nodes)
+    st = path.lstat()
+    stamp = (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
+             tuple(generation(sources)))
+    session = _INVOCATION.get()
+    cache = session['lifecycle'] if session is not None else {}
+    key = (str(path), stamp)
+    if key in cache:
+        return cache[key]
+    try:
+        data = reminders.lifecycle_read(current)
+    except (OSError, ValueError):
+        st = path.lstat()
+        return ('unknown', st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    retired = {}
+    for node in nodes:
+        inbox = node['dir'] / 'inbox.md'
+        lines = [line for line in inbox.read_text().splitlines() if line.startswith('- ')] if inbox.exists() else []
+        for pending in status.hook_question_queue(node).glob('*.json'):
+            try:
+                line = json.loads(pending.read_text()).get('line')
+                if isinstance(line, str):
+                    lines.append(line)
+            except (OSError, ValueError, AttributeError):
+                pass
+        # Reconciliation changes only these node-indexed dictionaries. Share
+        # immutable history instead of copying every node's receipt history for
+        # every generation check in a batch refresh.
+        observed = {**data, 'inbox': dict(data['inbox']), 'inbox_retired': dict(data.get('inbox_retired', {}))}
+        previous = data.get('inbox_retired', {}).get(node['id'], {})
+        if isinstance(previous, dict):
+            observed['inbox_retired'][node['id']] = dict(previous)
+        lines = reminders.request_lines(current, node, lines, readonly=True, lifecycle_data=observed)
+        visible = {reminders.inbox_source_id(node, line) for line in lines}
+        if not isinstance(previous, dict):
+            retired[node['id']] = previous  # retain the reader's invalid-state verdict
+        else:
+            retained = {key: value for key, value in previous.items() if key in visible}
+            if retained:
+                retired[node['id']] = retained
+    data['inbox_retired'] = retired
+    value = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).digest()
+    after = path.lstat()
+    if stamp == (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns,
+                 tuple(generation(sources))):
+        cache[key] = value
+    return value
+
+
 def generation(paths, shallow=False):
     """Cheap ref/config generations, including replacement-ref target aliases."""
     result = []
     def visit(path):
         try:
             st = path.lstat()
+            if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
+                # Hooks publish this sidecar under its own lock, including
+                # fresh retirement receipts for sources absent from the view.
+                result.append((str(path), lifecycle_identity(path)))
+                return
+            if shallow and stat.S_ISDIR(st.st_mode):
+                # Directory clocks move on every atomic file replacement.
+                # Membership cares about names; explicit file inputs fence the
+                # bytes/identity of each selected existing member separately.
+                children = (path.glob('*.pending') if path.parent.name == 'wake' else
+                            path.glob('*.json') if path.name in ('job-trains', 'handback-queue') else path.iterdir())
+                result.append((str(path), st.st_dev, st.st_ino, st.st_mode,
+                               tuple(sorted(child.name for child in children))))
+                return
             if path.name == '.git' and stat.S_ISDIR(st.st_mode):
                 result.append((str(path), st.st_dev, st.st_ino, st.st_mode))
                 return  # metadata marker identity, never the object store
@@ -338,14 +413,29 @@ def input_paths(inst, n):
             if child.is_dir():
                 paths.append(child / 'node.md')
     paths.extend(n['dir'] / name for name in (
-        'status.md', 'brief.md', 'backlog.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md', 'job-handbacks',
-        'job-attempts', 'job-contracts', 'job-trains', 'handback-queue', 'sources/import-proposals.md',
+        'status.md', 'brief.md', 'backlog.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md',
+        'job-contracts', 'sources/import-proposals.md',
         'direction.md', 'role.md', 'standards.md', 'lessons.md', 'synthesis.json', 'feedback.md'))
     from . import rule_contracts
     for source in rule_contracts.rule_sources(n):
         paths.extend((source['dir'] / 'AGENTS.md', source['dir'] / 'library/instance-rules.md'))
     from . import rotation, status, reports, tasks, task_flow, verify, watch, jobs, job_attempts, machine
     from . import recurrence, hosts
+    # The projection reads one attempt record per ledger row, never logs or
+    # run folders. Explicit missing paths also fence a newly created attempt.
+    packets = []
+    for row in jobs.read_jobs(n) or []:
+        paths.extend((job_attempts.attempt_path(n, row), jobs.handback_file(n, row)))
+        if not row.get('Ended'):
+            packets.append((jobs.read_handback(n, row) or {}).get('ready'))
+    for family in ('job-trains', 'handback-queue'):
+        paths.extend((n['dir'] / family).glob('*.json'))
+    def packet_map(packet):
+        name = packet.get('input_files_ref') if isinstance(packet, dict) else None
+        if isinstance(name, str) and re.fullmatch(r'[0-9a-f]{24}-inputs-[0-9a-f]{24}\.map', name):
+            paths.append(n['dir'] / 'job-handbacks' / name)
+    for packet in packets:
+        packet_map(packet)
     for target in recurrence.synthesis_targets(inst, n):
         if 'error' not in target:
             paths.extend(target['dir'] / name for name in ('direction.md', 'role.md', 'standards.md', 'lessons.md', 'synthesis.json'))
@@ -399,7 +489,12 @@ def input_paths(inst, n):
     # Ready packet and attempt validation can read worktree input files and
     # stored receipts. Do not include the worktree directory recursively.
     for branch, binding in n['local'].get('worktrees', {}).items():
-        paths.append(verify.ready_path(inst, n, branch))
+        ready = verify.ready_path(inst, n, branch)
+        paths.append(ready)
+        try:
+            packet_map(json.loads(ready.read_text()))
+        except (OSError, ValueError):
+            pass
         root = Path(binding['path'])
         for pattern in common.lst(n['fm'].get('verify_inputs')) or common.lst(verify.VERIFY_INPUTS):
             paths.extend(path for path in root.glob(pattern) if path.is_file())
@@ -413,11 +508,9 @@ def membership_paths(inst, selected):
     paths = [inst.root / '.brain/teaching']
     for node in inst.nodes():
         paths.extend(node['dir'] / name for name in ('nodes', 'library', 'specialists'))
-    for directory, subdirs, _files in os.walk(inst.root):
-        subdirs[:] = [name for name in subdirs if name not in ('.git', '.brain') and
-                      not (name == 'core' and Path(directory) == inst.root)]
-        if Path(directory).name == 'library':
-            paths.append(Path(directory))
+    for node in selected:
+        paths.extend(node['dir'] / name for name in ('job-trains', 'handback-queue'))
+    paths.extend(inst.library_directories())
     if any(node['id'] == 'root' for node in selected):
         from . import hosts
         paths.extend(hosts.wake_directory(inst, hosts.wake_target(inst, node)[0])
@@ -437,6 +530,9 @@ def content_identity(paths):
         seen.add(path)
         try:
             st = path.lstat()
+            if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
+                result.append((str(path), lifecycle_identity(path)))
+                return
             if stat.S_ISLNK(st.st_mode):
                 result.append((str(path), 'link', os.readlink(path)))
                 visit(path.resolve())
@@ -556,8 +652,8 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=(), incremen
         return build(inst, n)
     incremental = incremental and _INVOCATION.get() is not None
     if instance.holding():
-        # The final attempt retains its admission policy, but preparation still
-        # releases physical ownership. Drift gets only a bounded fresh rebuild.
+        # The final attempt retains physical ownership. Keep the fences for
+        # external editors/Git writers, which do not obey the instance lock.
         for _ in range(HELD_BUILDS):
             try:
                 result = fenced(inst, n, build, all_nodes, targets, extra, incremental)
@@ -569,7 +665,7 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=(), incremen
             if settings_changed():
                 common.die('state changed during the unlocked step; retry from fresh state')
             return result
-        common.die(f'status refresh inputs kept changing through {HELD_BUILDS} unlocked builds; '
+        common.die(f'status refresh inputs kept changing through {HELD_BUILDS} locked builds; '
                    'retry from fresh state')
     return fenced(inst, n, build, all_nodes, targets, extra, incremental)
 
