@@ -6,7 +6,7 @@ import { Kpi, Segmented, SectionTabs, ListFooter, type Mark } from "./dash";
 import { RequestRow, DueRow } from "./inbox";
 import { ProposalReader } from "./learnings";
 import { adoptable } from "./imports";
-import { list, count, needsView, threads, tone, nowOf, within, stamp, allJobs, learningRows, jobTitle, jobState, time, windowState, type RecordData } from "./model";
+import { list, count, needsView, threads, tone, nowOf, within, stamp, allJobs, learningRows, jobTitle, jobState, time, windowState, usageReadingText, type RecordData } from "./model";
 import { graphData, layout } from "./graph";
 import { useMemo } from "react";
 import type { Route } from "./routes";
@@ -150,7 +150,9 @@ export function Meters({ s }: { s: RecordData }) {
   const gauges = [
     ...list(s.usage).slice(0, 3).map((row) => {
       const w = row.windows?.seven_day, v = windowState(w, row, policy);
-      return { label: `${row.runtime || row.label || "Subscription"} · week`, value: v.known ? `${w.used_percent}%` : v.state, percent: v.percent, tone: /stop/i.test(v.state) ? (/At/.test(v.state) ? "danger" : "warn") : "" };
+      return { label: `${row.label || row.runtime || "Subscription"} · week`, value: v.known ? `${w.used_percent}%` : v.state,
+        note: usageReadingText(w, row, policy), percent: v.percent,
+        tone: v.state === "At stop line" ? "danger" : v.state === "Near stop line" ? "warn" : "" };
     }),
     { label: "Machine load", value: Number.isFinite(load) ? `${Math.round(load * 100)}%` : "Unknown", percent: Number.isFinite(load) ? Math.min(100, load * 100) : 0, tone: load > 0.9 ? "danger" : load > 0.7 ? "warn" : "" },
     { label: "Heat", value: s.machine?.thermal === "pressure" ? "Throttled" : s.machine?.thermal === "normal" ? "Normal" : "Unknown", percent: s.machine?.thermal === "pressure" ? 100 : s.machine?.thermal === "normal" ? 20 : 0, tone: s.machine?.thermal === "pressure" ? "danger" : "" },
@@ -161,7 +163,8 @@ export function Meters({ s }: { s: RecordData }) {
         <div className="kpi meter-kpi" key={g.label}>
           <span className="kpi-label">{g.label}</span>
           <span className="meter-value">{g.value}</span>
-          <span className={"meter-bar " + g.tone} role="meter" aria-label={g.label} aria-valuenow={Math.round(g.percent)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${g.percent}%` }} /></span>
+          {"note" in g && <small>{g.note}</small>}
+          <span className={"meter-bar " + g.tone} role="meter" aria-label={g.label} aria-valuetext={"note" in g ? `${g.value} · ${g.note}` : g.value} aria-valuenow={Math.round(g.percent)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${g.percent}%` }} /></span>
         </div>
       ))}
     </div>

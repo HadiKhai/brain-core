@@ -16,9 +16,13 @@ also logs safe lookup errors with a timestamp, without response bodies or creden
 An account with a confirmed missing OAuth token shows as signed out with its last-read
 date. Its historical percentages remain in the machine cache but are hidden from CLI
 and dashboard readings and excluded from capacity selection and stop-line checks.
-Unavailable Keychain access remains an unknown lookup, and cannot clear an existing
-signed-out state; observing a usable token clears it. No instance configuration changes
-are needed. Refresh once with `brain usage --refresh`, or let the poller refresh.
+Credential state and safe lookup errors belong to each subscription's runtime folder,
+even when several folders share one account's windows. Unreadable or invalid credential
+files and unavailable Keychain access are unknown/error readings, never confirmed
+sign-outs. Every CLI, routing and dashboard usage presentation carries the actual age,
+verification state and safe error. Signed-out or unavailable capacity is distinguished
+from confirmed stop-line exhaustion. No instance configuration changes are needed.
+Refresh once with `brain usage --refresh`, or let the poller refresh.
 
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 

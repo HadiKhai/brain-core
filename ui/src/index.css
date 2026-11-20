@@ -609,7 +609,8 @@ svg.searching .gnode:not(.match):not(.selected) { opacity: 0.28; }
 .subscription { grid-template-columns: minmax(180px, 1.1fr) repeat(auto-fit, minmax(160px, 1fr)); gap: 20px; padding: 10px 0; align-items: center; }
 .subscription-title { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; min-width: 0; }
 .window-meter .meter-heading strong { font-weight: 500; color: var(--muted-foreground); }
-.meter-foot { display: flex; gap: 6px; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meter-foot { display: flex; gap: 6px; align-items: center; white-space: normal; overflow-wrap: anywhere; }
+.meter-kpi small { overflow-wrap: anywhere; }
 .meter .tip-trigger { position: absolute; inset: auto; top: -3px; width: 2px; height: 10px; pointer-events: auto; }
 .meter .tip-trigger .stop-line { position: static; display: block; }
 .discover-inline { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; padding-bottom: 12px; }

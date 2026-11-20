@@ -13,6 +13,46 @@ const emitted = ts.transpile(source, {
 const m = await import(
   "data:text/javascript;base64," + Buffer.from(emitted).toString("base64")
 );
+// Execute the real presenter JSX with transparent UI primitives, without a DOM/server.
+function renderUsagePresenter(file, name, props) {
+  const js = ts.transpile(readFileSync(new URL(`../src/${file}.tsx`, import.meta.url), "utf8"), {
+    module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React,
+  });
+  const react = { createElement: (type, props, ...children) => typeof type === "function"
+    ? type({ ...props, children }) : { children }, Fragment: Symbol("fragment") };
+  const primitives = new Proxy({}, { get: () => ({ children }) => children });
+  const exports = {};
+  new Function("exports", "require", "React", js)(exports, id => id === "./model" ? m : primitives, react);
+  const text = node => node == null || typeof node === "boolean" ? "" : Array.isArray(node)
+    ? node.map(text).join(" ") : typeof node === "object" ? text(node.children) : String(node);
+  return text(exports[name](props));
+}
+
+test("usage and overview presenters retain stale age, verification and safe lookup error", () => {
+  const row = { id: "one", runtime: "claude", label: "Fixture", source: "lookup",
+    read_at: Date.now() / 1000 - 469 * 3600, note: "Claude usage lookup refused (HTTP 503)",
+    windows: { seven_day: { used_percent: 20, resets_at: Date.now() / 1000 + 86400 } } };
+  const s = { usage: [row], usage_policy: { stop_percent: 85, max_age_seconds: 120 } };
+  for (const [file, name] of [["overview", "Meters"], ["usage", "Usage"]]) {
+    const text = renderUsagePresenter(file, name, { s, active: true });
+    assert.match(text, /469 h/, file);
+    assert.match(text, /unverified/i, file);
+    assert.match(text, /HTTP 503/, file);
+  }
+});
+
+test("usage presenter separates signed out and unavailable from exhausted capacity", () => {
+  const row = { id: "one", label: "Fixture", read_at: Date.now() / 1000, source: "lookup" };
+  const state = rows => ({ usage: rows, usage_policy: { stop_percent: 85, max_age_seconds: 120 } });
+  const signedOut = renderUsagePresenter("usage", "Usage", { s: state([{ ...row, signed_out: true }]), active: true });
+  assert.match(signedOut, /signed out/i);
+  assert.doesNotMatch(signedOut, /all subscriptions are at the stop line/i);
+  const unavailable = renderUsagePresenter("usage", "Usage", { s: state([{ ...row, read_at: null }]), active: true });
+  assert.match(unavailable, /unavailable|unverified/i);
+  const exhausted = renderUsagePresenter("usage", "Usage", { s: state([{ ...row,
+    windows: { seven_day: { used_percent: 94, resets_at: Date.now() / 1000 + 86400 } } }]), active: true });
+  assert.match(exhausted, /stop line/i);
+});
 test("budget badges use replacement-round counters while lifetime usage stays available", () => {
   const lifetime = { processed: 900000, compactions: 8, active_h: 9 };
   const open = { usage: lifetime, age_h: 12, round_usage: { processed: 2000, compactions: 0, hours: 0.25 } };

@@ -53,6 +53,9 @@ def usage_cache():
         return {}
     if any(not isinstance(s, dict) or not isinstance(s.get("account_key"), str) for s in data["subscriptions"]):
         return {}
+    if any(("signed_out" in s and not isinstance(s["signed_out"], bool)) or
+           ("note" in s and not isinstance(s["note"], str)) for s in data["subscriptions"]):
+        return {}
     for r in data["accounts"].values():
         if not isinstance(r, dict) or r.get("source") not in ("lookup", "log", "unknown") or \
                 not isinstance(r.get("windows"), dict):
@@ -369,6 +372,29 @@ EXPIRED_CLAUDE_LOGIN = ("Claude login expired: it renews the next time Claude ru
                         "subscription's folder; using logs if available")
 
 
+def usage_claude_file(cfg):
+    """A missing file confirms absence; unreadable/invalid credentials remain unknown."""
+    try:
+        text = (cfg / ".credentials.json").read_text()
+    except FileNotFoundError:
+        return {"claudeAiOauth": {}}, ""
+    except UnicodeError:
+        return {}, "Claude credential file invalid; usage unverified"
+    except OSError:
+        return {}, "Claude credential file unreadable; usage unverified"
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError
+        oauth = data.get("claudeAiOauth", {})
+        if not isinstance(oauth, dict) or (oauth.get("accessToken") is not None and
+                                         not isinstance(oauth["accessToken"], str)):
+            raise ValueError
+        return data, ""
+    except (ValueError, TypeError):
+        return {}, "Claude credential file invalid; usage unverified"
+
+
 def usage_claude(sub):
     """Return windows, account, safe error and credential state (None means unavailable)."""
     import urllib.error
@@ -377,7 +403,7 @@ def usage_claude(sub):
     cfg = Path(sub["config_dir"])
     note, credentials = "", {}
     if sys.platform != "darwin":
-        credentials = usage_json(cfg / ".credentials.json") or {}
+        credentials, note = usage_claude_file(cfg)
     testing = os.environ.get("BRAIN_USAGE_TESTING") == "1"
     url = "https://api.anthropic.com/api/oauth/usage"
     if testing and os.environ.get("BRAIN_USAGE_TEST_URL"):
@@ -548,6 +574,8 @@ class usage_lock:
 
 def usage_merge(prior, reading):
     """Keep the newest observation of each window, including its source and time."""
+    prior = {k: v for k, v in prior.items() if k not in ("signed_out", "note")}
+    reading = {k: v for k, v in reading.items() if k not in ("signed_out", "note")}
     if not prior.get("windows"):
         return reading
     windows = {}
@@ -562,8 +590,7 @@ def usage_merge(prior, reading):
                 if r is reading:
                     changed = True
     if not changed and prior.get("windows"):
-        return {**prior, **({"signed_out": reading["signed_out"]} if "signed_out" in reading else {}),
-                "note": reading.get("note", "")}  # older numbers, today's reason and credential state
+        return prior
     if not windows:
         return reading
     newest = max(windows.values(), key=lambda w: w["read_at"] or 0)
@@ -586,15 +613,17 @@ def usage_refresh(config, stale_only=False, poll_interval=None):
                 key, reading = usage_reading(sub)
                 prior_sub = next((s for s in cached.get("subscriptions", []) if all(
                     s.get(k) == sub[k] for k in ("id", "runtime", "config_dir"))), {})
+                # Account windows are shared; credentials and errors belong only to this folder.
                 prior = cached.get("accounts", {}).get(prior_sub.get("account_key"), {})
+                folder_state = {"signed_out": reading.get("signed_out") is True, "note": reading.get("note", "")}
                 if reading["source"] != "lookup" and prior.get("windows"):
                     key = prior_sub["account_key"]
                 # A different account confirmed by a lookup must not inherit another account's limits.
                 if reading["source"] != "lookup" or key == prior_sub.get("account_key"):
                     reading = usage_merge(prior, reading)
-                paths[path_key] = key
+                paths[path_key] = {"account_key": key, **folder_state}
                 accounts[key] = usage_merge(accounts.get(key, {}), reading)
-            subs.append({**sub, "account_key": paths[path_key]})
+            subs.append({**sub, **paths[path_key]})
         if stale_only and accounts == cached.get("accounts") and subs == cached.get("subscriptions"):
             return cached  # a failed inline lookup cannot relabel or freshen the last good cache
         data = {**config, "subscriptions": subs, "accounts": accounts, "checked_at": time.time()}
@@ -687,7 +716,12 @@ def usage_rows(inst=None, refresh=False, before_launch=False, node=None, extra=(
             s.get(k) == sub[k] for k in ("runtime", "config_dir"))), {})
         r = cache.get("accounts", {}).get(prior.get("account_key"), {})
         stamp = r.get("read_at")
-        signed_out = r.get("signed_out") is True
+        # Legacy caches kept folder state on an account. Only use it when unambiguous.
+        folders = {(s.get("runtime"), s.get("config_dir")) for s in cache.get("subscriptions", [])
+                   if s.get("account_key") == prior.get("account_key")}
+        legacy = r if len(folders) == 1 else {}
+        signed_out = prior.get("signed_out", legacy.get("signed_out")) is True
+        note = prior.get("note", legacy.get("note", ""))
         if signed_out:
             stamp = max((w.get("read_at", stamp) or 0 for w in r.get("windows", {}).values()), default=stamp)
         age = max(0, time.time() - stamp) if usage_number(stamp) else None
@@ -698,19 +732,42 @@ def usage_rows(inst=None, refresh=False, before_launch=False, node=None, extra=(
             window_age = max(0, time.time() - window_stamp) if usage_number(window_stamp) else None
             windows[name] = {**w, "expired": bool(reset and reset <= time.time()),
                              "age_seconds": round(window_age, 1) if window_age is not None else None,
-                             "stale": window_age is None or window_age > config["max_age_seconds"]}
+                             "stale": window_age is None or window_age > config["max_age_seconds"],
+                             "error": note}
+            windows[name]["verification"] = "error" if note else "expired" if windows[name]["expired"] else \
+                "stale" if windows[name]["stale"] else "unknown" if w.get("source", r.get("source")) == "unknown" else "verified"
             if inst and reset:
                 windows[name]["reset_time"] = usage_datetime(reset, inst).isoformat(timespec="seconds")
         rows.append({**sub, "brains": ["*"] if "*" in sub["brains"] else ([brain] if inst else sub["brains"]),
                      "available_to_every_brain": "*" in sub["brains"], "autodetected": config["autodetected"], "config_dir": _m_common.tilde(sub["config_dir"]), "account_key": prior.get("account_key"),
                      "windows": windows, "read_at": stamp, "age_seconds": round(age, 1) if age is not None else None,
                      "source": r.get("source", "unknown"),
-                     "note": (f"Signed out; last read {usage_time(stamp, inst)}. " if signed_out else "") + r.get("note", ""),
+                     "note": (f"Signed out; last read {usage_time(stamp, inst)}. " if signed_out else "") + note,
+                     "lookup_error": note,
+                     "verification": "signed_out" if signed_out else "error" if note else
+                         "stale" if age is None or age > config["max_age_seconds"] else
+                         "unknown" if r.get("source", "unknown") == "unknown" else "verified",
                      "signed_out": signed_out,
                      "stale": age is None or age > config["max_age_seconds"],
                      "reading_time": usage_datetime(stamp, inst).isoformat(timespec="seconds")
                      if inst and stamp else None})
     return rows, config
+
+
+def usage_evidence(rows):
+    """Safe, clock-derived evidence travels with every routing result, including refusals."""
+    parts = []
+    for row in rows:
+        windows = row.get("windows", {})
+        readings = [f"{name}: {usage_age(w.get('age_seconds'))} old, "
+                    f"{w.get('verification', 'unknown')}" +
+                    (" (unverified)" if w.get("verification") != "verified" else "") for name, w in windows.items()]
+        if not readings:
+            readings = [f"last read {usage_time(row.get('read_at'))} / {usage_age(row.get('age_seconds'))} old, "
+                        f"{row.get('verification', 'unknown')}"]
+        parts.append(f"{row['label']}: " + '; '.join(readings) +
+                     (f"; {row['lookup_error']}" if row.get("lookup_error") else ""))
+    return (" Reading evidence: " + ' | '.join(parts) + ".") if parts else ""
 
 
 def class_allows_fallback(job_class):
@@ -754,13 +811,14 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
         if usage_config()["autodetected"]:
             return chosen, None, reason + " Usage unknown: no subscriptions.json; no provider refresh."
         rows, policy = usage_rows(inst, before_launch=not cached_only, node=node, extra=extra)
-        rows = [r for r in rows if not r["signed_out"]]
     except (OSError, ValueError):
         rows, policy = [], {"max_age_seconds": USAGE_MAX_AGE}
+    evidence_rows = rows
+    rows = [r for r in rows if not r["signed_out"]]
     def weekly(row):
         w = row.get("windows", {}).get("seven_day", {})
         stamp = w.get("read_at", row.get("read_at"))
-        if (w.get("absent") or w.get("expired") or
+        if (w.get("verification") != "verified" or w.get("absent") or w.get("expired") or
                 w.get("source", row.get("source")) == "unknown" or not usage_number(stamp) or
                 not 0 <= time.time() - stamp <= policy["max_age_seconds"] or
                 not usage_number(w.get("used_percent"))):
@@ -801,7 +859,7 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
                 reason += f" Alternative: {other['label']} ({other['runtime']}); choose --runtime explicitly."
         host = selected.get("host_provider_instance_id") or "unbound"
         reason += f" Subscription: {selected['label']} ({selected['id']}) · host instance: {host}."
-    return chosen, selected, reason
+    return chosen, selected, reason + usage_evidence([selected] if selected else evidence_rows)
 
 
 def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, node=None, extra=()):
@@ -821,7 +879,7 @@ def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, n
                    [m.casefold() for m in w.get("models", [])]))}
         if any(w["used_percent"] >= r.get("stop_percent", policy["stop_percent"]) for w in active.values()):
             continue
-        unknown = not active or any(w.get("source", r["source"]) == "unknown" or
+        unknown = not active or any(w.get("verification") != "verified" or w.get("source", r["source"]) == "unknown" or
             not w.get("read_at", r["read_at"]) or time.time() - w.get("read_at", r["read_at"]) > policy["max_age_seconds"]
             for w in active.values())
         weekly_windows = [w for n, w in active.items() if n.startswith("seven_day")]
@@ -836,8 +894,8 @@ def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, n
         eligible.append(((unknown, ahead, used, rank, r["runtime"] != preferred, r["id"]), r))
     if not eligible:
         if not allowed:
-            return None, "Usage unknown: no signed-in subscription is allowed for this brain and runtime; keeping the configured runtime."
-        return None, "Usage: all allowed subscriptions reached the stop line. Stop starting jobs; the brief remains available."
+            return None, "Usage unknown: no signed-in subscription is allowed for this brain and runtime; keeping the configured runtime." + usage_evidence(rows)
+        return None, "Usage: all allowed subscriptions reached the stop line. Stop starting jobs; the brief remains available." + usage_evidence(allowed)
     score, selected = min(eligible, key=lambda x: x[0])
     reason = "usage unknown/stale; capacity unverified" if score[0] else \
         f"most headroom ({100 - score[2]:g}% remaining in the fullest reported window)"
@@ -849,7 +907,7 @@ def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, n
     if score[1]:
         reason += "; weekly usage ahead of pace, no better-paced subscription available"
     host = selected["host_provider_instance_id"] or "unbound (choose its provider instance before launch)"
-    return selected, f"Subscription: {selected['label']} ({selected['id']}) · host instance: {host} · {reason}."
+    return selected, f"Subscription: {selected['label']} ({selected['id']}) · host instance: {host} · {reason}." + usage_evidence([selected])
 
 
 def usage_ui(inst, rows=None):
@@ -1024,9 +1082,8 @@ def cmd_usage(a):
                     try:
                         data = usage_refresh(usage_config(), poll_interval=a.every)
                         for sub in data.get("subscriptions", []):
-                            reading = data.get("accounts", {}).get(sub["account_key"], {})
-                            if reading.get("note"):
-                                print(f"{usage_time(time.time())} usage {sub['id']}: {reading['note']}",
+                            if sub.get("note"):
+                                print(f"{usage_time(time.time())} usage {sub['id']}: {sub['note']}",
                                       file=sys.stderr, flush=True)
                     except Exception:
                         print("brain: usage refresh unavailable; retrying next interval", file=sys.stderr, flush=True)
@@ -1066,10 +1123,11 @@ def cmd_usage(a):
             else:
                 reset = usage_time(w.get("resets_at"), inst)
                 value = f"{w['used_percent']:g}% / {reset}" + (" (expired; unknown)" if w["expired"] else "")
-            return value + (f" (stale; {usage_age(w['age_seconds'])} old; unverified)" if w["stale"] else "")
+            return value + (f" (stale; {usage_age(w['age_seconds'])} old; unverified)" if w["stale"] else
+                            f" ({w['verification']}; unverified)" if w["verification"] != "verified" else "")
         table.append([r["runtime"], r["label"], f"{r['stop_percent']:g}%", window("five_hour"), window("seven_day"),
                       f"{usage_time(r['read_at'], inst)} / {usage_age(r['age_seconds'])}" +
-                      (" (stale)" if r["stale"] else ""), r["source"],
+                      (" (stale)" if r["stale"] else " (unverified)" if r["verification"] != "verified" else ""), r["source"],
                       "every brain" + (" (autodetected)" if r["autodetected"] else "")
                       if r["available_to_every_brain"] else ','.join(r['brains']) or 'none'])
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]

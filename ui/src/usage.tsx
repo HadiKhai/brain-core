@@ -17,6 +17,8 @@ import {
   list,
   machineHealth,
   windowState,
+  usageReadingText,
+  usageCapacityMessage,
   usageStopPercent,
   routing,
   time,
@@ -52,13 +54,13 @@ function WindowMeter({
         <span className="tabular-nums meter-value">{v.known ? w?.used_percent + "%" : w?.absent ? "None" : "Unknown"}</span>
       </div>
       <div className={"meter " + (v.stale ? "stale" : v.state === "At stop line" ? "danger" : v.state === "Near stop line" ? "warning" : "")}>
-        <Progress value={v.percent} aria-label={name + " · " + v.state} />
+        <Progress value={v.percent} aria-label={name + " · " + usageReadingText(w, row, policy)} />
         {Number.isFinite(stop) && (
           <Tip text={`Stop at ${stop}%`} style={{ left: Math.min(100, Math.max(0, stop)) + "%" }}><i className="stop-line" /></Tip>
         )}
       </div>
-      <Tip text={`${w?.resets_at || w?.reset_time ? "Resets " + time(w.reset_time || w.resets_at, zone) : "Reset not recorded"} · ${v.age == null ? "reading age unknown" : `read ${v.age} min ago`} · ${w?.source || row.source || "source unknown"}`}>
-        <small className="meter-foot">{v.state !== "Normal" && <Status>{v.state}</Status>}<span>{reset} · {v.age == null ? "age unknown" : `${v.age} min old`}</span></small>
+      <Tip text={`${reset} · ${usageReadingText(w, row, policy)} · ${w?.source || row.source || "source unknown"}`}>
+        <small className="meter-foot"><span>{reset} · {usageReadingText(w, row, policy)}</span></small>
       </Tip>
     </div>
   );
@@ -84,13 +86,7 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
       >
         <div className="usage-intro">
           <p>
-            {p.autodetected
-              ? "New jobs keep their configured runtime."
-              : !Number.isFinite(p.stop_percent)
-                ? "Routing unavailable. Run brain usage to inspect subscription configuration."
-                : route
-                  ? `Unpinned new jobs go to ${route.row.label || "the available subscription"}${route.score[0] ? " · capacity unverified" : ""}. Pinned projects keep their runtime.`
-                  : "All subscriptions are at the stop line. Stop starting new jobs."}
+            {usageCapacityMessage(s)}
           </p>
           <div className="legend">
             <Status>Normal</Status>
@@ -103,7 +99,7 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
           <PagedCollection name="subscriptions">{list(s.usage).map((row, i) => (
             <article className="subscription" data-item key={row.id || i}>
               <div className="subscription-title">
-                <div className="row-line"><h3><Text>{row.label || "Subscription"}</Text></h3>{!p.autodetected && ["five_hour", "seven_day"].some((k) => { const w = row.windows?.[k]; return w && !w.absent && !w.expired && (!w.resets_at || w.resets_at > Date.now() / 1000) && w.used_percent >= usageStopPercent(row, p); }) && <Status>Skipped for new jobs</Status>}</div>
+                <div className="row-line"><h3><Text>{row.label || "Subscription"}</Text></h3>{!p.autodetected && ["five_hour", "seven_day"].some((k) => { const w = row.windows?.[k]; return windowState(w, row, p).verified && w && !w.absent && w.used_percent >= usageStopPercent(row, p); }) && <Status>Skipped for new jobs</Status>}</div>
                 {row.note ? <small className="row-note clamp-1"><Text>{row.note}</Text></small> : <small>{row.runtime || "Runtime unknown"}{(row.brains || []).length ? " · " + row.brains.join(", ") : ""}</small>}
               </div>
               <WindowMeter

@@ -89,8 +89,9 @@ for line in sys.stdin:
         subs, accounts = [], {}
         for sub, reading in zip(config["subscriptions"], readings):
             key = "key-" + sub["id"]
-            subs.append({**sub, "account_key": key})
-            accounts[key] = reading
+            subs.append({**sub, "account_key": key, "note": reading.get("note", ""),
+                         "signed_out": reading.get("signed_out") is True})
+            accounts[key] = {k: v for k, v in reading.items() if k not in ("note", "signed_out")}
         data = {**config, "subscriptions": subs, "accounts": accounts,
                 "checked_at": time.time() if checked is None else checked}
         self.m.usage_atomic(self.m.usage_file(), data)
@@ -963,12 +964,13 @@ for line in sys.stdin:
             self.assertIsNone(selected)
             self.assertNotIn("stop line", reason)
             self.declare(out, active)
-            # A subsequent credential lookup failure cannot turn signed-out history back into capacity.
+            # An unavailable read is explicitly unverified, not a confirmed sign-out.
             with mock.patch.object(self.m, "usage_reading", side_effect=[
                     (key, {"windows": {}, "read_at": None, "source": "unknown", "note": "Keychain unavailable"}),
                     ("active-key", self.reading(20, weekly=40))]):
                 self.m.usage_refresh(config)
-            self.assertTrue(self.m.usage_rows(inst)[0][0]["signed_out"])
+            self.assertFalse(self.m.usage_rows(inst)[0][0]["signed_out"])
+            self.assertEqual(self.m.usage_rows(inst)[0][0]["verification"], "error")
             # A new usable login explicitly clears signed-out state.
             with mock.patch.object(self.m, "usage_reading", side_effect=[
                     (key, {**self.reading(10, weekly=10), "signed_out": False}),
@@ -980,7 +982,7 @@ for line in sys.stdin:
         sub = self.subscription(runtime="claude")
         config = self.declare(sub)
         data = self.cache(config, [self.reading()])
-        data["accounts"][data["subscriptions"][0]["account_key"]]["note"] = "Claude usage lookup refused (HTTP 503)"
+        data["subscriptions"][0]["note"] = "Claude usage lookup refused (HTTP 503)"
         args = argparse.Namespace(action=None, watch=True, every=300)
         stderr = io.StringIO()
         with mock.patch.object(self.m, "usage_refresh", return_value=data), \
@@ -1014,6 +1016,95 @@ for line in sys.stdin:
                 credentials, note = self.m.usage_keychain(str(Path.home() / ".claude"))
             self.assertEqual(credentials, {})
             self.assertIn("Keychain denied/unavailable", note)
+
+    def test_usage_shared_account_keeps_credential_state_per_folder(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        one, two = self.subscription("active", runtime="claude"), self.subscription("out", runtime="claude")
+        for declared in ((one, two), (two, one)):
+            config = self.declare(*declared)
+            shared = "shared-account-key"
+            # Both folders previously identified the same provider account.
+            data = self.cache(config, [self.reading(20, weekly=40) for _ in declared])
+            data["accounts"] = {shared: self.reading(20, weekly=40)}
+            for sub in data["subscriptions"]:
+                sub["account_key"] = shared
+            self.m.usage_atomic(self.m.usage_file(), data)
+            def lookup(sub):
+                return shared, ({**self.reading(20, weekly=40), "signed_out": False} if sub["id"] == "active" else
+                                {"windows": {}, "read_at": None, "source": "unknown", "signed_out": True,
+                                 "note": "No stored Claude OAuth token"})
+            with mock.patch.object(self.m, "usage_reading", side_effect=lookup):
+                refreshed = self.m.usage_refresh(config)
+            rows = {r["id"]: r for r in self.m.usage_rows(inst)[0]}
+            self.assertFalse(rows["active"]["signed_out"])
+            self.assertTrue(rows["out"]["signed_out"])
+            self.assertEqual(rows["active"]["note"], "")
+            self.assertEqual(rows["out"]["windows"], {})
+            self.assertEqual(len(refreshed["accounts"]), 1)
+            self.assertNotIn("signed_out", refreshed["accounts"][shared])
+            self.assertNotIn("note", refreshed["accounts"][shared])
+            self.assertEqual(self.m.usage_route(inst, ["claude"], cached_only=True)[0]["id"], "active")
+
+    def test_usage_linux_credential_read_error_is_unverified_not_signed_out(self):
+        root = self.init("alice")
+        sub = self.subscription(runtime="claude")
+        config = self.declare(sub)
+        credential = Path(sub["config_dir"]) / ".credentials.json"
+        original = Path.read_text
+        def denied(path, *args, **kwargs):
+            if path == credential:
+                raise PermissionError("PRIVATE-TOKEN-FROM-ERROR")
+            return original(path, *args, **kwargs)
+        with mock.patch.object(self.m.sys, "platform", "linux"), mock.patch.object(Path, "read_text", denied):
+            _, reading = self.m.usage_reading(sub)
+        self.assertIsNot(reading.get("signed_out"), True)
+        self.assertIn("unreadable", reading["note"])
+        self.assertNotIn("PRIVATE-TOKEN", reading["note"])
+        old = self.reading(20, weekly=40, age=469 * 3600)
+        self.cache(config, [old])
+        with mock.patch.object(self.m, "usage_reading", return_value=("path", reading)):
+            self.m.usage_refresh(config)
+        text = self.b(root, "usage")
+        self.assertIn("469 h", text)
+        self.assertIn("unreadable", text)
+        self.assertNotIn("signed out", text)
+        for contents in ("not-json", "[]", '{"claudeAiOauth":[]}'):
+            credential.write_text(contents)
+            with mock.patch.object(self.m.sys, "platform", "linux"):
+                _, invalid = self.m.usage_reading(sub)
+            self.assertIsNot(invalid.get("signed_out"), True)
+            self.assertIn("invalid", invalid["note"])
+        credential.write_bytes(b'\xff')
+        with mock.patch.object(self.m.sys, "platform", "linux"):
+            self.assertIn("invalid", self.m.usage_reading(sub)[1]["note"])
+        credential.unlink()
+        with mock.patch.object(self.m.sys, "platform", "linux"):
+            self.assertTrue(self.m.usage_reading(sub)[1]["signed_out"])
+
+    def test_usage_routing_explains_age_verification_and_lookup_error(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        config = self.declare(self.subscription(runtime="claude"))
+        for used in (20, 94):
+            reading = self.reading(used, weekly=used, age=469 * 3600)
+            reading["note"] = "Claude usage lookup refused (HTTP 503)"
+            self.cache(config, [reading])
+            rows, _ = self.m.usage_rows(inst)
+            self.assertEqual(rows[0]["windows"]["seven_day"]["verification"], "error")
+            self.assertIn("HTTP 503", rows[0]["windows"]["seven_day"]["error"])
+            for reason in (self.m.usage_route(inst, ["claude"], cached_only=True)[1],
+                           self.m.class_route(inst, "review", cached_only=True)[2]):
+                self.assertIn("469 h", reason)
+                self.assertIn("unverified", reason)
+                self.assertIn("HTTP 503", reason)
+        # Even a young cached observation is unverified after a failed folder lookup.
+        config = self.declare(self.subscription("a-failed", runtime="claude"),
+                              self.subscription("z-healthy", runtime="claude"))
+        failed = {**self.reading(10, weekly=10), "note": "Claude usage lookup refused (HTTP 503)"}
+        self.cache(config, [failed, self.reading(40, weekly=40)])
+        self.assertEqual(self.m.usage_route(inst, ["claude"], cached_only=True)[0]["id"], "z-healthy")
+        self.assertEqual(self.m.class_route(inst, "review", cached_only=True)[1]["id"], "z-healthy")
 
     def test_usage_resume_switch_uses_replacement_subscription_and_local_fallback(self):
         root = self.init("alice")
@@ -1116,7 +1207,7 @@ for line in sys.stdin:
                     status[0] = 401
                     kept = next(iter(self.m.usage_refresh(self.m.usage_config())["accounts"].values()))
                     self.assertEqual(kept["windows"]["seven_day"]["used_percent"], 6)
-                    self.assertIn("login expired", kept["note"])
+                    self.assertIn("login expired", self.m.usage_cache()["subscriptions"][0]["note"])
                     status[0] = 302
                     before = len(requests)
                     self.assertEqual(self.m.usage_reading(sub)[1]["source"], "unknown")

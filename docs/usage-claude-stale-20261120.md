@@ -1,121 +1,107 @@
-# Claude usage freshness and signed-out accounts
+# Claude usage freshness: implementation and review corrections
 
-Builder evidence at 2026-11-20 05:27 +02:00 (`bin/brain -b personal now`).
-Base: `4316cbfb125b8f2781c1d7c728a9bf7f6cf259df`.
+This report describes the final patch, including all four changes requested by the
+fresh review of `f5ac03333bc3a41a5b1c81c1750ba50d6eedf210`. The original base is
+`4316cbfb125b8f2781c1d7c728a9bf7f6cf259df`. Final head and cloud run URL/state are in
+the hand-back; no merge, release, upgrade or installed-core change is performed.
 
-## Cause
+## Original cause and machine evidence
 
-The main Claude lookup is succeeding. The real OAuth usage endpoint returns
-`five_hour: null`, a valid weekly window, and `limits` entries for weekly total
-and a scoped model. At the base, `lib/brain/usage.py:176` drops null fields;
-`usage_merge` (`:530` at the base) retains the old five-hour observation and takes
-the minimum window timestamp for the account. Its October five-hour reading thus
-made a freshly updated weekly reading appear 469 hours old.
+The main Claude OAuth usage lookup succeeds. Its response has `five_hour: null`,
+valid weekly usage, and weekly scoped limits. The original parser dropped the
+explicit absence. Account-window merging retained the October session reading and
+used the minimum window timestamp, making a fresh weekly reading appear 469 hours
+old. `lib/brain/usage.py:234` accepts the explicit absence only with a valid weekly
+response; omitted/malformed windows and failed lookups retain their observations.
 
-The secondary account is a separate, confirmed sign-out: its Keychain entry is
-readable and contains an OAuth object without an access token. The failing path
-is `usage_keychain` → `usage_claude`'s token check, not a refused HTTP call.
-The exact safe diagnostic is `No stored Claude OAuth token`; no request is sent.
-Per the coordinator's correction, that temporary account needs no credential
-repair. No credential was changed.
+The temporary secondary account has a readable Keychain OAuth entry with no access
+token. `usage_claude` stops before HTTP with the safe diagnostic
+`No stored Claude OAuth token`. No credential was changed or re-login requested.
 
 Machine evidence was read locally from `~/.config/brain/usage.json`,
 `~/Library/LaunchAgents/org.brain.usage.plist`, `launchctl print`, and
-`~/Library/Logs/brain-usage.log`. The cache was checked at 05:14 with a 300-second
-running poller; the main weekly window had that fresh timestamp while its old
-five-hour window set the aggregate timestamp. The log tail contained Python
-malloc warnings and no per-account lookup diagnostic. At the base,
-`cmd_usage`'s watch loop only logged exceptions escaping the whole refresh;
-normal per-account error notes stayed solely in the cache.
+`~/Library/Logs/brain-usage.log`. The poller runs every 300 seconds. The main weekly
+window had a fresh timestamp while the retained session window set the account's
+age. The log tail contained malloc warnings, without per-account lookup errors:
+the original watch loop logged only exceptions escaping the whole refresh.
+The patch logs safe per-folder diagnostics with generated timestamps.
 
-## Change and regression coverage
+## Review findings: all fixed
 
-- `lib/brain/usage.py:231`: accept explicit null session absence only with a valid
-  weekly response. Omitted/malformed fields and failed lookups do not erase history.
-  `tests/test_usage.py:873` exercises endpoint parsing, merge, cache validation,
-  display, negative shapes, and precedence of a real session limit.
-- `lib/brain/usage.py:320`: distinguish a confirmed missing OAuth token from
-  unavailable Keychain access, including a missing entry versus denied alternate
-  entry. `tests/test_usage.py:993` covers both and the mixed-entry case.
-- `lib/brain/usage.py:564`: retain credential state with historical observations;
-  unavailable reads cannot clear sign-out. A usable login explicitly clears it.
-- `lib/brain/usage.py:689`: signed-out rows expose no windows and show the latest
-  successful window's date. `:757` and `:814` exclude those rows before capacity
-  selection and stop-line checks; `ui/src/model.ts:212` does the same in dashboard
-  routing. `tests/test_usage.py:926` covers historical 0% and 99%, no other
-  account, CLI/JSON/UI output, unavailable reads and restored login;
-  `ui/tests/model.test.mjs:241` independently covers dashboard routing.
-- `lib/brain/usage.py:697`: per-window age/staleness; `:1060` labels stale CLI
-  values with age and unverified status. `tests/test_usage.py:910` verifies a stale
-  five-hour observation alongside a fresh weekly window and a lookup error.
-- `lib/brain/usage.py:1025`: poller logs safe per-account errors with clock-derived
-  timestamps. `tests/test_usage.py:979` covers the HTTP-status diagnostic. Raw
-  exceptions, response bodies, headers and credential values are never logged.
+| Finding | Fix and evidence | Regression test that failed before the fix |
+| --- | --- | --- |
+| 1. MAJOR: shared account identity overwrote folder sign-in state | `lib/brain/usage.py:575` merges only account observations; `:618` stores credential state and error on each subscription/folder; `:723` reads that state. Legacy account metadata is used only when the folder is unambiguous. | `tests/test_usage.py:1020` — `test_usage_shared_account_keeps_credential_state_per_folder`: both declaration orders, one shared account, one signed-in and one signed-out folder; only the signed-in folder participates in routing. |
+| 2. MAJOR: Linux read failures became sign-out | `lib/brain/usage.py:375` separates FileNotFoundError from permission/read errors and invalid JSON, schema or text encoding. Only confirmed absence becomes sign-out; unavailable reads retain usage with a safe error and real age. | `tests/test_usage.py:1049` — `test_usage_linux_credential_read_error_is_unverified_not_signed_out`: PermissionError containing a fake private token, malformed JSON/schema, invalid UTF-8 and a genuinely absent file. |
+| 3. MAJOR: routing/overview lost age and safe error | `lib/brain/usage.py:737` exposes per-window verification, age and safe error; `:757` carries evidence through selected and stop-line routing results; `:821` and `:882` keep failed fresh lookups unverified in ranking; `:1127` labels CLI errors unverified. `ui/src/model.ts:212` shares the presentation across `overview.tsx:154` and `usage.tsx:63`. Visible and accessible gauge text carries the evidence; CSS wraps it instead of clipping it. | `tests/test_usage.py:1085` — `test_usage_routing_explains_age_verification_and_lookup_error` checks below/above stop-line routing and fresh failed lookups; `ui/tests/model.test.mjs:31` — `usage and overview presenters retain stale age, verification and safe lookup error` executes both real JSX presenters. |
+| 4. MINOR: signed-out-only capacity claimed exhaustion | `ui/src/model.ts:222` distinguishes signed out, unavailable/unverified and verified stop-line exhaustion; `ui/src/usage.tsx:89` uses that message. | `ui/tests/model.test.mjs:44` — `usage presenter separates signed out and unavailable from exhausted capacity`: signed-out-only, no usable reading and confirmed exhausted fixtures. |
 
-## Real-run proof
+The Python regression run failed all three new tests at the previous head in
+3.44 seconds. Both new presenter tests failed there in 326.157 ms: overview showed
+only a stale percentage, and the signed-out-only usage page claimed exhaustion.
+All now pass. Existing cache/absence tests also detected one intermediate metadata
+shape inconsistency; centralizing account-only merging fixed it without weakening
+the assertion. Final results: 88 affected Python tests passed in 24.96 seconds
+with four workers; all 18 UI model/presenter tests passed in 370.604 ms;
+TypeScript exited 0 with no diagnostics.
 
-Ran the worktree launcher against the actual registered personal instance and
-actual stored credentials. To keep the instance and installed poller unchanged,
-used a disposable machine-cache directory under this checkout's `docs/`, copied
-the current machine registry/subscriptions/cache into it, and set `BRAIN_CONFIG`
-to that registry and `BRAIN_NO_REEXEC=1`. No mock or test endpoint was used.
+## Validation and real-run proof
 
-Commands in that environment:
+Only affected local files are run, at most four Python workers, with pytest cache
+and bytecode publication disabled. No local full suite. Latest affected results
+and durations are in the hand-back. The UI model file includes the executable JSX
+presenter tests; TypeScript is checked with `tsc --noEmit --incremental false`.
+The React best-practices skill was applied to the two TSX edits: shared derived
+presentation, no new hooks/fetches/dependencies, stable keys, escaped text, and
+accessible meter descriptions. No browser or visual-geometry proof is claimed.
+
+The worktree launcher was run against the actual personal instance and actual
+stored credentials, with no mock endpoint. A temporary directory under `docs/`
+received a copy of the machine registry, subscriptions and usage cache. With
+`BRAIN_CONFIG` pointing there and `BRAIN_NO_REEXEC=1`, the commands were:
 
 ```sh
 bin/brain -b personal usage --refresh
 bin/brain -b personal usage
+bin/brain -b personal usage --json
 ```
 
-Both exit 0; combined duration 2.470 seconds. Actual aggregate observations:
+The real run at 2026-11-20 05:42 +02:00 exited 0, with refresh plus read taking
+1.917 seconds. Main Claude showed weekly 94%, five-hour none, age 0 s,
+`verification=verified`, no error, and scoped weekly usage 63%. The secondary
+account showed `signed_out`, last read 2026-11-18 18:02 +02:00, no windows and
+`No stored Claude OAuth token`. Each row/window now carries its own verification
+and safe error. The temporary cache was removed. The real instance cache,
+credentials and installed poller were not changed. The final hand-back records
+the final source inspection. A further final-source refresh/read at
+2026-11-20 05:45 +02:00 exited 0 in 1.736 seconds with the same main reading and
+secondary signed-out state; it also asserted that account-cache records contain
+neither folder credential state nor folder lookup errors.
 
-| Account | Five-hour | Weekly | Reading / age | State |
-| --- | --- | --- | --- | --- |
-| Main Claude | none | 94%, resets 2026-11-24 19:00 +02:00 | 2026-11-20 05:27 +02:00 / 0 s | lookup, fresh |
-| Secondary Claude | hidden | hidden | last read 2026-11-18 18:02 +02:00 | signed out |
+No raw credential, provider response body, account ID, transcript or private text
+is retained here. Tests use generic fixtures. Dependency access used a temporary
+read-only link to existing machine dependencies; the link and owned trial logs
+are removed before commit. No paid AI generation calls were made.
 
-The scoped model window was 63% and equally fresh. No secret value, account ID,
-raw provider payload, transcript or private text is retained in this report.
-The temporary cache was removed. The live installed cache is deliberately not
-rewritten by this proof; normal operation will refresh it after the gated release.
+## Rules from the sweep brief
 
-## Validation
-
-The two initial regression tests failed on the base in 3.30 seconds: retained
-historical session value and absent stale labels. They passed after the fix.
-Affected Python files passed 84 tests in 78.89 seconds before the final Keychain
-distinction test was added. Final targeted Keychain/sign-out/parser checks passed
-5 tests in 5.57 seconds. The final affected-file rerun passed all 85 tests in
-39.40 seconds with `-n 4`.
-Dashboard model tests passed 16 tests in 381.085 ms. `git diff --check` is clean.
-
-Only `tests/test_usage.py` and `tests/test_usage_rounds.py` were run locally, with
-at most four workers; no local full suite. Cloud full suite is requested once on
-`ci/fix/usage-claude-stale-20261120`; its exact run URL/state and final head are
-in the hand-back. Fresh review belongs to the coordinator; no child was started.
-
-## Rule evidence
-
-| Rule from the sweep brief | Builder result | Evidence |
+| Rule | Result | Final evidence |
 | --- | --- | --- |
-| R76, no text-meaning heuristics | PASS | `lib/brain/usage.py:231`, `:398`: typed provider fields and credential presence only. |
-| R94, instructions before patching model misses | PASS (not applicable) | `lib/brain/usage.py:372`: provider usage transport/parser, no model inference. |
-| R80, system prompt for every AI call | PASS (not applicable) | `lib/brain/usage.py:404`: authenticated usage GET, no AI generation call. |
-| Non-opinionated core | PASS | `lib/brain/usage.py:231`, `:814`: provider protocol and generic credential state; no instance name or rule hardcoded. |
-| R95 / R59, declared or computed numbers | PASS | `lib/brain/usage.py:697`: measured timestamp ages and existing configured cache interval; Security item-not-found status is a protocol constant at `:353`. |
-| R73, independent work concurrent | PASS | Affected files run with `-n 4`; dashboard model checks and independent reads ran concurrently. |
-| R84, private text stays local | PASS | `lib/brain/usage.py:410`, `:485`: no bodies or secret-bearing exception messages; fixtures in `tests/test_usage.py:873` are generic. |
-| R86, one builder / PR / review / full gate | PASS for builder scope | No child; one PR and one cloud full-suite trigger; coordinator owns the fresh review. |
-| R79, read code behind claims | PASS | This report's change map and complete builder diff inspection before commit. |
-| R87, no ordered scope cut | PASS | Main freshness, stale/error visibility and the corrected signed-out routing requirement are covered; credentials unchanged by explicit instruction. |
-| R74, git directory form | PASS | All builder git operations use `git -C` with the assigned absolute worktree. |
-| R60, real result before review | PASS | Live worktree CLI proof above, both exit 0 with fresh main reading. |
-| Machine / cleanup / no installed-core edits | PASS | Only affected files locally, four workers maximum; disposable cache/dependency link removed; no installed-core change or local full suite. |
+| R76: no text-meaning heuristics | PASS | `lib/brain/usage.py:375`, `:618`: typed file/error/provider structure, not semantic keyword decisions. UI states use explicit enum equality. |
+| R94: instructions before patching model misses | PASS (not applicable) | `lib/brain/usage.py:398`: usage transport/parser; no AI inference. |
+| R80: system prompt for every AI call | PASS (not applicable) | `lib/brain/usage.py:430`: OAuth usage GET, not generation. |
+| Non-opinionated core | PASS | `lib/brain/usage.py:618`, `ui/src/model.ts:222`: generic folder/account/window mechanisms; no instance rule or operator name in production code. |
+| R95 / R59: declared or computed numbers | PASS | `lib/brain/usage.py:733`, `ui/src/model.ts:212`: timestamp arithmetic and existing configured freshness interval; no new cutoff. |
+| R73: independent work concurrent | PASS | Python affected files use `-n 4`; UI checks and independent source reads run concurrently. |
+| R84: private text stays local | PASS | `lib/brain/usage.py:375`: fixed safe error messages; `tests/test_usage.py:1049` proves a secret-bearing exception message is not retained. |
+| R86: size process to job | PASS for builder scope | One builder, same PR, one new commit and one cloud run for this revised head; fresh re-check belongs to coordinator, no child launched. |
+| R79: read code behind claims | PASS | Full final diff read; finding map above cites each implementation and regression. |
+| R87: no ordered scope cut | PASS | All four findings fixed, plus original null-window freshness regression retained. |
+| R74: git directory form | PASS | All git commands use `git -C` with the assigned absolute worktree. |
+| R60: real result before review | PASS | Real worktree CLI commands and read-only instance proof above. |
+| Machine, cleanup, no installed-core edits | PASS | Affected files only, at most four workers, no local full suite or installed-core changes; owned temporary cache/link/logs removed. |
 
-Decisions made: use the existing absent-window representation; retain cached
-history while suppressing it for signed-out accounts; keep unknown Keychain
-access distinct from sign-out; use a disposable cache for real-instance proof.
-Proposed lesson: an explicit absent provider window is a current observation,
-and credential state must be separate from retained usage observations.
-
-Spend: no paid AI/provider generation. Subscription usage endpoints only.
+Decisions made: account windows remain shared; auth/error state is per folder;
+an unavailable read is an explicit unverified error, never a confirmed sign-out;
+the same derived evidence formatter serves overview and usage meters.
+Proposed lesson: account-wide limits and folder-local credentials are different
+identities, and every presenter must keep observation provenance alongside a number.

@@ -179,10 +179,12 @@ export function windowState(
   const stamp = w?.read_at || row.read_at,
     stale = !stamp || now - stamp > (policy.max_age_seconds ?? 120);
   const expired = w?.expired || !!(w?.resets_at && w.resets_at <= now);
-  const known = w && !w.absent && !expired && Number.isFinite(w.used_percent);
-  const state = !known
+  const error = w?.error || row.lookup_error || row.note || "";
+  const known = w && !row.signed_out && !w.absent && !expired && Number.isFinite(w.used_percent);
+  const verified = !row.signed_out && !error && !stale && !expired && !!(known || w?.absent);
+  const state = row.signed_out ? "Signed out" : error ? "Lookup failed · unverified" : !known
     ? w?.absent
-      ? "No window"
+      ? stale ? "Stale · unverified" : "No window"
       : expired
         ? "Expired · unknown"
         : "Unknown"
@@ -197,12 +199,38 @@ export function windowState(
           : "Normal";
   return {
     known,
+    verified,
+    error,
+    age_seconds: stamp ? Math.max(0, now - stamp) : null,
     stale,
     expired,
     state,
     percent: known ? Math.min(100, Math.max(0, w.used_percent)) : 0,
     age: stamp ? Math.max(0, Math.floor((now - stamp) / 60)) : null,
   };
+}
+export function usageReadingText(w: RecordData | undefined, row: RecordData, policy: RecordData, now = Date.now() / 1000) {
+  const v = windowState(w, row, policy, now);
+  const seconds = v.age_seconds == null ? null : Math.floor(v.age_seconds);
+  const age = seconds == null ? "age unknown" : seconds < 60 ? `${seconds} s old`
+    : seconds < 3600 ? `${Math.floor(seconds / 60)} m old`
+    : `${Math.floor(seconds / 3600)} h ${Math.floor(seconds / 60) % 60} m old`;
+  const state = v.verified ? v.state === "Normal" ? "Verified" : `${v.state} · verified` : v.state;
+  return `${state} · ${age}${v.error ? ` · ${v.error}` : ""}`;
+}
+
+export function usageCapacityMessage(s: RecordData) {
+  const p = { ...s.usage_routing_policy, ...s.usage_policy };
+  if (p.autodetected) return "New jobs keep their configured runtime.";
+  if (!Number.isFinite(p.stop_percent)) return "Routing unavailable. Run brain usage to inspect subscription configuration.";
+  const rows = list(s.usage), signedIn = rows.filter(row => !row.signed_out), route = routing(s);
+  if (rows.length && !signedIn.length) return "All configured subscriptions are signed out. Sign in to inspect capacity.";
+  if (route) return `Unpinned new jobs go to ${route.row.label || "the available subscription"}${route.score[0] ? " · capacity unverified" : ""}. Pinned projects keep their runtime.`;
+  if (signedIn.length && signedIn.every(row => ["five_hour", "seven_day"].some(name => {
+    const w = row.windows?.[name], v = windowState(w, row, p);
+    return v.verified && v.known && w.used_percent >= usageStopPercent(row, p);
+  }))) return "All signed-in subscriptions are at the stop line. Stop starting new jobs.";
+  return "Subscription capacity is unavailable or unverified. Check the reading age and lookup error before starting more work.";
 }
 export function routing(s: RecordData) {
   const p = { ...s.usage_routing_policy, ...s.usage_policy },
@@ -228,7 +256,7 @@ export function routing(s: RecordData) {
           ([, w]) =>
             !Number.isFinite(w.used_percent) ||
             (w.source || row.source) === "unknown" ||
-            windowState(w, row, p, now).stale,
+            !windowState(w, row, p, now).verified,
         );
       const ahead = windows.some(
         ([k, w]) =>
