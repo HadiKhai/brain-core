@@ -1,0 +1,163 @@
+{
+  "requested_runs": 30,
+  "nodeid": "tests/test_machine.py::BoundedMachineAdmission::test_concurrent_real_cli_writers_keep_both_audit_records",
+  "python": "3.9.6",
+  "source_sha256": {
+    "lib/brain/machine.py": "d56b481e3274963d0aed59d326ebd44c79569d68b41911b6e0bb128905da14de",
+    "tests/test_machine.py": "a9ff60cb9c9f594d791caa877c2f3be7b2aff0df0b79e523c3b57e4fa02ac79f"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "exit_code": 0,
+      "seconds": 2.625
+    },
+    {
+      "run": 2,
+      "exit_code": 0,
+      "seconds": 2.586
+    },
+    {
+      "run": 3,
+      "exit_code": 0,
+      "seconds": 2.631
+    },
+    {
+      "run": 4,
+      "exit_code": 0,
+      "seconds": 2.539
+    },
+    {
+      "run": 5,
+      "exit_code": 0,
+      "seconds": 2.538
+    },
+    {
+      "run": 6,
+      "exit_code": 0,
+      "seconds": 2.545
+    },
+    {
+      "run": 7,
+      "exit_code": 0,
+      "seconds": 2.57
+    },
+    {
+      "run": 8,
+      "exit_code": 0,
+      "seconds": 2.639
+    },
+    {
+      "run": 9,
+      "exit_code": 0,
+      "seconds": 2.682
+    },
+    {
+      "run": 10,
+      "exit_code": 0,
+      "seconds": 2.662
+    },
+    {
+      "run": 11,
+      "exit_code": 0,
+      "seconds": 2.679
+    },
+    {
+      "run": 12,
+      "exit_code": 0,
+      "seconds": 2.674
+    },
+    {
+      "run": 13,
+      "exit_code": 0,
+      "seconds": 2.705
+    },
+    {
+      "run": 14,
+      "exit_code": 0,
+      "seconds": 2.7
+    },
+    {
+      "run": 15,
+      "exit_code": 0,
+      "seconds": 2.602
+    },
+    {
+      "run": 16,
+      "exit_code": 0,
+      "seconds": 2.613
+    },
+    {
+      "run": 17,
+      "exit_code": 0,
+      "seconds": 2.565
+    },
+    {
+      "run": 18,
+      "exit_code": 0,
+      "seconds": 2.616
+    },
+    {
+      "run": 19,
+      "exit_code": 0,
+      "seconds": 2.572
+    },
+    {
+      "run": 20,
+      "exit_code": 0,
+      "seconds": 2.629
+    },
+    {
+      "run": 21,
+      "exit_code": 0,
+      "seconds": 2.651
+    },
+    {
+      "run": 22,
+      "exit_code": 0,
+      "seconds": 2.509
+    },
+    {
+      "run": 23,
+      "exit_code": 0,
+      "seconds": 2.521
+    },
+    {
+      "run": 24,
+      "exit_code": 0,
+      "seconds": 2.546
+    },
+    {
+      "run": 25,
+      "exit_code": 0,
+      "seconds": 2.498
+    },
+    {
+      "run": 26,
+      "exit_code": 0,
+      "seconds": 2.604
+    },
+    {
+      "run": 27,
+      "exit_code": 0,
+      "seconds": 2.707
+    },
+    {
+      "run": 28,
+      "exit_code": 0,
+      "seconds": 2.444
+    },
+    {
+      "run": 29,
+      "exit_code": 0,
+      "seconds": 2.463
+    },
+    {
+      "run": 30,
+      "exit_code": 0,
+      "seconds": 2.542
+    }
+  ],
+  "passed": 30,
+  "seconds": 77.871
+}
