@@ -116,13 +116,14 @@ test('a sibling tooltip never masks a clipped primary name', async ({page}) => {
   expect(issues.filter(v => v.kind !== 'measurement').some(v => v.detail.includes('no full text on hover'))).toBe(true);
 });
 
-test('the real secondary picker context is available in a tooltip while primary names wrap', async ({page}) => {
+test('the real secondary picker context wraps in full like the primary name after hover', async ({page}) => {
   await page.goto('/?k=long#view=learnings');
   await page.getByRole('combobox', {name:'Specialist',exact:true}).click();
   const secondary = page.getByRole('option').filter({hasText:'Layout engineer'}).locator('small');
   const full = await secondary.textContent();
   await secondary.hover();
-  await expect(page.getByRole('tooltip')).toHaveText(full!);
+  await expect(secondary).toBeVisible();
+  await expect(secondary).toHaveText(full!);
   const issues = await page.evaluate(audit, 'options');
   expect(issues.filter(v => v.kind !== 'measurement')).toEqual([]);
 });
