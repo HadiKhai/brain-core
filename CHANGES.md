@@ -9,8 +9,9 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 
 `brain status <node> --refresh` no longer treats native run folders, unrelated attempt
 logs or unreferenced verification logs as displayed state. Attempt and handback JSON,
-referenced input maps, current inbox episode identities, and pending wake membership
-remain checked. Retired inbox generations for absent sources and atomic replacements
+referenced input maps and current inbox episode identities remain checked. Wake delivery
+turns/queues are transport output rather than status snapshot inputs. Retired inbox generations
+for absent sources and atomic replacements
 of unchanged directory members no longer force a rebuild.
 
 Ordinary refresh projections still release the instance lock. After repeated contention,
@@ -23,6 +24,8 @@ snapshot renders that prefix, and an unread suffix invalidates its event view un
 next refresh; edits or truncation of the prefix still refuse publication. Lifecycle
 receipt history is excluded by schema field, with current episode identities fenced
 separately. Malformed receipt state keeps the reader's repair/fail-open behavior.
+Typed inbox reminder receipts are projected for those same frozen sources; publishing
+reminders or pending transport for an unread suffix does not overtake the prefix window.
 
 Final admitted refresh ownership has a five-second Git/checkpoint budget. Git commands
 and their helpers are terminated together when their remaining budget expires. PreTool

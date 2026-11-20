@@ -95,9 +95,13 @@ def lifecycle_identity(path):
     nodes = current.nodes()
     sources = [node['dir'] / 'inbox.md' for node in nodes]
     sources.extend(status.hook_question_queue(node) for node in nodes)
-    st = path.lstat()
-    stamp = (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns,
-             tuple(generation(sources)))
+    def physical():
+        try:
+            st = path.lstat()
+            return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        except FileNotFoundError:
+            return None
+    stamp = (physical(), tuple(generation(sources)))
     session = _INVOCATION.get()
     cache = session['lifecycle'] if session is not None else {}
     key = (str(path), stamp)
@@ -123,20 +127,33 @@ def lifecycle_identity(path):
             if isinstance(previous, dict):
                 observed['inbox_retired'][node['id']] = dict(previous)
             lines = reminders.request_lines(current, node, lines, readonly=True, lifecycle_data=observed)
-            projected.append((node['id'], [(reminders.inbox_source_id(node, line),
-                reminders.request_episode_id(current, node, line, lifecycle_data=observed)) for line in lines]))
+            episodes = []
+            for line in lines:
+                episode = reminders.request_episode_id(current, node, line, lifecycle_data=observed)
+                key = reminders.reminder_key({'node': node['id'], 'kind': 'inbox',
+                                              'text': line[2:], 'episode': episode})
+                record = data['reminders'].get(node['id'], {}).get(key)
+                episodes.append((reminders.inbox_source_id(node, line), episode, record))
+            projected.append((node['id'], episodes))
         # These fields are receipt history, not direct display inputs. The
         # projected identities above retain every currently relevant recurrence.
-        selected = {name: value for name, value in data.items() if name not in ('inbox', 'inbox_retired')}
+        selected = {name: value for name, value in data.items()
+                    if name not in ('inbox', 'inbox_retired', 'reminders')}
+        # A configured hook also publishes typed inbox reminders and a wake.
+        # Only the frozen prefix's inbox reminders belong to this display;
+        # keep every other/legacy kind conservative and unchanged.
+        selected['reminders'] = {}
+        for nid, records in data['reminders'].items():
+            retained = {key: record for key, record in records.items()
+                        if not isinstance(record, dict) or record.get('kind') != 'inbox'}
+            if retained:
+                selected['reminders'][nid] = retained
         value = hashlib.sha256(json.dumps([selected, projected], sort_keys=True).encode()).digest()
     except (OSError, ValueError, TypeError, AttributeError):
         if 'conservative' in locals():
             return ('unknown', conservative)
-        st = path.lstat()
-        return ('unknown', st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-    after = path.lstat()
-    if stamp == (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns,
-                 tuple(generation(sources))):
+        return ('unknown', physical())
+    if stamp == (physical(), tuple(generation(sources))):
         cache[key] = value
     return value
 
@@ -150,13 +167,11 @@ def generation(paths, shallow=False):
         if prefixes is not None and path in prefixes:
             result.append(inbox_identity(path))
             return
+        if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
+            result.append((str(path), lifecycle_identity(path)))
+            return
         try:
             st = path.lstat()
-            if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
-                # Hooks publish this sidecar under its own lock, including
-                # fresh retirement receipts for sources absent from the view.
-                result.append((str(path), lifecycle_identity(path)))
-                return
             if shallow and stat.S_ISDIR(st.st_mode):
                 # Directory clocks move on every atomic file replacement.
                 # Membership cares about names; explicit file inputs fence the
@@ -469,7 +484,7 @@ def input_paths(inst, n):
     for source in rule_contracts.rule_sources(n):
         paths.extend((source['dir'] / 'AGENTS.md', source['dir'] / 'library/instance-rules.md'))
     from . import rotation, status, reports, tasks, task_flow, verify, watch, jobs, job_attempts, machine
-    from . import recurrence, hosts
+    from . import recurrence
     # The projection reads one attempt record per ledger row, never logs or
     # run folders. Explicit missing paths also fence a newly created attempt.
     packets = []
@@ -506,12 +521,10 @@ def input_paths(inst, n):
         paths.extend((inst.root / '.brain/coordinator-runs.json', inst.root / '.brain/core-remote.json',
                       inst.root / '.brain/host-observations.json'))
         paths.append(common.CORE / 'adapters/hosts' / (inst.cfg.get('host', '') + '.env'))
-        for peer in inst.nodes():
-            if not peer['archived'] and peer['local'].get('coordinator'):
-                target, _ = hosts.wake_target(inst, peer)
-                directory = hosts.wake_directory(inst, target)
-                paths.append(directory / 'turn.json')
-                paths.extend(directory.glob('*.pending'))
+        # Wake turn/queue files are transport output. snapshot_view/facts_block
+        # read source work and coordinator bindings, not delivery queue state.
+        # A real hook publishes a pending wake after its inbox append; fencing
+        # that output would defeat the admissible-prefix window again.
     if any(job_attempts.current_attempt(n, row, strict=False) for row in jobs.read_jobs(n) or []):
         paths.extend(machine.machine_dir() / name for name in ('machine-care-queue.json', 'machine-care.json'))
     # Only task nodes reached by the projection's dependency checks are read.
@@ -560,10 +573,6 @@ def membership_paths(inst, selected):
     for node in selected:
         paths.extend(node['dir'] / name for name in ('job-trains', 'handback-queue'))
     paths.extend(inst.library_directories())
-    if any(node['id'] == 'root' for node in selected):
-        from . import hosts
-        paths.extend(hosts.wake_directory(inst, hosts.wake_target(inst, node)[0])
-                     for node in inst.nodes() if not node['archived'] and node['local'].get('coordinator'))
     return tuple(sorted(set(paths)))
 
 
@@ -581,11 +590,11 @@ def content_identity(paths):
         if prefixes is not None and path in prefixes:
             result.append(inbox_identity(path))
             return
+        if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
+            result.append((str(path), lifecycle_identity(path)))
+            return
         try:
             st = path.lstat()
-            if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
-                result.append((str(path), lifecycle_identity(path)))
-                return
             if stat.S_ISLNK(st.st_mode):
                 result.append((str(path), 'link', os.readlink(path)))
                 visit(path.resolve())

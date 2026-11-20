@@ -403,11 +403,15 @@ class AutonomyFacts(AutonomyProject):
         m, cli, status, events, instance = self.refresh_cli(root, 'review_hook_prefix')
         refresh = importlib.import_module(cli.__package__ + '.status_refresh')
         inst = m.Instance(root)
+        inst.local_of('root').update(coordinator='fixture-coordinator', wake='exit 0')
+        inst.save_local()
+        inst = m.Instance(root)
         transcript = self.tmp / 'hook-question.jsonl'
         script = '''import sys
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from brain import instance,hosts
+hosts.wake_start=lambda *args,**kwargs: None  # transport stays local; queue publication is real
 inst=instance.Instance(Path(sys.argv[2]))
 hosts.capture_hook_questions(inst,inst.node('root'),{'transcript_path':sys.argv[3],'session_id':'fixture'})
 '''
@@ -427,6 +431,7 @@ hosts.capture_hook_questions(inst,inst.node('root'),{'transcript_path':sys.argv[
         self.assertEqual(len(calls), 1)
         self.assertFalse(any('Question number' in line for line in result))
         self.assertIn('Question number 1?', (root / 'inbox.md').read_text())
+        self.assertTrue(list((root / '.brain/wake').rglob('*.pending')))
         with mock.patch.dict(os.environ, self.env), refresh.invocation():
             following = refresh.compute(inst, inst.node('root'),
                 lambda current, node: status.inbox_lines.__wrapped__(node, readonly=True))
