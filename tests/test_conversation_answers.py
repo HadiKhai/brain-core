@@ -177,6 +177,29 @@ class InstructionCapture(Scenario):
         self.assertIn(self.quote, reason)
         self.assertIn('same-turn citing rule commit', reason)
 
+    def test_utc_git_dates_still_require_a_same_turn_rule_commit(self):
+        original = self.capture.subprocess.run
+        observed = []
+        def utc_git(argv, **kwargs):
+            result = original(argv, **kwargs)
+            if argv[:2] == ['git', 'log'] and '--format=%H %cI' in argv and not result.returncode:
+                rows = []
+                for row in result.stdout.splitlines():
+                    sha, stamp = row.split(' ', 1)
+                    at = datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+                    utc = at.astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+                    rows.append(sha + ' ' + utc)
+                    observed.append(utc)
+                result.stdout = '\n'.join(rows) + ('\n' if rows else '')
+            return result
+        with mock.patch.object(self.capture.subprocess, 'run', side_effect=utc_git):
+            self.assertIn(self.quote, self.stop())
+            self.commit_rule()
+            self.assertIsNone(self.stop())
+        self.assertTrue(observed)
+        self.assertTrue(all(stamp.endswith('Z') for stamp in observed))
+        self.assertNotIn('instruction-capture-gap', (self.root / 'inbox.md').read_text())
+
     def test_unknown_speaker_standing_instruction_stays_pending_without_a_rule_commit(self):
         """Review finding 5: a speaker the AI cannot tell keeps the declared protection."""
         reason = self.stop(speaker='unknown')

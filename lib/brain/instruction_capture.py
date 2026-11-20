@@ -373,7 +373,8 @@ def rule_committed(inst, n, item, baseline=None):
     quote = item['quote']
     for row in commits:
         sha, stamp = row.split(' ', 1)
-        if datetime.datetime.fromisoformat(stamp) < at:
+        # Git's strict ISO output uses Z for UTC; Python 3.9 needs an offset.
+        if datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00')) < at:
             continue
         qualified = set()
         for path in paths:

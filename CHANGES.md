@@ -5,6 +5,12 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-20: Instruction capture accepts UTC Git commit timestamps
+
+Instruction capture parses both Z and numeric UTC offsets in Git's strict ISO
+commit dates on Python 3.9. An unconverted standing instruction still blocks;
+a qualifying same-turn rule commit still clears it. No configuration is needed.
+
 ## 2026-11-20: Hook refusal sources and clock-stamped messages
 
 Brain hook refusals now start `brain-hook:pretool:` or `brain-hook:stop:`. A declined
