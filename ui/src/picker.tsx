@@ -2,6 +2,7 @@ import { useId, useMemo, useState, type ReactNode } from "react";
 import { Combobox as ComboboxPrimitive } from "@base-ui/react";
 import { ChevronDown, X } from "lucide-react";
 import { Combobox, ComboboxContent, ComboboxInput, ComboboxItem, ComboboxList } from "@/components/ui/combobox";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { useSearch, fold, type Found } from "./search";
@@ -77,7 +78,10 @@ export function RecordPicker({ s, kind, label, value, onChange, placeholder, all
               <ComboboxItem key={item.kind + item.id} value={item} className="picker-item">
                 <span className="picker-item-text">
                   <span className="picker-item-title" dir="auto"><Highlight text={item.title} query={query} /></span>
-                  <small dir="auto">{item.secondary}</small>
+                  <Tooltip>
+                    <TooltipTrigger render={<small dir="auto" tabIndex={-1} aria-label={item.secondary} />}>{item.secondary}</TooltipTrigger>
+                    <TooltipContent className="max-w-sm break-words">{item.secondary}</TooltipContent>
+                  </Tooltip>
                 </span>
               </ComboboxItem>
             )}

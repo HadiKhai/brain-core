@@ -47,7 +47,7 @@ test("options rejects menu text that overflows without an ellipsis", async ({ pa
   await page.locator("[role=listbox] [role=option]").first().waitFor();
   let tag: any;
   await proves(page, "options", "ellipsis removed from option text",
-    async () => { tag = await style(page, "[role=option], [role=option] * { text-overflow: clip !important; white-space: nowrap !important; } [role=listbox] { max-width: 240px !important; }"); },
+    async () => { tag = await style(page, "[role=option], [role=option] * { text-overflow: clip !important; white-space: nowrap !important; } [role=listbox] { max-width: 240px !important; } .picker-item-title { overflow: hidden !important; }"); },
     () => tag.evaluate((e: Element) => e.remove()), "no full text on hover");
 });
 

@@ -38,7 +38,7 @@ jobs:
           BROWSER_SCOPE: ${{ github.event_name == 'push' && 'warning-proof' || inputs.browser_scope }}
         run: |
           if [ "$BROWSER_SCOPE" = warning-proof ]; then
-            npx playwright test visual-warning.spec.ts
+            npx playwright test visual-warning.spec.ts ui-fitness.mutations.spec.ts ui-fitness.spec.ts
           else
             npm run test:browser
           fi

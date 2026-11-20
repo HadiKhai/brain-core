@@ -132,7 +132,7 @@ export function audit(rule: string): Violation[] {
         const start = axis === "x" ? box.left + ancestor.clientLeft : box.top + ancestor.clientTop;
         const end = start + size;
         const outside = axis === "x" ? text.left < start - 1 || text.right > end + 1 : text.top < start - 1 || text.bottom > end + 1;
-        if (outside && (overflow === "hidden" || overflow === "clip" || (axis === "x" && cs.textOverflow === "ellipsis")))
+        if (content > size + 1 && outside && (overflow === "hidden" || overflow === "clip" || (axis === "x" && cs.textOverflow === "ellipsis")))
           return true;
       }
       return false;
@@ -145,17 +145,35 @@ export function audit(rule: string): Violation[] {
         const r = option.getBoundingClientRect();
         const bounds = `menu ${JSON.stringify(box.toJSON())}, option ${JSON.stringify(r.toJSON())}`;
         if (r.right > box.right + 1 || r.left < box.left - 1) measure(`option ${describe(option)} is wider than its menu: ${bounds}`);
-        const tooltip = !!option.closest("[data-slot=tooltip-trigger]") || !!option.querySelector("[data-slot=tooltip-trigger]");
-        for (const e of [option, ...option.querySelectorAll("*")]) {
-          if (!name(e) || e.clientWidth <= 0) continue;
+        const fullTextAccess = (element: Element, value: string) => {
+          const contains = (text: string | null | undefined) => !!text && text.replace(/\s+/g, " ").trim().includes(value.replace(/\s+/g, " ").trim());
+          for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+            if (ancestor.getAttribute("data-slot") === "tooltip-trigger" || contains(ancestor.getAttribute("title")) || contains(ancestor.getAttribute("aria-label"))) return true;
+            for (const attribute of ["aria-labelledby", "aria-describedby"])
+              if (contains((ancestor.getAttribute(attribute) || "").split(/\s+/).map(id => document.getElementById(id)?.textContent || "").join(" "))) return true;
+            if (ancestor === option) break;
+          }
+          return false;
+        };
+        // A container range includes descendants even when they clip independently.
+        // Inspect each text node once, against only its own ancestor path.
+        const walker = document.createTreeWalker(option, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          if (!node.textContent?.trim() || !node.parentElement) continue;
+          const element = node.parentElement;
+          if (!visible(element)) continue;
+          let e = element;
+          while (!e.clientWidth && e !== option && e.parentElement) e = e.parentElement;
+          if (!e.clientWidth) continue;
           const range = document.createRange();
-          range.selectNodeContents(e);
+          range.selectNodeContents(node);
           const text = range.getBoundingClientRect();
-          const cutX = clipped(e, "x", text), cutY = clipped(e, "y", text);
+          const cutX = clipped(element, "x", text), cutY = clipped(element, "y", text);
           const horizontal = e.scrollWidth > e.clientWidth + 1;
           const vertical = e.scrollHeight > e.clientHeight + 1;
-          const detail = `option text ${describe(e)}: content ${e.scrollWidth}x${e.scrollHeight}px, viewport ${e.clientWidth}x${e.clientHeight}px, text ${JSON.stringify(text.toJSON())}, ${bounds}`;
-          if ((cutX || cutY) && !tooltip)
+          const detail = `option text ${describe(element)}: content ${e.scrollWidth}x${e.scrollHeight}px, viewport ${e.clientWidth}x${e.clientHeight}px, text ${JSON.stringify(text.toJSON())}, ${bounds}`;
+          if ((cutX || cutY) && !fullTextAccess(element, node.textContent))
             add(`${detail}; ${cutY ? "clamped vertically" : "clipped horizontally"}, no full text on hover`);
           else if (horizontal || vertical || cutX || cutY)
             measure(`${detail}; overflow remains readable or has full text on hover`);

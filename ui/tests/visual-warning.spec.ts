@@ -81,3 +81,48 @@ test('a one-pixel restore difference reports a warning without a test error', as
   expect(JSON.parse(warning!.description!).issues[0]).toMatchObject({actual:301,expected:300});
   expect(test.info().errors).toEqual([]);
 });
+
+for (const access of ['title', 'aria-label', 'aria-labelledby', 'aria-describedby', 'tooltip']) {
+  test(`a clipped secondary leaf with ${access} on its ancestor does not implicate fitting containers`, async ({page}) => {
+    await page.setContent(`<style>
+      #workspace-content {width:800px;height:400px;overflow:auto}
+      [role=option] {width:292px;overflow:hidden}
+      .copy {display:flex;flex-direction:column;width:292px}
+      small {display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      </style><main id="workspace-content"><section data-page="proof"><div role="listbox">
+      <div role="option"><span class="copy"><span>Wrapped primary name</span><span id="access"><small>${'Long secondary context '.repeat(12)}</small></span></span></div>
+      </div></section></main>`);
+    await page.locator('#access').evaluate((e, access) => {
+      const value = e.textContent!;
+      if (access === 'tooltip') e.setAttribute('data-slot', 'tooltip-trigger');
+      else if (access === 'aria-labelledby' || access === 'aria-describedby') {
+        const description = document.createElement('span'); description.id = 'full-secondary'; description.textContent = value; description.hidden = true; document.body.append(description);
+        e.setAttribute(access, description.id);
+      } else e.setAttribute(access, value);
+    }, access);
+    // Ensure this really reproduces a fitted option containing an overflowing leaf.
+    expect(await page.getByRole('option').evaluate(e => e.scrollWidth === e.clientWidth)).toBe(true);
+    const issues = await page.evaluate(audit, 'options');
+    expect(issues.filter(v => v.kind !== 'measurement')).toEqual([]);
+  });
+}
+
+test('a sibling tooltip never masks a clipped primary name', async ({page}) => {
+  await page.setContent(menuFixture('hidden'));
+  await page.getByRole('option').evaluate(e => {
+    const sibling = document.createElement('span'); sibling.dataset.slot = 'tooltip-trigger'; sibling.textContent = 'Other accessible context'; e.append(sibling);
+  });
+  const issues = await page.evaluate(audit, 'options');
+  expect(issues.filter(v => v.kind !== 'measurement').some(v => v.detail.includes('no full text on hover'))).toBe(true);
+});
+
+test('the real secondary picker context is available in a tooltip while primary names wrap', async ({page}) => {
+  await page.goto('/?k=long#view=learnings');
+  await page.getByRole('combobox', {name:'Specialist',exact:true}).click();
+  const secondary = page.getByRole('option').filter({hasText:'Layout engineer'}).locator('small');
+  const full = await secondary.textContent();
+  await secondary.hover();
+  await expect(page.getByRole('tooltip')).toHaveText(full!);
+  const issues = await page.evaluate(audit, 'options');
+  expect(issues.filter(v => v.kind !== 'measurement')).toEqual([]);
+});
