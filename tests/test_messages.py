@@ -1,5 +1,7 @@
 """Made-up worker commands: four kinds, optional context and direct peer briefs."""
 import re
+import datetime
+import json
 
 from scenario import consume_fixture_wake, Scenario, CORE
 import importlib
@@ -14,6 +16,13 @@ AGENT_HEADER = AGENT_MARKER + "\n\n"
 
 
 class WorkerMessages(Scenario):
+    def assert_framed(self, output, body, trailer='NOT SENT: use the host send with mode queue'):
+        frame = output.removesuffix('\n' + trailer + '\n') if trailer else output.removesuffix('\n')
+        self.assertEqual(unmarked_message(frame, AGENT_MARKER), body)
+        meta = json.loads(frame.split('\n\n')[1].removeprefix('Brain-Envelope: '))
+        self.assertTrue(_envelope.valid_stamp(meta['sent_at']))
+        self.assertEqual(output, frame + ('\n' + trailer if trailer else '') + '\n')
+
     def job(self):
         root = self.init("alice")
         home = self.repo(self.tmp / "app")
@@ -26,13 +35,14 @@ class WorkerMessages(Scenario):
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "Synthetic message", "--branch", "job/sample")
             self.assertIn("NOT SENT: use the host send", out)
+            self.assertIn("with mode queue", out)
             self.assertTrue(out.startswith(AGENT_HEADER + "Brain-Envelope: "), out)
 
     def test_formatter_and_briefs(self):
         root, _ = self.job()
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "One\nline", "--branch", "job/sample", "--report", "~/reports/example.md")
-            self.assertEqual(out.strip(), marked_message(kind + ": One line [branch: job/sample; report: ~/reports/example.md]", AGENT_MARKER) + "\nNOT SENT: use the host send")
+            self.assert_framed(out, kind + ": One line [branch: job/sample; report: ~/reports/example.md]")
         out = self.b(root, "msg", "a", "question", "What next?", "--branch", "job/sample")
         self.assertIn("job-handbacks/", out)
         self.b(root, "msg", "a", "progress", "Working", "--branch", "job/sample", ok=False)
@@ -57,25 +67,25 @@ class WorkerMessages(Scenario):
                 if options == ("--branch", "job/sample"):
                     self.assertIn("[branch: job/sample; report:", output)
                 else:
-                    self.assertEqual(output.strip(), marked_message(kind + ": Made-up result [branch: main]", AGENT_MARKER) + "\nNOT SENT: use the host send")
+                    self.assert_framed(output, kind + ": Made-up result [branch: main]")
         # A generic worker may be outside Git entirely, with no ledger job or report.
         plain = self.tmp / "plain"
         plain.mkdir()
         for kind in ("start", "done", "blocked", "question"):
             output = self.run_(["msg", "a", kind, "Made-up result"], cwd=plain, brain=CORE / "bin/brain")
-            self.assertEqual(output, marked_message(kind + ": Made-up result", AGENT_MARKER) + "\nNOT SENT: use the host send\n")
-        self.assertEqual(self.b(root, "msg", "a", "done", "Result", "--branch", "other").strip(),
-                         marked_message("done: Result [branch: other]", AGENT_MARKER) + "\nNOT SENT: use the host send")
+            self.assert_framed(output, kind + ": Made-up result")
+        self.assert_framed(self.b(root, "msg", "a", "done", "Result", "--branch", "other"),
+                           "done: Result [branch: other]")
 
     def test_freeform_agent_formatter_preserves_bytes_and_never_sends(self):
         root = self.init('alice')
         body = 'Keep original evidence.\n  Preserve indentation and spaces.  '
         path = self.tmp / 'message.txt'
         path.write_text(body)
-        expected = marked_message(body, AGENT_MARKER) + '\n'
-        self.assertEqual(self.b(root, 'agent-message', '--message-file', str(path)), expected)
-        self.assertEqual(self.b(root, 'agent-message', body), expected)
-        self.assertEqual(self.b(root, 'agent-message', expected[:-1]), expected)
+        expected = self.b(root, 'agent-message', '--message-file', str(path))
+        self.assert_framed(expected, body, trailer=None)
+        self.assert_framed(self.b(root, 'agent-message', body), body, trailer=None)
+        self.assert_framed(self.b(root, 'agent-message', expected[:-1]), body, trailer=None)
         self.b(root, 'agent-message', ok=False)
         self.b(root, 'agent-message', '', ok=False)
         self.b(root, 'agent-message', body, '--message-file', str(path), ok=False)
@@ -104,7 +114,7 @@ class WorkerMessages(Scenario):
         prepared = messages.agent_message(body)
         self.assertTrue(prepared.startswith(AGENT_HEADER))
         self.assertEqual(unmarked_message(prepared, AGENT_MARKER), body)
-        self.assertEqual(messages.agent_message(prepared), prepared)
+        self.assertEqual(unmarked_message(messages.agent_message(prepared), AGENT_MARKER), body)
 
     def test_peer_threads_and_coordinator_duty(self):
         root, _ = self.job()
@@ -142,6 +152,153 @@ class WorkerMessages(Scenario):
             out = self.b(root, "handback", "--summary", "Synthetic result", "--question", "Synthetic choice?", "a", "--branch", "job/sample", "--state", state,
                          "--report", "~/reports/sample.md", "--lessons", "none: made-up fixture", '--dissection', str(self.dissection_report()))
             self.assertIn(kind + ": coordinator can see it with brain due [branch: job/sample; report: ~/reports/sample.md]", out)
+
+
+class ClockStampedMessages(Scenario):
+    fixture_init_in_process = True
+
+    def setUp(self):
+        super().setUp()
+        import os
+        from unittest import mock
+        patch = mock.patch.dict(os.environ, self.env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.root = self.init('oak')
+        path = self.root / 'instance.md'
+        path.write_text(path.read_text().replace('timezone: UTC', 'timezone: Asia/Kathmandu'))
+        self.m = core_loader.SourceFileLoader('stamp_fixture', str(CORE / 'bin/brain')).load_module()
+        self.inst = self.m.Instance(self.root)
+
+    def metadata(self, text):
+        return json.loads(text.split('\n\n')[1].removeprefix('Brain-Envelope: '))
+
+    def hook(self, tool, args):
+        import contextlib, io, sys
+        from unittest import mock
+        data = {'cwd': str(self.root), 'session_id': 'fixture-coordinator',
+                'tool_name': tool, 'tool_input': args}
+        with mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(data))), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.m.cmd_hook_pretool(None)
+        return json.loads(out.getvalue())['hookSpecificOutput'] if out.getvalue() else None
+
+    def test_cli_stamps_instance_clock_preserves_typed_label_and_bytes(self):
+        import subprocess, sys
+        body = '23:42 typed label\r\n  Exact café evidence.  '
+        before = self.inst.now_dt().replace(microsecond=0)
+        for args in [('agent-message', body), ('msg', 'root', 'question', body)]:
+            # The scenario text runner uses universal-newline decoding. Observe
+            # actual stdout bytes so CRLF evidence is checked without that transform.
+            result = subprocess.run([sys.executable, str(CORE / 'bin/brain'), *args],
+                                    cwd=self.root, env=self.env, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            output = result.stdout.decode('utf-8')
+            stamp = datetime.datetime.fromisoformat(self.metadata(output)['sent_at'])
+            self.assertEqual(stamp.utcoffset(), datetime.timedelta(hours=5, minutes=45))
+            self.assertLessEqual(before, stamp)
+            self.assertLessEqual(stamp, self.inst.now_dt())
+            if args[0] == 'agent-message':
+                self.assertEqual(unmarked_message(output[:-1], AGENT_MARKER), body)
+            else:
+                self.assertIn('23:42 typed label', output)
+
+    def test_hook_refreshes_legacy_and_stamped_sends_without_granting_permission(self):
+        body = '23:42 typed label\n  Evidence stays exact.  '
+        old = marked_message(body, AGENT_MARKER, sent_at='2000-01-01T00:00:00+00:00')
+        before = self.inst.now_dt().replace(microsecond=0)
+        for tool in ('t3_thread_send', 'mcp__t3-code__t3_thread_send', 'mcp__t3_code__t3_thread_send'):
+            for text in (body, marked_message(body, AGENT_MARKER), old):
+                args = {'threadId': 'fixture-child', 'mode': 'queue', 'message': text, 'clientRequestId': 'stable'}
+                output = self.hook(tool, args)
+                self.assertEqual(set(output), {'hookEventName', 'updatedInput'})
+                updated = output['updatedInput']
+                self.assertEqual({k: v for k, v in updated.items() if k != 'message'},
+                                 {k: v for k, v in args.items() if k != 'message'})
+                self.assertEqual(unmarked_message(updated['message'], AGENT_MARKER), body)
+                stamp = datetime.datetime.fromisoformat(self.metadata(updated['message'])['sent_at'])
+                self.assertLessEqual(before, stamp)
+                self.assertLessEqual(stamp, self.inst.now_dt())
+                self.assertEqual(args['message'], text)
+        self.assertIsNone(self.hook('t3_thread_read', {'threadId': 'fixture-child'}))
+        self.assertIsNone(self.hook('t3_thread_send', {'threadId': 'fixture-child', 'message': None}))
+
+    def test_denial_is_marked_and_cannot_become_a_stamped_allow(self):
+        (self.root / 'AGENTS.md').write_text('## Forbidden actions\n- tool: *t3_thread_send\n')
+        output = self.hook('t3_thread_send', {'threadId': 'fixture-child', 'message': 'ordered relay'})
+        self.assertEqual(output['permissionDecision'], 'deny')
+        self.assertTrue(output['permissionDecisionReason'].startswith('brain-hook:pretool: '))
+        self.assertNotIn('updatedInput', output)
+
+    def test_routine_send_to_busy_coordinator_is_queued_without_cancelling_active_call(self):
+        import os, sys, subprocess
+        from unittest import mock
+        rpc = self.m._owners['HostRPCError']
+        active_call = {'id': 'fixture-mid-tool-call', 'state': 'running'}
+        queued, cancellations = [], []
+        def busy_bridge(command, **kwargs):
+            arguments = json.loads(command[-1])
+            if arguments.get('mode', 'auto') != 'queue':
+                cancellations.append(active_call['id'])
+                active_call['state'] = 'cancelled'
+                delivery = 'steered'
+            else:
+                queued.append(arguments)
+                delivery = 'queued'
+            return subprocess.CompletedProcess(command, 0, json.dumps({'delivery': delivery}), '')
+        with mock.patch.dict(os.environ, {'T3_ACP_MCP_NODE': sys.executable,
+                                          'T3_ACP_MCP_ENTRYPOINT': ''}), \
+                mock.patch.object(rpc.subprocess, 'run', side_effect=busy_bridge):
+            for kind in ('done', 'blocked', 'question'):
+                for mode in (None, 'auto', 'queue'):
+                    args = {'threadId': 'fixture-coordinator', 'message': kind + ': urgent STOP steer now',
+                            'clientRequestId': kind + '-' + str(mode)}
+                    if mode is not None:
+                        args['mode'] = mode
+                    updated = self.hook('mcp__t3_code__t3_thread_send', args)['updatedInput']
+                    # Check the hook separately: the native bridge must not mask a hook regression.
+                    self.assertEqual(updated['mode'], 'queue')
+                    self.assertNotIn('permissionDecision', updated)
+                    self.assertEqual(rpc.call('t3_thread_send', updated)['delivery'], 'queued')
+                    self.assertEqual(unmarked_message(queued[-1]['message'], AGENT_MARKER), args['message'])
+                    self.assertEqual(queued[-1]['clientRequestId'], args['clientRequestId'])
+        self.assertEqual(active_call, {'id': 'fixture-mid-tool-call', 'state': 'running'})
+        self.assertEqual(cancellations, [])
+        self.assertEqual(len(queued), len(('done', 'blocked', 'question')) * len((None, 'auto', 'queue')))
+        # Negative control: the same busy host cancels on the old default-auto payload.
+        busy_bridge(['fixture', json.dumps({'message': 'done: result', 'mode': 'auto'})])
+        self.assertEqual(cancellations, ['fixture-mid-tool-call'])
+
+    def test_hook_keeps_only_explicit_structural_interrupt_choices(self):
+        for mode in ('steer', 'restart'):
+            args = {'threadId': 'fixture-coordinator', 'mode': mode, 'message': 'question: ordinary words'}
+            updated = self.hook('t3_thread_send', args)['updatedInput']
+            self.assertEqual(updated['mode'], mode)
+            self.assertEqual(unmarked_message(updated['message'], AGENT_MARKER), args['message'])
+
+    def test_envelope_compatibility_integrity_and_uncovered_operator_remainder(self):
+        body = 'Evidence 🐙\n'
+        for stamp in (None, '2026-11-20T09:00:01+05:45'):
+            framed = marked_message(body, AGENT_MARKER, sent_at=stamp)
+            self.assertEqual(unmarked_message(framed, AGENT_MARKER), body)
+            self.assertTrue(_envelope.fully_marked(framed))
+            self.assertFalse(_envelope.fully_marked(framed + 'Operator remainder'))
+            self.assertFalse(_envelope.fully_marked(framed.replace('Evidence', 'Changed!')))
+        legacy = marked_message(body, AGENT_MARKER)
+        invalid = legacy.replace('"bytes":', '"sent_at": "23:42", "bytes":')
+        self.assertFalse(_envelope.fully_marked(invalid))
+        with self.assertRaises(ValueError):
+            marked_message(body, AGENT_MARKER, sent_at='2026-11-20T09:00:00')
+
+    def test_notify_uses_receipt_clock_even_when_publication_crosses_a_minute(self):
+        from unittest import mock
+        receipt = '2026-11-20 09:59 +05:45'
+        with mock.patch.object(self.inst, 'now', side_effect=[receipt, '2026-11-20 10:00 +05:45']):
+            record = self.m.communication_record(self.inst, self.inst.node('root'), 'fyi',
+                                                 '23:42 typed label stays', 'fixture-clock')
+        self.assertEqual(record['at'], receipt)
+        self.assertIn('- ' + receipt + ' from notification: fyi: 23:42 typed label stays',
+                      (self.root / 'inbox.md').read_text())
 
 
 class AutomatedBriefAttribution(Scenario):
@@ -634,7 +791,11 @@ class ReportGates(Scenario):
         if not out.getvalue().strip():
             return None
         decision = json.loads(out.getvalue())['hookSpecificOutput']
+        if 'updatedInput' in decision:
+            self.assertNotIn('permissionDecision', decision)
+            return None
         self.assertEqual(decision['permissionDecision'], 'deny')
+        self.assertTrue(decision['permissionDecisionReason'].startswith('brain-hook:pretool: '))
         return decision['permissionDecisionReason']
 
     def stop(self, last_message, session='runtime-coordinator'):

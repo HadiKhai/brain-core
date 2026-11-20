@@ -1,0 +1,42 @@
+{
+  "runs": [
+    {
+      "name": "brain-host-stamp-affected",
+      "completed": 107,
+      "failures": [
+        "tests/test_hosts.py::StopHook::test_stop_notice_guard_blocks_ignored_output_and_second_stop_passes"
+      ],
+      "wall_s": 156.0
+    },
+    {
+      "name": "brain-host-stamp-final",
+      "completed": 37,
+      "failures": [],
+      "wall_s": 29.21
+    }
+  ],
+  "distinct_latest_completed": 107,
+  "distinct_latest_passed": 107,
+  "distinct_latest_failed": [],
+  "affected_wall_s": 185.21,
+  "parallel_workers": 4,
+  "lane_coverage": {
+    "lanes": 39,
+    "unit_files": 119
+  },
+  "source_sha256": {
+    "lib/brain/action_guard.py": "84d9ee2f7c5b21257d16604f39d75e61fb71e997020fa0a7ba541e944728c6b7",
+    "lib/brain/message_envelope.py": "c35018494aa2607173b170208f7c460a45ab6fc90f23a655af1b66b08e575ff1",
+    "lib/brain/messages.py": "5c67e3fe02d1acba17b0cbfeb51c8ae34d9be06bc24808511169c8d97c87694e",
+    "lib/brain/communication.py": "1603e6af4d3c7bb2ec74933f61a9a24c4d4e14ec0a4d6462b120fd8ceb522476",
+    "lib/brain/cleanup_notices.py": "f066245ce78bbde29a94f589a126eeee339dabd15f5cad6ff67282774b6e013c",
+    "lib/brain/hosts.py": "e551247915eefb36a8ea5307e667a7b66e7722572525d6ef6570c57a4d8ec441",
+    "roles/coordinator.md": "8d298c149337d1ca183f80f1d39eedf4cd80eadb70c34bc28d8ceedc8f6ed14b",
+    "roles/worker.md": "0f66aafd31da25eb0147b9e9eb66e38a683d1eafd6fc3432638d1d31ee92b5dd"
+  },
+  "notes": [
+    "The first 21-test preliminary run had one harness failure: universal-newline decoding transformed CRLF before hash validation. The corrected test captures stdout bytes.",
+    "The 107-test run passed 106 and exposed one exact expected-output assertion needing the new stop source prefix. The corrected stop class and clock class rerun passed all 37 tests. All 107 distinct tests have a passing latest result.",
+    "No local full suite was run."
+  ]
+}

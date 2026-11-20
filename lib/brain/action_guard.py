@@ -259,9 +259,10 @@ def cmd_hook_pretool(a):
         reason = _m_launch_policy.pretool_launch_reason(inst, policy, data)
         if reason:
             print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',
-                  'permissionDecision': 'deny', 'permissionDecisionReason': _m_guard.redact(reason, _m_guard.never_terms(policy))}}))
+                  'permissionDecision': 'deny', 'permissionDecisionReason': 'brain-hook:pretool: ' + _m_guard.redact(reason, _m_guard.never_terms(policy))}}))
             return
         if len(nearest) != 1:
+            stamp_send(inst, data)
             return
         sender = data.get('session_id')
         if isinstance(sender, str) and sender.strip():
@@ -278,7 +279,18 @@ def cmd_hook_pretool(a):
             reason += _m_report_gates.refused_parent_note(inst, nearest[0], data) or ''
         if reason:
             print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',
-                  'permissionDecision': 'deny', 'permissionDecisionReason': _m_guard.redact(reason, _m_guard.never_terms(nearest[0]))}}))
+                  'permissionDecision': 'deny', 'permissionDecisionReason': 'brain-hook:pretool: ' + _m_guard.redact(reason, _m_guard.never_terms(nearest[0]))}}))
+        else:
+            stamp_send(inst, data)
     except (Exception, SystemExit):
         return  # Missing policy, malformed input or unavailable bookkeeping never breaks a runtime.
+
+
+def stamp_send(inst, data):
+    from . import messages
+    updated = messages.stamped_send_input(inst, data.get('tool_name'), data.get('tool_input'))
+    if updated is not None and updated != data.get('tool_input'):
+        # updatedInput replaces the entire object. No allow/ask decision: native
+        # permissions still apply, and denied calls never reach this rewrite.
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'updatedInput': updated}}))
 

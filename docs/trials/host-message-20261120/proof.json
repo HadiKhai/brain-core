@@ -1,0 +1,36 @@
+{
+  "clock_window": [
+    "2026-11-20T09:25:01+05:45",
+    "2026-11-20T09:25:03.849144+05:45"
+  ],
+  "formatter_stamps": {
+    "agent-message": "2026-11-20T09:25:01+05:45",
+    "msg": "2026-11-20T09:25:02+05:45"
+  },
+  "notification_at": "2026-11-20 09:25 +05:45",
+  "hook_stamp": "2026-11-20T09:25:03+05:45",
+  "hook_clock_window": [
+    "2026-11-20T09:25:03+05:45",
+    "2026-11-20T09:25:03.992545+05:45"
+  ],
+  "denial": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "brain-hook:pretool: Forbidden action matched this node's declared tool rules; an exact --once allowance is required."
+  },
+  "body_bytes_preserved": true,
+  "other_arguments_preserved": true,
+  "operator_remainder_not_hidden": true,
+  "permission_not_granted": true,
+  "busy_bridge_fixture": {
+    "deliveries": [
+      "queued",
+      "queued"
+    ],
+    "active_call": "running",
+    "cancelled": [],
+    "queued_count": 2
+  },
+  "concurrent_commands": 3,
+  "elapsed_s": 2.628502
+}

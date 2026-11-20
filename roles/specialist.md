@@ -17,6 +17,13 @@ A hired specialist runs as a **worker** in the target node. Its brief is assembl
 2. the lessons and library items the target node may use (`core/bin/brain usable`);
 3. the task.
 
+Deliver routine reports, hand-backs and questions to the coordinator with host send
+`mode: queue`, preserving its running turn and active call. Explicitly choose
+`mode: steer` only to intentionally interrupt mid-turn, or `mode: restart` to
+interrupt and restart. Never use `auto` for routine traffic or infer delivery mode
+from the message text. Where hooks cannot rewrite input, set `queue` yourself;
+Brain's native send bridge also queues omitted/`auto` modes.
+
 Imported roles start `proposed` and cannot be hired until the operator/coordinator confirms
 their review with `brain specialist accept`. Source roles are summarized, never copied as authority.
 

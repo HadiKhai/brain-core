@@ -27,6 +27,9 @@ def call(tool_name, arguments):
         raise HostRPCError('invalid native host tool name')
     if not isinstance(arguments, dict):
         raise HostRPCError('native host arguments must be an object')
+    if tool_name == 't3_thread_send':
+        from .messages import send_delivery_mode
+        arguments = {**arguments, 'mode': send_delivery_mode(arguments.get('mode'))}
     if tool_name == 't3_thread_organize':
         if set(arguments) - {'threadId', 'action', 'snoozedUntil'}:
             raise HostRPCError('thread organization requires singular threadId; unknown arguments refused')

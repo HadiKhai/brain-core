@@ -1,0 +1,52 @@
+{
+  "base_head": "c83019f6662a8b2a519a50fb398413f7738d5eb8",
+  "collected": 89,
+  "completed": 89,
+  "passed": 89,
+  "failures": [],
+  "wall_s": 52.79,
+  "workers": 4,
+  "affected_files": [
+    "tests/test_messages.py",
+    "tests/test_worker_message_guard.py",
+    "tests/test_host_rpc.py",
+    "tests/test_coordinator_profile.py",
+    "tests/test_prune_states.py",
+    "tests/test_prune_thread_targets.py"
+  ],
+  "regressions": [
+    "tests/test_messages.py::ClockStampedMessages::test_routine_send_to_busy_coordinator_is_queued_without_cancelling_active_call",
+    "tests/test_messages.py::ClockStampedMessages::test_hook_keeps_only_explicit_structural_interrupt_choices",
+    "tests/test_host_rpc.py::HostRPC::test_native_sends_queue_without_hook_and_preserve_explicit_interruption"
+  ],
+  "lane_coverage": {
+    "lanes": 39,
+    "unit_files": 119
+  },
+  "standalone_proof_s": 2.628502,
+  "busy_bridge_fixture": {
+    "deliveries": [
+      "queued",
+      "queued"
+    ],
+    "active_call": "running",
+    "cancelled": [],
+    "queued_count": 2
+  },
+  "source_sha256": {
+    "lib/brain/messages.py": "3bc32e6dbc0807d9e8afba62c95955e43b6b70160028cca61fc78fc50a948f7f",
+    "lib/brain/host_rpc.py": "82cf1767e998dfae0531a94f019fd04a21b12cdb9e2a4243c1af1983e8420b46",
+    "lib/brain/cleanup_notices.py": "19631841e0f6f53a1ce429076699b5beca9672905dd04b67258beb39189068b4",
+    "roles/worker.md": "3bc2489f31a29145a5ca57518177a68c2d0e1e7650f1609eb7818ca680b4ae4e",
+    "roles/coordinator.md": "cec411f72e6a0efef81b1f19b7b1ce6d0097d3a13ed966b2824777c1fe3ca258",
+    "roles/specialist.md": "9718837fd364b5eba53a4911cf1310c5f865db88ce8ed99cdf85a3c0579d352a",
+    "tests/test_messages.py": "e60247ce19c2751bd8c49bba684dd63648ef3e459363e62341ff087b8c898255",
+    "tests/test_host_rpc.py": "29f851b3dd6343b8c2e2d71296d9a5f0f805fce0d3c67f8782f6e53cf08e93c6"
+  },
+  "notes": [
+    "Preliminary targeted run: 22 passed and one prose assertion failed because it required intentional rather than intend. That low-value wording check was removed; the behavioral tests and negative control remain.",
+    "The final affected run passed all 89 tests. No local full suite or paid model calls.",
+    "Busy-host behavior is a deterministic host-contract fixture, not a live T3 runtime claim. Actual CLI/hook/native bridge processes were exercised.",
+    "All Git mutations used git -C with the assigned absolute worktree path. No force push, merge, tag or installed-core change."
+  ]
+}

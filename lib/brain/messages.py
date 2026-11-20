@@ -1,6 +1,7 @@
 """Worker message formatting; host delivery remains the caller's action."""
 from pathlib import Path
 import re
+import datetime
 
 from . import common as _m_common
 from .message_envelope import AGENT_MESSAGE_PREFIX, marked_message, unmarked_message
@@ -9,9 +10,29 @@ _m_guard = _m_common.LazyModule(__package__, 'guard')
 _m_jobs = _m_common.LazyModule(__package__, 'jobs')
 _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
-def agent_message(text):
+def agent_message(text, inst=None):
     """Frame the exact body so a coalesced operator remainder cannot be hidden."""
-    return marked_message(text, AGENT_MESSAGE_PREFIX)
+    if inst is None:
+        root = _m_nodes.try_find_root()
+        if root:
+            from .instance import Instance
+            inst = Instance(root)
+    now = inst.now_dt() if inst else datetime.datetime.now().astimezone()
+    return marked_message(text, AGENT_MESSAGE_PREFIX, sent_at=now.isoformat(timespec='seconds'))
+
+
+def send_delivery_mode(mode=None):
+    """Only an explicit interruption choice may preempt a running recipient."""
+    return mode if mode in ('steer', 'restart') else 'queue'
+
+
+def stamped_send_input(inst, tool, args):
+    """Stamp a declared send and queue routine traffic without reading its meaning."""
+    if (not isinstance(tool, str) or tool.split('__')[-1].split('.')[-1] != 't3_thread_send'
+            or not isinstance(args, dict) or not isinstance(args.get('message'), str)):
+        return None
+    return {**args, 'message': agent_message(args['message'], inst),
+            'mode': send_delivery_mode(args.get('mode'))}
 
 
 def cmd_agent_message(a):
@@ -31,6 +52,8 @@ MESSAGE_PROTOCOL = (
     "Send the coordinator only start, done, blocked or question; no progress notes, receipts, acknowledgements or hash relays. "
     "Use `brain msg <node> <kind> \"<one line>\"` to format a host message, adding branch and report when known, or use the existing hand-back path. "
     "Questions and failure reports always go through. "
+    "Use host send mode queue for routine reports, hand-backs and questions; "
+    "choose mode steer only to intentionally interrupt the recipient's running turn. "
     "Workers sharing a commit coordinate directly with the peer thread named in their brief; ask the coordinator for its id once if absent."
 )
 
@@ -89,8 +112,8 @@ def cmd_msg(a):
     report = a.report
     if not report and row:
         report = (_m_jobs.read_handback(n, row) or {}).get("report") or _m_common.tilde(_m_jobs.handback_file(n, row))
-    print(agent_message(_m_guard.redact(format_worker_message(a.kind, a.message, branch, report), _m_guard.never_terms(n))))
+    print(agent_message(_m_guard.redact(format_worker_message(a.kind, a.message, branch, report), _m_guard.never_terms(n)), inst))
     if n['id'] == 'root' and a.kind != 'question':
         print('INBOX ONLY: record landing/park/FYI with brain notify; do not host-send this update')
     else:
-        print("NOT SENT: use the host send")
+        print("NOT SENT: use the host send with mode queue")

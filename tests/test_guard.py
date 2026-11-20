@@ -1487,7 +1487,9 @@ class ForbiddenActions(Scenario):
                            input=json.dumps({'cwd': str(r), 'tool_name': 'Bash', 'tool_input': {'command': 'git push'}}),
                            text=True, capture_output=True)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertEqual(json.loads(p.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+        decision = json.loads(p.stdout)['hookSpecificOutput']
+        self.assertEqual(decision['permissionDecision'], 'deny')
+        self.assertTrue(decision['permissionDecisionReason'].startswith('brain-hook:pretool: '))
         p = subprocess.run([sys.executable, str(CORE / 'bin/brain'), 'hook', 'pretool'], cwd=r, env=self.env,
                            input='{bad', text=True, capture_output=True)
         self.assertEqual((p.returncode, p.stdout), (0, ''))

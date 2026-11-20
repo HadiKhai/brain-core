@@ -133,7 +133,7 @@ def communication_record(inst, n, kind, text, key, question=None):
     if defer or record.get('deferred'):
         return record  # quiet retries never deliver; only deferred receipts are morning work
     # Receipt first: interrupted inbox publication is recoverable by the next same-key call.
-    line = '- ' + inst.now() + ' from notification: ' + kind + ': ' + text + ' ' + marker + '\n'
+    line = '- ' + record['at'] + ' from notification: ' + kind + ': ' + text + ' ' + marker + '\n'
     if typed:
         _m_transitions.inbox_append(n['dir'], line, marker)
     else:

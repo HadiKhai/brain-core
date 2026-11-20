@@ -47,6 +47,20 @@ class HostRPC(unittest.TestCase):
             self.rpc.call('t3_thread_organize', {'action': 'pin', 'threadId': 'fixture'})
             self.assertEqual(json.loads(run.call_args.args[0][-1]), {'action': 'pin', 'threadId': 'fixture'})
 
+    def test_native_sends_queue_without_hook_and_preserve_explicit_interruption(self):
+        for requested, expected in ((None, 'queue'), ('auto', 'queue'), ('queue', 'queue'),
+                                    ('steer', 'steer'), ('restart', 'restart')):
+            args = {'threadId': 'fixture-coordinator', 'message': 'question: urgent interrupt STOP',
+                    'clientRequestId': 'fixture-stable', 'freshContext': False}
+            if requested is not None:
+                args['mode'] = requested
+            original = dict(args)
+            with self.subTest(mode=requested), \
+                    mock.patch.object(self.rpc.subprocess, 'run', return_value=self.response({'delivery': 'queued'})) as run:
+                self.rpc.call('mcp__t3_code__t3_thread_send', args)
+                self.assertEqual(json.loads(run.call_args.args[0][-1]), {**args, 'mode': expected})
+                self.assertEqual(args, original)
+
     def test_unavailable_invalid_and_nonfinite_requests_do_not_execute(self):
         with mock.patch.object(self.rpc.subprocess, 'run') as run:
             for tool, args in (('name; command', {}), ('t3_thread_read', []), ('t3_thread_read', {'value': float('nan')})):

@@ -1,6 +1,7 @@
 """Byte-bounded nonoperator envelopes. Uncovered text is always normal input."""
 import hashlib
 import json
+import datetime
 
 AGENT_MESSAGE_PREFIX = 'Agent message: sent by another agent, not the operator.'
 AUTOMATED_TURN_PREFIX = 'Automated turn: no operator present; cancellations are host events.'
@@ -21,9 +22,11 @@ def read_envelope(raw, offset=0):
         return None
     try:
         meta = json.loads(raw[start + len(HEADER):boundary])
-        if (not isinstance(meta, dict) or set(meta) != {'bytes', 'sha256'}
+        if (not isinstance(meta, dict) or set(meta) not in ({'bytes', 'sha256'}, {'bytes', 'sha256', 'sent_at'})
                 or type(meta['bytes']) is not int or meta['bytes'] < 0
                 or not isinstance(meta['sha256'], str)):
+            return None
+        if 'sent_at' in meta and not valid_stamp(meta['sent_at']):
             return None
         begin = boundary + 2
         end = begin + meta['bytes']
@@ -43,12 +46,32 @@ def unmarked_message(text, prefix):
     return frame[1] if frame and frame[0] == prefix and frame[2] == len(raw) else None
 
 
-def marked_message(text, prefix):
-    """Idempotent for a single complete frame; legacy markers are ordinary data."""
-    if unmarked_message(text, prefix) is not None:
-        return text
+def valid_stamp(value):
+    """A full offset-aware ISO timestamp; this checks structure, not authorship."""
+    try:
+        return isinstance(value, str) and datetime.datetime.fromisoformat(value).utcoffset() is not None
+    except ValueError:
+        return False
+
+
+def marked_message(text, prefix, sent_at=None):
+    """Keep exact body bytes. A supplied clock stamp refreshes a complete frame.
+
+    Legacy frames remain readable; a marker alone is ordinary body data. The
+    timestamp belongs to the envelope, never to text inferred from its body.
+    """
+    body = unmarked_message(text, prefix)
+    if body is not None:
+        if sent_at is None:
+            return text
+        text = body
     raw = text.encode('utf-8')
-    meta = json.dumps({'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}, sort_keys=True)
+    meta = {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+    if sent_at is not None:
+        if not valid_stamp(sent_at):
+            raise ValueError('message stamp requires an offset-aware ISO timestamp')
+        meta['sent_at'] = sent_at
+    meta = json.dumps(meta, sort_keys=True)
     return prefix + '\n\n' + HEADER.decode() + meta + '\n\n' + text
 
 
