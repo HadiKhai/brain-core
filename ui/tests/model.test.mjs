@@ -242,6 +242,8 @@ test("machine pressure preserves processor, memory and disk warning thresholds",
     mem_total_gb: 32,
     disk_free_gb: 39,
     disk_total_gb: 1000,
+    disk_reserve_gb: 40,
+    disk_floor_gb: 40,
   });
   assert.equal(rows.length, 3);
   assert.ok(rows.every((r) => r.state === "Critical pressure"));
@@ -305,4 +307,13 @@ test("Needs you keeps one item per id and leaves advice out", () => {
   assert.equal(m.needAsk("Choose a color; waiting on operator; clears when chosen; since: 2020-01-01; recommendation: blue; default: gray"),
     "Choose a color; waiting on operator; clears when chosen");
   assert.equal(state.inbox.length, 3);
+});
+
+
+test("disk status follows declared reserve and bounded floor without guessed thresholds", () => {
+  const disk = { disk_free_gb: 18, disk_total_gb: 1000, disk_reserve_gb: 43, disk_floor_gb: 12 };
+  assert.equal(m.machineHealth(disk)[0].state, "Below reserve · admitted");
+  assert.equal(m.machineHealth({ ...disk, disk_floor_gb: 43 })[0].state, "Critical pressure");
+  assert.equal(m.machineHealth({ ...disk, disk_free_gb: 43 })[0].state, "Normal");
+  assert.equal(m.machineHealth({ disk_free_gb: 18, disk_total_gb: 1000 })[0].state, "Reserve unknown");
 });

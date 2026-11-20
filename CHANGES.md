@@ -24,6 +24,18 @@ verification state and safe error. Signed-out or unavailable capacity is disting
 from confirmed stop-line exhaustion. No instance configuration changes are needed.
 Refresh once with `brain usage --refresh`, or let the poller refresh.
 
+## 2026-11-20: Bounded disk admissions preserve the machine reserve
+
+Use `brain machine admit --disk-floor N --until HH:MM --reason "one named gate"` for an
+explicit temporary disk floor. The base machine policy is never rewritten. The latest admission
+expires on policy reads, without a timer, and its first observer appends an expiry audit entry; `brain machine admit list` shows audit history and
+`brain machine admit cancel --reason "gate finished"` cancels early. Deadlines are today in the instance's timezone
+(`HH:MM` or `HH:MM:SS`), or an ISO timestamp with an offset for overnight work. Holds identify the
+measured disk value, reserve, machine policy owner and admission command. The dashboard's Usage
+page shows free disk against its policy reserve and the active admission's floor, owner and expiry.
+Admissions can only loosen the effective base reserve. Grants recheck expiry under the queue lock
+after sampling. No configuration change is required; existing machine policy and defaults remain in force.
+
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 
 A coordinator's send, launch or worker start is refused as unordered only in an operator turn.

@@ -3576,3 +3576,277 @@ class WriteQueueService(Scenario):
         until(lambda: self.queue.intent_receipt(self.inst, request['id']) is not None)
         self.assertEqual(self.queue.intent_receipt(self.inst, request['id'])['state'], 'applied')
         self.assertEqual((self.root / 'inbox.md').read_text().count(request['id']), 1)
+
+
+class BoundedMachineAdmission(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('bounded_admission_fixture', str(CORE / 'bin/brain')).load_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.policy = self.folder / 'machine-care.json'
+        self.policy.write_text(json.dumps({'disk_free_gb': 43, 'max_hold_minutes': 0}))
+        self.original = self.policy.read_bytes()
+        self.now = time.time()
+        self.reading = {'disk_free_gb': 18, 'disk_total_gb': 1000}
+        (self.folder / 'instance.md').write_text('---\ntimezone: UTC\nprincipals: fixture\n---\n')
+        (self.folder / 'node.md').write_text('---\ntitle: Fixture\n---\n')
+        machine = self.m._owners['machine_admission_command']
+        self.patches = [mock.patch.object(self.m, 'machine_dir', return_value=self.folder),
+                        mock.patch.object(self.m, 'machine_top_cpu', return_value=[]),
+                        mock.patch.object(self.m, 'machine_reading', side_effect=lambda inst=None: dict(self.reading)),
+                        mock.patch.object(machine._m_nodes, 'find_root', return_value=self.folder)]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.reading = {'disk_free_gb': 18, 'disk_total_gb': 1000}
+
+    def command(self, **kwargs):
+        args = argparse.Namespace(id=None, disk_floor=None, until=None, reason=None)
+        vars(args).update(kwargs)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.machine_admission_command(args)
+        return json.loads(output.getvalue())
+
+    def admit(self):
+        deadline = datetime.datetime.fromtimestamp(self.now + 60, datetime.timezone.utc).isoformat()
+        return self.command(disk_floor=12, until=deadline, reason='one named fixture gate')
+
+    def test_expiry_restores_policy_without_base_write_or_a_timer(self):
+        row = self.admit()['active']
+        journal = (self.folder / 'machine-admissions.json').read_bytes()
+        with mock.patch.object(self.m.time, 'time', return_value=row['until'] - 0.001):
+            self.assertEqual(self.m.machine_reasons(self.reading, self.m.machine_policy()), [])
+        with mock.patch.object(self.m.time, 'time', return_value=row['until']):
+            policy = self.m.machine_policy()
+            self.assertEqual(policy['disk_free_gb'], 43)
+            self.assertIsNone(policy['_admission'])
+            self.assertIn('free disk 18 GB < 43 GB', self.m.machine_reasons(self.reading, policy)[0])
+        updated = (self.folder / 'machine-admissions.json').read_bytes()
+        self.assertNotEqual(updated, journal)
+        self.assertEqual([e['action'] for e in json.loads(updated)['events']], ['admit', 'expire'])
+        self.assertEqual(self.policy.read_bytes(), self.original)
+
+    def test_list_cancel_audit_and_permissions(self):
+        row = self.admit()['active']
+        self.assertTrue(row['actor'])
+        self.assertEqual(row['reason'], 'one named fixture gate')
+        self.assertLess(row['at'], row['until'])
+        self.assertEqual(self.command()['active'], row)
+        self.command(id='cancel', reason='fixture finished')
+        data = self.command()
+        self.assertIsNone(data['active'])
+        self.assertEqual([e['action'] for e in data['events']], ['admit', 'cancel'])
+        self.assertEqual(data['events'][-1]['reason'], 'fixture finished')
+        self.assertEqual(self.m.machine_policy()['disk_free_gb'], 43)
+        self.assertEqual((self.folder / 'machine-admissions.json').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.policy.read_bytes(), self.original)
+
+    def test_bad_deadlines_and_nonfinite_limits_never_publish(self):
+        for value in ('00:00', '25:00', 'tomorrow', '2020-01-01T00:00:00', '2020-01-01T00:00:00Z'):
+            with self.subTest(until=value), self.assertRaises(SystemExit):
+                self.command(disk_floor=12, until=value)
+        for value in (-1, float('nan'), float('inf')):
+            with self.subTest(floor=value), self.assertRaises(SystemExit):
+                self.command(disk_floor=value, until='23:59')
+        self.assertFalse((self.folder / 'machine-admissions.json').exists())
+
+    def test_local_clock_and_offset_deadlines_are_exact(self):
+        now = datetime.datetime.now().astimezone().replace(hour=10, minute=20, second=0, microsecond=0)
+        target = now.replace(hour=10, minute=21, second=3)
+        self.assertEqual(self.m.machine_admission_until('10:21:03', now), target.timestamp())
+        self.assertEqual(self.m.machine_admission_until(target.isoformat(), now), target.timestamp())
+        with self.assertRaises(SystemExit):
+            self.m.machine_admission_until('10:20', now)
+
+    def test_invalid_journal_fails_closed_and_is_preserved(self):
+        path = self.folder / 'machine-admissions.json'
+        for data in ({'version': 1, 'events': [{}]}, {'version': 1, 'events': 'broken'}, []):
+            path.write_text(json.dumps(data))
+            self.assertIn('_error', self.m.machine_policy(strict=False))
+            with self.assertRaises(ValueError):
+                self.command(id='cancel')
+            self.assertEqual(json.loads(path.read_text()), data)
+
+    def test_hold_names_measurement_reserve_authority_and_command(self):
+        reasons = self.m.machine_reasons(self.reading, self.m.machine_policy())
+        for text in ('free disk 18 GB < 43 GB', 'declared reserve 43 GB', 'machine policy owner',
+                     'brain machine admit --disk-floor N --until HH:MM'):
+            self.assertIn(text, reasons[0])
+        with mock.patch.object(self.m, 'machine_reading', return_value=self.reading), \
+             mock.patch.object(self.m, 'process_stamp', return_value='fixture-start'), \
+             self.assertRaisesRegex(SystemExit, 'free disk 18 GB < 43 GB'):
+            self.m.machine_wait(reporter=None)
+
+    def test_dashboard_data_and_cached_holds_use_live_override(self):
+        self.admit()
+        cached = dict(self.reading, sample_reasons=['free disk 18 GB < 43 GB', 'thermal warning unresolved'])
+        policy = self.m.machine_policy()
+        self.assertEqual(self.m.machine_reasons(cached, policy), ['thermal warning unresolved'])
+        with mock.patch.object(self.m, 'machine_reading', return_value=dict(self.reading)):
+            state = self.m.machine_state()
+        self.assertEqual((state['disk_reserve_gb'], state['disk_floor_gb']), (43, 12))
+        self.assertEqual(state['admission']['reason'], 'one named fixture gate')
+        self.assertEqual(state['held'], [])
+        with mock.patch.object(self.m.time, 'time', return_value=state['admission']['until']), \
+             mock.patch.object(self.m, 'machine_reading', return_value=dict(self.reading)):
+            state = self.m.machine_state()
+        self.assertEqual((state['disk_reserve_gb'], state['disk_floor_gb']), (43, 43))
+        self.assertIsNone(state['admission'])
+        self.assertTrue(state['held'])
+
+    def test_absent_policy_retains_existing_small_machine_reserve(self):
+        self.policy.unlink()
+        with mock.patch.object(self.m, 'machine_reading', return_value={'disk_free_gb': 18, 'disk_total_gb': 100}):
+            state = self.m.machine_state()
+        self.assertEqual(state['disk_reserve_gb'], 20)
+        self.admit()
+        with mock.patch.object(self.m, 'machine_reading', return_value={'disk_free_gb': 18, 'disk_total_gb': 100}):
+            state = self.m.machine_state()
+        self.assertEqual((state['disk_reserve_gb'], state['disk_floor_gb']), (20, 12))
+
+
+    def test_newest_expired_override_does_not_reactivate_an_older_one(self):
+        self.admit()
+        until = datetime.datetime.fromtimestamp(self.now + 30, datetime.timezone.utc).isoformat()
+        row = self.command(disk_floor=10, until=until, reason='replacement admission')['active']
+        with mock.patch.object(self.m.time, 'time', return_value=row['until']):
+            self.assertIsNone(self.m.machine_policy()['_admission'])
+            self.assertEqual(self.m.machine_policy()['disk_free_gb'], 43)
+        self.assertEqual([e['action'] for e in self.command()['events']], ['admit', 'admit', 'expire'])
+
+    def test_concurrent_real_cli_writers_keep_both_audit_records(self):
+        deadline = datetime.datetime.fromtimestamp(self.now + 60, datetime.timezone.utc).isoformat()
+        env = {**os.environ, 'HOME': str(self.folder), 'BRAIN_NO_REEXEC': '1',
+               'BRAIN_ROOT': str(self.folder), 'BRAIN_CONFIG': str(self.folder / 'brains.json')}
+        (self.folder / 'instance.md').write_text('---\ntimezone: UTC\nprincipals: fixture\n---\n')
+        (self.folder / 'node.md').write_text('---\ntitle: Fixture\n---\n')
+        # Preserve the actual exception if a public command reports a write failure.
+        wrapper = """import runpy, sys, traceback
+sys.path.insert(0, sys.argv.pop(1))
+from brain import common
+original = common.die
+def diagnose(message, *args, **kwargs):
+    traceback.print_exc()
+    original(message, *args, **kwargs)
+common.die = diagnose
+script = sys.argv.pop(1)
+sys.argv[0] = script
+runpy.run_path(script, run_name='__main__')
+"""
+        commands = [subprocess.Popen([sys.executable, '-B', '-c', wrapper, str(CORE / 'lib'), str(CORE / 'bin/brain'), 'machine', 'admit',
+                    '--disk-floor', str(floor), '--until', deadline, '--reason', f'fixture gate {floor}'],
+                    cwd=self.folder, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    for floor in (10, 12)]
+        try:
+            observed = []
+            for command in commands:
+                stdout, stderr = command.communicate(timeout=20)
+                observed.append((command.returncode, stdout, stderr))
+            self.assertEqual([r[0] for r in observed], [0, 0], repr(observed))
+            journal = json.loads((self.folder / '.local/state/brain/machine-admissions.json').read_text())
+            self.assertCountEqual([row['disk_floor_gb'] for row in journal['events']], [10, 12])
+        finally:
+            for command in commands:
+                if command.poll() is None:
+                    command.kill()
+                    command.wait()
+
+
+    def test_review_expiry_during_sampling_or_queue_lock_never_grants(self):
+        for boundary in ('sampling', 'queue-lock', 'capacity'):
+            with self.subTest(boundary=boundary):
+                wall = [100.0]
+                journal = {'version': 1, 'events': [{'action': 'admit', 'at': 99.0, 'until': 101.0,
+                    'actor': 'fixture', 'reason': 'one gate', 'disk_floor_gb': 12}]}
+                (self.folder / 'machine-admissions.json').write_text(json.dumps(journal))
+                queue = self.m.machine_queue
+                @contextlib.contextmanager
+                def delayed_queue():
+                    with queue() as state:
+                        if boundary == 'queue-lock':
+                            wall[0] = 102.0
+                        yield state
+                limit = self.m.machine_limit
+                def delayed_limit(policy):
+                    if boundary == 'capacity':
+                        wall[0] = 102.0
+                    return limit(policy)
+                def sample():
+                    if boundary == 'sampling':
+                        wall[0] = 102.0
+                    return dict(self.reading)
+                with mock.patch.object(self.m.time, 'time', side_effect=lambda: wall[0]), \
+                     mock.patch.object(self.m, 'process_stamp', return_value='fixture-start'), \
+                     mock.patch.object(self.m, 'machine_queue', side_effect=delayed_queue), \
+                     mock.patch.object(self.m, 'machine_limit', side_effect=delayed_limit), \
+                     self.assertRaisesRegex(SystemExit, 'free disk 18 GB < 43 GB'):
+                    self.m.machine_wait(read=sample, reporter=None)
+                self.assertEqual(self.policy.read_bytes(), self.original)
+
+    def test_review_clock_deadline_uses_instance_zone_on_utc_host(self):
+        fixed = datetime.datetime(2026, 11, 20, 8, tzinfo=datetime.timezone.utc)
+        old_zone = os.environ.get('TZ')
+        self.addCleanup(lambda: (os.environ.pop('TZ', None) if old_zone is None else
+                                 os.environ.__setitem__('TZ', old_zone), time.tzset()))
+        os.environ['TZ'] = 'UTC'
+        time.tzset()
+        (self.folder / 'instance.md').write_text('---\ntimezone: Asia/Beirut\nprincipals: fixture\n---\n')
+        with mock.patch.object(self.m.datetime, 'datetime', wraps=datetime.datetime) as dates, \
+             mock.patch.object(self.m.time, 'time', return_value=fixed.timestamp()):
+            dates.now.side_effect = lambda tz=None: fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+            row = self.command(disk_floor=12, until='11:00')['active']
+        expected = datetime.datetime(2026, 11, 20, 9, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertEqual(row['until'], expected)
+
+    def test_review_expiry_is_logged_once_by_readers_without_policy_rewrite(self):
+        row = self.admit()['active']
+        with mock.patch.object(self.m.time, 'time', return_value=row['until'] + 1):
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=4) as readers:
+                policies = list(readers.map(lambda _: self.m.machine_policy(), range(4)))
+            self.assertTrue(all(policy['_admission'] is None for policy in policies))
+            journal = self.command()
+            self.assertIsNone(self.m.machine_policy()['_admission'])
+            self.assertEqual(self.command(), journal)
+        events = journal['events']
+        self.assertEqual([e['action'] for e in events], ['admit', 'expire'])
+        self.assertEqual(events[-1]['at'], row['until'] + 1)
+        self.assertEqual(events[-1]['until'], row['until'])
+        self.assertTrue(events[-1]['actor'])
+        self.assertTrue(events[-1]['reason'])
+        self.assertEqual(self.policy.read_bytes(), self.original)
+
+    def test_review_admission_refuses_tightening_effective_base_reserve(self):
+        deadline = datetime.datetime.fromtimestamp(self.now + 60, datetime.timezone.utc).isoformat()
+        with self.assertRaisesRegex(SystemExit, 'effective base reserve'):
+            self.command(disk_floor=99, until=deadline)
+        self.assertFalse((self.folder / 'machine-admissions.json').exists())
+        self.policy.unlink()
+        with mock.patch.object(self.m, 'machine_reading', return_value={'disk_free_gb': 18, 'disk_total_gb': 100}), \
+             self.assertRaisesRegex(SystemExit, 'effective base reserve'):
+            self.command(disk_floor=21, until=deadline)
+        self.assertFalse((self.folder / 'machine-admissions.json').exists())
+
+    def test_review_hold_and_dashboard_use_same_scaled_reserve(self):
+        self.policy.unlink()
+        reading = {'disk_free_gb': 18, 'disk_total_gb': 100}
+        with mock.patch.object(self.m, 'machine_reading', return_value=dict(reading)):
+            state = self.m.machine_state()
+        self.assertEqual(state['disk_reserve_gb'], 20)
+        self.assertIn('declared reserve 20 GB', state['held'][0])
+        self.assertNotIn('declared reserve 40 GB', state['held'][0])
+        with mock.patch.object(self.m, 'machine_reading', return_value=dict(reading)):
+            self.admit()
+        policy = self.m.machine_policy()
+        self.assertIn('declared reserve 20 GB', self.m.machine_reasons(dict(reading, disk_free_gb=5), policy)[0])
+
+
+    def test_expiry_between_journal_read_and_active_selection_is_audited(self):
+        row = self.admit()['active']
+        data = self.m.machine_admissions()
+        with mock.patch.object(self.m.time, 'time', return_value=row['until'] + 1):
+            self.assertIsNone(self.m.machine_active_admission(data))
+        events = json.loads((self.folder / 'machine-admissions.json').read_text())['events']
+        self.assertEqual([event['action'] for event in events], ['admit', 'expire'])
+        self.assertEqual([event['action'] for event in data['events']], ['admit', 'expire'])
