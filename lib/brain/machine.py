@@ -558,39 +558,97 @@ def machine_admission_actor():
     return pwd.getpwuid(os.getuid()).pw_name
 
 
-def machine_admissions():
-    """Atomic audit journal; the latest admission applies only until its deadline."""
+def machine_admissions_read():
+    """Read and validate the private audit journal without observing an expiry."""
     try:
         data = json.loads((machine_dir() / 'machine-admissions.json').read_text())
     except FileNotFoundError:
         return {'version': 1, 'events': []}
     if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('events'), list):
         raise ValueError('invalid machine admission journal')
-    for row in data['events']:
-        if (not isinstance(row, dict) or row.get('action') not in ('admit', 'cancel')
+    for index, row in enumerate(data['events']):
+        if (not isinstance(row, dict) or row.get('action') not in ('admit', 'cancel', 'expire')
                 or not machine_timestamp(row.get('at'))
                 or not all(isinstance(row.get(k), str) and row[k].strip() for k in ('actor', 'reason'))):
             raise ValueError('invalid machine admission event')
         if row['action'] == 'admit' and (not machine_timestamp(row.get('until')) or row['until'] <= row['at']
                 or not machine_timestamp(row.get('disk_floor_gb'))):
             raise ValueError('invalid machine admission limits')
+        if row['action'] == 'expire':
+            source = row.get('admission_event')
+            if (type(source) is not int or not 0 <= source < index
+                    or data['events'][source]['action'] != 'admit'
+                    or row.get('until') != data['events'][source]['until']
+                    or row['at'] < row['until']):
+                raise ValueError('invalid machine admission expiry')
+    return data
+
+
+def machine_admission_expired(data, now):
+    row = data['events'][-1] if data['events'] else None
+    return bool(row and row['action'] == 'admit' and now >= row['until'])
+
+
+@contextlib.contextmanager
+def machine_admission_journal():
+    """Serialize observation and writes; expiry and its audit record publish together."""
+    import fcntl
+    folder = machine_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    with _m_common.directory_target(folder / 'machine-admissions.lock', private=True) as target:
+        fd = os.open(target.path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=target.fd)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
+                raise ValueError('invalid machine admission lock')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            data = machine_admissions_read()
+            original = json.dumps(data, sort_keys=True)
+            now = time.time()
+            if machine_admission_expired(data, now):
+                source = len(data['events']) - 1
+                data['events'].append({'action': 'expire', 'at': now, 'actor': machine_admission_actor(),
+                    'reason': 'admission deadline reached; observed by machine policy reader',
+                    'admission_event': source, 'until': data['events'][source]['until']})
+            yield data
+            if json.dumps(data, sort_keys=True) != original:
+                _m_common.atomic_write(folder / 'machine-admissions.json', json.dumps(data, indent=2) + '\n', private=True)
+        finally:
+            os.close(fd)
+
+
+def machine_admissions():
+    data = machine_admissions_read()
+    if machine_admission_expired(data, time.time()):
+        # Another reader may already have recorded it while we waited. Re-read
+        # under the shared lock so that every admission has at most one expiry.
+        with machine_admission_journal() as data:
+            pass
     return data
 
 
 def machine_active_admission(data, now=None):
     now = time.time() if now is None else now
+    if machine_admission_expired(data, now):
+        # The deadline can pass between reading the journal and selecting its
+        # active entry. Observe that boundary too, including command output.
+        with machine_admission_journal() as current:
+            data.clear()
+            data.update(current)
     row = data['events'][-1] if data['events'] else None
     return dict(row) if row and row['action'] == 'admit' and row['at'] <= now < row['until'] else None
 
 
-def machine_admission_until(value, now=None):
-    """Local same-day HH:MM[:SS], or an absolute timestamp with an explicit offset."""
-    now = datetime.datetime.now().astimezone() if now is None else now
+def machine_admission_until(value, now=None, zone=None):
+    """Instance-zone same-day HH:MM[:SS], or an absolute offset timestamp."""
+    now = datetime.datetime.now(zone) if now is None and zone is not None else (
+        datetime.datetime.now().astimezone() if now is None else now)
+    if zone is not None:
+        now = now.astimezone(zone)
     try:
         if re.fullmatch(r'\d{2}:\d{2}(?::\d{2})?', value):
             clock = datetime.time.fromisoformat(value)
-            # Resolve the local offset at the deadline too (including DST changes).
-            deadline = datetime.datetime.combine(now.date(), clock).astimezone()
+            # Keep the instance's date and zone, including its deadline-time DST offset.
+            deadline = datetime.datetime.combine(now.date(), clock, tzinfo=zone or now.tzinfo)
         else:
             deadline = datetime.datetime.fromisoformat(value)
             if deadline.tzinfo is None:
@@ -599,12 +657,11 @@ def machine_admission_until(value, now=None):
             raise ValueError('deadline must be in the future')
         return deadline.timestamp()
     except (ValueError, TypeError):
-        _m_common.die('machine admit: --until must be a future local HH:MM[:SS] today '
+        _m_common.die('machine admit: --until must be a future instance-zone HH:MM[:SS] today '
                       'or an ISO timestamp with offset (use ISO for overnight admission)')
 
 
 def machine_admission_command(a):
-    import fcntl
     action = getattr(a, 'id', None) or 'list'
     floor, until = getattr(a, 'disk_floor', None), getattr(a, 'until', None)
     if action not in ('list', 'cancel') or (action == 'cancel' and (floor is not None or until is not None)):
@@ -615,29 +672,33 @@ def machine_admission_command(a):
         return
     if action != 'cancel' and (not machine_timestamp(floor) or until is None):
         _m_common.die('machine admit requires a finite nonnegative --disk-floor and --until')
-    deadline = machine_admission_until(until) if action != 'cancel' else None
+    deadline, reading = None, None
+    if action != 'cancel':
+        # Admission needs instance configuration, not a machine-registry write.
+        inst = _m_instance.Instance(_m_nodes.find_root())
+        zone = inst.zone()
+        if zone is None:
+            _m_common.die('machine admit: instance timezone is invalid; repair instance.md')
+        deadline = machine_admission_until(until, zone=zone)
+        reading = machine_reading(inst)
+        reserve = machine_disk_reserve(reading, machine_policy(include_admission=False))
+        if floor > reserve:
+            _m_common.die(f'machine admit: disk floor {floor:g} GB exceeds effective base reserve {reserve:g} GB')
     reason = getattr(a, 'reason', None) or ('bounded disk admission requested' if action != 'cancel' else 'admission cancelled')
     if not reason.strip():
         _m_common.die('machine admit: --reason must not be blank')
-    folder = machine_dir()
-    folder.mkdir(parents=True, exist_ok=True)
-    with _m_common.directory_target(folder / 'machine-admissions.lock', private=True) as target:
-        fd = os.open(target.path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=target.fd)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
-                raise ValueError('invalid machine admission lock')
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            data = machine_admissions()
-            row = {'action': 'cancel' if action == 'cancel' else 'admit', 'at': time.time(),
-                   'actor': machine_admission_actor(), 'reason': reason}
-            if deadline is not None:
-                if deadline <= row['at']:
-                    _m_common.die('machine admit: deadline expired before publication')
-                row.update(disk_floor_gb=floor, until=deadline)
-            data['events'].append(row)
-            _m_common.atomic_write(folder / 'machine-admissions.json', json.dumps(data, indent=2) + '\n', private=True)
-        finally:
-            os.close(fd)
+    with machine_admission_journal() as data:
+        if deadline is not None:
+            reserve = machine_disk_reserve(reading, machine_policy(include_admission=False))
+            if floor > reserve:
+                _m_common.die(f'machine admit: disk floor {floor:g} GB exceeds effective base reserve {reserve:g} GB')
+        row = {'action': 'cancel' if action == 'cancel' else 'admit', 'at': time.time(),
+               'actor': machine_admission_actor(), 'reason': reason}
+        if deadline is not None:
+            if deadline <= row['at']:
+                _m_common.die('machine admit: deadline expired before publication')
+            row.update(disk_floor_gb=floor, until=deadline)
+        data['events'].append(row)
     print(json.dumps({'active': machine_active_admission(data), 'event': row}, indent=2))
 
 
@@ -647,10 +708,19 @@ def machine_free_floor(reading, policy, field):
     threshold = policy[limit]
     if total and limit not in policy.get('_configured', []):
         threshold = min(threshold, total * (0.25 if field == 'mem_free_gb' else 0.2))
+    if field == 'disk_free_gb' and policy.get('_admission'):
+        # A later base-policy change cannot turn an admission into a tightening.
+        threshold = min(threshold, machine_disk_reserve(reading, policy))
     return threshold
 
 
-def machine_policy(strict=True):
+def machine_disk_reserve(reading, policy):
+    base = dict(policy, disk_free_gb=policy.get('_base_disk_free_gb', policy['disk_free_gb']), _admission=None)
+    base['_configured'] = policy.get('_base_configured', policy.get('_configured', []))
+    return machine_free_floor(reading, base, 'disk_free_gb')
+
+
+def machine_policy(strict=True, include_admission=True):
     import math
     try:
         try:
@@ -673,7 +743,7 @@ def machine_policy(strict=True):
         policy["_configured"] = list(supplied)
         policy['_base_configured'] = list(supplied)
         policy['_base_disk_free_gb'] = policy['disk_free_gb']
-        policy['_admission'] = machine_active_admission(machine_admissions())
+        policy['_admission'] = machine_active_admission(machine_admissions()) if include_admission else None
         if policy['_admission']:
             policy['disk_free_gb'] = policy['_admission']['disk_floor_gb']
             if 'disk_free_gb' not in policy['_configured']:
@@ -714,7 +784,7 @@ def machine_reasons(reading, policy):
             note = "; threshold exceeds machine; adjust machine-care.json" if total and threshold >= total else ""
             note += ("; machine policy owner can grant bounded admission: "
                      f"brain machine admit --disk-floor N --until HH:MM --reason TEXT (OS user {machine_admission_actor()})") if field == 'disk_free_gb' else "; machine policy owner can adjust machine-care.json"
-            base = policy.get('_base_disk_free_gb', policy['disk_free_gb'])
+            base = machine_disk_reserve(reading, policy)
             reserve = f" (declared reserve {base:g} GB)" if field == 'disk_free_gb' else ''
             reasons.append(f"{title} {reading[field]:g} GB < {threshold:g} GB" + reserve + note)
     return reasons
@@ -1521,16 +1591,13 @@ def machine_state(inst=None):
     reading["held"] = machine_reasons(reading, policy)
     if policy.get("_error"):
         reading["held"].append(policy["_error"])
-    base = dict(policy, disk_free_gb=policy.get('_base_disk_free_gb', policy['disk_free_gb']))
-    if policy.get('_admission') and 'disk_free_gb' not in policy.get('_base_configured', policy.get('_configured', [])):
-        base['_configured'] = [k for k in policy['_configured'] if k != 'disk_free_gb']
-    reading['disk_reserve_gb'] = machine_free_floor(reading, base, 'disk_free_gb')
+    reading['disk_reserve_gb'] = machine_disk_reserve(reading, policy)
     reading['disk_floor_gb'] = machine_free_floor(reading, policy, 'disk_free_gb')
     reading['admission'] = policy.get('_admission')
     reading["verify_limit"] = machine_limit(policy)
     if reading["held"]:
         reading["top_cpu"] = machine_top_cpu()
-    # Reading the live view never creates state or a lock file.
+    # Queue projection is read-only; an observed admission expiry is audited above.
     try:
         rows = json.loads((machine_dir() / "machine-care-queue.json").read_text())
         if not isinstance(rows, list) or any(not machine_queue.valid(r) for r in rows):
@@ -2262,22 +2329,24 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
     while True:
         if cancelled and cancelled():
             raise MachineSignal(cancelled())
-        policy = machine_policy(strict=False)
         reading = read()
-        reasons = list(machine_reasons(reading, policy))
-        if policy.get("_error"):
-            reasons.append(policy["_error"])
-        elapsed = max(0, clock.monotonic() - started)
-        reduced = bool(reasons) and elapsed >= policy['max_hold_minutes'] * 60
-        hard = [r for r in reasons if not (r.startswith('CPU idle') or '5-minute load' in r)]
-        if reduced and hard:
-            _m_common.die('machine care: maximum hold reached; unsafe resource pressure; no command started; ' + '; '.join(hard))
-        if reduced and not policy.get('_error') and not reduction_ready:
-            _m_common.die('machine care: maximum hold reached; cannot enforce reduced parallelism '
-                          'for this verify command; no command started. Use a literal make or pytest command.')
-        # Degrade resource admission, never bypass a broken policy or FIFO ownership.
-        resource_hold = bool(reasons) and (not reduced or bool(policy.get('_error')))
         with machine_queue() as queue:
+            # Sampling and lock acquisition can outlive a bounded admission.
+            # Resolve policy only after both, while the grant transaction is held.
+            policy = machine_policy(strict=False)
+            reasons = list(machine_reasons(reading, policy))
+            if policy.get("_error"):
+                reasons.append(policy["_error"])
+            elapsed = max(0, clock.monotonic() - started)
+            reduced = bool(reasons) and elapsed >= policy['max_hold_minutes'] * 60
+            hard = [r for r in reasons if not (r.startswith('CPU idle') or '5-minute load' in r)]
+            if reduced and hard:
+                _m_common.die('machine care: maximum hold reached; unsafe resource pressure; no command started; ' + '; '.join(hard))
+            if reduced and not policy.get('_error') and not reduction_ready:
+                _m_common.die('machine care: maximum hold reached; cannot enforce reduced parallelism '
+                              'for this verify command; no command started. Use a literal make or pytest command.')
+            # Degrade resource admission, never bypass a broken policy or FIFO ownership.
+            resource_hold = bool(reasons) and (not reduced or bool(policy.get('_error')))
             row = next((r for r in queue.rows if r["token"] == token), None)
             if row is None:
                 row = {"token": token, "owner": owner, "kind": kind, "state": "queued",
@@ -2300,6 +2369,11 @@ def machine_admit(token, kind, inst, node, job, clock, read, pause, reduction_re
             grant = 1 if reduced else min(row.get('requested_workers', budget), budget)
             position = waiting.index(row) + 1
             limit = 1 if reduced else machine_limit(policy)
+            admission = policy.get('_admission')
+            if admission and not admission['at'] <= time.time() < admission['until']:
+                # Re-enter with fresh policy rather than grant from a snapshot
+                # that expired during queue/capacity calculations.
+                continue
             admitted = not resource_hold and (kind != "verify" or (position == 1 and running < limit and used + grant <= budget))
             detail = ("; ".join(reasons) if resource_hold else
                       f"queued #{position}, {running}/{limit} verify slots busy; {used}/{budget} workers busy, requesting {grant}")

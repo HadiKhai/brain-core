@@ -552,12 +552,13 @@ opaque and legacy reservations take the full budget, so opaque verifies serializ
 
 The machine policy owner can grant a bounded disk admission without rewriting that policy:
 `brain machine admit --disk-floor N --until HH:MM --reason "one named gate"`.
-The deadline is local time today; `HH:MM:SS` also works, or use an ISO timestamp with an explicit
+The deadline is today in the selected instance's timezone; `HH:MM:SS` also works, or use an ISO timestamp with an explicit
 offset for an overnight deadline. `brain machine admit list` shows the active admission and its
 audit history; `brain machine admit cancel --reason "gate finished"` cancels it early.
-Admissions and cancellations record the OS user, time and reason in the private machine journal
+Admissions, cancellations and the first observed expiry record the OS user, time and reason in the private machine journal
 `~/.local/state/brain/machine-admissions.json`. Only the latest admission applies, until its exact
-expiry; no timer or policy restoration process is needed. Other machine limits still apply.
+expiry; no timer or policy restoration process is needed. A floor above the effective base reserve
+is refused. Other machine limits still apply.
 The dashboard's Usage page shows free disk, the policy reserve, effective admission floor and expiry.
 
 Native verification recognizes a single literal `pytest` or `python -m pytest` command,

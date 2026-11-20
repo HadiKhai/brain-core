@@ -807,7 +807,7 @@ def _main():
         opt("--yes", action="store_true", help="install/remove the sampler with operator consent"),
         opt("--missing-homes", action="store_true", dest="missing_homes"),
         opt('--disk-floor', type=float, help='temporary minimum free disk in GB; never rewrites base policy'),
-        opt('--until', help='expiry: local HH:MM[:SS] today or ISO timestamp with offset'),
+        opt('--until', help='expiry: instance-zone HH:MM[:SS] today or ISO timestamp with offset'),
         opt('--reason', help='reason recorded with OS user and timestamp in the private machine audit journal'))
     cmd("brains", _Command("hosts", "cmd_brains"), "the brains on this machine: brain brains [forget <name>]",
         opt("action", nargs="?", choices=["list", "forget"], default="list"), opt("name", nargs="?"))
