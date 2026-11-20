@@ -1,5 +1,8 @@
 # Admission review fixes
 
+Historical report for fix head `fc1ef9eb15e4fa706845a6dcb38d1d40d4dfa5b6`.
+The concurrent-startup issue is addressed by the [new startup race fix](startup-race.md).
+
 PR #4 review at `f5fce8c73bc951ac2f799eb35dc1c45348c136da`: all five findings addressed
 in one follow-up commit on the same branch. No force push, merge, tag, upgrade or installed-core change.
 

@@ -1,0 +1,18 @@
+{
+  "requested_runs": 30,
+  "nodeid": "tests/test_machine.py::BoundedMachineAdmission::test_concurrent_real_cli_writers_keep_both_audit_records",
+  "python": "3.9.6",
+  "source_sha256": {
+    "lib/brain/machine.py": "036d43d5cd7614cad66e1448dfa01c66d69399f8555e1fe31bd51bc46b9c9251",
+    "tests/test_machine.py": "a9ff60cb9c9f594d791caa877c2f3be7b2aff0df0b79e523c3b57e4fa02ac79f"
+  },
+  "runs": [
+    {
+      "run": 1,
+      "exit_code": 1,
+      "seconds": 2.791
+    }
+  ],
+  "passed": 0,
+  "seconds": 2.792
+}

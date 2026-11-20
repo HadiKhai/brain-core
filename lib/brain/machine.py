@@ -555,13 +555,20 @@ def machine_dir():
 
 def machine_admission_actor():
     import pwd
-    return pwd.getpwuid(os.getuid()).pw_name
+    uid = os.getuid()
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except (KeyError, OSError):
+        # Sandboxes and minimal systems may have no readable passwd entry.
+        # The kernel identity still names the policy owner without trusting env.
+        return 'uid:' + str(uid)
 
 
-def machine_admissions_read():
+def machine_admissions_read(target=None):
     """Read and validate the private audit journal without observing an expiry."""
     try:
-        data = json.loads((machine_dir() / 'machine-admissions.json').read_text())
+        data = json.loads(target.read_bytes() if target is not None else
+                          (machine_dir() / 'machine-admissions.json').read_text())
     except FileNotFoundError:
         return {'version': 1, 'events': []}
     if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('events'), list):
@@ -590,30 +597,66 @@ def machine_admission_expired(data, now):
 
 
 @contextlib.contextmanager
-def machine_admission_journal():
-    """Serialize observation and writes; expiry and its audit record publish together."""
+def machine_admission_lock():
+    """Pin the state directory and lock inode; recover one changed directory before use."""
     import fcntl
     folder = machine_dir()
-    folder.mkdir(parents=True, exist_ok=True)
-    with _m_common.directory_target(folder / 'machine-admissions.lock', private=True) as target:
-        fd = os.open(target.path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=target.fd)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
-                raise ValueError('invalid machine admission lock')
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            data = machine_admissions_read()
-            original = json.dumps(data, sort_keys=True)
-            now = time.time()
-            if machine_admission_expired(data, now):
-                source = len(data['events']) - 1
-                data['events'].append({'action': 'expire', 'at': now, 'actor': machine_admission_actor(),
-                    'reason': 'admission deadline reached; observed by machine policy reader',
-                    'admission_event': source, 'until': data['events'][source]['until']})
-            yield data
-            if json.dumps(data, sort_keys=True) != original:
-                _m_common.atomic_write(folder / 'machine-admissions.json', json.dumps(data, indent=2) + '\n', private=True)
-        finally:
-            os.close(fd)
+    for attempt in range(2):
+        identity = None
+        with contextlib.ExitStack() as cleanup:
+            try:
+                # Directory creation is idempotent. Never stage/replace a shared
+                # state directory as though it were an atomically written file.
+                folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+                before = os.stat(folder, follow_symlinks=False)
+                identity = (before.st_dev, before.st_ino)
+                target = cleanup.enter_context(
+                    _m_common.directory_target(folder / 'machine-admissions.lock', private=True))
+                held = os.fstat(target.fd)
+                identity = (held.st_dev, held.st_ino)
+                # Serialize initial lock-file creation as well as journal writes.
+                # A named lock cannot serialize its own concurrent first opens.
+                fcntl.flock(target.fd, fcntl.LOCK_EX)
+                target.check()
+                fd = os.open(target.path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=target.fd)
+                cleanup.callback(os.close, fd)
+                if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_nlink != 1:
+                    raise ValueError('invalid machine admission lock')
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                # The directory or named lock may have moved while open/flock
+                # waited. Never transact on a detached or substituted inode.
+                target.check_file(fd)
+            except OSError:
+                try:
+                    current = os.stat(folder, follow_symlinks=False)
+                    current_identity = (current.st_dev, current.st_ino)
+                except FileNotFoundError:
+                    current_identity = None
+                if attempt == 0 and (current_identity is None or
+                                     identity is not None and current_identity != identity):
+                    continue
+                raise
+            # Retry only acquisition. Never replay a transaction that has begun.
+            yield target
+            return
+
+
+@contextlib.contextmanager
+def machine_admission_journal():
+    """Serialize observation and writes in the same pinned directory as the lock."""
+    with machine_admission_lock() as target:
+        target.path = target.path.with_name('machine-admissions.json')
+        data = machine_admissions_read(target)
+        original = json.dumps(data, sort_keys=True)
+        now = time.time()
+        if machine_admission_expired(data, now):
+            source = len(data['events']) - 1
+            data['events'].append({'action': 'expire', 'at': now, 'actor': machine_admission_actor(),
+                'reason': 'admission deadline reached; observed by machine policy reader',
+                'admission_event': source, 'until': data['events'][source]['until']})
+        yield data
+        if json.dumps(data, sort_keys=True) != original:
+            target.atomic_write(json.dumps(data, indent=2) + '\n')
 
 
 def machine_admissions():

@@ -3627,6 +3627,19 @@ class BoundedMachineAdmission(unittest.TestCase):
         self.assertEqual([e['action'] for e in json.loads(updated)['events']], ['admit', 'expire'])
         self.assertEqual(self.policy.read_bytes(), self.original)
 
+    def test_missing_passwd_entry_preserves_hold_and_audit_actor(self):
+        import pwd
+        for error in (KeyError('uid unavailable'), OSError('lookup unavailable')):
+            with self.subTest(error=type(error).__name__), mock.patch.object(pwd, 'getpwuid', side_effect=error):
+                actor = 'uid:' + str(os.getuid())
+                self.assertEqual(self.m.machine_admission_actor(), actor)
+                reason = self.m.machine_reasons(self.reading, self.m.machine_policy())[0]
+                self.assertIn('OS user ' + actor, reason)
+                row = self.admit()['active']
+                self.assertEqual(row['actor'], actor)
+                self.command(id='cancel', reason='fixture finished')
+                self.assertEqual(self.command()['events'][-1]['actor'], actor)
+
     def test_list_cancel_audit_and_permissions(self):
         row = self.admit()['active']
         self.assertTrue(row['actor'])
@@ -3850,3 +3863,63 @@ runpy.run_path(script, run_name='__main__')
         events = json.loads((self.folder / 'machine-admissions.json').read_text())['events']
         self.assertEqual([event['action'] for event in events], ['admit', 'expire'])
         self.assertEqual([event['action'] for event in data['events']], ['admit', 'expire'])
+
+
+    def test_admission_reopens_once_when_state_directory_changes_before_lock_open(self):
+        import errno
+        displaced = self.folder.with_name(self.folder.name + '-displaced')
+        self.addCleanup(shutil.rmtree, displaced, ignore_errors=True)
+        original_open = os.open
+        attempts = []
+        def changed_directory(path, flags, *args, **kwargs):
+            if path == 'machine-admissions.lock' and kwargs.get('dir_fd') is not None:
+                attempts.append(os.fstat(kwargs['dir_fd']).st_ino)
+                if len(attempts) == 1:
+                    self.folder.rename(displaced)
+                    self.folder.mkdir()
+                    self.policy.write_bytes(self.original)
+                    raise FileNotFoundError(errno.ENOENT, 'directory was replaced', path)
+            return original_open(path, flags, *args, **kwargs)
+        with mock.patch.object(self.m.os, 'open', side_effect=changed_directory):
+            self.admit()
+        self.assertEqual(len(attempts), 2)
+        self.assertNotEqual(*attempts)
+        self.assertEqual(len(self.command()['events']), 1)
+        self.assertEqual(self.policy.read_bytes(), self.original)
+
+    def test_admission_retries_directory_identity_change_at_most_once(self):
+        import errno
+        original_open = os.open
+        attempts, displaced = [], []
+        def changing_directory(path, flags, *args, **kwargs):
+            if path == 'machine-admissions.lock' and kwargs.get('dir_fd') is not None:
+                attempts.append(os.fstat(kwargs['dir_fd']).st_ino)
+                previous = self.folder.with_name(self.folder.name + f'-displaced-{len(attempts)}')
+                self.folder.rename(previous)
+                displaced.append(previous)
+                self.folder.mkdir()
+                self.policy.write_bytes(self.original)
+                raise FileNotFoundError(errno.ENOENT, 'directory was replaced', path)
+            return original_open(path, flags, *args, **kwargs)
+        try:
+            with mock.patch.object(self.m.os, 'open', side_effect=changing_directory), self.assertRaises(OSError):
+                self.admit()
+            self.assertEqual(len(attempts), 2)
+            self.assertFalse((self.folder / 'machine-admissions.json').exists())
+        finally:
+            for previous in displaced:
+                shutil.rmtree(previous)
+
+    def test_admission_does_not_retry_unrelated_lock_errors(self):
+        import errno
+        original_open = os.open
+        attempts = []
+        def denied(path, flags, *args, **kwargs):
+            if path == 'machine-admissions.lock' and kwargs.get('dir_fd') is not None:
+                attempts.append(path)
+                raise PermissionError(errno.EACCES, 'fixture permission refusal', path)
+            return original_open(path, flags, *args, **kwargs)
+        with mock.patch.object(self.m.os, 'open', side_effect=denied), self.assertRaises(PermissionError):
+            self.admit()
+        self.assertEqual(len(attempts), 1)
+        self.assertFalse((self.folder / 'machine-admissions.json').exists())
