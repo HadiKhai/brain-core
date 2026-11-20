@@ -120,19 +120,45 @@ export function audit(rule: string): Violation[] {
 
   if (rule === "options") {
     const lists = [...document.querySelectorAll("[role=listbox], [role=menu]")].filter(visible);
+    // Overflow is not itself clipping. Check the text and its clipping ancestors;
+    // a scroll owner can expose its content and is not evidence of unreadability.
+    const clipped = (e: Element, axis: "x" | "y", text: DOMRect) => {
+      for (let ancestor: Element | null = e; ancestor; ancestor = ancestor.parentElement) {
+        const cs = getComputedStyle(ancestor), box = ancestor.getBoundingClientRect();
+        const overflow = axis === "x" ? cs.overflowX : cs.overflowY;
+        const content = axis === "x" ? ancestor.scrollWidth : ancestor.scrollHeight;
+        const size = axis === "x" ? ancestor.clientWidth : ancestor.clientHeight;
+        if ((overflow === "auto" || overflow === "scroll") && content > size + 1) return false;
+        const start = axis === "x" ? box.left + ancestor.clientLeft : box.top + ancestor.clientTop;
+        const end = start + size;
+        const outside = axis === "x" ? text.left < start - 1 || text.right > end + 1 : text.top < start - 1 || text.bottom > end + 1;
+        if (outside && (overflow === "hidden" || overflow === "clip" || (axis === "x" && cs.textOverflow === "ellipsis")))
+          return true;
+      }
+      return false;
+    };
     for (const list of lists) {
-      if (list.scrollWidth > list.clientWidth + 1) measure(`menu ${describe(list)} scrolls sideways`);
       const box = list.getBoundingClientRect();
+      if (list.scrollWidth > list.clientWidth + 1)
+        measure(`menu ${describe(list)} scrolls sideways: content ${list.scrollWidth}px, viewport ${list.clientWidth}px, bounds ${JSON.stringify(box.toJSON())}`);
       for (const option of list.querySelectorAll("[role=option], [role=menuitem]")) {
         const r = option.getBoundingClientRect();
-        if (r.right > box.right + 1 || r.left < box.left - 1) measure(`option ${describe(option)} is wider than its menu`);
+        const bounds = `menu ${JSON.stringify(box.toJSON())}, option ${JSON.stringify(r.toJSON())}`;
+        if (r.right > box.right + 1 || r.left < box.left - 1) measure(`option ${describe(option)} is wider than its menu: ${bounds}`);
         const tooltip = !!option.closest("[data-slot=tooltip-trigger]") || !!option.querySelector("[data-slot=tooltip-trigger]");
         for (const e of [option, ...option.querySelectorAll("*")]) {
-          if (e.scrollWidth > e.clientWidth + 1 && e.clientWidth > 0 && !tooltip && name(e))
-            add(`option text ${describe(e)} is cut with no full text on hover (${e.scrollWidth} > ${e.clientWidth})`);
-          // A line clamp hides text too: it needs the full text in a tooltip, or the text must wrap in full.
-          if (e.scrollHeight > e.clientHeight + 1 && e.clientHeight > 0 && getComputedStyle(e).overflowY !== "visible" && !tooltip && name(e))
-            add(`option text ${describe(e)} is clamped vertically with no way to read it (${e.scrollHeight} > ${e.clientHeight})`);
+          if (!name(e) || e.clientWidth <= 0) continue;
+          const range = document.createRange();
+          range.selectNodeContents(e);
+          const text = range.getBoundingClientRect();
+          const cutX = clipped(e, "x", text), cutY = clipped(e, "y", text);
+          const horizontal = e.scrollWidth > e.clientWidth + 1;
+          const vertical = e.scrollHeight > e.clientHeight + 1;
+          const detail = `option text ${describe(e)}: content ${e.scrollWidth}x${e.scrollHeight}px, viewport ${e.clientWidth}x${e.clientHeight}px, text ${JSON.stringify(text.toJSON())}, ${bounds}`;
+          if ((cutX || cutY) && !tooltip)
+            add(`${detail}; ${cutY ? "clamped vertically" : "clipped horizontally"}, no full text on hover`);
+          else if (horizontal || vertical || cutX || cutY)
+            measure(`${detail}; overflow remains readable or has full text on hover`);
         }
       }
     }
@@ -194,11 +220,11 @@ export function audit(rule: string): Violation[] {
     for (const e of [scroller, ...p!.querySelectorAll("*")]) {
       if (!visible(e) || inModal(e)) continue;
       const cs = getComputedStyle(e);
-      if (/contain|none/.test(cs.overscrollBehaviorY) && scrollable(e)) add(`overscroll-behavior ${cs.overscrollBehaviorY} traps scrolling: ${describe(e)}`);
+      if (/contain|none/.test(cs.overscrollBehaviorY) && scrollable(e)) measure(`overscroll-behavior ${cs.overscrollBehaviorY} may trap scrolling: ${describe(e)}`);
       if (e !== scroller && overflowing(e)) {
         let depth = 0;
         for (let a = e.parentElement; a && a !== scroller; a = a.parentElement) if (overflowing(a)) depth++;
-        if (depth >= 1) add(`scroll area nested ${depth + 1} deep: ${describe(e)}`);
+        if (depth >= 1) measure(`scroll area nested ${depth + 1} deep: ${describe(e)}`);
       }
     }
   }

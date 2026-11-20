@@ -1,7 +1,18 @@
 name: UI checks
+run-name: UI checks (${{ github.event_name == 'push' && 'warning-proof' || inputs.browser_scope || 'all' }})
 on:
   pull_request:
+  push:
+    branches: ['ci/**']
   workflow_dispatch:
+    inputs:
+      browser_scope:
+        description: 'Browser coverage (full suite remains the default PR check)'
+        type: choice
+        default: all
+        options:
+          - all
+          - warning-proof
 permissions:
   contents: read
 jobs:
@@ -23,7 +34,14 @@ jobs:
       - run: npm test
         working-directory: ui
       - name: Browser flows and advisory visual measurements
-        run: npm run test:browser
+        env:
+          BROWSER_SCOPE: ${{ github.event_name == 'push' && 'warning-proof' || inputs.browser_scope }}
+        run: |
+          if [ "$BROWSER_SCOPE" = warning-proof ]; then
+            npx playwright test visual-warning.spec.ts
+          else
+            npm run test:browser
+          fi
         working-directory: ui
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()

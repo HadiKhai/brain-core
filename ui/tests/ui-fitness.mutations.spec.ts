@@ -123,7 +123,7 @@ test("chaining rejects a scroll trap and a nested scroll area", async ({ page })
   let tag: any;
   await proves(page, "chaining", "overscroll contained on the page",
     async () => { tag = await style(page, "#workspace-content { overscroll-behavior: contain !important; }"); },
-    () => tag.evaluate((e: Element) => e.remove()), "traps scrolling");
+    () => tag.evaluate((e: Element) => e.remove()), "may trap scrolling");
   await proves(page, "chaining", "a scroll area inside a scroll area",
     () => page.evaluate(() => { const t = document.querySelector<HTMLElement>("[data-page=jobs] [data-slot=table-container]")!; t.style.cssText = "max-height:300px;overflow:auto"; const b = t.querySelector<HTMLElement>("tbody")!; b.style.cssText = "display:block;max-height:120px;overflow:auto"; }),
     () => page.evaluate(() => { const t = document.querySelector<HTMLElement>("[data-page=jobs] [data-slot=table-container]")!; t.style.cssText = ""; t.querySelector<HTMLElement>("tbody")!.style.cssText = ""; }), "nested 2 deep");

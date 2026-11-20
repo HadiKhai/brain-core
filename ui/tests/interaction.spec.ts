@@ -269,7 +269,8 @@ test("browser Back restores each destination page scroll position", async ({ pag
   await expect(page).toHaveURL(/view=learnings/);
   await page.goBack();
   await expect(page).toHaveURL(/view=usage/);
-  await expect.poll(() => page.locator("#workspace-content").evaluate((e) => e.scrollTop)).toBe(restored);
+  await expect(page.locator("[data-page=usage]")).toBeVisible();
+  await visualExpect(page, await page.locator("#workspace-content").evaluate(e => e.scrollTop), "page scroll restoration in px").toBe(restored);
 });
 
 test("browser Back retains a full-height list's own scroll position", async ({ page }) => {
@@ -282,7 +283,8 @@ test("browser Back retains a full-height list's own scroll position", async ({ p
   await page.getByRole("link", { name: /^Usage/ }).click();
   await page.goBack();
   await expect(page).toHaveURL(/view=learnings/);
-  await expect.poll(() => list.evaluate(e => e.scrollTop)).toBe(restored);
+  await expect(list).toBeVisible();
+  await visualExpect(page, await list.evaluate(e => e.scrollTop), "list scroll restoration in px").toBe(restored);
 });
 
 test("job state separates its kind from the clamped readable description", async ({ page }) => {

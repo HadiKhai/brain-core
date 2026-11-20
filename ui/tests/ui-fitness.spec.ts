@@ -82,7 +82,10 @@ test("§15 options never overflow", async ({ page }) => {
         continue;
       }
       await page.waitForTimeout(150);
-      result.push(...(await page.evaluate(audit, "options")));
+      const menuIssues = await page.evaluate(audit, "options");
+      // Evidence belongs to this open menu, before Escape or another trigger.
+      await reportMeasurements(page, menuIssues.filter(v => v.kind === "measurement"));
+      result.push(...menuIssues.filter(v => v.kind !== "measurement"));
       await page.keyboard.press("Escape");
       await page.locator("[role=listbox]:visible").waitFor({ state: "detached", timeout: 2000 }).catch(() => page.keyboard.press("Escape"));
     }
