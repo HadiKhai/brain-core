@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "runtime_samples_s": [
+    0.19260837499999983,
+    1.106508292000001
+  ],
+  "provenance": {
+    "commit": "6b661c8171158cf768ec7ff2f28f440696200108",
+    "artifact": "docs/status-refresh-lock/review-fixes-evidence.json",
+    "fields": [
+      "measurements.refresh-lock-proof.hook_s",
+      "measurements.pretool-lock-proof.elapsed_s"
+    ],
+    "scope": "Generic Stop and contended PreTool CLI fixtures; full observed hook wall time is reserved as conservative headroom, including the measured contention wait."
+  }
+}

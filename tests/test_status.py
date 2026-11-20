@@ -496,11 +496,11 @@ hosts.capture_hook_questions(inst,inst.node('root'),{'transcript_path':sys.argv[
         binary = fake / 'git'
         binary.write_text('#!/bin/sh\nexec sleep 60\n')
         binary.chmod(0o700)
-        script = '''import sys,time
+        script = '''import sys,time,os
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from brain import instance,common
-instance.REFRESH_LOCK_SECONDS=.15
+os.environ['BRAIN_REFRESH_LOCK_SECONDS']='.15'
 with instance.held(Path(sys.argv[2])),instance.brain_lock(Path(sys.argv[2])):
     common.git('version')
 '''

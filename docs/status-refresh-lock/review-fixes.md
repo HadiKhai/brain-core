@@ -1,5 +1,9 @@
 # Review fixes for PR #6
 
+Historical handback at `6b661c81`. The coordinator corrected the earlier fail-open
+instruction and budget requirements; [guard-corrections.md](guard-corrections.md)
+contains the current denial behavior, derived settings, checks and rule table.
+
 Reviewed head: `bca87792fe0b682cf5a09f9fceb8ff59fa91da21`.
 All three findings are fixed by normal commits on the same branch, including a configured-route follow-up. No rebase or force-push.
 This is a builder fix report, not a new independent review or a full-suite green claim.

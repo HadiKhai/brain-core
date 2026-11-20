@@ -1,7 +1,7 @@
 """Declared tool-action guards and exact, single-use local allowances.
 
 This is a conservative textual command guard, not a shell parser or a sandbox.
-Only an explicit match denies. Hook errors fail open, as stop-hook errors do.
+Only an explicit match denies. An unchecked allowance cannot authorize a matched action.
 """
 import fnmatch
 import hashlib
@@ -21,7 +21,6 @@ _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 SHELL_TOOLS = ('Bash', 'bash', 'exec_command', 'functions.exec_command')
-PRETOOL_LOCK_WAIT_SECONDS = 1.0  # hook bookkeeping budget; runtime adapter timeout is 30 s
 
 
 def forbidden_actions(n):
@@ -196,8 +195,24 @@ def pretool_decision(inst, n, data):
     digest = action_fingerprint(action)
     policy = action_fingerprint({'rules': rules})
     started = time.monotonic()
+    def deny_unchecked(reason, message):
+        from . import events
+        try:
+            events.append_line(inst.root / '.brain/hook-decisions.jsonl',
+                {'at': inst.now(), 'node': events.node_ref(n['id']), 'decision': 'deny',
+                 'reason': reason, 'action': digest, 'wait_s': time.monotonic() - started})
+        except (Exception, SystemExit):
+            pass  # Audit failure must never turn a known-forbidden action into permission.
+        return message
     try:
-        with _m_instance.brain_lock(inst, timeout=PRETOOL_LOCK_WAIT_SECONDS):
+        from . import hook_budget
+        wait = hook_budget.seconds('pretool')
+    except ValueError:
+        return deny_unchecked('hook-budget-unavailable',
+            'brain-hook: the hook lock budget is unavailable; the --once allowance for this forbidden '
+            'action could not be checked; repair the budget and retry')
+    try:
+        with _m_instance.brain_lock(inst, timeout=wait):
             state = allowance_state(inst, n)
             allowed = state['allowances'].get(digest)
             if isinstance(allowed, dict) and allowed.get('policy') == policy:
@@ -206,12 +221,13 @@ def pretool_decision(inst, n, data):
                 save_allowances(inst, n, state)
                 return None
     except _m_instance.LockTimeout:
-        from . import events
-        events.append_line(inst.root / '.brain/hook-decisions.jsonl',
-            {'at': inst.now(), 'node': events.node_ref(n['id']), 'decision': 'fail-open',
-             'reason': 'instance-lock-contention', 'action': digest,
-             'wait_s': time.monotonic() - started})
-        return None
+        return deny_unchecked('instance-lock-contention',
+            'brain-hook: the instance is busy, the --once allowance for this forbidden action '
+            'could not be checked; retry in a moment')
+    except (Exception, SystemExit):
+        return deny_unchecked('allowance-check-unavailable',
+            'brain-hook: the --once allowance for this forbidden action could not be checked; '
+            'repair the allowance state and retry')
     return 'Forbidden action matched this node\'s declared tool rules; an exact --once allowance is required.'
 
 

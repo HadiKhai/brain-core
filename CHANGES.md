@@ -27,11 +27,18 @@ separately. Malformed receipt state keeps the reader's repair/fail-open behavior
 Typed inbox reminder receipts are projected for those same frozen sources; publishing
 reminders or pending transport for an unread suffix does not overtake the prefix window.
 
-Final admitted refresh ownership has a five-second Git/checkpoint budget. Git commands
-and their helpers are terminated together when their remaining budget expires. PreTool
-allowance bookkeeping waits at most one second for any instance lock holder; contention
-leaves allowances untouched, lets the hook return neutrally, and records a metadata-only
-fail-open decision in `.brain/hook-decisions.jsonl`. The shipped adapters allow 30 seconds.
+Final admitted refresh ownership and PreTool allowance-lock waits use declared settings
+`BRAIN_REFRESH_LOCK_SECONDS` and `BRAIN_PRETOOL_LOCK_WAIT_SECONDS`. Their defaults are
+computed from the minimum applicable runtime-adapter hook timeout minus the maximum
+retained calibration runtime in `adapters/runtimes/hook-budget.json`; that file records
+the measurement's commit and artifact. Explicit settings may shorten that derived limit.
+Git commands and their helpers are terminated together when their remaining budget expires.
+
+A PreTool action that matched a forbidden rule is denied when its allowance cannot be
+checked. Lock contention records a metadata-only `deny` decision in
+`.brain/hook-decisions.jsonl`, preserves its --once allowance, and asks the caller to retry.
+Audit-write failures cannot change that denial into permission. Actions matching no rule
+return before allowance locking and budget loading, so they are unaffected.
 
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 

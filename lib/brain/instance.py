@@ -326,7 +326,6 @@ class Instance:
 
 _LOCK = {"depth": 0, "fh": None}
 LOCK_WAIT = int(os.environ.get("BRAIN_LOCK_WAIT") or 300)  # seconds a command waits for another before giving up
-REFRESH_LOCK_SECONDS = 5.0  # final refresh ownership budget, below runtime hooks' 30 s timeout
 
 
 class LockTimeout(TimeoutError):
@@ -337,7 +336,7 @@ def refresh_lock_remaining():
     started = _LOCK.get('hold_started')
     if not holding() or _LOCK['fh'] is None or started is None:
         return None
-    remaining = REFRESH_LOCK_SECONDS - (time.perf_counter() - started)
+    remaining = _LOCK['held_budget'] - (time.perf_counter() - started)
     if remaining <= 0:
         _m_common.die('status refresh lock ownership deadline expired; retry from fresh state')
     return remaining
@@ -432,11 +431,18 @@ def held(root):
     Settings are frozen before the attempt loads any: an editor outside the
     lock may change them, and a held refresh then refuses as before.
     """
+    from . import hook_budget
+    try:
+        budget = hook_budget.seconds('refresh')
+    except ValueError as error:
+        _m_common.die(str(error))
+    _LOCK["held_budget"] = budget
     _LOCK["hold"], _LOCK["held_root"], _LOCK["held_settings"] = True, root, settings(Instance(root))
     try:
         yield
     finally:
         _LOCK["hold"], _LOCK["held_root"], _LOCK["held_settings"] = False, None, None
+        _LOCK.pop('held_budget', None)
 
 
 def unlock():

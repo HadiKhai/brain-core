@@ -1,0 +1,63 @@
+{
+  "reviewed_head": "6b661c8171158cf768ec7ff2f28f440696200108",
+  "red": {
+    "count": 4,
+    "outcome": "failed",
+    "skipped": 0,
+    "duration_s": 5.92
+  },
+  "focused_green": {
+    "count": 4,
+    "outcome": "passed",
+    "skipped": 0,
+    "duration_s": 3.28
+  },
+  "affected_green": {
+    "count": 365,
+    "outcome": "passed",
+    "skipped": 2,
+    "duration_s": 229.56
+  },
+  "affected_files": [
+    "tests/test_guard.py",
+    "tests/test_status.py",
+    "tests/test_events.py"
+  ],
+  "workers": 4,
+  "derived_defaults": {
+    "pretool": {
+      "adapter_timeout_s": 30,
+      "measured_headroom_s": 1.106508292000001,
+      "default_s": 28.893491708
+    },
+    "refresh": {
+      "adapter_timeout_s": 30,
+      "measured_headroom_s": 1.106508292000001,
+      "default_s": 28.893491708
+    }
+  },
+  "default_pretool_probe": {
+    "derivation": {
+      "adapter_timeout_s": 30,
+      "measured_headroom_s": 1.106508292000001,
+      "default_s": 28.893491708
+    },
+    "elapsed_s": 29.015804832999997,
+    "recorded_wait_s": 28.917941000000003,
+    "decision": "deny",
+    "allowance_preserved_while_busy": true,
+    "allowance_consumed_on_retry": true,
+    "within_adapter_timeout": true
+  },
+  "runtime_sha256": {
+    "lib/brain/action_guard.py": "787beb0510b3cd696db945ff6dbb515b89a8cb5c261451c23db8612481d59aef",
+    "lib/brain/instance.py": "cfd751b15b0ff6570eca475682e4381f01b6be63db70fae4aa751d6d5d89be7f",
+    "lib/brain/hook_budget.py": "e2bad00ef8a9b543f2d8d4d2edb4dddacd23eb73f8ac361e20c0c3fb53af0010",
+    "lib/brain/common.py": "2481b78c28598d890a57b580c0310c394d82df50504163eba81cd9b9e9f91d7b",
+    "adapters/runtimes/hook-budget.json": "fc6ea95325304538f8c954b55669a68dc23651b5a87ab290705f650038ae641f"
+  },
+  "cloud_gate": "coordinator stacked batch only; no ci/ branch push or standalone full suite",
+  "git_operations": "git -C <assigned-worktree>; one normal new commit, PR branch push only; no force-push",
+  "delegates_started": 0,
+  "provider_ai_calls": 0
+}
