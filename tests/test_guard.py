@@ -188,23 +188,38 @@ class ScanTermsCache(TermsFixture):
         self.assertEqual(len(indexed), 42)  # original one.txt, large blob and forty small blobs
 
     def test_repeated_scan_avoids_duplicate_reads_with_timing_budget(self):
-        stream = self.guard.stream_mentions
-        def delayed(*args, **kwargs):
-            time.sleep(.02)  # model read latency; no machine-speed assertion
-            return stream(*args, **kwargs)
-        def scan_file():
-            return self.guard.file_mentions(self.home / 'one.txt', ('needle',))
-        # Time the cached file read, excluding Git process startup contention
-        # when the full suite runs other fixture repositories concurrently.
-        with mock.patch.object(self.guard, 'stream_mentions', side_effect=delayed):
-            start = time.monotonic()
-            scan_file(); scan_file()
-            uncached = time.monotonic() - start
-            start = time.monotonic()
+        # Count actual reads and searches. Wall-clock ratios also measure CI
+        # scheduling pauses, even when the cache did exactly the same work.
+        path = self.home / 'one.txt'
+        original_open = open
+        reads = []
+        class MeasuredFile:
+            def __init__(self, *args, **kwargs):
+                self.file = original_open(*args, **kwargs)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                self.file.close()
+            def __getattr__(self, name):
+                return getattr(self.file, name)
+            def read(self, size):
+                body = self.file.read(size)
+                reads.append(len(body))
+                return body
+        with mock.patch('builtins.open', side_effect=MeasuredFile), \
+                mock.patch.object(self.guard, 'stream_mentions', wraps=self.guard.stream_mentions) as search:
+            for _ in range(2):
+                self.assertEqual(self.guard.file_mentions(path, ('needle',)), {'needle'})
+            uncached_reads, uncached_searches = sum(reads), search.call_count
+            reads.clear()
+            search.reset_mock()
             with self.guard.term_scan_cache():
-                scan_file(); scan_file()
-            cached = time.monotonic() - start
-        self.assertLess(cached, uncached * .85)
+                for _ in range(2):
+                    self.assertEqual(self.guard.file_mentions(path, ('needle',)), {'needle'})
+            self.assertEqual(uncached_reads, 2 * path.stat().st_size)
+            self.assertEqual(uncached_searches, 2)
+            self.assertEqual(sum(reads), path.stat().st_size)
+            self.assertEqual(search.call_count, 1)
 
     def test_nonregular_descriptors_are_never_read_or_blocking(self):
         fifo = self.tmp / 'fifo'

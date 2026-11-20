@@ -70,6 +70,13 @@ envelopes remain readable. `brain notify` uses the same recorded clock time for
 its receipt and inbox publication. Prepare messages immediately before sending;
 do not type clock labels. Existing labels in message bodies remain unchanged.
 
+## 2026-11-20: Term-cache regression measures reads instead of scheduling pauses
+
+The repeated file-scan test now checks bytes read and matching passes directly.
+It still requires the same answers and half the work with the cache; unrelated
+CI scheduling pauses no longer produce a false cache regression. Runtime behavior
+and cache invalidation checks are unchanged.
+
 ## 2026-11-20: Status refresh ignores execution output and retains final writer ownership
 
 `brain status <node> --refresh` no longer treats native run folders, unrelated attempt
