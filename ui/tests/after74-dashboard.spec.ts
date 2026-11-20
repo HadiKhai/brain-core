@@ -1,3 +1,4 @@
+import { visualExpect } from "./visual-checks";
 import { test as base, expect } from "@playwright/test";
 
 const test = base.extend<{ state: any }>({
@@ -106,8 +107,8 @@ test('Show more stays visible and preserves scroll at phone width', async ({ pag
   const top = await frame.locator('.list-scroll').evaluate(e => e.scrollTop);
   await frame.getByRole('button', { name: 'Show more', exact: true }).click();
   await expect(frame.locator('.request')).toHaveCount(20);
-  expect(await frame.locator('.list-scroll').evaluate(e => e.scrollTop)).toBe(top);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await visualExpect(page, await frame.locator('.list-scroll').evaluate(e => e.scrollTop)).toBe(top);
+  await visualExpect(page, await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
 

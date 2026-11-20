@@ -15,7 +15,7 @@ export default defineConfig({
   testDir: "tests",
   testMatch: "*.spec.ts",
   workers: 1,
-  reporter: "list",
+  reporter: [["list"], ["./tests/visual-reporter.mjs"], ["html", { open: "never" }]],
   webServer: [
     ...(process.env.BRAIN_TEST_UI_URL ? [] : [fixture(4109)]),
     ...(process.env.BRAIN_TASK_UI_URL ? [] : [fixture(4192)]),

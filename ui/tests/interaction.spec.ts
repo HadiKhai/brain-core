@@ -1,3 +1,4 @@
+import { visualExpect, reportMeasurements } from "./visual-checks";
 import { test, expect, chromium, webkit } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -29,7 +30,7 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
   await page.getByRole("textbox", { name: "Search learnings" }).tap();
   await page.getByRole("textbox", { name: "Search learnings" }).fill("filters");
   await expect(page.locator("[data-page=learnings] .list-header .list-count")).toHaveText("1–1 of 1 learning");
-  expect(
+  await visualExpect(page,
     await page.evaluate(
       () =>
         getComputedStyle(
@@ -62,7 +63,7 @@ test("real touch activates mobile navigation, filters, paging and the fixed impo
   const before = await dock.boundingBox();
   await page.locator(".add-sheet .sheet-body").evaluate((e) => (e.scrollTop = e.scrollHeight));
   const after = await dock.boundingBox();
-  expect(after!.y).toBe(before!.y);
+  await visualExpect(page, after!.y).toBe(before!.y);
   await dock.getByRole("combobox", { name: "Parent project" }).tap();
   await page.getByRole("option", { name: /^Field Guide/ }).tap();
   await dock.getByRole("button",{name:"Review import",exact:true}).tap();
@@ -108,18 +109,12 @@ test("keyboard navigation, visible focus, disclosures and collapsed rail stay us
   await page.getByRole("button", { name: "Toggle Sidebar" }).click();
   const rail = page.locator("[data-state=collapsed][data-slot=sidebar]");
   await expect(rail).toBeVisible();
-  await expect
-    .poll(() =>
-      page
-        .locator("[data-slot=sidebar-menu-button] svg")
-        .first()
-        .evaluate((e) => {
-          const icon = e.getBoundingClientRect(),
-            button = e.closest("button")!.getBoundingClientRect();
-          return icon.left >= button.left && icon.right <= button.right;
-        }),
-    )
-    .toBe(true);
+  const iconBounds = await page.locator("[data-slot=sidebar-menu-button] svg").first().evaluate(e => {
+    const icon = e.getBoundingClientRect(), button = e.closest("button")!.getBoundingClientRect();
+    return {icon: icon.toJSON(), button: button.toJSON()};
+  });
+  await visualExpect(page, iconBounds.icon.left, 'rail icon left edge').toBeGreaterThanOrEqual(iconBounds.button.left);
+  await visualExpect(page, iconBounds.icon.right, 'rail icon right edge').toBeLessThanOrEqual(iconBounds.button.right);
   await page.getByRole("button", { name: "Learnings", exact: true }).hover();
   await expect(page.locator("[data-slot=tooltip-content]")).toHaveText(
     "Learnings",
@@ -154,7 +149,7 @@ test("keyboard navigation, visible focus, disclosures and collapsed rail stay us
       .boxShadow,
     innerShadow: getComputedStyle(e).boxShadow,
   }));
-  expect(focus.groupShadow).not.toBe("none");
+  await visualExpect(page, focus.groupShadow).not.toBe("none");
   await page.getByRole("button", { name: "Clear filters" }).click();
   await page
     .getByRole("button", { name: "Read learning", exact: true })
@@ -176,6 +171,7 @@ test("browser assertions at narrow width and contrast geometry remain executable
   const result = await page.evaluate(
     readFileSync(resolve("..", "tests", "ui-checks.js"), "utf8"),
   );
+  await reportMeasurements(page, result.warnings || []);
   expect(result.passed).toBeGreaterThanOrEqual(60);
 });
 
@@ -199,14 +195,11 @@ test("long labels, missing values, untrusted markdown and exact import paths rem
     ]) {
       await page.evaluate((v) => (location.hash = "view=" + v), view);
       await expect(page.locator(`[data-page=${view}]`)).toBeVisible();
-      expect(
-        await page.evaluate(
-          () =>
-            document.documentElement.scrollWidth <= innerWidth &&
-            document.querySelector("#workspace-content")!.scrollWidth <=
-              document.querySelector("#workspace-content")!.clientWidth,
-        ),
-      ).toBe(true);
+      const overflow = await page.evaluate(() => ({
+        document: document.documentElement.scrollWidth-innerWidth,
+        inset: document.querySelector("#workspace-content")!.scrollWidth-document.querySelector("#workspace-content")!.clientWidth,
+      }));
+      for (const [owner, px] of Object.entries(overflow)) await visualExpect(page, px, `${owner} overflow in px`).toBeLessThanOrEqual(0);
     }
     await page.evaluate(() => (location.hash = "view=learnings"));
     await page
@@ -300,7 +293,7 @@ test("job state separates its kind from the clamped readable description", async
     await expect(row.locator(".status").first()).toHaveText("Reviewing");
     const description = row.locator(".flight-description");
     await expect(description).toContainText("complete narrow-screen navigation");
-    expect(await description.evaluate(e => e.clientHeight <= 2 * parseFloat(getComputedStyle(e).lineHeight) + 1)).toBe(true);
+    await visualExpect(page, await description.evaluate(e => e.clientHeight-2*parseFloat(getComputedStyle(e).lineHeight)), 'description height beyond two lines in px').toBeLessThanOrEqual(1);
     await description.locator("..").focus();
     await expect(page.locator('[data-slot="tooltip-content"]')).toContainText("preserving the project context");
     await page.keyboard.press("Escape");
@@ -327,8 +320,9 @@ for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
         const dialog = page.getByRole("dialog");
         await expect(dialog).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
-        expect(await page.locator('[data-slot="sheet-overlay"]').evaluate(e => getComputedStyle(e).backdropFilter)).toBe("none");
-        await expect.poll(() => dialog.evaluate(e => getComputedStyle(e).opacity)).toBe("1");
+        await visualExpect(page, await page.locator('[data-slot="sheet-overlay"]').evaluate(e => getComputedStyle(e).backdropFilter)).toBe("none");
+        await dialog.evaluate(async e => { await Promise.all(e.getAnimations({subtree:true}).filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {}))); });
+        await visualExpect(page, await dialog.evaluate(e => getComputedStyle(e).opacity), 'dialog opacity after animation').toBe("1");
         for (let i = 0; i < 6; i++) {
           await page.keyboard.press("Tab");
           await expect.poll(() => dialog.evaluate(e => e.contains(document.activeElement))).toBe(true);
@@ -341,7 +335,7 @@ for (const [engine, browserType] of Object.entries({ chromium, webkit })) {
           const a=e.getBoundingClientRect(), b=e.querySelector('.status-dot')!.getBoundingClientRect();
           return Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2);
         }));
-        expect(dots.every(d => d < 1)).toBe(true);
+        for (const offset of dots) await visualExpect(page, offset, 'status dot centre offset in px').toBeLessThan(1);
         await project.getByRole("tab", { name: /^Activity/ }).click();
         await expect(project.locator("[data-item]").first()).toBeVisible();
         const spark = project.locator('.spark').first();

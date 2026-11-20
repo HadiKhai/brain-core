@@ -1,3 +1,4 @@
+import { visualExpect } from "./visual-checks";
 import { test, expect } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -66,7 +67,7 @@ test("canvas directs edges, highlights downstream and opens task details with pa
   await expect(tasks.getByRole('tab', { name: 'Canvas', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(tasks.getByRole('tab', { name: 'Board', exact: true })).toHaveAttribute('aria-selected', 'false');
   const tabColors = await tasks.getByRole('tab').evaluateAll(es => es.map(e => getComputedStyle(e).backgroundColor));
-  expect(tabColors[0]).toBe('rgba(0, 0, 0, 0)');
+  await visualExpect(page, tabColors[0]).toBe('rgba(0, 0, 0, 0)');
   expect(tabColors[1]).not.toBe(tabColors[0]);
   await expect(tasks.getByLabel('Task status legend')).toContainText('Blocked');
   await expect(canvas.locator('[data-task-from="field-guide:APP-1"][data-task-to="field-guide:APP-2"]')).toHaveCount(1);
@@ -136,12 +137,12 @@ test("project task tab is scoped and mobile board scrolls within its surface", a
   const tasks = page.locator('[data-page=project]').getByRole('region', { name: 'Tasks', exact: true });
   await expect(tasks.locator('.task-card')).toHaveCount(5);
   await expect(tasks).not.toContainText('Translate the public report');
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  expect(await tasks.locator('.task-board').evaluate(e => e.scrollWidth > e.clientWidth)).toBe(true);
+  await visualExpect(page, await page.evaluate(() => document.documentElement.scrollWidth-innerWidth), 'document overflow in px').toBeLessThanOrEqual(0);
+  await visualExpect(page, await tasks.locator('.task-board').evaluate(e => e.scrollWidth-e.clientWidth), 'board scroll extent in px').toBeGreaterThan(0);
   // Ready is the second column; scroll its card into the board viewport before measuring.
   await tasks.locator('[data-task-id="APP-2"]').scrollIntoViewIfNeeded();
   const titleBox = await tasks.locator('[data-task-id="APP-2"] .task-card-copy').boundingBox();
-  expect(titleBox?.width).toBeGreaterThan(120);
+  await visualExpect(page, titleBox?.width).toBeGreaterThan(120);
   await shot(page, 'tasks-mobile-project');
   await tasks.locator('[data-task-id="APP-2"]').getByRole('button', { name: 'Read task', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('Keep the source request');
@@ -164,15 +165,16 @@ test("keyboard focus reveals distant tasks and viewport shortcuts work from a fo
   await page.keyboard.press('Tab');
   await node.focus();
   const box = await node.boundingBox(), viewport = await canvas.boundingBox();
-  expect(box!.x).toBeGreaterThanOrEqual(viewport!.x);
-  expect(box!.y).toBeGreaterThanOrEqual(viewport!.y);
-  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.x + viewport!.width);
-  expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.y + viewport!.height);
+  await visualExpect(page, box!.x).toBeGreaterThanOrEqual(viewport!.x);
+  await visualExpect(page, box!.y).toBeGreaterThanOrEqual(viewport!.y);
+  await visualExpect(page, box!.x + box!.width).toBeLessThanOrEqual(viewport!.x + viewport!.width);
+  await visualExpect(page, box!.y + box!.height).toBeLessThanOrEqual(viewport!.y + viewport!.height);
   const transform = await canvas.locator(':scope > g').getAttribute('transform');
   await node.press('ArrowDown');
   expect(await canvas.locator(':scope > g').getAttribute('transform')).not.toBe(transform);
   await node.press('+');
   await expect(canvas).toHaveAttribute('data-zoom', '1.25');
+  await node.click({ trial: true }); // A wholly covered/clipped control remains a functional failure.
   await node.press('Enter');
   await expect(page.getByRole('dialog')).toContainText('Large task 1000');
 });
@@ -196,7 +198,7 @@ test("short plain titles retain full context, parked tasks collapse and blocked 
   const imported = tasks.locator('[data-task-id="APP-1"]');
   await expect(imported.locator('.task-card-copy strong')).not.toContainText('**');
   expect((await imported.locator('.task-card-copy strong').innerText()).length).toBeLessThanOrEqual(120);
-  expect(await imported.locator('.task-card-copy strong').evaluate(e => e.getBoundingClientRect().height <= parseFloat(getComputedStyle(e).lineHeight) * 3 + 1)).toBe(true);
+  await visualExpect(page, await imported.locator('.task-card-copy strong').evaluate(e => e.getBoundingClientRect().height-parseFloat(getComputedStyle(e).lineHeight)*3), 'task title height beyond three lines in px').toBeLessThanOrEqual(1);
   await imported.getByRole('button', { name: 'Read task', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('End of retained original note.');
   await page.keyboard.press('Escape');
@@ -211,8 +213,8 @@ test("short plain titles retain full context, parked tasks collapse and blocked 
   await tasks.getByText('Show 1 parked tasks', { exact: true }).click();
   await expect(tasks.locator('[data-task-id="APP-6"]')).toBeVisible();
   const read = await imported.getByRole('button', { name: 'Read task' }).evaluate(e => ({ border: getComputedStyle(e).borderStyle, radius: getComputedStyle(e).borderRadius }));
-  expect(read.border).toBe('solid');
-  expect(read.radius).not.toBe('0px');
+  await visualExpect(page, read.border).toBe('solid');
+  await visualExpect(page, read.radius).not.toBe('0px');
 });
 
 test("zero-link canvas explains the empty graph and show all lists tasks without a grid", async ({ page }) => {
@@ -235,12 +237,12 @@ test("task count excludes dropped and the settled navigation labels match expand
   await expect(page.locator('[data-page=project]').getByRole('tab', { name: 'Tasks 5', exact: true })).toHaveAttribute('aria-selected', 'true');
   for (const name of ['Overview', 'Inbox', 'Tasks']) {
     const button = page.getByRole('navigation', { name: 'Workspace navigation' }).getByRole('button', { name, exact: true });
-    expect(await button.locator('span').last().evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
+    await visualExpect(page, await button.locator('span').last().evaluate(e => e.scrollWidth-e.clientWidth), `${name} text overflow in px`).toBeLessThanOrEqual(0);
   }
   await page.getByRole('button', { name: 'Toggle Sidebar' }).click();
   const rail = page.locator('[data-slot=sidebar][data-state=collapsed]');
   await rail.evaluate(async e => { await Promise.all(e.getAnimations({ subtree: true }).filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{}))); });
   for (const name of ['Overview', 'Inbox', 'Tasks']) {
-    expect(await rail.getByRole('button', { name, exact: true }).locator('span').last().evaluate(e => e.getBoundingClientRect().width)).toBe(0);
+    await visualExpect(page, await rail.getByRole('button', { name, exact: true }).locator('span').last().evaluate(e => e.getBoundingClientRect().width)).toBe(0);
   }
 });

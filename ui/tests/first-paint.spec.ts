@@ -1,3 +1,4 @@
+import { visualExpect } from "./visual-checks";
 import { test, expect } from '@playwright/test';
 import { performance } from 'node:perf_hooks';
 
@@ -74,8 +75,8 @@ test('a failed partial reading uses the loading notice on a narrow screen until 
   await expect(marker).toHaveAttribute('data-slot', 'alert');
   const bounds = await marker.boundingBox();
   expect(bounds).not.toBeNull();
-  expect(bounds!.x).toBeGreaterThanOrEqual(0);
-  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+  await visualExpect(page, bounds!.x).toBeGreaterThanOrEqual(0);
+  await visualExpect(page, bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
   await capture(page, 'narrow-pending');
   full = true;
   const data = await (await page.request.get('/api/state?k=demo')).json();

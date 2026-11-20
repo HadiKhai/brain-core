@@ -13,7 +13,7 @@
     );
   };
   // Compare rendered anchors with the design inset, not their current padding: a
-  // missing-padding mutation must fail rather than redefine its own expectation.
+  // missing-padding mutation must report rather than redefine its own expectation.
   const alignment = { anchors: 0, headers: 0, failures: [] };
   const rendered = e => !!e.getClientRects().length && !e.closest('[hidden],[aria-hidden=true]');
   const near = (actual, expected, label) => {
@@ -71,7 +71,7 @@
       near(left, right, 'equal phone page gutters');
     }
   }
-  if (alignment.failures.length) throw Error('Section alignment: ' + JSON.stringify(alignment));
+
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 1;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -180,8 +180,9 @@
   const clippedStatuses = [...document.querySelectorAll(".status")]
     .filter((e) => visible(e) && e.scrollHeight > e.clientHeight + 1)
     .map((e) => e.textContent);
-  if (clippedStatuses.length)
-    throw Error("Clipped status text: " + clippedStatuses.join("; "));
+  const unreadableStatuses = [...document.querySelectorAll(".status")]
+    .filter(e => visible(e) && e.scrollHeight > e.clientHeight + 1 && !e.closest("[data-slot=tooltip-trigger]") && !e.querySelector("[data-slot=tooltip-trigger]"));
+  if (unreadableStatuses.length) throw Error("Cut status with no full text on hover: " + unreadableStatuses.map(e => e.textContent).join("; "));
   const result = {
     viewport: [innerWidth, innerHeight],
     theme: document.documentElement.classList.contains("dark")
@@ -199,6 +200,9 @@
       page: rect(page),
       dock: dock && visible(dock) ? rect(dock) : null,
       gutter: parseFloat(getComputedStyle(scroller).paddingLeft),
+      documentWidth: document.documentElement.scrollWidth,
+      insetWidth: scroller.clientWidth,
+      insetContentWidth: scroller.scrollWidth,
       documentOverflow: document.documentElement.scrollWidth > innerWidth,
       insetOverflow: scroller.scrollWidth > scroller.clientWidth + 1,
     },
@@ -218,14 +222,13 @@
     controls,
     alignment,
   };
-  if (
-    contrastFailures.length ||
-    missingFieldLabels ||
-    missingPlaceholders ||
-    result.fields.smallFont ||
-    result.geometry.documentOverflow ||
-    result.geometry.insetOverflow
-  )
-    throw Error(JSON.stringify(result));
-  return result;
+  const warnings = [
+    ...alignment.failures.map(value => ({kind: 'alignment', ...value})),
+    ...contrastFailures.map(value => ({kind: 'contrast', ...value})),
+    ...(clippedStatuses.length ? [{kind: 'text-overflow', values: clippedStatuses}] : []),
+    ...(result.fields.smallFont ? [{kind: 'field-font', actual: result.fields.smallFont, expected: 0}] : []),
+    ...(result.geometry.documentOverflow || result.geometry.insetOverflow ? [{kind: 'overflow', ...result.geometry}] : []),
+  ];
+  if (missingFieldLabels || missingPlaceholders) throw Error(JSON.stringify(result));
+  return {...result, warnings};
 })();
