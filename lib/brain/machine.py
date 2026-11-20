@@ -555,7 +555,13 @@ def machine_dir():
 
 def machine_admission_actor():
     import pwd
-    return pwd.getpwuid(os.getuid()).pw_name
+    uid = os.getuid()
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except (KeyError, OSError):
+        # Sandboxes and minimal systems may have no readable passwd entry.
+        # The kernel identity still names the policy owner without trusting env.
+        return 'uid:' + str(uid)
 
 
 def machine_admissions_read(target=None):

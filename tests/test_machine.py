@@ -3627,6 +3627,19 @@ class BoundedMachineAdmission(unittest.TestCase):
         self.assertEqual([e['action'] for e in json.loads(updated)['events']], ['admit', 'expire'])
         self.assertEqual(self.policy.read_bytes(), self.original)
 
+    def test_missing_passwd_entry_preserves_hold_and_audit_actor(self):
+        import pwd
+        for error in (KeyError('uid unavailable'), OSError('lookup unavailable')):
+            with self.subTest(error=type(error).__name__), mock.patch.object(pwd, 'getpwuid', side_effect=error):
+                actor = 'uid:' + str(os.getuid())
+                self.assertEqual(self.m.machine_admission_actor(), actor)
+                reason = self.m.machine_reasons(self.reading, self.m.machine_policy())[0]
+                self.assertIn('OS user ' + actor, reason)
+                row = self.admit()['active']
+                self.assertEqual(row['actor'], actor)
+                self.command(id='cancel', reason='fixture finished')
+                self.assertEqual(self.command()['events'][-1]['actor'], actor)
+
     def test_list_cancel_audit_and_permissions(self):
         row = self.admit()['active']
         self.assertTrue(row['actor'])

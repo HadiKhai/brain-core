@@ -5,6 +5,12 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-20: Machine admission tolerates an unavailable passwd database
+
+Machine holds and admission audit records identify the numeric kernel uid when the
+OS passwd entry cannot be resolved. Sandboxed status refreshes keep reporting the
+hold without depending on the account lookup service. No policy change is needed.
+
 ## 2026-11-20: Bounded disk admissions preserve the machine reserve
 
 Use `brain machine admit --disk-floor N --until HH:MM --reason "one named gate"` for an
