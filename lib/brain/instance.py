@@ -326,6 +326,25 @@ class Instance:
 
 _LOCK = {"depth": 0, "fh": None}
 LOCK_WAIT = int(os.environ.get("BRAIN_LOCK_WAIT") or 300)  # seconds a command waits for another before giving up
+REFRESH_LOCK_SECONDS = 5.0  # final refresh ownership budget, below runtime hooks' 30 s timeout
+
+
+class LockTimeout(TimeoutError):
+    """An explicitly bounded caller could not obtain instance ownership."""
+
+
+def refresh_lock_remaining():
+    started = _LOCK.get('hold_started')
+    if not holding() or _LOCK['fh'] is None or started is None:
+        return None
+    remaining = REFRESH_LOCK_SECONDS - (time.perf_counter() - started)
+    if remaining <= 0:
+        _m_common.die('status refresh lock ownership deadline expired; retry from fresh state')
+    return remaining
+
+
+def check_refresh_deadline():
+    refresh_lock_remaining()
 
 
 class brain_lock:
@@ -334,10 +353,11 @@ class brain_lock:
     process). The holder writes its pid into the file and says so in BRAIN_LOCK_HELD, so a brain command it
     starts itself (git runs hooks inside our commit) goes on without waiting for it, and only while it holds it."""
 
-    def __init__(self, inst_or_root):
+    def __init__(self, inst_or_root, *, timeout=None):
         root = inst_or_root.root if isinstance(inst_or_root, Instance) else inst_or_root  # (a Path's .root is "/")
         self.path = Path(root) / ".brain" / "lock"
         self.key = str(Path(root).resolve())
+        self.timeout = timeout
 
     def owner_is_running_us(self):
         held = os.environ.get("BRAIN_LOCK_HELD", "")
@@ -360,17 +380,20 @@ class brain_lock:
             if os.fstat(fh.fileno()).st_nlink > 1 or self.path.is_symlink():
                 fh.close()
                 _m_common.die(f"{_m_common.tilde(self.path)} is linked to another file; brain won't write it (remove it)")
-            deadline = time.time() + LOCK_WAIT
+            wait = LOCK_WAIT if self.timeout is None else min(LOCK_WAIT, self.timeout)
+            deadline = time.monotonic() + wait
             while True:
                 try:
                     fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if time.time() > deadline:
+                    if time.monotonic() >= deadline:
                         fh.close()
+                        if self.timeout is not None:
+                            raise LockTimeout('instance lock wait expired')
                         _m_common.die(f"another brain command has held this instance's lock for {LOCK_WAIT // 60} minutes; "
                             f"try again (lock: {_m_common.tilde(self.path)})")
-                    time.sleep(0.05)
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
             try:
                 os.fchmod(fh.fileno(), 0o600)
             except OSError:

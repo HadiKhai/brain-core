@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from . import common as _m_common
@@ -20,6 +21,7 @@ _m_nodes = _m_common.LazyModule(__package__, 'nodes')
 
 
 SHELL_TOOLS = ('Bash', 'bash', 'exec_command', 'functions.exec_command')
+PRETOOL_LOCK_WAIT_SECONDS = 1.0  # hook bookkeeping budget; runtime adapter timeout is 30 s
 
 
 def forbidden_actions(n):
@@ -193,14 +195,23 @@ def pretool_decision(inst, n, data):
         return None
     digest = action_fingerprint(action)
     policy = action_fingerprint({'rules': rules})
-    with _m_instance.brain_lock(inst):
-        state = allowance_state(inst, n)
-        allowed = state['allowances'].get(digest)
-        if isinstance(allowed, dict) and allowed.get('policy') == policy:
-            del state['allowances'][digest]
-            state['events'].append({'event': 'consumed', 'action': digest, 'at': inst.now()})
-            save_allowances(inst, n, state)
-            return None
+    started = time.monotonic()
+    try:
+        with _m_instance.brain_lock(inst, timeout=PRETOOL_LOCK_WAIT_SECONDS):
+            state = allowance_state(inst, n)
+            allowed = state['allowances'].get(digest)
+            if isinstance(allowed, dict) and allowed.get('policy') == policy:
+                del state['allowances'][digest]
+                state['events'].append({'event': 'consumed', 'action': digest, 'at': inst.now()})
+                save_allowances(inst, n, state)
+                return None
+    except _m_instance.LockTimeout:
+        from . import events
+        events.append_line(inst.root / '.brain/hook-decisions.jsonl',
+            {'at': inst.now(), 'node': events.node_ref(n['id']), 'decision': 'fail-open',
+             'reason': 'instance-lock-contention', 'action': digest,
+             'wait_s': time.monotonic() - started})
+        return None
     return 'Forbidden action matched this node\'s declared tool rules; an exact --once allowance is required.'
 
 

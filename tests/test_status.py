@@ -398,6 +398,119 @@ class AutonomyDue(AutonomyProject):
 
 
 class AutonomyFacts(AutonomyProject):
+    def test_review_hook_appends_preserve_prefix_and_appear_next_refresh(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'review_hook_prefix')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        inst = m.Instance(root)
+        transcript = self.tmp / 'hook-question.jsonl'
+        script = '''import sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from brain import instance,hosts
+inst=instance.Instance(Path(sys.argv[2]))
+hosts.capture_hook_questions(inst,inst.node('root'),{'transcript_path':sys.argv[3],'session_id':'fixture'})
+'''
+        calls = []
+        def prepare(current, node):
+            calls.append(len(calls))
+            question = 'Question number %d?' % len(calls)
+            transcript.write_text(json.dumps({'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'q%d' % len(calls), 'name': 'AskUserQuestion',
+                 'input': {'questions': [{'question': question}]}}]}}) + '\n')
+            hook = subprocess.run([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(root), str(transcript)],
+                                  env=self.env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(hook.returncode, 0, hook.stderr)
+            return status.inbox_lines.__wrapped__(node, readonly=True)
+        with mock.patch.dict(os.environ, self.env), refresh.invocation(), instance.held(root):
+            result = refresh.compute(inst, inst.node('root'), prepare)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(any('Question number' in line for line in result))
+        self.assertIn('Question number 1?', (root / 'inbox.md').read_text())
+        with mock.patch.dict(os.environ, self.env), refresh.invocation():
+            following = refresh.compute(inst, inst.node('root'),
+                lambda current, node: status.inbox_lines.__wrapped__(node, readonly=True))
+        self.assertTrue(any('Question number 1?' in line for line in following))
+        def edit_prefix(current, node):
+            inbox = node['dir'] / 'inbox.md'
+            inbox.write_text(inbox.read_text().replace('Question number 1?', 'Edited earlier question?'))
+        with mock.patch.dict(os.environ, self.env), self.assertRaisesRegex(SystemExit, 'state changed'):
+            refresh.compute(inst, inst.node('root'), edit_prefix)
+
+    def test_review_malformed_retired_inbox_keeps_fail_open_refresh(self):
+        root = self.init('alice')
+        m, cli, status, events, instance = self.refresh_cli(root, 'review_invalid_lifecycle')
+        refresh = importlib.import_module(cli.__package__ + '.status_refresh')
+        reminders = importlib.import_module(cli.__package__ + '.reminders')
+        path = root / '.brain/wake/lifecycle.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = reminders.lifecycle_empty()
+        data['inbox_retired'] = {'root': []}
+        path.write_text(json.dumps(data))
+        (root / 'inbox.md').write_text('- Fixture question?\n')
+        inst = m.Instance(root)
+        with mock.patch.dict(os.environ, self.env), refresh.invocation():
+            before = refresh.generation([path])
+            self.assertTrue(refresh.compute(inst, inst.node('root'), m.refreshed_text))
+            data['inbox_retired'] = {'root': 'invalid'}
+            path.write_text(json.dumps(data))
+            self.assertNotEqual(before, refresh.generation([path]))
+
+    def test_review_cli_hook_append_is_not_certified_until_next_refresh(self):
+        root = self.init('alice')
+        self.b(root, 'status', 'root', '--refresh')
+        m, cli, status, events, instance = self.refresh_cli(root, 'review_cli_hook_prefix')
+        transitions = importlib.import_module(cli.__package__ + '.transitions')
+        facts, writes = status.status_facts, []
+        def hook_append(*args, **kwargs):
+            result = facts(*args, **kwargs)
+            line = '- Hook suffix %d\n' % len(writes)
+            # This is the exact nonblocking appender used by capture_hook_questions;
+            # unlike cooperating CLI writers it bypasses the instance lock.
+            self.assertTrue(transitions.inbox_append(root, line, nonblocking=True))
+            writes.append(line)
+            return result
+        with mock.patch.dict(os.environ, {**self.env, 'BRAIN_ROOT': str(root)}), \
+                mock.patch.object(sys, 'argv', ['brain', 'status', 'root', '--refresh']), \
+                mock.patch.object(status, 'status_facts', side_effect=hook_append), \
+                mock.patch('random.uniform', return_value=0), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.main()
+        self.assertTrue(writes)
+        inst = m.Instance(root)
+        self.assertIn(events.node_ref('root'), events.journal(inst).state['invalid'])
+        self.b(root, 'status', 'root', '--refresh')
+        self.assertNotIn(events.node_ref('root'), events.journal(inst).state['invalid'])
+        self.assertIn(writes[-1].strip(), status.inbox_lines.__wrapped__(inst.node('root'), readonly=True))
+
+    def test_review_locked_git_subprocess_has_an_ownership_deadline(self):
+        import signal
+        root = self.init('alice')
+        fake = self.tmp / 'fake-bin'
+        fake.mkdir()
+        binary = fake / 'git'
+        binary.write_text('#!/bin/sh\nexec sleep 60\n')
+        binary.chmod(0o700)
+        script = '''import sys,time
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from brain import instance,common
+instance.REFRESH_LOCK_SECONDS=.15
+with instance.held(Path(sys.argv[2])),instance.brain_lock(Path(sys.argv[2])):
+    common.git('version')
+'''
+        child = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(root)],
+            env={**self.env, 'PATH': str(fake) + os.pathsep + self.env['PATH']},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            out, err = child.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.communicate()
+            self.fail('retained refresh ownership did not deadline its Git subprocess')
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn('refresh lock ownership deadline', err)
+
     def _assert_refresh_preserves_merge_comparison(self, event_source):
         root, home, wt = self.project()
         (wt / 'merged.txt').write_text('merged fixture\n')
@@ -1112,7 +1225,7 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         self.assertEqual((root / 'status.md').read_bytes(), original)
         self.assertIn('[x]', backlog.read_text())
 
-    def test_refresh_refuses_hook_question_during_git_validation(self):
+    def test_refresh_admits_hook_append_during_git_validation_for_next_refresh(self):
         root = self.init('alice')
         self.git('branch', 'validation-probe', cwd=root)
         loader = core_loader.SourceFileLoader('refresh_hook_validation', str(CORE / 'bin/brain'))
@@ -1133,8 +1246,8 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
             refresh.common.git('rev-parse', '--verify', 'validation-probe', cwd=root)
             return text
         with mock.patch.object(refresh.GitInputs, 'reread', interleave):
-            with self.assertRaisesRegex(SystemExit, 'state changed during the unlocked step'):
-                refresh.compute(inst, inst.node('root'), prepare)
+            prepared = refresh.compute(inst, inst.node('root'), prepare)
+        self.assertNotIn('Hook question arriving', str(prepared))
         self.assertTrue(changed)
         self.assertEqual((root / 'status.md').read_bytes(), original)
         self.assertIn('Hook question arriving', (root / 'inbox.md').read_text())
@@ -1416,12 +1529,12 @@ with instance.brain_lock(instance.Instance(__import__('pathlib').Path(sys.argv[2
         root = self.init('alice')
         self.b(root, 'status', 'root', '--refresh')
         m, cli, status, events, instance = self.refresh_cli(root, 'refresh_retry_locked')
-        inbox = root / 'inbox.md'
+        source = root / 'brief.md'
         facts, locked = status.status_facts, []
         def contended(*args, **kwargs):
             result = facts(*args, **kwargs)
             if instance._LOCK['fh'] is None:
-                with inbox.open('a') as stream:  # displayed work changes in every unlocked compute
+                with source.open('a') as stream:  # a non-inbox input changes in every unlocked compute
                     stream.write('\n- concurrent item\n')
             else:
                 locked.append(instance.holding())
@@ -1454,7 +1567,7 @@ from brain import instance
 root=Path(sys.argv[2])
 for line in sys.stdin:
     with instance.brain_lock(root):
-        with (root/'inbox.md').open('a') as stream: stream.write('\\n- concurrent item\\n')
+        with (root/'brief.md').open('a') as stream: stream.write('\\n- concurrent item\\n')
     print('written',flush=True)
 '''
         writer = subprocess.Popen([sys.executable, '-B', '-c', script, str(CORE / 'lib'), str(root)],

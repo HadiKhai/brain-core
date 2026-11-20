@@ -37,12 +37,58 @@ def requested(inst):
     return any(op.command == 'status' and op.inst.root == inst.root for op in events._CURRENT)
 
 
-def lifecycle_identity(path):
-    """Retirement receipts for absent inbox sources are scan output, not facts.
+_INBOX_PREFIXES = ContextVar('brain_refresh_inbox_prefixes', default=None)
 
-    Preserve every other lifecycle field, and retirement generations for every
-    currently visible source. The same readers select those sources; no new
-    text classification or acknowledgement semantics live in this fence.
+
+def inbox_bytes(path):
+    """One read window sees an immutable prefix; hooks may append after it."""
+    prefixes = _INBOX_PREFIXES.get()
+    if prefixes is not None and path in prefixes and prefixes[path] is not None:
+        return prefixes[path][0]
+    try:
+        st = path.lstat()
+        value = path.read_bytes()
+        namespace = (st.st_mode, st.st_uid, st.st_nlink)
+    except FileNotFoundError:
+        value, namespace = b'', None
+    if prefixes is not None and path in prefixes:
+        prefixes[path] = (value, namespace)
+    return value
+
+
+def inbox_identity(path):
+    prefix = inbox_bytes(path)
+    namespace = _INBOX_PREFIXES.get()[path][1]
+    try:
+        st = path.lstat()
+        current = path.read_bytes()
+        actual = (st.st_mode, st.st_uid, st.st_nlink)
+    except FileNotFoundError:
+        current, actual = b'', None
+    # A new ordinary inbox is admissible when the snapshot read an empty one.
+    if namespace is None and actual is not None and stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
+        actual = None
+    if current.startswith(prefix) and actual == namespace:
+        return (str(path), 'inbox-prefix', hashlib.sha256(prefix).digest(), namespace)
+    return (str(path), 'inbox-edited', hashlib.sha256(current).digest(), actual)
+
+
+@contextlib.contextmanager
+def inbox_snapshot(inst):
+    paths = [node['dir'] / 'inbox.md' for node in inst.nodes()]
+    token = _INBOX_PREFIXES.set({path: None for path in [*paths, *[p.resolve() for p in paths]]})
+    try:
+        yield
+    finally:
+        _INBOX_PREFIXES.reset(token)
+
+
+def lifecycle_identity(path):
+    """Exclude receipt-history fields structurally; fence their displayed episodes.
+
+    The existing request reader determines episode identities for the frozen
+    inbox prefixes. Malformed nested receipts retain a conservative identity,
+    while the display reader keeps its existing repair/fail-open behavior.
     """
     from . import reminders, status
     current = instance.Instance(path.parents[2])
@@ -59,37 +105,35 @@ def lifecycle_identity(path):
         return cache[key]
     try:
         data = reminders.lifecycle_read(current)
-    except (OSError, ValueError):
+        conservative = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).digest()
+        projected = []
+        for node in nodes:
+            lines = [line for line in inbox_bytes(node['dir'] / 'inbox.md').decode().splitlines()
+                     if line.startswith('- ')]
+            for pending in status.hook_question_queue(node).glob('*.json'):
+                try:
+                    line = json.loads(pending.read_text()).get('line')
+                    if isinstance(line, str):
+                        lines.append(line)
+                except (OSError, ValueError, AttributeError):
+                    pass
+            observed = {**data, 'inbox': dict(data['inbox']),
+                        'inbox_retired': dict(data.get('inbox_retired', {}))}
+            previous = data.get('inbox_retired', {}).get(node['id'], {})
+            if isinstance(previous, dict):
+                observed['inbox_retired'][node['id']] = dict(previous)
+            lines = reminders.request_lines(current, node, lines, readonly=True, lifecycle_data=observed)
+            projected.append((node['id'], [(reminders.inbox_source_id(node, line),
+                reminders.request_episode_id(current, node, line, lifecycle_data=observed)) for line in lines]))
+        # These fields are receipt history, not direct display inputs. The
+        # projected identities above retain every currently relevant recurrence.
+        selected = {name: value for name, value in data.items() if name not in ('inbox', 'inbox_retired')}
+        value = hashlib.sha256(json.dumps([selected, projected], sort_keys=True).encode()).digest()
+    except (OSError, ValueError, TypeError, AttributeError):
+        if 'conservative' in locals():
+            return ('unknown', conservative)
         st = path.lstat()
         return ('unknown', st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-    retired = {}
-    for node in nodes:
-        inbox = node['dir'] / 'inbox.md'
-        lines = [line for line in inbox.read_text().splitlines() if line.startswith('- ')] if inbox.exists() else []
-        for pending in status.hook_question_queue(node).glob('*.json'):
-            try:
-                line = json.loads(pending.read_text()).get('line')
-                if isinstance(line, str):
-                    lines.append(line)
-            except (OSError, ValueError, AttributeError):
-                pass
-        # Reconciliation changes only these node-indexed dictionaries. Share
-        # immutable history instead of copying every node's receipt history for
-        # every generation check in a batch refresh.
-        observed = {**data, 'inbox': dict(data['inbox']), 'inbox_retired': dict(data.get('inbox_retired', {}))}
-        previous = data.get('inbox_retired', {}).get(node['id'], {})
-        if isinstance(previous, dict):
-            observed['inbox_retired'][node['id']] = dict(previous)
-        lines = reminders.request_lines(current, node, lines, readonly=True, lifecycle_data=observed)
-        visible = {reminders.inbox_source_id(node, line) for line in lines}
-        if not isinstance(previous, dict):
-            retired[node['id']] = previous  # retain the reader's invalid-state verdict
-        else:
-            retained = {key: value for key, value in previous.items() if key in visible}
-            if retained:
-                retired[node['id']] = retained
-    data['inbox_retired'] = retired
-    value = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).digest()
     after = path.lstat()
     if stamp == (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns,
                  tuple(generation(sources))):
@@ -99,8 +143,13 @@ def lifecycle_identity(path):
 
 def generation(paths, shallow=False):
     """Cheap ref/config generations, including replacement-ref target aliases."""
+    instance.check_refresh_deadline()
     result = []
     def visit(path):
+        prefixes = _INBOX_PREFIXES.get()
+        if prefixes is not None and path in prefixes:
+            result.append(inbox_identity(path))
+            return
         try:
             st = path.lstat()
             if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
@@ -528,6 +577,10 @@ def content_identity(paths):
         if path in seen:
             return
         seen.add(path)
+        prefixes = _INBOX_PREFIXES.get()
+        if prefixes is not None and path in prefixes:
+            result.append(inbox_identity(path))
+            return
         try:
             st = path.lstat()
             if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
@@ -671,6 +724,11 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=(), incremen
 
 
 def fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
+    with inbox_snapshot(inst):
+        return _fenced(inst, n, build, all_nodes, targets, extra, incremental)
+
+
+def _fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
     git_inputs = GitInputs()
     with instance.brain_lock(inst):
         current = instance.Instance(inst.root)
@@ -801,6 +859,12 @@ def fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
             except SystemExit:
                 invalidate_views(git_inputs)
                 raise
+        if owner is not None and owner.command == 'status':
+            captured = getattr(owner, 'refresh_inbox_prefixes', {})
+            for target in selected:
+                path = target['dir'] / 'inbox.md'
+                captured[target['id']] = inbox_bytes(path)
+            owner.refresh_inbox_prefixes = captured
         return result
 
 

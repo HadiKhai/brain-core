@@ -1442,6 +1442,38 @@ if __name__ == "__main__":
 
 
 class ForbiddenActions(Scenario):
+    def test_review_contended_pretool_fails_open_records_and_preserves_allowance(self):
+        root = self.init('alice')
+        (root / 'AGENTS.md').write_text('## Forbidden actions\n- tool:FixtureTool\n')
+        inst = self.m.Instance(root)
+        node = inst.node('root')
+        payload = {'cwd': str(root), 'tool_name': 'FixtureTool', 'tool_input': {}}
+        action = self.m.action_fingerprint(self.m.tool_action(payload))
+        state = self.m.allowance_state(inst, node)
+        state['allowances'][action] = {'policy': self.m.action_fingerprint({'rules': ['tool:FixtureTool']})}
+        self.m.save_allowances(inst, node, state)
+        path = self.m.allowance_path(inst, node)
+        before = path.read_bytes()
+        started = time.monotonic()
+        with self.m.brain_lock(inst):
+            try:
+                child = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'hook', 'pretool'],
+                    cwd=root, input=json.dumps(payload), env={**self.env, 'BRAIN_NO_REEXEC': '1'},
+                    capture_output=True, text=True, timeout=3)
+            except subprocess.TimeoutExpired:
+                self.fail('contended pretool outlived its hook lock-wait budget')
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertEqual(child.stdout, '')  # neutral hook result is fail-open
+            self.assertEqual(path.read_bytes(), before)
+            rows = [json.loads(line) for line in (root / '.brain/hook-decisions.jsonl').read_text().splitlines()]
+            self.assertEqual(rows[-1]['decision'], 'fail-open')
+            self.assertEqual(rows[-1]['reason'], 'instance-lock-contention')
+            self.assertEqual(rows[-1]['action'], action)
+            print('pretool-lock-proof: ' + json.dumps({'elapsed_s': time.monotonic() - started,
+                                                       'lock_wait_s': rows[-1]['wait_s']}))
+        self.assertIsNone(self.m.pretool_decision(inst, node, payload))
+        self.assertNotIn(action, self.m.allowance_state(inst, node)['allowances'])
+
     def setUp(self):
         super().setUp()
         self.m = core_loader.SourceFileLoader('action_guard_fixture', str(CORE / 'bin/brain')).load_module()

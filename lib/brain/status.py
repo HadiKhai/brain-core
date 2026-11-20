@@ -351,11 +351,11 @@ def machine_transition_line(n, line):
 
 @_m_command_reads.memo
 def inbox_lines(n, readonly=False, lifecycle_data=None):
-    from . import ui_readmodel
+    from . import ui_readmodel, status_refresh
     readonly = readonly or ui_readmodel.projection(_m_instance.instance_above(n['dir'])) is not None
     f = n["dir"] / "inbox.md"
     # Filter the historical record on read. Never rewrite or discard episode history.
-    lines = [l for l in f.read_text().splitlines() if l.startswith("- ")
+    lines = [l for l in status_refresh.inbox_bytes(f).decode().splitlines() if l.startswith("- ")
              and not machine_transition_line(n, l)] if f.exists() else []
     # A busy inbox never loses a stopped turn's question. The private queue is also an inbox
     # source until it can be appended; reading due/inbox retries delivery without waiting.

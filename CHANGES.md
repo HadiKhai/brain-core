@@ -18,6 +18,18 @@ the final admitted attempt retains that existing lock so cooperating writers can
 continually overtake publication. Policy edits and external changes to relevant inputs
 still refuse stale publication. No configuration or instance migration is needed.
 
+Hook inbox appends are admitted against the exact byte prefix the refresh read. The
+snapshot renders that prefix, and an unread suffix invalidates its event view until the
+next refresh; edits or truncation of the prefix still refuse publication. Lifecycle
+receipt history is excluded by schema field, with current episode identities fenced
+separately. Malformed receipt state keeps the reader's repair/fail-open behavior.
+
+Final admitted refresh ownership has a five-second Git/checkpoint budget. Git commands
+and their helpers are terminated together when their remaining budget expires. PreTool
+allowance bookkeeping waits at most one second for any instance lock holder; contention
+leaves allowances untouched, lets the hook return neutrally, and records a metadata-only
+fail-open decision in `.brain/hook-decisions.jsonl`. The shipped adapters allow 30 seconds.
+
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 
 A coordinator's send, launch or worker start is refused as unordered only in an operator turn.

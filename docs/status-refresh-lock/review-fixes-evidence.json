@@ -1,0 +1,171 @@
+{
+  "reviewed_head": "bca87792fe0b682cf5a09f9fceb8ff59fa91da21",
+  "red": {
+    "count": 5,
+    "outcome": "failed",
+    "skipped": 0,
+    "duration_s": 9.16
+  },
+  "focused_green": {
+    "count": 7,
+    "outcome": "passed",
+    "skipped": 0,
+    "duration_s": 19.46
+  },
+  "affected_green": {
+    "count": 363,
+    "outcome": "passed",
+    "skipped": 2,
+    "duration_s": 325.54,
+    "files": [
+      "tests/test_status.py",
+      "tests/test_guard.py",
+      "tests/test_events.py"
+    ],
+    "workers": 3
+  },
+  "measurements": {
+    "refresh-lock-proof": {
+      "max_hold_s": 0.6758662070000012,
+      "writer_wait_s": 0.4236771249999993,
+      "hook_s": [
+        0.24770862500000046
+      ]
+    },
+    "pretool-lock-proof": {
+      "elapsed_s": 1.1158865419999984,
+      "lock_wait_s": 1.017188584
+    }
+  },
+  "real": [
+    {
+      "exit": 0,
+      "wall_s": 41.468743875,
+      "output_writes": 5124,
+      "max_sampled_own_hold_s": 8.768698041999997,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 41.357931,
+          "lock_hold_s": 10.723186,
+          "lock_wait_s": 0.0103,
+          "phases": {
+            "dispatch": 41.35331,
+            "file_state": 6.358748,
+            "lock_hold": 10.723186,
+            "lock_wait": 0.0103,
+            "pending_imports": 0.244816,
+            "refresh_compute": 30.225092,
+            "refresh_revalidate": 4.848374,
+            "refresh_write": 0.002101,
+            "runaway_checks": 0.038343,
+            "status_facts": 20.694675,
+            "usage_read": 0.009427
+          }
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "wall_s": 6.326658333000005,
+      "output_writes": 759,
+      "max_sampled_own_hold_s": 3.2484703750000037,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 6.216986,
+          "lock_hold_s": 3.991501,
+          "lock_wait_s": 0.0171,
+          "phases": {
+            "dispatch": 6.19824,
+            "file_state": 0.447134,
+            "lock_hold": 3.991501,
+            "lock_wait": 0.0171,
+            "pending_imports": 0.020031,
+            "refresh_compute": 1.822352,
+            "refresh_revalidate": 0.152466,
+            "refresh_write": 0.001915,
+            "runaway_checks": 3.1e-05,
+            "status_facts": 0.9049,
+            "usage_read": 0.001789
+          }
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "wall_s": 6.708828249999996,
+      "output_writes": 822,
+      "max_sampled_own_hold_s": 3.210819917000002,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 6.613803,
+          "lock_hold_s": 4.229796,
+          "lock_wait_s": 0.009035,
+          "phases": {
+            "dispatch": 6.609239,
+            "file_state": 0.381297,
+            "lock_hold": 4.229796,
+            "lock_wait": 0.009035,
+            "pending_imports": 0.022243,
+            "refresh_compute": 1.990833,
+            "refresh_revalidate": 0.396469,
+            "refresh_write": 0.001852,
+            "runaway_checks": 1.5e-05,
+            "status_facts": 1.075748,
+            "usage_read": 0.001743
+          }
+        }
+      ]
+    }
+  ],
+  "real_summary": {
+    "passed": 3,
+    "runs": 3,
+    "output_writes": 6705,
+    "wall_min_s": 6.326658333000005,
+    "wall_max_s": 41.468743875,
+    "max_sampled_hold_s": 8.768698041999997
+  },
+  "provider_ai_spend_usd": 0,
+  "runtime_sha256": {
+    "lib/brain/status_refresh.py": "89143d1c561d57f30fc4af4d379a8a2b378c630c03bcba619bbe343f3947a1c9",
+    "lib/brain/status.py": "6ee31dd9512b5986553c24b92ab18625fa768d7dd34c66cbda8ff83bc95acc40",
+    "lib/brain/instance.py": "61bc37906311df94c359a3fb092893e3c45053b0a1880d44ee6473076e4b7454",
+    "lib/brain/common.py": "2481b78c28598d890a57b580c0310c394d82df50504163eba81cd9b9e9f91d7b",
+    "lib/brain/action_guard.py": "52ebfeffbb3279f10ead28f270cbc3d64ce08007ac90005569e02a6c015086b3",
+    "lib/brain/events.py": "7c88d8b83d2adefc948ac762204d90141bca7f81e84e2a2107e906f42a4034bd"
+  },
+  "process": {
+    "delegates_started": 0,
+    "pr": "https://github.com/HadiKhai/brain-core/pull/6",
+    "new_review_requested": false,
+    "review_findings_addressed": [
+      "hook-appends",
+      "hook-timeout-budget",
+      "invalid-retirement-state"
+    ],
+    "git_command_form": "git -C <assigned-worktree> ...; normal commits and fast-forward pushes only",
+    "cleanup": "owned baseline export and owned run-output folders removed; installed core unchanged"
+  },
+  "declared_budgets": {
+    "REFRESH_LOCK_SECONDS": {
+      "seconds": 5.0,
+      "source": "lib/brain/instance.py:329"
+    },
+    "PRETOOL_LOCK_WAIT_SECONDS": {
+      "seconds": 1.0,
+      "source": "lib/brain/action_guard.py:24"
+    },
+    "adapter_timeouts_s": [
+      30
+    ]
+  }
+}

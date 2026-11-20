@@ -840,8 +840,17 @@ class Command:
             try:
                 data = {'command': self.command, 'exit': exit_code, 'resources': resource_list(self.inst, changed),
                         'views': views, 'maintenance_ok': maintenance_ok}
+                # A refresh may publish its frozen inbox prefix while hooks
+                # append. Keep those views invalid for the next refresh rather
+                # than certifying the unread suffix as an up-to-date event view.
+                for nid, prefix in getattr(self, 'refresh_inbox_prefixes', {}).items():
+                    path = self.inst.node(nid)['dir'] / 'inbox.md'
+                    current = path.read_bytes() if path.exists() else b''
+                    if current != prefix:
+                        data.setdefault('invalidate', []).append(node_ref(nid))
                 if not maintenance_ok:
-                    data['invalidate'] = [node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)]
+                    data['invalidate'] = sorted(set(data.get('invalidate', [])) |
+                                                {node_ref(n['id']) for n in affected_nodes(self.inst, changed, self.node)})
                 if getattr(self, 'views_deferred', False):
                     data['deferred'] = True
                 # Prepare all display text before publication; no display failure may strand begin.

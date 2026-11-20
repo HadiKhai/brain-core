@@ -1,5 +1,8 @@
 # Status refresh under concurrent writes
 
+Initial handback at `bca87792`. The three review findings and their fixes are documented
+in [review-fixes.md](review-fixes.md); use that report for the current implementation.
+
 Base: `origin/main` at `4316cbfb`. Branch: `fix/status-refresh-lock-20261120`.
 This is the builder report; fresh coordinator review and the cloud full suite remain independent gates.
 
