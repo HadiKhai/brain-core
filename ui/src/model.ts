@@ -209,6 +209,7 @@ export function routing(s: RecordData) {
     now = Date.now() / 1000;
   if (p.autodetected) return null;
   return list(s.usage)
+    .filter((row) => !row.signed_out)
     .map((row) => {
       const stop = usageStopPercent(row, p);
       if (!Number.isFinite(stop)) return null;

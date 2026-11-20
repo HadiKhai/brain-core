@@ -59,6 +59,8 @@ def usage_cache():
             return {}
         if r.get("read_at") is not None and (not usage_number(r["read_at"]) or usage_stamp(r["read_at"]) is None):
             return {}
+        if "signed_out" in r and not isinstance(r["signed_out"], bool):
+            return {}
         for name, w in r["windows"].items():
             if (name not in USAGE_WINDOWS and not name.startswith("seven_day_model:")) or not isinstance(w, dict):
                 return {}
@@ -226,6 +228,11 @@ def usage_windows(data, runtime, absences=False):
             used = w.get("utilization", w.get("used_percentage"))
             if usage_number(used) and 0 <= used <= 100:
                 out[name] = {"used_percent": used, "resets_at": usage_stamp(w.get("resets_at"))}
+        # A successful weekly lookup can explicitly declare no session window.
+        # Omitted/malformed fields and failed lookups must keep the prior observation.
+        if absences and "seven_day" in out and "five_hour" not in out and \
+                "five_hour" in data and data["five_hour"] is None:
+            out["five_hour"] = {"absent": True}
     return out
 
 
@@ -322,9 +329,11 @@ def usage_keychain(config_dir):
         if isinstance(oauth, dict) and isinstance(oauth.get("accessToken"), str) and oauth["accessToken"]:
             found.append(d)
         else:
-            notes.append(note or "No stored Claude OAuth token")
+            notes.append(note)
     if not found:
-        return {}, notes[-1]
+        # Every possible entry must be known missing; a denied alternate login is unknown.
+        unavailable = next((note for note in reversed(notes) if note), "")
+        return ({}, unavailable) if unavailable else ({"claudeAiOauth": {}}, "No stored Claude OAuth token")
     def expiry(d):
         v = d["claudeAiOauth"].get("expiresAt")
         return v if usage_number(v) else 0
@@ -341,6 +350,8 @@ def usage_keychain_read(service):
         r = subprocess.run(["/usr/bin/security", "find-generic-password", "-s", service,
                             "-a", user, "-w"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                            stdin=subprocess.DEVNULL, timeout=2, start_new_session=True)
+        if r.returncode == 44:  # errSecItemNotFound (-25300 modulo 256), distinct from denied access
+            return {}, ""
         if r.returncode:
             raise ValueError("unavailable")
         d = json.loads(r.stdout)
@@ -359,6 +370,7 @@ EXPIRED_CLAUDE_LOGIN = ("Claude login expired: it renews the next time Claude ru
 
 
 def usage_claude(sub):
+    """Return windows, account, safe error and credential state (None means unavailable)."""
     import urllib.error
     import urllib.request
     import urllib.parse
@@ -382,9 +394,9 @@ def usage_claude(sub):
         token = oauth.get("accessToken")
         if isinstance(token, str) and token and usage_number(oauth.get("expiresAt")) and \
                 oauth["expiresAt"] / 1000 <= time.time():
-            return {}, None, EXPIRED_CLAUDE_LOGIN
+            return {}, None, EXPIRED_CLAUDE_LOGIN, False
     if not isinstance(token, str) or not token:
-        return {}, None, note or "No stored Claude OAuth token"
+        return {}, None, note or "No stored Claude OAuth token", True if credentials or not note else None
     # Redirects must never carry the Authorization header to another host.
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
@@ -397,10 +409,13 @@ def usage_claude(sub):
     except urllib.error.HTTPError as e:
         # Only the status code: the body and headers stay unread.
         return {}, None, EXPIRED_CLAUDE_LOGIN if e.code in (401, 403) else \
-            f"Claude usage lookup refused (HTTP {e.code}); using logs if available"
+            f"Claude usage lookup refused (HTTP {e.code}); using logs if available", False
     except (urllib.error.URLError, OSError):
-        return {}, None, "Claude usage lookup unreachable (network); using logs if available"
-    return usage_windows(data, "claude"), usage_account(data.get("account")) or usage_account(data), note
+        return {}, None, "Claude usage lookup unreachable (network); using logs if available", False
+    windows = usage_windows(data, "claude", absences=True)
+    if not windows:
+        note = "Claude usage lookup returned no subscription windows; using logs if available"
+    return windows, usage_account(data.get("account")) or usage_account(data), note, False
 
 
 def usage_logs(sub):
@@ -459,6 +474,7 @@ def usage_key(runtime, identity):
 
 def usage_reading(sub):
     account, note, windows = None, "", {}
+    signed_out = None
     if not Path(sub["config_dir"]).is_dir():
         return usage_key(sub["runtime"], sub["config_dir"]), {
             "windows": {}, "read_at": None, "source": "unknown", "note": "Runtime config directory unavailable"}
@@ -466,17 +482,20 @@ def usage_reading(sub):
         if sub["runtime"] == "codex":
             windows, account = usage_codex(sub)
         else:
-            windows, account, note = usage_claude(sub)
+            windows, account, note, signed_out = usage_claude(sub)
     except Exception:
         # Never include exception messages: an upstream error can contain headers or credentials.
         note = "Runtime lookup failed; using logs if available"
     if windows:
         stamp, source = time.time(), "lookup"
+    elif signed_out:
+        stamp, source = None, "unknown"
     else:
         windows, stamp = usage_logs(sub)
         source = "log" if windows else "unknown"
     return usage_key(sub["runtime"], account or sub["config_dir"]), {
-        "windows": windows, "read_at": stamp, "source": source, "note": note}
+        "windows": windows, "read_at": stamp, "source": source, "note": note,
+        **({"signed_out": signed_out} if signed_out is not None else {})}
 
 
 def usage_atomic(path, data):
@@ -543,11 +562,12 @@ def usage_merge(prior, reading):
                 if r is reading:
                     changed = True
     if not changed and prior.get("windows"):
-        return {**prior, "note": reading.get("note", "")}  # older numbers, today's reason
+        return {**prior, **({"signed_out": reading["signed_out"]} if "signed_out" in reading else {}),
+                "note": reading.get("note", "")}  # older numbers, today's reason and credential state
     if not windows:
         return reading
     newest = max(windows.values(), key=lambda w: w["read_at"] or 0)
-    return {**reading, "windows": windows, "read_at": min(w["read_at"] or 0 for w in windows.values()),
+    return {**prior, **reading, "windows": windows, "read_at": min(w["read_at"] or 0 for w in windows.values()),
             "source": newest["source"]}
 
 
@@ -667,17 +687,27 @@ def usage_rows(inst=None, refresh=False, before_launch=False, node=None, extra=(
             s.get(k) == sub[k] for k in ("runtime", "config_dir"))), {})
         r = cache.get("accounts", {}).get(prior.get("account_key"), {})
         stamp = r.get("read_at")
+        signed_out = r.get("signed_out") is True
+        if signed_out:
+            stamp = max((w.get("read_at", stamp) or 0 for w in r.get("windows", {}).values()), default=stamp)
         age = max(0, time.time() - stamp) if usage_number(stamp) else None
         windows = {}
-        for name, w in r.get("windows", {}).items():
+        for name, w in ({} if signed_out else r.get("windows", {})).items():
             reset = w.get("resets_at")
-            windows[name] = {**w, "expired": bool(reset and reset <= time.time())}
+            window_stamp = w.get("read_at", stamp)
+            window_age = max(0, time.time() - window_stamp) if usage_number(window_stamp) else None
+            windows[name] = {**w, "expired": bool(reset and reset <= time.time()),
+                             "age_seconds": round(window_age, 1) if window_age is not None else None,
+                             "stale": window_age is None or window_age > config["max_age_seconds"]}
             if inst and reset:
                 windows[name]["reset_time"] = usage_datetime(reset, inst).isoformat(timespec="seconds")
         rows.append({**sub, "brains": ["*"] if "*" in sub["brains"] else ([brain] if inst else sub["brains"]),
                      "available_to_every_brain": "*" in sub["brains"], "autodetected": config["autodetected"], "config_dir": _m_common.tilde(sub["config_dir"]), "account_key": prior.get("account_key"),
                      "windows": windows, "read_at": stamp, "age_seconds": round(age, 1) if age is not None else None,
-                     "source": r.get("source", "unknown"), "note": r.get("note", ""),
+                     "source": r.get("source", "unknown"),
+                     "note": (f"Signed out; last read {usage_time(stamp, inst)}. " if signed_out else "") + r.get("note", ""),
+                     "signed_out": signed_out,
+                     "stale": age is None or age > config["max_age_seconds"],
                      "reading_time": usage_datetime(stamp, inst).isoformat(timespec="seconds")
                      if inst and stamp else None})
     return rows, config
@@ -724,6 +754,7 @@ def class_route(inst, job_class, runtime=None, model=None, cached_only=False, we
         if usage_config()["autodetected"]:
             return chosen, None, reason + " Usage unknown: no subscriptions.json; no provider refresh."
         rows, policy = usage_rows(inst, before_launch=not cached_only, node=node, extra=extra)
+        rows = [r for r in rows if not r["signed_out"]]
     except (OSError, ValueError):
         rows, policy = [], {"max_age_seconds": USAGE_MAX_AGE}
     def weekly(row):
@@ -780,7 +811,7 @@ def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, n
         rows, policy = usage_rows(inst, before_launch=not cached_only, node=node, extra=extra)
     except (OSError, ValueError):
         return None, "Usage unknown: machine subscription configuration unavailable; no subscription selected."
-    allowed = [r for r in rows if r["runtime"] in runtimes]
+    allowed = [r for r in rows if r["runtime"] in runtimes and not r["signed_out"]]
     fallback = inst.local.get("fallback", [])
     fallback = fallback if isinstance(fallback, list) else []
     eligible = []
@@ -805,7 +836,7 @@ def usage_route(inst, runtimes, preferred=None, model=None, cached_only=False, n
         eligible.append(((unknown, ahead, used, rank, r["runtime"] != preferred, r["id"]), r))
     if not eligible:
         if not allowed:
-            return None, "Usage unknown: no subscription is allowed for this brain and runtime; keeping the configured runtime."
+            return None, "Usage unknown: no signed-in subscription is allowed for this brain and runtime; keeping the configured runtime."
         return None, "Usage: all allowed subscriptions reached the stop line. Stop starting jobs; the brief remains available."
     score, selected = min(eligible, key=lambda x: x[0])
     reason = "usage unknown/stale; capacity unverified" if score[0] else \
@@ -991,7 +1022,12 @@ def cmd_usage(a):
             try:
                 while True:
                     try:
-                        usage_refresh(usage_config(), poll_interval=a.every)
+                        data = usage_refresh(usage_config(), poll_interval=a.every)
+                        for sub in data.get("subscriptions", []):
+                            reading = data.get("accounts", {}).get(sub["account_key"], {})
+                            if reading.get("note"):
+                                print(f"{usage_time(time.time())} usage {sub['id']}: {reading['note']}",
+                                      file=sys.stderr, flush=True)
                     except Exception:
                         print("brain: usage refresh unavailable; retrying next interval", file=sys.stderr, flush=True)
                     time.sleep(a.every)
@@ -1014,6 +1050,10 @@ def cmd_usage(a):
     print(f"Account-wide subscription usage · default stop line {policy['stop_percent']:g}% · this machine's share: unavailable")
     table = [["runtime", "label", "stop line", "5h used / reset", "weekly used / reset", "reading / age", "source", "brains"]]
     for r in rows:
+        if r["signed_out"]:
+            print(f"{r['label']}: signed out · last read {usage_time(r['read_at'], inst)} / "
+                  f"{usage_age(r['age_seconds'])} ago")
+            continue
         if not r["read_at"]:
             print(f"{r['label']}: no reading yet: run `brain usage --refresh` or install the poller (`brain usage install`); stop line {r['stop_percent']:g}%")
             continue
@@ -1022,11 +1062,14 @@ def cmd_usage(a):
             if not w:
                 return "unknown"
             if w.get("absent"):
-                return "none"
-            reset = usage_time(w.get("resets_at"), inst)
-            return f"{w['used_percent']:g}% / {reset}" + (" (expired; unknown)" if w["expired"] else "")
+                value = "none"
+            else:
+                reset = usage_time(w.get("resets_at"), inst)
+                value = f"{w['used_percent']:g}% / {reset}" + (" (expired; unknown)" if w["expired"] else "")
+            return value + (f" (stale; {usage_age(w['age_seconds'])} old; unverified)" if w["stale"] else "")
         table.append([r["runtime"], r["label"], f"{r['stop_percent']:g}%", window("five_hour"), window("seven_day"),
-                      f"{usage_time(r['read_at'], inst)} / {usage_age(r['age_seconds'])}", r["source"],
+                      f"{usage_time(r['read_at'], inst)} / {usage_age(r['age_seconds'])}" +
+                      (" (stale)" if r["stale"] else ""), r["source"],
                       "every brain" + (" (autodetected)" if r["autodetected"] else "")
                       if r["available_to_every_brain"] else ','.join(r['brains']) or 'none'])
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
@@ -1036,7 +1079,7 @@ def cmd_usage(a):
         for name, w in r["windows"].items():
             if name.startswith("seven_day_model:"):
                 print(f"  {r['label']} · weekly model {', '.join(w.get('models', []))}: "
-                      f"{w['used_percent']:g}% / {usage_time(w.get('resets_at'), inst)}")
+                      f"{window(name)}")
         if r["note"]:
             print(f"  {r['label']}: {r['note']}")
     if policy["other_subscriptions"]:

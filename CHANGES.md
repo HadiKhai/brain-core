@@ -5,6 +5,21 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-20: Usage distinguishes absent windows, stale readings and signed-out accounts
+
+A successful Claude lookup with an explicit null five-hour window and a valid weekly
+window now records no five-hour window, replacing historical session percentages.
+Omitted or malformed windows and failed lookups still preserve the last observation.
+`brain usage` labels stale windows with their age and shows lookup errors; the poller
+also logs safe lookup errors with a timestamp, without response bodies or credentials.
+
+An account with a confirmed missing OAuth token shows as signed out with its last-read
+date. Its historical percentages remain in the machine cache but are hidden from CLI
+and dashboard readings and excluded from capacity selection and stop-line checks.
+Unavailable Keychain access remains an unknown lookup, and cannot clear an existing
+signed-out state; observing a usable token clears it. No instance configuration changes
+are needed. Refresh once with `brain usage --refresh`, or let the poller refresh.
+
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 
 A coordinator's send, launch or worker start is refused as unordered only in an operator turn.

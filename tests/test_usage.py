@@ -870,6 +870,151 @@ for line in sys.stdin:
         self.assertIn("none", self.b(root, "usage"))
         self.assertNotIn("Stop starting", self.m.usage_route(self.m.Instance(root), ["codex"])[1])
 
+    def test_usage_claude_null_session_replaces_historical_window(self):
+        root = self.init("alice")
+        sub = self.subscription(runtime="claude")
+        config = self.declare(sub)
+        payload = {"five_hour": None, "seven_day": {"utilization": 45,
+                   "resets_at": time.time() + 86400}, "limits": [
+                   {"kind": "weekly_all", "percent": 45, "resets_at": time.time() + 86400}]}
+        # Null is an explicit absence only beside a valid weekly reading, never an omitted/bad field.
+        for bad in ({}, {"five_hour": None}, {"seven_day": payload["seven_day"]},
+                    {**payload, "five_hour": {}}, {**payload, "five_hour": {"utilization": "bad"}}):
+            self.assertNotIn("five_hour", self.m.usage_windows(bad, "claude", absences=True))
+        self.assertNotIn("five_hour", self.m.usage_windows(payload, "claude"))
+        import urllib.request
+        response = io.BytesIO(json.dumps(payload).encode())
+        opener = mock.Mock()
+        opener.open.return_value = response
+        key = self.m.usage_key("claude", sub["config_dir"])
+        old = self.reading(8, weekly=30, age=469 * 3600)
+        old["windows"]["five_hour"]["resets_at"] = time.time() - 86400
+        with mock.patch.object(self.m, "usage_reading", return_value=(key, old)):
+            self.m.usage_refresh(config)
+        with mock.patch.object(self.m.sys, "platform", "darwin"), \
+                mock.patch.object(self.m, "usage_keychain", return_value=(
+                    {"claudeAiOauth": {"accessToken": "fixture-token"}}, "")), \
+                mock.patch.object(urllib.request, "build_opener", return_value=opener):
+            data = self.m.usage_refresh(config)
+        reading = data["accounts"][key]
+        self.assertTrue(reading["windows"]["five_hour"].get("absent"))
+        self.assertLess(time.time() - reading["read_at"], 10)
+        self.assertTrue(self.m.usage_cache())  # explicit absence round-trips through cache validation
+        text = self.b(root, "usage")
+        self.assertRegex(text, r"claude\s+one\s+85%\s+none\s+45%")
+        self.assertNotIn("469 h", text)
+        # A valid session limit in the new envelope wins over the legacy null field.
+        payload["limits"].append({"kind": "session", "percent": 20})
+        self.assertEqual(self.m.usage_windows(payload, "claude", absences=True)["five_hour"]["used_percent"], 20)
+
+    def test_usage_cli_marks_each_stale_window_and_lookup_failure(self):
+        root = self.init("alice")
+        config = self.declare(self.subscription(runtime="claude"))
+        reading = self.reading(8, weekly=94, age=469 * 3600)
+        reading["windows"]["seven_day"].update(read_at=time.time(), source="lookup")
+        reading["note"] = "No stored Claude OAuth token"
+        self.cache(config, [reading])
+        text = self.b(root, "usage")
+        self.assertIn("stale; 469 h", text)
+        self.assertIn("(stale)", text)
+        self.assertIn("No stored Claude OAuth token", text)
+        rows, _ = self.m.usage_rows()
+        self.assertTrue(rows[0]["windows"]["five_hour"]["stale"])
+        self.assertFalse(rows[0]["windows"]["seven_day"]["stale"])
+        self.assertTrue(rows[0]["stale"])
+
+    def test_usage_signed_out_hides_history_and_cannot_affect_routing(self):
+        root = self.init("alice")
+        inst = self.m.Instance(root)
+        out = self.subscription("signed-out", runtime="claude")
+        active = self.subscription("active", runtime="claude")
+        config = self.declare(out, active)
+        key = self.m.usage_key("claude", out["config_dir"])
+        for historical in (0, 99):
+            old = self.reading(historical, weekly=historical, age=469 * 3600)
+            old["windows"]["seven_day"].update(read_at=time.time() - 86400, source="lookup")
+            cached = self.cache(config, [old, self.reading(20, weekly=40)])
+            key = cached["subscriptions"][0]["account_key"]
+            original = self.m.usage_reading
+            def lookup(sub):
+                return original(sub) if sub["id"] == out["id"] else ("active-key", self.reading(20, weekly=40))
+            with mock.patch.object(self.m.sys, "platform", "darwin"), \
+                    mock.patch.object(self.m, "usage_keychain", return_value=({"claudeAiOauth": {}}, "No stored Claude OAuth token")), \
+                    mock.patch.object(self.m, "usage_logs", side_effect=AssertionError("signed out must not read logs")), \
+                    mock.patch.object(self.m, "usage_reading", side_effect=lookup):
+                self.m.usage_refresh(config)
+            rows, _ = self.m.usage_rows(inst)
+            self.assertTrue(rows[0]["signed_out"])
+            self.assertEqual(rows[0]["windows"], {})
+            self.assertEqual(rows[0]["read_at"], old["windows"]["seven_day"]["read_at"])
+            self.assertTrue(self.m.usage_cache())
+            text = self.b(root, "usage")
+            line = next(line for line in text.splitlines() if line.startswith("signed-out:"))
+            self.assertIn("signed out · last read ", line)
+            self.assertNotIn("%", line)
+            self.assertEqual(self.m.usage_ui(inst)[0]["windows"], {})
+            self.assertEqual(self.m.usage_route(inst, ["claude"], cached_only=True)[0]["id"], active["id"])
+            self.assertEqual(self.m.class_route(inst, "review", cached_only=True)[1]["id"], active["id"])
+            # With only this account allowed, it cannot become a capacity choice or a stop warning.
+            self.declare(out)
+            self.assertIsNone(self.m.usage_route(inst, ["claude"], cached_only=True)[0])
+            self.assertNotIn("stop line", self.m.usage_route(inst, ["claude"], cached_only=True)[1])
+            chosen, selected, reason = self.m.class_route(inst, "review", cached_only=True)
+            self.assertIsNone(selected)
+            self.assertNotIn("stop line", reason)
+            self.declare(out, active)
+            # A subsequent credential lookup failure cannot turn signed-out history back into capacity.
+            with mock.patch.object(self.m, "usage_reading", side_effect=[
+                    (key, {"windows": {}, "read_at": None, "source": "unknown", "note": "Keychain unavailable"}),
+                    ("active-key", self.reading(20, weekly=40))]):
+                self.m.usage_refresh(config)
+            self.assertTrue(self.m.usage_rows(inst)[0][0]["signed_out"])
+            # A new usable login explicitly clears signed-out state.
+            with mock.patch.object(self.m, "usage_reading", side_effect=[
+                    (key, {**self.reading(10, weekly=10), "signed_out": False}),
+                    ("active-key", self.reading(20, weekly=40))]):
+                self.m.usage_refresh(config)
+            self.assertFalse(self.m.usage_rows(inst)[0][0]["signed_out"])
+
+    def test_usage_poller_reports_safe_lookup_errors(self):
+        sub = self.subscription(runtime="claude")
+        config = self.declare(sub)
+        data = self.cache(config, [self.reading()])
+        data["accounts"][data["subscriptions"][0]["account_key"]]["note"] = "Claude usage lookup refused (HTTP 503)"
+        args = argparse.Namespace(action=None, watch=True, every=300)
+        stderr = io.StringIO()
+        with mock.patch.object(self.m, "usage_refresh", return_value=data), \
+                mock.patch.object(self.m.time, "sleep", side_effect=KeyboardInterrupt), \
+                contextlib.redirect_stderr(stderr):
+            self.m.cmd_usage(args)
+        self.assertIn("usage one: Claude usage lookup refused (HTTP 503)", stderr.getvalue())
+        self.assertRegex(stderr.getvalue(), r"\d{4}-\d{2}-\d{2}")
+
+    def test_usage_keychain_missing_token_is_distinct_from_unavailable(self):
+        sub = self.subscription(runtime="claude")
+        with mock.patch.dict(os.environ, {"BRAIN_USAGE_TEST_NO_KEYCHAIN": "0"}), \
+                mock.patch.object(self.m.sys, "platform", "darwin"), \
+                mock.patch.object(self.m.subprocess, "run") as run:
+            for code, content in ((0, b'{"claudeAiOauth":{}}'), (44, b'')):
+                self.m._KEYCHAIN_CYCLE_BLOCKED.clear()
+                self.m._KEYCHAIN_RETRY_AT.clear()
+                run.return_value = subprocess.CompletedProcess([], code, content)
+                _, reading = self.m.usage_reading(sub)
+                self.assertTrue(reading["signed_out"])
+                self.assertIn("No stored Claude OAuth token", reading["note"])
+            self.m._KEYCHAIN_CYCLE_BLOCKED.clear()
+            self.m._KEYCHAIN_RETRY_AT.clear()
+            run.return_value = subprocess.CompletedProcess([], 1, b'')
+            _, reading = self.m.usage_reading(sub)
+            self.assertNotIn("signed_out", reading)
+            self.assertIn("Keychain denied/unavailable", reading["note"])
+            # A missing default entry cannot establish sign-out while the alternate is unreadable.
+            with mock.patch.object(self.m, "usage_keychain_read", side_effect=[
+                    ({}, ""), ({}, "Keychain denied/unavailable")]):
+                credentials, note = self.m.usage_keychain(str(Path.home() / ".claude"))
+            self.assertEqual(credentials, {})
+            self.assertIn("Keychain denied/unavailable", note)
+
     def test_usage_resume_switch_uses_replacement_subscription_and_local_fallback(self):
         root = self.init("alice")
         home = self.repo(self.tmp / "app")

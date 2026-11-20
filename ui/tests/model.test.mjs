@@ -238,6 +238,19 @@ test("subscription stop lines override the default in meters and routing", () =>
   assert.equal(m.windowState({ used_percent: 85 }, { read_at: now }, policy, now).state, "At stop line");
 });
 
+test("signed-out subscriptions never contribute headroom or stop-line checks", () => {
+  const now = Date.now() / 1000;
+  const policy = { stop_percent: 85, max_age_seconds: 120 };
+  const active = { id: "active", read_at: now, windows: {
+    seven_day: { used_percent: 40, resets_at: now + 86400, source: "lookup" } } };
+  for (const used of [0, 99]) {
+    const signedOut = { ...active, id: "signed-out", signed_out: true,
+      windows: { seven_day: { ...active.windows.seven_day, used_percent: used } } };
+    assert.equal(m.routing({ usage: [signedOut, active], usage_policy: policy }).row.id, "active");
+    assert.equal(m.routing({ usage: [signedOut], usage_policy: policy }), undefined);
+  }
+});
+
 test("Needs you keeps one item per id and leaves advice out", () => {
   const request = { id: "one", kind: "inbox", node: "demo", text: "question: Which color?", recipient: "operator", options: ["Blue", "Gray"], recommendation: "Blue" };
   const another = { ...request, id: "two" };
