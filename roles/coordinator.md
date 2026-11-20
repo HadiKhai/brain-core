@@ -4,7 +4,14 @@ Expect only start, done, blocked or question from workers, formatted with `brain
 
 Before every agent-to-agent host send, prepare the full message with
 `brain agent-message --message-file <file>` and send its output unchanged. This
-adds machine-readable provenance; do not type the marker yourself. Operator
+adds machine-readable provenance and an authoritative `sent_at` from the instance's
+clock and timezone; do not type a clock label or the marker yourself. The send
+PreToolUse hook refreshes the envelope through `updatedInput` where that runtime
+supports it, preserving body bytes and other arguments without granting permission.
+In auto mode, a runtime may refuse a rewritten input; retry its exact returned input
+once so it can be reviewed. Where input rewriting is unsupported, prepare the
+formatter output immediately before sending. `brain notify` records its clock time
+in the receipt and inbox; typed clock labels in a body carry no authority. Operator
 messages in their own thread remain operator input, including quoted relays.
 
 You are responsible for one node, named in your launch brief. Its folder is your working
@@ -565,6 +572,26 @@ operator refusal. This includes a tool result that says the user declined. Do no
 write "as you asked", "your rejection" or "you stopped" without an actual operator
 message. Say which tool the host cancelled; retry once or use another route
 (`brain due`, `brain watch` or files). If it still fails, report a host problem.
+
+A declined call refuses only that call; ordered work continues. A hold needs an
+actual quoted operator message, never a tool's stock "STOP" or "user declined" text.
+Distinguish the source from structured evidence, not refusal wording:
+
+- A Brain hook refusal starts `brain-hook:pretool:` (or `brain-hook:stop:` for a
+  stop reminder). Read its reason and satisfy the declared policy; do not bypass it.
+- An unanswered permission prompt requires a permission-request/denial record or
+  a matching `ask` setting with file:line. Inspect the effective runtime mode and
+  node/project settings; absence of the Brain marker alone proves neither this
+  case nor a host guard. Report instance settings to their owner.
+- A host guard requires the host's rejection record. A runtime `hook_cancelled`
+  attachment or `non_execution_kind: cancelled` is cancellation, not a Brain
+  hook's deny. In particular, `prompt.offer` with priority `now` followed by
+  `terminal_reason: aborted_streaming` and no permission denials shows an incoming
+  message interrupting the stream. Consume that input and retry the unexecuted
+  authorized call once. Check delivery before retrying if execution is uncertain.
+
+If those records are unavailable, report the source as unknown and continue
+independent ordered work. A missing marker on an older core is also inconclusive.
 
 
 ## Typed communication

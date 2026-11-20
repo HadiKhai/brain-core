@@ -1,0 +1,27 @@
+{
+  "clock_window": [
+    "2026-11-20T09:14:36+05:45",
+    "2026-11-20T09:14:39.029961+05:45"
+  ],
+  "formatter_stamps": {
+    "agent-message": "2026-11-20T09:14:36+05:45",
+    "msg": "2026-11-20T09:14:36+05:45"
+  },
+  "notification_at": "2026-11-20 09:14 +05:45",
+  "hook_stamp": "2026-11-20T09:14:39+05:45",
+  "hook_clock_window": [
+    "2026-11-20T09:14:39+05:45",
+    "2026-11-20T09:14:39.186387+05:45"
+  ],
+  "denial": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "brain-hook:pretool: Forbidden action matched this node's declared tool rules; an exact --once allowance is required."
+  },
+  "body_bytes_preserved": true,
+  "other_arguments_preserved": true,
+  "operator_remainder_not_hidden": true,
+  "permission_not_granted": true,
+  "concurrent_commands": 3,
+  "elapsed_s": 2.873772
+}

@@ -5,6 +5,22 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-20: Hook refusal sources and clock-stamped messages
+
+Brain hook refusals now start `brain-hook:pretool:` or `brain-hook:stop:`. A declined
+call refuses only that call; continue independent ordered work. A hold requires an
+actual operator message. The coordinator role explains how to distinguish a hook
+denial, an unanswered permission prompt, a host guard and a stream cancelled by an
+incoming message. Stock refusal wording alone does not identify who refused it.
+
+`brain agent-message` and `brain msg` put `sent_at` in the byte-bounded envelope,
+using the instance clock and timezone (local system time outside an instance).
+The send PreToolUse hook refreshes that field through `updatedInput`, retaining
+every other argument and body byte without auto-approving the tool. Legacy
+envelopes remain readable. `brain notify` uses the same recorded clock time for
+its receipt and inbox publication. Prepare messages immediately before sending;
+do not type clock labels. Existing labels in message bodies remain unchanged.
+
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 
 A coordinator's send, launch or worker start is refused as unordered only in an operator turn.

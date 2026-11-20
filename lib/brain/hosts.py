@@ -1743,7 +1743,7 @@ def hook_stop(a):
         except (OSError, ValueError):
             pass  # unreadable transcripts follow the existing fail-open hook convention
     if reasons:
-        print(json.dumps({'decision': 'block', 'reason': '\n'.join(reasons)}))
+        print(json.dumps({'decision': 'block', 'reason': 'brain-hook:stop: ' + '\n'.join(reasons)}))
         return
     if isinstance(last_message, str) and last_message.strip().casefold() == "relay only":
         return  # explicit read-only relay: capture questions, then skip notes and reminder bookkeeping
@@ -1826,7 +1826,7 @@ def hook_stop(a):
     if not why and not upgrade:
         return
     if not why:  # only the upgrade: one notice, then the session goes on
-        print(json.dumps({"decision": "block", "reason": _m_guard.redact(f"Before you stop, node `{n['id']}`: {upgrade}.",
+        print(json.dumps({"decision": "block", "reason": "brain-hook:stop: " + _m_guard.redact(f"Before you stop, node `{n['id']}`: {upgrade}.",
                                                                  _m_guard.never_terms(n))}))
         return
     reason = (f"Before you stop, node `{n['id']}`: " + (upgrade + ". Also: " if upgrade else "") +
@@ -1837,7 +1837,7 @@ def hook_stop(a):
               f"the coordinator should know to inbox.md. If this conversation changed nothing here (you only read "
               f"this node, or it isn't yours), record nothing and end with `relay only`; the stop hook accepts "
               f"that short reply without another notes check.")
-    print(json.dumps({"decision": "block", "reason": _m_guard.redact(reason, _m_guard.never_terms(n))}))
+    print(json.dumps({"decision": "block", "reason": "brain-hook:stop: " + _m_guard.redact(reason, _m_guard.never_terms(n))}))
 
 
 def codex_hooks(root):

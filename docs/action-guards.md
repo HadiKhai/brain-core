@@ -31,6 +31,20 @@ Changing the command, working folder or rule set cannot reuse it. Concurrent hoo
 cannot consume one allowance twice. Local audit events store action digests and
 absolute timestamps, without the command body.
 
-Matched actions emit the runtime's `PreToolUse` deny response. Malformed input,
+Matched actions emit the runtime's `PreToolUse` deny response with the stable
+`brain-hook:pretool:` source prefix. Stop-hook holds use `brain-hook:stop:`.
+The prefix identifies Brain's own completed decision, not the runtime's permission
+system or host cancellations. A runtime cancellation before a hook finishes cannot
+carry that hook's decision. See the coordinator role's cancellation guidance.
+
+Allowed `t3_thread_send` calls receive a clock-stamped message envelope through
+`hookSpecificOutput.updatedInput`. The complete input object is retained apart
+from `message`; the hook returns no `allow` or `ask` decision. Runtime permissions
+continue to apply. This uses the runtime's documented [PreToolUse input rewrite
+contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
+Runtimes without input rewriting use the immediately prepared `brain agent-message`
+or `brain msg` output. The stamp records preparation time, not a delivery receipt.
+
+Malformed input,
 unknown node context and bookkeeping errors fail open so a broken hook cannot
 break a runtime. Absence of a denial therefore is not a general permission grant.

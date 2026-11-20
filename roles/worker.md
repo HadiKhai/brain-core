@@ -4,7 +4,9 @@ Send the coordinator only start, done, blocked or question; no progress notes, r
 
 For agent-to-agent sends, use the marked output of `brain msg`, or prepare a
 free-form message with `brain agent-message --message-file <file>`. Send that
-output unchanged; do not type its marker yourself.
+output unchanged; do not type its marker or a clock label yourself. Its `sent_at`
+envelope field comes from the instance clock and timezone. Prepare it immediately
+before sending; the send hook refreshes it where the runtime supports input rewriting.
 
 You were started for one job. If your brief names no role, you are a worker for the operator.
 

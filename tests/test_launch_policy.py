@@ -52,7 +52,11 @@ class PolicyFixture(Scenario):
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.m.cmd_hook_pretool(None)
         text = out.getvalue()
-        return json.loads(text)['hookSpecificOutput']['permissionDecisionReason'] if text else None
+        result = json.loads(text)['hookSpecificOutput'] if text else {}
+        reason = result.get('permissionDecisionReason')
+        if reason:
+            self.assertTrue(reason.startswith('brain-hook:pretool: '))
+        return reason
 
     def launch(self, chosen, message='Role: worker in node `app`.\n', cwd=None):
         args = {'title': 'fixture', 'message': message}

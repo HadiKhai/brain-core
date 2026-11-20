@@ -49,7 +49,7 @@ def cleanup_notice(inst, n, job_key, identity, workspace, rpc):
                 clientRequestId=data['client_request_id'],
                 message=_m_messages.agent_message(
                     'This job is closed and its checkout is awaiting cleanup. Return any final hand-back now; '
-                    'do not begin follow-on work here. Cleanup will wait for terminal state and reconciled requests.')))
+                    'do not begin follow-on work here. Cleanup will wait for terminal state and reconciled requests.', inst)))
             if (not isinstance(reply, dict) or reply.get('threadId') != identity
                     or reply.get('delivery') not in ('started', 'queued', 'steered', 'restarted')
                     or not isinstance(reply.get('messageId'), str) or not reply['messageId']

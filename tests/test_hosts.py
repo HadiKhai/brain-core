@@ -1388,7 +1388,10 @@ class StopHook(Scenario):
                                                "hook_event_name": "Stop", "last_assistant_message": last_message,
                                                "transcript_path": str(transcript) if transcript else None}), timeout=10)
         self.assertEqual(res.returncode, 0, res.stderr)
-        return json.loads(res.stdout) if res.stdout.strip() else None
+        result = json.loads(res.stdout) if res.stdout.strip() else None
+        if result and result.get('decision') == 'block':
+            self.assertTrue(result['reason'].startswith('brain-hook:stop: '))
+        return result
 
     def test_stop_notice_guard_blocks_ignored_output_and_second_stop_passes(self):
         r = self.init('fixture')
@@ -1398,7 +1401,7 @@ class StopHook(Scenario):
                 {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Done.'}]}}]
         path = self.question_log(rows)
         expected = {"decision": "block", "reason":
-                    "Read the notice's output and act on it (fix, next step, or one line to root)."}
+                    "brain-hook:stop: Read the notice's output and act on it (fix, next step, or one line to root)."}
         self.assertEqual(self.hook(r, r, transcript=path), expected)
         self.assertEqual(self.hook(r, r, transcript=path, last_message='No response requested.'), expected)
         self.assertEqual(self.hook(r, r, transcript=path, last_message='relay only'), expected)
