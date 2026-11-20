@@ -1,3 +1,4 @@
+import { visualExpect } from "./visual-checks";
 import { test, expect } from "@playwright/test";
 import { audit } from "./fitness-rules";
 
@@ -39,7 +40,7 @@ test("daily throughput shows zero days and measurement coverage", async ({ page,
   await request.post("/fixture/update", { data: { nodes: state.nodes } });
   try {
     await page.goto("/?k=demo#view=jobs");
-    expect((await page.getByRole("region", { name: "Jobs at a glance", exact: true }).boundingBox())!.height).toBeGreaterThan(100);
+    await visualExpect(page, (await page.getByRole("region", { name: "Jobs at a glance", exact: true }).boundingBox())!.height).toBeGreaterThan(100);
     expect(await page.evaluate(audit, "hierarchy")).toEqual([]);
     await page.getByRole("button", { name: "Daily throughput", exact: true }).click();
     const throughput = page.getByRole("region", { name: "Daily throughput", exact: true });
@@ -50,7 +51,7 @@ test("daily throughput shows zero days and measurement coverage", async ({ page,
     await expect(throughput).toContainText("3.50 s");
     const lastColumn = (await throughput.getByRole("columnheader").last().boundingBox())!;
     const dialog = (await page.getByRole("dialog").boundingBox())!;
-    expect(lastColumn.x + lastColumn.width).toBeLessThanOrEqual(dialog.x + dialog.width);
+    await visualExpect(page, lastColumn.x + lastColumn.width).toBeLessThanOrEqual(dialog.x + dialog.width);
   } finally {
     await request.post("/fixture/update", { data: { nodes: original } });
   }

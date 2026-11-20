@@ -1,11 +1,12 @@
 // ui-designer §15 "lean structure" rules as mechanical checks. Each function runs inside the
 // page (it is serialised by Playwright), so it must stay self-contained: no imports, no closures.
 // The checks read only rendered geometry and computed style, never class names of one build.
-export type Violation = { rule: string; detail: string };
+export type Violation = { rule: string; detail: string; kind?: "measurement" };
 
 export function audit(rule: string): Violation[] {
   const out: Violation[] = [];
   const add = (detail: string) => out.push({ rule, detail });
+  const measure = (detail: string) => out.push({ rule, detail, kind: "measurement" as const });
   const scroller = document.querySelector<HTMLElement>("#workspace-content")!;
   const inSidebar = (e: Element) => !!e.closest("[data-slot=sidebar], [data-sidebar=sidebar]");
   const inModal = (e: Element) => !!e.closest("[role=dialog], [role=alertdialog], [role=listbox], [role=menu], [data-slot=tooltip-content], [data-slot=popover-content]");
@@ -65,7 +66,7 @@ export function audit(rule: string): Violation[] {
   if (rule === "spacing") {
     const token = (name: string) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
     const near = (actual: number, expected: number, detail: string) => {
-      if (!Number.isFinite(actual) || !Number.isFinite(expected) || Math.abs(actual - expected) > 1) add(`${detail}: ${actual.toFixed(2)}px, expected ${expected}px`);
+      if (!Number.isFinite(actual) || !Number.isFinite(expected) || Math.abs(actual - expected) > 1) measure(`${detail}: ${actual.toFixed(2)}px, expected ${expected}px`);
     };
     const top = document.querySelector<HTMLElement>(".topbar")!;
     const toggle = top.querySelector<HTMLElement>("[data-slot=sidebar-trigger]")!;
@@ -88,7 +89,7 @@ export function audit(rule: string): Violation[] {
         near(f.left - group.getBoundingClientRect().left, gutter, "sidebar and top-bar gutters must match");
         near(i.left - f.left, token("--field-icon-inset"), "leading icon inset must equal its spacing token");
         near(f.left + parseFloat(getComputedStyle(filter).paddingLeft) - i.right, token("--field-icon-gap"), "icon-to-field text gap must equal its spacing token");
-        if (i.left < f.left || i.right > f.right || i.top < f.top || i.bottom > f.bottom) add("search icon must sit inside the filter input");
+        if (i.left < f.left || i.right > f.right || i.top < f.top || i.bottom > f.bottom) measure(`search icon must sit inside the filter input: icon ${JSON.stringify(i.toJSON())}, field ${JSON.stringify(f.toJSON())}`);
       }
     }
   }
@@ -119,19 +120,63 @@ export function audit(rule: string): Violation[] {
 
   if (rule === "options") {
     const lists = [...document.querySelectorAll("[role=listbox], [role=menu]")].filter(visible);
+    // Overflow is not itself clipping. Check the text and its clipping ancestors;
+    // a scroll owner can expose its content and is not evidence of unreadability.
+    const clipped = (e: Element, axis: "x" | "y", text: DOMRect) => {
+      for (let ancestor: Element | null = e; ancestor; ancestor = ancestor.parentElement) {
+        const cs = getComputedStyle(ancestor), box = ancestor.getBoundingClientRect();
+        const overflow = axis === "x" ? cs.overflowX : cs.overflowY;
+        const content = axis === "x" ? ancestor.scrollWidth : ancestor.scrollHeight;
+        const size = axis === "x" ? ancestor.clientWidth : ancestor.clientHeight;
+        if ((overflow === "auto" || overflow === "scroll") && content > size + 1) return false;
+        const start = axis === "x" ? box.left + ancestor.clientLeft : box.top + ancestor.clientTop;
+        const end = start + size;
+        const outside = axis === "x" ? text.left < start - 1 || text.right > end + 1 : text.top < start - 1 || text.bottom > end + 1;
+        if (content > size + 1 && outside && (overflow === "hidden" || overflow === "clip" || (axis === "x" && cs.textOverflow === "ellipsis")))
+          return true;
+      }
+      return false;
+    };
     for (const list of lists) {
-      if (list.scrollWidth > list.clientWidth + 1) add(`menu ${describe(list)} scrolls sideways`);
       const box = list.getBoundingClientRect();
+      if (list.scrollWidth > list.clientWidth + 1)
+        measure(`menu ${describe(list)} scrolls sideways: content ${list.scrollWidth}px, viewport ${list.clientWidth}px, bounds ${JSON.stringify(box.toJSON())}`);
       for (const option of list.querySelectorAll("[role=option], [role=menuitem]")) {
         const r = option.getBoundingClientRect();
-        if (r.right > box.right + 1 || r.left < box.left - 1) add(`option ${describe(option)} is wider than its menu`);
-        const tooltip = !!option.closest("[data-slot=tooltip-trigger]") || !!option.querySelector("[data-slot=tooltip-trigger]");
-        for (const e of [option, ...option.querySelectorAll("*")]) {
-          if (e.scrollWidth > e.clientWidth + 1 && getComputedStyle(e).textOverflow !== "ellipsis" && e.clientWidth > 0)
-            add(`option text ${describe(e)} overflows without an ellipsis (${e.scrollWidth} > ${e.clientWidth})`);
-          // A line clamp hides text too: it needs the full text in a tooltip, or the text must wrap in full.
-          if (e.scrollHeight > e.clientHeight + 1 && e.clientHeight > 0 && getComputedStyle(e).overflowY !== "visible" && !tooltip && name(e))
-            add(`option text ${describe(e)} is clamped vertically with no way to read it (${e.scrollHeight} > ${e.clientHeight})`);
+        const bounds = `menu ${JSON.stringify(box.toJSON())}, option ${JSON.stringify(r.toJSON())}`;
+        if (r.right > box.right + 1 || r.left < box.left - 1) measure(`option ${describe(option)} is wider than its menu: ${bounds}`);
+        const fullTextAccess = (element: Element, value: string) => {
+          const contains = (text: string | null | undefined) => !!text && text.replace(/\s+/g, " ").trim().includes(value.replace(/\s+/g, " ").trim());
+          for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) {
+            if (ancestor.getAttribute("data-slot") === "tooltip-trigger" || contains(ancestor.getAttribute("title")) || contains(ancestor.getAttribute("aria-label"))) return true;
+            for (const attribute of ["aria-labelledby", "aria-describedby"])
+              if (contains((ancestor.getAttribute(attribute) || "").split(/\s+/).map(id => document.getElementById(id)?.textContent || "").join(" "))) return true;
+            if (ancestor === option) break;
+          }
+          return false;
+        };
+        // A container range includes descendants even when they clip independently.
+        // Inspect each text node once, against only its own ancestor path.
+        const walker = document.createTreeWalker(option, NodeFilter.SHOW_TEXT);
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+          if (!node.textContent?.trim() || !node.parentElement) continue;
+          const element = node.parentElement;
+          if (!visible(element)) continue;
+          let e = element;
+          while (!e.clientWidth && e !== option && e.parentElement) e = e.parentElement;
+          if (!e.clientWidth) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const text = range.getBoundingClientRect();
+          const cutX = clipped(element, "x", text), cutY = clipped(element, "y", text);
+          const horizontal = e.scrollWidth > e.clientWidth + 1;
+          const vertical = e.scrollHeight > e.clientHeight + 1;
+          const detail = `option text ${describe(element)}: content ${e.scrollWidth}x${e.scrollHeight}px, viewport ${e.clientWidth}x${e.clientHeight}px, text ${JSON.stringify(text.toJSON())}, ${bounds}`;
+          if ((cutX || cutY) && !fullTextAccess(element, node.textContent))
+            add(`${detail}; ${cutY ? "clamped vertically" : "clipped horizontally"}, no full text on hover`);
+          else if (horizontal || vertical || cutX || cutY)
+            measure(`${detail}; overflow remains readable or has full text on hover`);
         }
       }
     }
@@ -144,7 +189,7 @@ export function audit(rule: string): Violation[] {
       if (e !== document.documentElement && e !== document.body && !overflowing(e) && getComputedStyle(e).overflowY !== "scroll") continue;
       const cs = getComputedStyle(e) as CSSStyleDeclaration & { scrollbarColor: string; scrollbarWidth: string };
       if (cs.scrollbarWidth !== "thin" || !cs.scrollbarColor || cs.scrollbarColor === "auto")
-        add(`${describe(e)} uses the platform scrollbar (width ${cs.scrollbarWidth}, colour ${cs.scrollbarColor})`);
+        measure(`${describe(e)} uses the platform scrollbar (width ${cs.scrollbarWidth}, colour ${cs.scrollbarColor})`);
     }
   }
 
@@ -168,16 +213,16 @@ export function audit(rule: string): Violation[] {
 
   if (rule === "surfaces") {
     for (const { el, depth } of surfaces(p!)) {
-      if (depth >= 3) add(`surface depth ${depth}: ${describe(el)}`);
+      if (depth >= 3) measure(`surface depth ${depth}: ${describe(el)}`);
       let only: Element = el;
       while (only.children.length === 1 && !only.matches(itemSelector) && !(only !== el && painted(only))) only = only.children[0];
       if (only !== el && (only.matches(itemSelector) || painted(only)) && name(only) === name(el))
-        add(`box around a single item: ${describe(el)}`);
+        measure(`box around a single item: ${describe(el)}`);
     }
     for (const e of p!.querySelectorAll("*")) {
       if (e === scroller || !visible(e) || inModal(e) || !overflowing(e)) continue;
       if (!(e.matches(".list-scroll") && e.closest(".list-surface")) && e.scrollHeight <= innerHeight * 1.5 && e.scrollHeight > e.clientHeight + 1)
-        add(`inner scroll for short content (${e.scrollHeight}px ≤ 1.5 viewports): ${describe(e)}`);
+        measure(`inner scroll for short content (${e.scrollHeight}px ≤ 1.5 viewports): ${describe(e)}`);
     }
   }
 
@@ -185,7 +230,7 @@ export function audit(rule: string): Violation[] {
     const heights = items(p!).map((e) => e.getBoundingClientRect().height).sort((a, b) => a - b);
     if (heights.length >= 2) {
       const median = heights[Math.floor(heights.length / 2)];
-      if (median > innerHeight * 0.08) add(`median list item is ${Math.round(median)}px, over 8% of a ${innerHeight}px viewport`);
+      if (median > innerHeight * 0.08) measure(`median list item is ${Math.round(median)}px, over 8% of a ${innerHeight}px viewport`);
     }
   }
 
@@ -193,17 +238,17 @@ export function audit(rule: string): Violation[] {
     for (const e of [scroller, ...p!.querySelectorAll("*")]) {
       if (!visible(e) || inModal(e)) continue;
       const cs = getComputedStyle(e);
-      if (/contain|none/.test(cs.overscrollBehaviorY) && scrollable(e)) add(`overscroll-behavior ${cs.overscrollBehaviorY} traps scrolling: ${describe(e)}`);
+      if (/contain|none/.test(cs.overscrollBehaviorY) && scrollable(e)) measure(`overscroll-behavior ${cs.overscrollBehaviorY} may trap scrolling: ${describe(e)}`);
       if (e !== scroller && overflowing(e)) {
         let depth = 0;
         for (let a = e.parentElement; a && a !== scroller; a = a.parentElement) if (overflowing(a)) depth++;
-        if (depth >= 1) add(`scroll area nested ${depth + 1} deep: ${describe(e)}`);
+        if (depth >= 1) measure(`scroll area nested ${depth + 1} deep: ${describe(e)}`);
       }
     }
   }
 
   if (rule === "overview") {
-    if (scroller.scrollHeight > scroller.clientHeight * 2 + 1) add(`overview needs ${(scroller.scrollHeight / scroller.clientHeight).toFixed(1)} viewports`);
+    if (scroller.scrollHeight > scroller.clientHeight * 2 + 1) measure(`overview needs ${(scroller.scrollHeight / scroller.clientHeight).toFixed(1)} viewports`);
     const parents = new Set(items(p!).map((e) => e.parentElement!));
     const lists = [...parents].filter((l) => items(l).length >= 2 && ![...parents].some((o) => o !== l && o.contains(l)));
     const bare = lists.filter((l) => {

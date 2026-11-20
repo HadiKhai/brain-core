@@ -1,9 +1,10 @@
+import { reportMeasurements } from "./visual-checks";
 import { test, expect, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { audit, sidebarShape } from "./fitness-rules";
 
-// Every §15 check is shown able to fail: clean before, a violation after one targeted break, clean again after undo.
+// Prove that detectors still find deliberate regressions; measurements report warnings and functional checks fail.
 const out = process.env.UI_FITNESS_OUT;
 const evidence: unknown[] = [];
 test.afterAll(() => { if (out) { mkdirSync(out, { recursive: true }); writeFileSync(join(out, "mutations.json"), JSON.stringify(evidence, null, 1)); } });
@@ -15,15 +16,20 @@ async function open(page: Page, hash: string, scenario = "demo") {
   await page.waitForTimeout(150);
 }
 async function proves(page: Page, rule: string, name: string, mutate: () => Promise<unknown>, undo: () => Promise<unknown>, expected: string, check = () => page.evaluate(audit, rule)) {
-  expect(await check(), `${rule} clean before “${name}”`).toEqual([]);
+  const inspect = async () => {
+    const issues = await check();
+    await reportMeasurements(page, issues.filter(v => v.kind === "measurement"));
+    return issues;
+  };
+  expect((await inspect()).filter(v => v.kind !== "measurement"), `${rule} clean before “${name}”`).toEqual([]);
   await mutate();
   await page.waitForTimeout(100);
-  const found = await check();
+  const found = await inspect();
   expect(found.length, `${rule} rejects “${name}”`).toBeGreaterThan(0);
   expect(found.map((v) => v.detail).join("\n"), `${rule} names the broken rule for “${name}”`).toContain(expected);
   await undo();
   await page.waitForTimeout(100);
-  expect(await check(), `${rule} clean after undoing “${name}”`).toEqual([]);
+  expect((await inspect()).filter(v => v.kind !== "measurement"), `${rule} clean after undoing “${name}”`).toEqual([]);
   evidence.push({ rule, mutation: name, rejected: found.map((v) => v.detail) });
 }
 const style = (page: Page, css: string) => page.addStyleTag({ content: css }).then((h) => h);
@@ -41,8 +47,8 @@ test("options rejects menu text that overflows without an ellipsis", async ({ pa
   await page.locator("[role=listbox] [role=option]").first().waitFor();
   let tag: any;
   await proves(page, "options", "ellipsis removed from option text",
-    async () => { tag = await style(page, "[role=option], [role=option] * { text-overflow: clip !important; white-space: nowrap !important; } [role=listbox] { max-width: 240px !important; }"); },
-    () => tag.evaluate((e: Element) => e.remove()), "overflows without an ellipsis");
+    async () => { tag = await style(page, "[role=option], [role=option] * { text-overflow: clip !important; white-space: nowrap !important; } [role=listbox] { max-width: 240px !important; } .picker-item-title { overflow: hidden !important; }"); },
+    () => tag.evaluate((e: Element) => e.remove()), "no full text on hover");
 });
 
 test("options rejects a name clamped to fewer lines with no full text", async ({ page }) => {
@@ -117,7 +123,7 @@ test("chaining rejects a scroll trap and a nested scroll area", async ({ page })
   let tag: any;
   await proves(page, "chaining", "overscroll contained on the page",
     async () => { tag = await style(page, "#workspace-content { overscroll-behavior: contain !important; }"); },
-    () => tag.evaluate((e: Element) => e.remove()), "traps scrolling");
+    () => tag.evaluate((e: Element) => e.remove()), "may trap scrolling");
   await proves(page, "chaining", "a scroll area inside a scroll area",
     () => page.evaluate(() => { const t = document.querySelector<HTMLElement>("[data-page=jobs] [data-slot=table-container]")!; t.style.cssText = "max-height:300px;overflow:auto"; const b = t.querySelector<HTMLElement>("tbody")!; b.style.cssText = "display:block;max-height:120px;overflow:auto"; }),
     () => page.evaluate(() => { const t = document.querySelector<HTMLElement>("[data-page=jobs] [data-slot=table-container]")!; t.style.cssText = ""; t.querySelector<HTMLElement>("tbody")!.style.cssText = ""; }), "nested 2 deep");

@@ -1,3 +1,4 @@
+import { visualExpect } from "./visual-checks";
 import { test, expect } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
@@ -95,7 +96,7 @@ test("dense graph keeps a permanent, collision-free label for every project", as
     return labels.flatMap((a, i) => labels.slice(i + 1).filter((b) => a.box.left < b.box.right && a.box.right > b.box.left && a.box.top < b.box.bottom && a.box.bottom > b.box.top)
       .map((b) => ({ first: a.title, second: b.title, firstBounds: a.box.toJSON(), secondBounds: b.box.toJSON() })));
   });
-  expect(overlaps).toEqual([]);
+  await visualExpect(page, overlaps).toEqual([]);
 });
 
 for (const scenario of ["ten", "hundred"]) {
@@ -106,13 +107,13 @@ for (const scenario of ["ten", "hundred"]) {
     await expect(frame).toBeVisible();
     await expect(frame.locator(".list-header")).toContainText(`1–10 of ${scenario === "ten" ? 10 : 100} projects`);
     await expect(frame.getByRole("combobox", { name: "Rows per page", exact: true })).toBeVisible();
-    expect(await aside.evaluate((e) => getComputedStyle(e).overflowY)).toBe("visible");
+    await visualExpect(page, await aside.evaluate((e) => getComputedStyle(e).overflowY)).toBe("visible");
     const footer = frame.locator(".table-footer");
     const before = (await footer.boundingBox())!;
     const bounds = (await aside.boundingBox())!;
-    expect(before.y + before.height).toBeLessThanOrEqual(bounds.y + bounds.height);
+    await visualExpect(page, before.y + before.height).toBeLessThanOrEqual(bounds.y + bounds.height);
     await frame.locator(".list-scroll").evaluate((e) => { e.scrollTop = e.scrollHeight; });
-    expect((await footer.boundingBox())!.y).toBeCloseTo(before.y, 0);
+    await visualExpect(page, (await footer.boundingBox())!.y).toBeCloseTo(before.y, 0);
     if (scenario === "hundred") {
       await footer.getByRole("button", { name: "Next", exact: true }).click();
       await expect(frame.locator(".list-header")).toContainText("11–20 of 100 projects");

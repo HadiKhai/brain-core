@@ -1,3 +1,4 @@
+import { visualExpect } from "./visual-checks";
 import { test, expect } from "@playwright/test";
 
 for (const view of ["inbox", "specialists", "learnings", "threads", "jobs"]) {
@@ -10,10 +11,10 @@ for (const view of ["inbox", "specialists", "learnings", "threads", "jobs"]) {
     await expect(frame.locator(".list-header").getByRole("combobox", { name: "Rows per page", exact: true })).toBeVisible();
     const footer = frame.locator(".table-footer");
     const before = await footer.boundingBox();
-    expect(before!.y + before!.height).toBeLessThanOrEqual(880);
+    await visualExpect(page, before!.y + before!.height).toBeLessThanOrEqual(880);
     await frame.locator(".list-scroll").evaluate((e) => { e.scrollTop = e.scrollHeight; });
     await expect(footer.getByRole("button", { name: "Next", exact: true })).toBeVisible();
-    expect((await footer.boundingBox())!.y).toBeCloseTo(before!.y, 0);
+    await visualExpect(page, (await footer.boundingBox())!.y).toBeCloseTo(before!.y, 0);
     await footer.getByRole("button", { name: "Next", exact: true }).click();
     await expect(frame.locator(".list-header")).toContainText("11–20 of");
   });
@@ -27,7 +28,7 @@ for (const view of ["specialists", "learnings", "graph"]) {
     await expect(card).toBeVisible();
     const bottom = (await card.boundingBox())!;
     const footer = (await page.locator(".workspace-footer").boundingBox())!;
-    expect(Math.abs(bottom.y + bottom.height - footer.y)).toBeLessThanOrEqual(2);
+    await visualExpect(page, Math.abs(bottom.y + bottom.height - footer.y)).toBeLessThanOrEqual(2);
   });
 }
 

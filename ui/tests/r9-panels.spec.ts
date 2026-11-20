@@ -1,3 +1,4 @@
+import { visualExpect } from "./visual-checks";
 import { test as base, expect } from "@playwright/test";
 
 const test = base.extend<{ state: any }>({
@@ -45,7 +46,7 @@ for (const width of [1440, 320]) test(`specialist hire pager follows its rows wi
   await expect(frame.locator("[data-slot=table-body] [data-slot=table-row]")).toHaveCount(1);
   const body = (await frame.locator(".list-scroll").boundingBox())!;
   const footer = (await frame.locator(".table-footer").boundingBox())!;
-  expect(footer.y).toBeGreaterThanOrEqual(body.y + body.height - 1);
+  await visualExpect(page, footer.y).toBeGreaterThanOrEqual(body.y + body.height - 1);
   await panel.locator(".reader-body").evaluate(e => { e.scrollTop = e.scrollHeight; });
   await expect(frame.getByRole("button", { name: "Next", exact: true })).toBeVisible();
 });

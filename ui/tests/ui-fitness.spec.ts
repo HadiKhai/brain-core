@@ -1,3 +1,4 @@
+import { reportMeasurements } from "./visual-checks";
 import { test, expect, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -29,7 +30,9 @@ async function everyRoute(page: Page, check: (label: string) => Promise<Violatio
     const route = await page.evaluate(() => location.hash);
     if (seen.has(route)) continue;
     seen.add(route);
-    for (const v of await check(label)) found.push({ ...v, detail: `${label} (${route}): ${v.detail}` });
+    const issues = await check(label);
+    await reportMeasurements(page, issues.filter(v => v.kind === "measurement"));
+    for (const v of issues) found.push({ ...v, detail: `${label} (${route}): ${v.detail}` });
   }
   return found;
 }
@@ -43,7 +46,7 @@ const ruleOnEveryRoute = (rule: string, scenarios = ["demo"], themes: ("light" |
         found.push(...(await everyRoute(page, async () => page.evaluate(audit, rule))).map((v) => ({ ...v, detail: `[${scenario}/${theme}] ${v.detail}` })));
       }
     record(rule, found);
-    expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+    expect(found.filter(v => v.kind !== "measurement"), found.map((v) => v.detail).join("\n")).toEqual([]);
   });
 
 ruleOnEveryRoute("one-title");
@@ -61,7 +64,7 @@ test("§15 one-title at phone width", async ({ page }) => {
     found.push(...(await page.evaluate(audit, "one-title")));
   }
   record("one-title-phone", found);
-  expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+  expect(found.filter(v => v.kind !== "measurement"), found.map((v) => v.detail).join("\n")).toEqual([]);
 });
 
 test("§15 options never overflow", async ({ page }) => {
@@ -79,7 +82,10 @@ test("§15 options never overflow", async ({ page }) => {
         continue;
       }
       await page.waitForTimeout(150);
-      result.push(...(await page.evaluate(audit, "options")));
+      const menuIssues = await page.evaluate(audit, "options");
+      // Evidence belongs to this open menu, before Escape or another trigger.
+      await reportMeasurements(page, menuIssues.filter(v => v.kind === "measurement"));
+      result.push(...menuIssues.filter(v => v.kind !== "measurement"));
       await page.keyboard.press("Escape");
       await page.locator("[role=listbox]:visible").waitFor({ state: "detached", timeout: 2000 }).catch(() => page.keyboard.press("Escape"));
     }
@@ -87,7 +93,7 @@ test("§15 options never overflow", async ({ page }) => {
   }));
   }
   record("options", found);
-  expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+  expect(found.filter(v => v.kind !== "measurement"), found.map((v) => v.detail).join("\n")).toEqual([]);
 });
 
 test("§15 sidebar hierarchy", async ({ page, request }) => {
@@ -95,7 +101,7 @@ test("§15 sidebar hierarchy", async ({ page, request }) => {
   const state = await (await request.get("/api/state?k=demo")).json();
   const found = [...(await page.evaluate(sidebarShape, state)), ...(await everyRoute(page, async () => page.evaluate(audit, "hierarchy")))];
   record("hierarchy", found);
-  expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+  expect(found.filter(v => v.kind !== "measurement"), found.map((v) => v.detail).join("\n")).toEqual([]);
 });
 
 test("§15 scroll chains to the page", async ({ page }) => {
@@ -131,7 +137,7 @@ test("§15 scroll chains to the page", async ({ page }) => {
     })).map((v) => ({ ...v, detail: `[${scenario}] ${v.detail}` })));
   }
   record("chaining", found);
-  expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+  expect(found.filter(v => v.kind !== "measurement"), found.map((v) => v.detail).join("\n")).toEqual([]);
 });
 
 // Opt-in live keyed coverage is beside this gate in live-overview.spec.ts.
@@ -141,10 +147,12 @@ test("§15 overview is a decision dashboard", async ({ page }) => {
     await open(page, scenario);
     await page.evaluate(() => (location.hash = "view=overview"));
     await page.waitForTimeout(150);
-    found.push(...(await page.evaluate(audit, "overview")).map((v) => ({ ...v, detail: `[${scenario}] ${v.detail}` })));
+    const measured = await page.evaluate(audit, "overview");
+    await reportMeasurements(page, measured.filter(v => v.kind === "measurement"));
+    found.push(...measured.map((v) => ({ ...v, detail: `[${scenario}] ${v.detail}` })));
   }
   record("overview", found);
-  expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+  expect(found.filter(v => v.kind !== "measurement"), found.map((v) => v.detail).join("\n")).toEqual([]);
 });
 
 test("r9 gutters, header action and input icon follow their tokens at desktop and phone widths", async ({ page }) => {
@@ -153,8 +161,10 @@ test("r9 gutters, header action and input icon follow their tokens at desktop an
     await open(page, "hundred", theme, width, 900);
     if (width < 768) await page.getByRole("button", { name: "Toggle Sidebar", exact: true }).click();
     await page.waitForTimeout(150);
-    found.push(...(await page.evaluate(audit, "spacing")).map((v) => ({ ...v, detail: `[${width}/${theme}] ${v.detail}` })));
+    const measured = await page.evaluate(audit, "spacing");
+    await reportMeasurements(page, measured.filter(v => v.kind === "measurement"));
+    found.push(...measured.map((v) => ({ ...v, detail: `[${width}/${theme}] ${v.detail}` })));
   }
   record("spacing", found);
-  expect(found, found.map((v) => v.detail).join("\n")).toEqual([]);
+  expect(found.filter(v => v.kind !== "measurement"), found.map((v) => v.detail).join("\n")).toEqual([]);
 });

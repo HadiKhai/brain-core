@@ -1,3 +1,4 @@
+import { visualExpect, fitnessAudit } from "./visual-checks";
 import { test, expect } from "@playwright/test";
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -37,28 +38,28 @@ for (const scenario of scenarios) test(`seeded ${scenario}: every screen contain
         const host = document.querySelector("#screen-action-host")!, primary = host.getBoundingClientRect();
         const requests = [...document.querySelectorAll(".row.request")].filter(visible);
         return {
-          overflow: document.documentElement.scrollWidth > innerWidth || root.scrollWidth > root.clientWidth + 1,
+          overflow: Math.max(document.documentElement.scrollWidth-innerWidth, root.scrollWidth-root.clientWidth-1),
           clippedCells: cells.filter(e => e.clientHeight > 3 * parseFloat(getComputedStyle(e).lineHeight) + 2).length,
           tallRows: [...document.querySelectorAll<HTMLElement>("[data-page]:not([hidden]) .row")].filter(e => visible(e) && innerWidth >= 768 && e.getBoundingClientRect().height > 96).length,
           requestCount: requests.length,
           missingActions: requests.filter(e => !e.querySelector("a,button")).length,
           squeezedFilters: [...document.querySelectorAll<HTMLElement>('.filter-toolbar [data-slot=input-group],.filter-toolbar .picker-trigger')].filter(e => visible(e) && e.getBoundingClientRect().width < 160).length,
-          primaryAboveFold: !host.children.length || (primary.height > 0 && primary.bottom <= innerHeight),
+          primaryAboveFold: !host.children.length ? 0 : Math.max(-primary.height, primary.bottom-innerHeight),
           dark: document.documentElement.classList.contains("dark"),
           rtl: [...document.querySelectorAll<HTMLElement>(".readable[dir=auto]")].filter(e => visible(e) && getComputedStyle(e).direction === "rtl").length,
         };
       });
-      expect(audit.overflow, `${scenario}/${view}/${width}/${colorScheme}`).toBe(false);
-      expect(audit.clippedCells).toBe(0);
-      expect(audit.tallRows, `${scenario}/${view}/${width}`).toBe(0);
+      await visualExpect(page, audit.overflow, `${scenario}/${view}/${width}/${colorScheme}: overflow in px`).toBeLessThanOrEqual(0);
+      await visualExpect(page, audit.clippedCells).toBe(0);
+      await visualExpect(page, audit.tallRows, `${scenario}/${view}/${width}`).toBe(0);
       expect(audit.missingActions).toBe(0);
-      expect(audit.squeezedFilters).toBe(0);
-      expect(audit.primaryAboveFold).toBe(true);
+      await visualExpect(page, audit.squeezedFilters).toBe(0);
+      await visualExpect(page, audit.primaryAboveFold, 'primary action beyond fold in px').toBeLessThanOrEqual(0);
       expect(audit.dark).toBe(colorScheme === "dark");
       if (view === "overview") expect(audit.requestCount).toBeLessThanOrEqual(5);
       if (view === "inbox") expect(audit.requestCount).toBeLessThanOrEqual(10);
       if (scenario === "rtl" && ["overview","inbox","learnings","specialists"].includes(view)) expect(audit.rtl).toBeGreaterThan(0);
-      const fitness = await page.evaluate(fitnessSource);
+      const fitness = await fitnessAudit(page, fitnessSource);
       if (folder && (!process.env.UI_TOUR_PHONE_ONLY || width < 768)) await page.screenshot({ path:join(folder,`${scenario}-${view}-${width}x${height}-${colorScheme}.png`), animations:"disabled" });
       evidence.push({scenario,view,width,height,colorScheme,...audit,alignment:fitness.alignment,contrast:fitness.contrast});
     }
@@ -104,7 +105,7 @@ test("long hire briefs, proposal decisions and overflowing specialist options ha
   // Long names wrap inside the widened menu, up to its maximum, never past it.
   const option = page.getByRole("option").first();
   await expect(option).toContainText("thoughtful project notebook");
-  expect(await option.evaluate(e => e.getBoundingClientRect().right <= innerWidth && e.scrollWidth <= e.clientWidth + 1)).toBe(true);
+  await visualExpect(page, await option.evaluate(e => Math.max(e.getBoundingClientRect().right-innerWidth, e.scrollWidth-e.clientWidth-1)), 'option overflow in px').toBeLessThanOrEqual(0);
   await page.keyboard.press("Escape");
   await page.goto("/?k=demo#view=learnings");
   await page.locator('#screen-action-host').getByRole("button",{name:"Review proposal",exact:true}).click();
@@ -174,7 +175,7 @@ test("a hundred threads, schedules and project items stay paged, never an unboun
   await expect(threads.locator(".row.thread")).toHaveCount(10);
   await expect(threads.locator(".table-footer")).toContainText("1–10 of 100 threads");
   const height = () => page.locator("#workspace-content").evaluate((e) => e.scrollHeight / e.clientHeight);
-  expect(await height()).toBeLessThan(2.5);
+  await visualExpect(page, await height()).toBeLessThan(2.5);
   await page.evaluate(() => (location.hash = "view=jobs"));
   await expect(page.locator("[aria-label='Recurring work'] [data-item]")).toHaveCount(10);
   const state = await (await page.request.get("/api/state?k=hundred")).json();
@@ -191,7 +192,7 @@ test("a hundred threads, schedules and project items stay paged, never an unboun
     await expect(notes.locator("[role=tabpanel]:visible [data-item]")).toHaveCount(10);
     await expect(notes.locator("[role=tabpanel]:visible .table-footer")).toContainText("of 100");
   }
-  expect(await height()).toBeLessThan(2.5);
+  await visualExpect(page, await height()).toBeLessThan(2.5);
 });
 
 test("changing thread filters starts at the first matching page", async ({ page }) => {

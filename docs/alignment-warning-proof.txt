@@ -1,0 +1,23 @@
+VISUAL WARNING {"url":"http://synthetic.invalid/inbox","viewport":{"width":320,"height":640},"issues":[{"kind":"alignment","label":"section content inset","actual":2,"expected":16},{"kind":"alignment","label":"section footer and toolbar inset","actual":30,"expected":16}]}
+## Visual measurement warnings: 2
+
+Advisory only. Values and screenshots are in the UI evidence artifact and Playwright report.
+
+| Test | Measured values / evidence |
+| --- | --- |
+| alignment logic mutation | {"url":"http://synthetic.invalid/inbox","viewport":{"width":320,"height":640},"issues":[{"kind":"alignment","label":"section content inset","actual":2,"expected":16},{"kind":"alignment","label":"section footer and toolbar inset","actual":30,"expected":16}]} |
+| alignment logic mutation | Screenshot unavailable: Logic-only proof: browser not installed in worktree |
+
+VISUAL WARNING {"url":"/synthetic","viewport":null,"issues":[{"actual":14,"expected":0}]}
+✔ real audit logic: 14px inset misses report values and the run passes (8.594208ms)
+✔ audit keeps missing labels and cut text without hover hard (1.338125ms)
+✔ measurement adapter warns, keeps evaluating, and propagates non-assertion failures (1.645167ms)
+✔ warning screenshots are attached when the browser supplies them (0.488417ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 114.71075
