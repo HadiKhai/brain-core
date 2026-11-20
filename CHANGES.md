@@ -5,6 +5,17 @@ upgrading. `brain changes <node>` shows the entries this node's coordinator hasn
 `brain due <node>` lists them until `brain changes <node> --seen`. Entry headings are
 `## <date>: <title>`; once released, a heading never changes.
 
+## 2026-11-20: Bounded disk admissions preserve the machine reserve
+
+Use `brain machine admit --disk-floor N --until HH:MM --reason "one named gate"` for an
+explicit temporary disk floor. The base machine policy is never rewritten. The latest admission
+expires on policy reads, without a timer; `brain machine admit list` shows audit history and
+`brain machine admit cancel --reason "gate finished"` cancels early. Deadlines are local time today
+(`HH:MM` or `HH:MM:SS`), or an ISO timestamp with an offset for overnight work. Holds identify the
+measured disk value, reserve, machine policy owner and admission command. The dashboard's Usage
+page shows free disk against its policy reserve and the active admission's floor, owner and expiry.
+No configuration change is required; existing machine policy and defaults remain in force.
+
 ## 2026-11-18: The order gate stops refusing real orders, and a refused send to the parent is filed
 
 A coordinator's send, launch or worker start is refused as unordered only in an operator turn.

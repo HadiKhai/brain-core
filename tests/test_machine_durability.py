@@ -57,8 +57,10 @@ class MachineDurability(unittest.TestCase):
             path.chmod(0o644)
             self.m.write_brains({'brains': {}})
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        semantic = importlib.import_module('brain.semantic')
-        runtime = importlib.import_module('brain.semantic_runtime')
+        # The model helper intentionally imports its standalone canonical package.
+        with mock.patch.object(sys, 'path', [str(CORE / 'lib'), *sys.path]):
+            semantic = importlib.import_module('brain.semantic')
+            runtime = importlib.import_module('brain.semantic_runtime')
         folder = self.root / 'model'
         folder.mkdir()
         manifest = folder / 'manifest.json'

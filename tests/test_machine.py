@@ -3576,3 +3576,152 @@ class WriteQueueService(Scenario):
         until(lambda: self.queue.intent_receipt(self.inst, request['id']) is not None)
         self.assertEqual(self.queue.intent_receipt(self.inst, request['id'])['state'], 'applied')
         self.assertEqual((self.root / 'inbox.md').read_text().count(request['id']), 1)
+
+
+class BoundedMachineAdmission(unittest.TestCase):
+    def setUp(self):
+        self.m = core_loader.SourceFileLoader('bounded_admission_fixture', str(CORE / 'bin/brain')).load_module()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.policy = self.folder / 'machine-care.json'
+        self.policy.write_text(json.dumps({'disk_free_gb': 43, 'max_hold_minutes': 0}))
+        self.original = self.policy.read_bytes()
+        self.now = time.time()
+        self.patches = [mock.patch.object(self.m, 'machine_dir', return_value=self.folder),
+                        mock.patch.object(self.m, 'machine_top_cpu', return_value=[])]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.reading = {'disk_free_gb': 18, 'disk_total_gb': 1000}
+
+    def command(self, **kwargs):
+        args = argparse.Namespace(id=None, disk_floor=None, until=None, reason=None)
+        vars(args).update(kwargs)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.m.machine_admission_command(args)
+        return json.loads(output.getvalue())
+
+    def admit(self):
+        deadline = datetime.datetime.fromtimestamp(self.now + 60, datetime.timezone.utc).isoformat()
+        return self.command(disk_floor=12, until=deadline, reason='one named fixture gate')
+
+    def test_expiry_restores_policy_without_writing_or_a_timer(self):
+        row = self.admit()['active']
+        journal = (self.folder / 'machine-admissions.json').read_bytes()
+        with mock.patch.object(self.m.time, 'time', return_value=row['until'] - 0.001):
+            self.assertEqual(self.m.machine_reasons(self.reading, self.m.machine_policy()), [])
+        with mock.patch.object(self.m.time, 'time', return_value=row['until']):
+            policy = self.m.machine_policy()
+            self.assertEqual(policy['disk_free_gb'], 43)
+            self.assertIsNone(policy['_admission'])
+            self.assertIn('free disk 18 GB < 43 GB', self.m.machine_reasons(self.reading, policy)[0])
+        self.assertEqual((self.folder / 'machine-admissions.json').read_bytes(), journal)
+        self.assertEqual(self.policy.read_bytes(), self.original)
+
+    def test_list_cancel_audit_and_permissions(self):
+        row = self.admit()['active']
+        self.assertTrue(row['actor'])
+        self.assertEqual(row['reason'], 'one named fixture gate')
+        self.assertLess(row['at'], row['until'])
+        self.assertEqual(self.command()['active'], row)
+        self.command(id='cancel', reason='fixture finished')
+        data = self.command()
+        self.assertIsNone(data['active'])
+        self.assertEqual([e['action'] for e in data['events']], ['admit', 'cancel'])
+        self.assertEqual(data['events'][-1]['reason'], 'fixture finished')
+        self.assertEqual(self.m.machine_policy()['disk_free_gb'], 43)
+        self.assertEqual((self.folder / 'machine-admissions.json').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.policy.read_bytes(), self.original)
+
+    def test_bad_deadlines_and_nonfinite_limits_never_publish(self):
+        for value in ('00:00', '25:00', 'tomorrow', '2020-01-01T00:00:00', '2020-01-01T00:00:00Z'):
+            with self.subTest(until=value), self.assertRaises(SystemExit):
+                self.command(disk_floor=12, until=value)
+        for value in (-1, float('nan'), float('inf')):
+            with self.subTest(floor=value), self.assertRaises(SystemExit):
+                self.command(disk_floor=value, until='23:59')
+        self.assertFalse((self.folder / 'machine-admissions.json').exists())
+
+    def test_local_clock_and_offset_deadlines_are_exact(self):
+        now = datetime.datetime.now().astimezone().replace(hour=10, minute=20, second=0, microsecond=0)
+        target = now.replace(hour=10, minute=21, second=3)
+        self.assertEqual(self.m.machine_admission_until('10:21:03', now), target.timestamp())
+        self.assertEqual(self.m.machine_admission_until(target.isoformat(), now), target.timestamp())
+        with self.assertRaises(SystemExit):
+            self.m.machine_admission_until('10:20', now)
+
+    def test_invalid_journal_fails_closed_and_is_preserved(self):
+        path = self.folder / 'machine-admissions.json'
+        for data in ({'version': 1, 'events': [{}]}, {'version': 1, 'events': 'broken'}, []):
+            path.write_text(json.dumps(data))
+            self.assertIn('_error', self.m.machine_policy(strict=False))
+            with self.assertRaises(ValueError):
+                self.command(id='cancel')
+            self.assertEqual(json.loads(path.read_text()), data)
+
+    def test_hold_names_measurement_reserve_authority_and_command(self):
+        reasons = self.m.machine_reasons(self.reading, self.m.machine_policy())
+        for text in ('free disk 18 GB < 43 GB', 'declared reserve 43 GB', 'machine policy owner',
+                     'brain machine admit --disk-floor N --until HH:MM'):
+            self.assertIn(text, reasons[0])
+        with mock.patch.object(self.m, 'machine_reading', return_value=self.reading), \
+             mock.patch.object(self.m, 'process_stamp', return_value='fixture-start'), \
+             self.assertRaisesRegex(SystemExit, 'free disk 18 GB < 43 GB'):
+            self.m.machine_wait(reporter=None)
+
+    def test_dashboard_data_and_cached_holds_use_live_override(self):
+        self.admit()
+        cached = dict(self.reading, sample_reasons=['free disk 18 GB < 43 GB', 'thermal warning unresolved'])
+        policy = self.m.machine_policy()
+        self.assertEqual(self.m.machine_reasons(cached, policy), ['thermal warning unresolved'])
+        with mock.patch.object(self.m, 'machine_reading', return_value=dict(self.reading)):
+            state = self.m.machine_state()
+        self.assertEqual((state['disk_reserve_gb'], state['disk_floor_gb']), (43, 12))
+        self.assertEqual(state['admission']['reason'], 'one named fixture gate')
+        self.assertEqual(state['held'], [])
+        with mock.patch.object(self.m.time, 'time', return_value=state['admission']['until']), \
+             mock.patch.object(self.m, 'machine_reading', return_value=dict(self.reading)):
+            state = self.m.machine_state()
+        self.assertEqual((state['disk_reserve_gb'], state['disk_floor_gb']), (43, 43))
+        self.assertIsNone(state['admission'])
+        self.assertTrue(state['held'])
+
+    def test_absent_policy_retains_existing_small_machine_reserve(self):
+        self.policy.unlink()
+        with mock.patch.object(self.m, 'machine_reading', return_value={'disk_free_gb': 18, 'disk_total_gb': 100}):
+            state = self.m.machine_state()
+        self.assertEqual(state['disk_reserve_gb'], 20)
+        self.admit()
+        with mock.patch.object(self.m, 'machine_reading', return_value={'disk_free_gb': 18, 'disk_total_gb': 100}):
+            state = self.m.machine_state()
+        self.assertEqual((state['disk_reserve_gb'], state['disk_floor_gb']), (20, 12))
+
+
+    def test_newest_expired_override_does_not_reactivate_an_older_one(self):
+        self.admit()
+        until = datetime.datetime.fromtimestamp(self.now + 30, datetime.timezone.utc).isoformat()
+        row = self.command(disk_floor=10, until=until, reason='replacement admission')['active']
+        with mock.patch.object(self.m.time, 'time', return_value=row['until']):
+            self.assertIsNone(self.m.machine_policy()['_admission'])
+            self.assertEqual(self.m.machine_policy()['disk_free_gb'], 43)
+        self.assertEqual(len(self.command()['events']), 2)
+
+    def test_concurrent_real_cli_writers_keep_both_audit_records(self):
+        deadline = datetime.datetime.fromtimestamp(self.now + 60, datetime.timezone.utc).isoformat()
+        env = {**os.environ, 'HOME': str(self.folder), 'BRAIN_NO_REEXEC': '1'}
+        commands = [subprocess.Popen([sys.executable, '-B', str(CORE / 'bin/brain'), 'machine', 'admit',
+                    '--disk-floor', str(floor), '--until', deadline, '--reason', f'fixture gate {floor}'],
+                    cwd=self.folder, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    for floor in (10, 12)]
+        try:
+            for command in commands:
+                stdout, stderr = command.communicate(timeout=20)
+                self.assertEqual(command.returncode, 0, stdout + stderr)
+            journal = json.loads((self.folder / '.local/state/brain/machine-admissions.json').read_text())
+            self.assertCountEqual([row['disk_floor_gb'] for row in journal['events']], [10, 12])
+        finally:
+            for command in commands:
+                if command.poll() is None:
+                    command.kill()
+                    command.wait()

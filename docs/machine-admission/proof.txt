@@ -1,0 +1,77 @@
+$ brain init <temporary-home>/instance --operator operator --title Admission proof --tz UTC
+instance: <temporary-home>/instance
+name: instance
+operator: operator
+runtimes: claude,codex
+host: t3
+exit=0
+measured free disk GB=15; declared fixture reserve GB=16
+$ brain heavy
+brain: machine care: maximum hold reached; unsafe resource pressure; no command started; free disk 15 GB < 16 GB (declared reserve 16 GB); machine policy owner can grant bounded admission: brain machine admit --disk-floor N --until HH:MM --reason TEXT (OS user <local-os-user>)
+exit=1
+$ brain machine admit --disk-floor 15 --until 05:26:12 --reason one disposable proof admission
+{
+  "active": {
+    "action": "admit",
+    "at": 1795145168.3209128,
+    "actor": "<local-os-user>",
+    "reason": "one disposable proof admission",
+    "disk_floor_gb": 15.0,
+    "until": 1795145172.0
+  },
+  "event": {
+    "action": "admit",
+    "at": 1795145168.3209128,
+    "actor": "<local-os-user>",
+    "reason": "one disposable proof admission",
+    "disk_floor_gb": 15.0,
+    "until": 1795145172.0
+  }
+}
+exit=0
+$ brain heavy
+machine care: heavy work allowed (admission only)
+exit=0
+$ brain machine admit list
+{
+  "active": {
+    "action": "admit",
+    "at": 1795145168.3209128,
+    "actor": "<local-os-user>",
+    "reason": "one disposable proof admission",
+    "disk_floor_gb": 15.0,
+    "until": 1795145172.0
+  },
+  "version": 1,
+  "events": [
+    {
+      "action": "admit",
+      "at": 1795145168.3209128,
+      "actor": "<local-os-user>",
+      "reason": "one disposable proof admission",
+      "disk_floor_gb": 15.0,
+      "until": 1795145172.0
+    }
+  ]
+}
+exit=0
+$ brain heavy
+brain: machine care: maximum hold reached; unsafe resource pressure; no command started; free disk 15 GB < 16 GB (declared reserve 16 GB); machine policy owner can grant bounded admission: brain machine admit --disk-floor N --until HH:MM --reason TEXT (OS user <local-os-user>)
+exit=1
+$ brain machine admit list
+{
+  "active": null,
+  "version": 1,
+  "events": [
+    {
+      "action": "admit",
+      "at": 1795145168.3209128,
+      "actor": "<local-os-user>",
+      "reason": "one disposable proof admission",
+      "disk_floor_gb": 15.0,
+      "until": 1795145172.0
+    }
+  ]
+}
+exit=0
+PASS: hold -> admitted -> expired hold; base policy SHA256 unchanged=f3afa4a6bad67bf1d074b70fa5b2764384776c345af0d945d78b47513630e135

@@ -550,6 +550,16 @@ two explicit 8-worker requests can overlap when the run-count cap allows two. Re
 wait for their full count, capped to the budget; running grants never shrink. Undeclared,
 opaque and legacy reservations take the full budget, so opaque verifies serialize.
 
+The machine policy owner can grant a bounded disk admission without rewriting that policy:
+`brain machine admit --disk-floor N --until HH:MM --reason "one named gate"`.
+The deadline is local time today; `HH:MM:SS` also works, or use an ISO timestamp with an explicit
+offset for an overnight deadline. `brain machine admit list` shows the active admission and its
+audit history; `brain machine admit cancel --reason "gate finished"` cancels it early.
+Admissions and cancellations record the OS user, time and reason in the private machine journal
+`~/.local/state/brain/machine-admissions.json`. Only the latest admission applies, until its exact
+expiry; no timer or policy restoration process is needed. Other machine limits still apply.
+The dashboard's Usage page shows free disk, the policy reserve, effective admission floor and expiry.
+
 Native verification recognizes a single literal `pytest` or `python -m pytest` command,
 including numeric `-n`/`--numprocesses` forms. It counts the requested workers and clamps
 only those worker arguments to the grant; `auto`/`logical` reserve the full budget and

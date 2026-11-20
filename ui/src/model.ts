@@ -325,11 +325,11 @@ export function machineHealth(machine: RecordData) {
     add(
       "Disk used",
       used,
-      machine.disk_free_gb < 40
+      Number.isFinite(machine.disk_floor_gb) && machine.disk_free_gb < machine.disk_floor_gb
         ? "Critical pressure"
-        : used > 0.85
-          ? "Near capacity"
-          : "Normal",
+        : Number.isFinite(machine.disk_reserve_gb) && machine.disk_free_gb < machine.disk_reserve_gb
+          ? "Below reserve · admitted"
+          : Number.isFinite(machine.disk_reserve_gb) ? "Normal" : "Reserve unknown",
     );
   }
   return out;

@@ -230,11 +230,12 @@ export function Usage({ s, active }: { s: RecordData; active: boolean }) {
           {[
             ["Processor load", s.machine?.load?.[0], `${s.machine?.cpus || "Unknown"} cores · 5 min ${s.machine?.load?.[1] ?? "unknown"}`],
             ["Memory free", s.machine?.mem_free_gb, `of ${s.machine?.mem_total_gb ?? "unknown"} GB`],
-            ["Disk free", s.machine?.disk_free_gb, `of ${s.machine?.disk_total_gb ?? "unknown"} GB`],
+            ["Disk free", s.machine?.disk_free_gb, `GB free · reserve ${s.machine?.disk_reserve_gb ?? "unknown"} GB · admission floor ${s.machine?.disk_floor_gb ?? "unknown"} GB`],
           ].map(([name, value, note]) => (
             <div className="kpi" data-kpi key={name}><span className="kpi-label">{name}</span><strong className="kpi-value">{value ?? "Unknown"}</strong><span className="kpi-note">{note}</span></div>
           ))}
         </div>
+        {s.machine?.admission && <p className="pace-list" role="status">Bounded disk admission: {s.machine.admission.disk_floor_gb} GB until {time(s.machine.admission.until, s.brain?.tz)} · {s.machine.admission.actor} · {s.machine.admission.reason}</p>}
         <div className="machine-health">
           {machineHealth(s.machine || {}).map((h) => (
             <div className={h.state === "Critical pressure" ? "health-critical" : h.state === "Near capacity" ? "health-warning" : ""} key={h.name}>
