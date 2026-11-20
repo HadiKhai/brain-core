@@ -519,7 +519,13 @@ ui_json.ui_json_background(root, '[]')
                      self.m.ui_json_read(inst, [])]
         for view in views:
             row = view['usage'][0]
-            self.assertEqual(row['windows'], cli[0]['windows'])
+            # Ages are computed when each view reads the cache, so they may differ by the
+            # time between those reads; every other window field must match exactly.
+            strip = lambda windows: {k: {f: v for f, v in w.items() if f != 'age_seconds'}
+                                     for k, w in windows.items()}
+            self.assertEqual(strip(row['windows']), strip(cli[0]['windows']))
+            for name, window in row['windows'].items():
+                self.assertGreaterEqual(window['age_seconds'], cli[0]['windows'][name]['age_seconds'])
             self.assertEqual((row['read_at'], row['source']), (cli[0]['read_at'], cli[0]['source']))
             self.assertNotIn('config_dir', row)
             self.assertEqual(view['usage_policy']['max_age_seconds'], 600)
