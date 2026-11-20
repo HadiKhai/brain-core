@@ -20,7 +20,8 @@ _VIEW_FENCES = ContextVar('brain_status_refresh_view_fences', default=None)
 @contextlib.contextmanager
 def invocation():
     """One refresh's immutable observations; never retained by a later command."""
-    token = _INVOCATION.set({'views': {}, 'git': {}, 'reads': {}, 'contents': {}, 'dirty': set(), 'layouts': {}})
+    token = _INVOCATION.set({'views': {}, 'git': {}, 'reads': {}, 'contents': {}, 'dirty': set(), 'layouts': {},
+                             'lifecycle': {}})
     try:
         yield
     finally:
@@ -36,12 +37,150 @@ def requested(inst):
     return any(op.command == 'status' and op.inst.root == inst.root for op in events._CURRENT)
 
 
-def generation(paths, shallow=False):
-    """Cheap ref/config generations, including replacement-ref target aliases."""
-    result = []
-    def visit(path):
+_INBOX_PREFIXES = ContextVar('brain_refresh_inbox_prefixes', default=None)
+
+
+def inbox_bytes(path):
+    """One read window sees an immutable prefix; hooks may append after it."""
+    prefixes = _INBOX_PREFIXES.get()
+    if prefixes is not None and path in prefixes and prefixes[path] is not None:
+        return prefixes[path][0]
+    try:
+        st = path.lstat()
+        value = path.read_bytes()
+        namespace = (st.st_mode, st.st_uid, st.st_nlink)
+    except FileNotFoundError:
+        value, namespace = b'', None
+    if prefixes is not None and path in prefixes:
+        prefixes[path] = (value, namespace)
+    return value
+
+
+def inbox_identity(path):
+    prefix = inbox_bytes(path)
+    namespace = _INBOX_PREFIXES.get()[path][1]
+    try:
+        st = path.lstat()
+        current = path.read_bytes()
+        actual = (st.st_mode, st.st_uid, st.st_nlink)
+    except FileNotFoundError:
+        current, actual = b'', None
+    # A new ordinary inbox is admissible when the snapshot read an empty one.
+    if namespace is None and actual is not None and stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
+        actual = None
+    if current.startswith(prefix) and actual == namespace:
+        return (str(path), 'inbox-prefix', hashlib.sha256(prefix).digest(), namespace)
+    return (str(path), 'inbox-edited', hashlib.sha256(current).digest(), actual)
+
+
+@contextlib.contextmanager
+def inbox_snapshot(inst):
+    paths = [node['dir'] / 'inbox.md' for node in inst.nodes()]
+    token = _INBOX_PREFIXES.set({path: None for path in [*paths, *[p.resolve() for p in paths]]})
+    try:
+        yield
+    finally:
+        _INBOX_PREFIXES.reset(token)
+
+
+def lifecycle_identity(path):
+    """Exclude receipt-history fields structurally; fence their displayed episodes.
+
+    The existing request reader determines episode identities for the frozen
+    inbox prefixes. Malformed nested receipts retain a conservative identity,
+    while the display reader keeps its existing repair/fail-open behavior.
+    """
+    from . import reminders, status
+    current = instance.Instance(path.parents[2])
+    nodes = current.nodes()
+    sources = [node['dir'] / 'inbox.md' for node in nodes]
+    sources.extend(status.hook_question_queue(node) for node in nodes)
+    def physical():
         try:
             st = path.lstat()
+            return (st.st_dev, st.st_ino, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        except FileNotFoundError:
+            return None
+    stamp = (physical(), tuple(generation(sources)))
+    session = _INVOCATION.get()
+    cache = session['lifecycle'] if session is not None else {}
+    key = (str(path), stamp)
+    if key in cache:
+        return cache[key]
+    try:
+        data = reminders.lifecycle_read(current)
+        conservative = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).digest()
+        projected = []
+        for node in nodes:
+            lines = [line for line in inbox_bytes(node['dir'] / 'inbox.md').decode().splitlines()
+                     if line.startswith('- ')]
+            for pending in status.hook_question_queue(node).glob('*.json'):
+                try:
+                    line = json.loads(pending.read_text()).get('line')
+                    if isinstance(line, str):
+                        lines.append(line)
+                except (OSError, ValueError, AttributeError):
+                    pass
+            observed = {**data, 'inbox': dict(data['inbox']),
+                        'inbox_retired': dict(data.get('inbox_retired', {}))}
+            previous = data.get('inbox_retired', {}).get(node['id'], {})
+            if isinstance(previous, dict):
+                observed['inbox_retired'][node['id']] = dict(previous)
+            lines = reminders.request_lines(current, node, lines, readonly=True, lifecycle_data=observed)
+            episodes = []
+            for line in lines:
+                episode = reminders.request_episode_id(current, node, line, lifecycle_data=observed)
+                key = reminders.reminder_key({'node': node['id'], 'kind': 'inbox',
+                                              'text': line[2:], 'episode': episode})
+                record = data['reminders'].get(node['id'], {}).get(key)
+                episodes.append((reminders.inbox_source_id(node, line), episode, record))
+            projected.append((node['id'], episodes))
+        # These fields are receipt history, not direct display inputs. The
+        # projected identities above retain every currently relevant recurrence.
+        selected = {name: value for name, value in data.items()
+                    if name not in ('inbox', 'inbox_retired', 'reminders')}
+        # A configured hook also publishes typed inbox reminders and a wake.
+        # Only the frozen prefix's inbox reminders belong to this display;
+        # keep every other/legacy kind conservative and unchanged.
+        selected['reminders'] = {}
+        for nid, records in data['reminders'].items():
+            retained = {key: record for key, record in records.items()
+                        if not isinstance(record, dict) or record.get('kind') != 'inbox'}
+            if retained:
+                selected['reminders'][nid] = retained
+        value = hashlib.sha256(json.dumps([selected, projected], sort_keys=True).encode()).digest()
+    except (OSError, ValueError, TypeError, AttributeError):
+        if 'conservative' in locals():
+            return ('unknown', conservative)
+        return ('unknown', physical())
+    if stamp == (physical(), tuple(generation(sources))):
+        cache[key] = value
+    return value
+
+
+def generation(paths, shallow=False):
+    """Cheap ref/config generations, including replacement-ref target aliases."""
+    instance.check_refresh_deadline()
+    result = []
+    def visit(path):
+        prefixes = _INBOX_PREFIXES.get()
+        if prefixes is not None and path in prefixes:
+            result.append(inbox_identity(path))
+            return
+        if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
+            result.append((str(path), lifecycle_identity(path)))
+            return
+        try:
+            st = path.lstat()
+            if shallow and stat.S_ISDIR(st.st_mode):
+                # Directory clocks move on every atomic file replacement.
+                # Membership cares about names; explicit file inputs fence the
+                # bytes/identity of each selected existing member separately.
+                children = (path.glob('*.pending') if path.parent.name == 'wake' else
+                            path.glob('*.json') if path.name in ('job-trains', 'handback-queue') else path.iterdir())
+                result.append((str(path), st.st_dev, st.st_ino, st.st_mode,
+                               tuple(sorted(child.name for child in children))))
+                return
             if path.name == '.git' and stat.S_ISDIR(st.st_mode):
                 result.append((str(path), st.st_dev, st.st_ino, st.st_mode))
                 return  # metadata marker identity, never the object store
@@ -338,14 +477,29 @@ def input_paths(inst, n):
             if child.is_dir():
                 paths.append(child / 'node.md')
     paths.extend(n['dir'] / name for name in (
-        'status.md', 'brief.md', 'backlog.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md', 'job-handbacks',
-        'job-attempts', 'job-contracts', 'job-trains', 'handback-queue', 'sources/import-proposals.md',
+        'status.md', 'brief.md', 'backlog.md', 'inbox.md', 'AGENTS.md', 'job-ledger.md',
+        'job-contracts', 'sources/import-proposals.md',
         'direction.md', 'role.md', 'standards.md', 'lessons.md', 'synthesis.json', 'feedback.md'))
     from . import rule_contracts
     for source in rule_contracts.rule_sources(n):
         paths.extend((source['dir'] / 'AGENTS.md', source['dir'] / 'library/instance-rules.md'))
     from . import rotation, status, reports, tasks, task_flow, verify, watch, jobs, job_attempts, machine
-    from . import recurrence, hosts
+    from . import recurrence
+    # The projection reads one attempt record per ledger row, never logs or
+    # run folders. Explicit missing paths also fence a newly created attempt.
+    packets = []
+    for row in jobs.read_jobs(n) or []:
+        paths.extend((job_attempts.attempt_path(n, row), jobs.handback_file(n, row)))
+        if not row.get('Ended'):
+            packets.append((jobs.read_handback(n, row) or {}).get('ready'))
+    for family in ('job-trains', 'handback-queue'):
+        paths.extend((n['dir'] / family).glob('*.json'))
+    def packet_map(packet):
+        name = packet.get('input_files_ref') if isinstance(packet, dict) else None
+        if isinstance(name, str) and re.fullmatch(r'[0-9a-f]{24}-inputs-[0-9a-f]{24}\.map', name):
+            paths.append(n['dir'] / 'job-handbacks' / name)
+    for packet in packets:
+        packet_map(packet)
     for target in recurrence.synthesis_targets(inst, n):
         if 'error' not in target:
             paths.extend(target['dir'] / name for name in ('direction.md', 'role.md', 'standards.md', 'lessons.md', 'synthesis.json'))
@@ -367,12 +521,10 @@ def input_paths(inst, n):
         paths.extend((inst.root / '.brain/coordinator-runs.json', inst.root / '.brain/core-remote.json',
                       inst.root / '.brain/host-observations.json'))
         paths.append(common.CORE / 'adapters/hosts' / (inst.cfg.get('host', '') + '.env'))
-        for peer in inst.nodes():
-            if not peer['archived'] and peer['local'].get('coordinator'):
-                target, _ = hosts.wake_target(inst, peer)
-                directory = hosts.wake_directory(inst, target)
-                paths.append(directory / 'turn.json')
-                paths.extend(directory.glob('*.pending'))
+        # Wake turn/queue files are transport output. snapshot_view/facts_block
+        # read source work and coordinator bindings, not delivery queue state.
+        # A real hook publishes a pending wake after its inbox append; fencing
+        # that output would defeat the admissible-prefix window again.
     if any(job_attempts.current_attempt(n, row, strict=False) for row in jobs.read_jobs(n) or []):
         paths.extend(machine.machine_dir() / name for name in ('machine-care-queue.json', 'machine-care.json'))
     # Only task nodes reached by the projection's dependency checks are read.
@@ -399,7 +551,12 @@ def input_paths(inst, n):
     # Ready packet and attempt validation can read worktree input files and
     # stored receipts. Do not include the worktree directory recursively.
     for branch, binding in n['local'].get('worktrees', {}).items():
-        paths.append(verify.ready_path(inst, n, branch))
+        ready = verify.ready_path(inst, n, branch)
+        paths.append(ready)
+        try:
+            packet_map(json.loads(ready.read_text()))
+        except (OSError, ValueError):
+            pass
         root = Path(binding['path'])
         for pattern in common.lst(n['fm'].get('verify_inputs')) or common.lst(verify.VERIFY_INPUTS):
             paths.extend(path for path in root.glob(pattern) if path.is_file())
@@ -413,15 +570,9 @@ def membership_paths(inst, selected):
     paths = [inst.root / '.brain/teaching']
     for node in inst.nodes():
         paths.extend(node['dir'] / name for name in ('nodes', 'library', 'specialists'))
-    for directory, subdirs, _files in os.walk(inst.root):
-        subdirs[:] = [name for name in subdirs if name not in ('.git', '.brain') and
-                      not (name == 'core' and Path(directory) == inst.root)]
-        if Path(directory).name == 'library':
-            paths.append(Path(directory))
-    if any(node['id'] == 'root' for node in selected):
-        from . import hosts
-        paths.extend(hosts.wake_directory(inst, hosts.wake_target(inst, node)[0])
-                     for node in inst.nodes() if not node['archived'] and node['local'].get('coordinator'))
+    for node in selected:
+        paths.extend(node['dir'] / name for name in ('job-trains', 'handback-queue'))
+    paths.extend(inst.library_directories())
     return tuple(sorted(set(paths)))
 
 
@@ -435,6 +586,13 @@ def content_identity(paths):
         if path in seen:
             return
         seen.add(path)
+        prefixes = _INBOX_PREFIXES.get()
+        if prefixes is not None and path in prefixes:
+            result.append(inbox_identity(path))
+            return
+        if path.parts[-3:] == ('.brain', 'wake', 'lifecycle.json'):
+            result.append((str(path), lifecycle_identity(path)))
+            return
         try:
             st = path.lstat()
             if stat.S_ISLNK(st.st_mode):
@@ -556,8 +714,8 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=(), incremen
         return build(inst, n)
     incremental = incremental and _INVOCATION.get() is not None
     if instance.holding():
-        # The final attempt retains its admission policy, but preparation still
-        # releases physical ownership. Drift gets only a bounded fresh rebuild.
+        # The final attempt retains physical ownership. Keep the fences for
+        # external editors/Git writers, which do not obey the instance lock.
         for _ in range(HELD_BUILDS):
             try:
                 result = fenced(inst, n, build, all_nodes, targets, extra, incremental)
@@ -569,12 +727,17 @@ def compute(inst, n, build, *, all_nodes=False, targets=None, extra=(), incremen
             if settings_changed():
                 common.die('state changed during the unlocked step; retry from fresh state')
             return result
-        common.die(f'status refresh inputs kept changing through {HELD_BUILDS} unlocked builds; '
+        common.die(f'status refresh inputs kept changing through {HELD_BUILDS} locked builds; '
                    'retry from fresh state')
     return fenced(inst, n, build, all_nodes, targets, extra, incremental)
 
 
 def fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
+    with inbox_snapshot(inst):
+        return _fenced(inst, n, build, all_nodes, targets, extra, incremental)
+
+
+def _fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
     git_inputs = GitInputs()
     with instance.brain_lock(inst):
         current = instance.Instance(inst.root)
@@ -705,6 +868,12 @@ def fenced(inst, n, build, all_nodes, targets, extra, incremental=False):
             except SystemExit:
                 invalidate_views(git_inputs)
                 raise
+        if owner is not None and owner.command == 'status':
+            captured = getattr(owner, 'refresh_inbox_prefixes', {})
+            for target in selected:
+                path = target['dir'] / 'inbox.md'
+                captured[target['id']] = inbox_bytes(path)
+            owner.refresh_inbox_prefixes = captured
         return result
 
 

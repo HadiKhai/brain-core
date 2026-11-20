@@ -954,7 +954,7 @@ def refresh_with_retry(attempt, root):
 
 
 def _refresh_with_retry(attempt, root):
-    """Retry fresh state, then use bounded final admission and unlocked builds."""
+    """Retry fresh state, then use bounded final admission with writer ownership."""
     import contextlib
     import random
     import time

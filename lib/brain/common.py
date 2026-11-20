@@ -935,7 +935,26 @@ def git_read_index(cwd, env, *, diff=False):
         yield child
 
 
+def owned_git(argv, env, seconds):
+    """Bound final-refresh Git and its helpers as one disposable process group."""
+    import signal
+    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          errors='replace', env=env, start_new_session=True) as process:
+        try:
+            out, err = process.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            die('status refresh lock ownership deadline expired during Git; retry from fresh state')
+        return subprocess.CompletedProcess(argv, process.returncode, out, err)
+
+
 def git(*args, cwd=None, check=False, env=None):
+    from . import instance
+    instance.check_refresh_deadline()
     reads = _GIT_READS.get()
     key = (str(Path(cwd or Path.cwd()).absolute()), args)
     query = args
@@ -989,8 +1008,10 @@ def git(*args, cwd=None, check=False, env=None):
         index = (git_read_index(cwd, env, diff=lock_query[0] == 'diff')
                  if lock_query and lock_query[0] in ('status', 'diff') else contextlib.nullcontext(env))
         with index as child_env:
-            result = subprocess.run(["git", *(["-C", str(cwd)] if cwd else []), *args],
-                                    capture_output=True, text=True, errors="replace", check=False, env=child_env)
+            argv = ["git", *(["-C", str(cwd)] if cwd else []), *args]
+            remaining = instance.refresh_lock_remaining()
+            result = (owned_git(argv, child_env, remaining) if remaining is not None else
+                      subprocess.run(argv, capture_output=True, text=True, errors="replace", check=False, env=child_env))
         if cacheable:
             reads[key] = result
     if check:

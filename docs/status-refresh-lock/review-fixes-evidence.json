@@ -1,0 +1,183 @@
+{
+  "reviewed_head": "bca87792fe0b682cf5a09f9fceb8ff59fa91da21",
+  "red": {
+    "count": 5,
+    "outcome": "failed",
+    "skipped": 0,
+    "duration_s": 8.06
+  },
+  "focused_green": {
+    "count": 7,
+    "outcome": "passed",
+    "skipped": 0,
+    "duration_s": 12.54
+  },
+  "affected_green": {
+    "count": 185,
+    "outcome": "passed",
+    "skipped": 1,
+    "duration_s": 157.84,
+    "files": [
+      "tests/test_status.py"
+    ],
+    "workers": 3
+  },
+  "measurements": {
+    "refresh-lock-proof": {
+      "max_hold_s": 0.552090918000002,
+      "writer_wait_s": 0.3490068329999998,
+      "hook_s": [
+        0.19260837499999983
+      ]
+    },
+    "pretool-lock-proof": {
+      "elapsed_s": 1.106508292000001,
+      "lock_wait_s": 1.021798584
+    }
+  },
+  "real": [
+    {
+      "exit": 0,
+      "wall_s": 58.679248,
+      "output_writes": 7101,
+      "max_sampled_own_hold_s": 12.480272916999994,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 58.57761,
+          "lock_hold_s": 14.893647,
+          "lock_wait_s": 0.010028,
+          "phases": {
+            "dispatch": 58.56992,
+            "file_state": 10.260661,
+            "lock_hold": 14.893647,
+            "lock_wait": 0.010028,
+            "pending_imports": 0.249321,
+            "refresh_compute": 43.300766,
+            "refresh_revalidate": 8.935904,
+            "refresh_write": 0.003095,
+            "runaway_checks": 0.03824,
+            "status_facts": 25.041296,
+            "usage_read": 0.012499
+          }
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "wall_s": 8.090477749999998,
+      "output_writes": 987,
+      "max_sampled_own_hold_s": 3.2528462090000048,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 7.992873,
+          "lock_hold_s": 4.631969,
+          "lock_wait_s": 0.009896,
+          "phases": {
+            "dispatch": 7.988537,
+            "file_state": 0.721022,
+            "lock_hold": 4.631969,
+            "lock_wait": 0.009896,
+            "pending_imports": 0.023196,
+            "refresh_compute": 2.968714,
+            "refresh_revalidate": 0.736536,
+            "refresh_write": 0.001687,
+            "runaway_checks": 1.7e-05,
+            "status_facts": 1.267526,
+            "usage_read": 0.001815
+          }
+        }
+      ]
+    },
+    {
+      "exit": 0,
+      "wall_s": 8.208297833000003,
+      "output_writes": 1008,
+      "max_sampled_own_hold_s": 3.3380822090000066,
+      "hold_sample_interval_s": 0.02,
+      "bounded_admission": false,
+      "status_timing_records": [
+        {
+          "success": true,
+          "elapsed_s": 8.109088,
+          "lock_hold_s": 4.68393,
+          "lock_wait_s": 0.009203,
+          "phases": {
+            "dispatch": 8.104677,
+            "file_state": 0.728704,
+            "lock_hold": 4.68393,
+            "lock_wait": 0.009203,
+            "pending_imports": 0.024069,
+            "refresh_compute": 2.955816,
+            "refresh_revalidate": 0.729684,
+            "refresh_write": 0.001839,
+            "runaway_checks": 1.6e-05,
+            "status_facts": 1.261915,
+            "usage_read": 0.001763
+          }
+        }
+      ]
+    }
+  ],
+  "real_summary": {
+    "passed": 3,
+    "runs": 3,
+    "output_writes": 9096,
+    "wall_min_s": 8.090477749999998,
+    "wall_max_s": 58.679248,
+    "max_sampled_hold_s": 12.480272916999994
+  },
+  "provider_ai_spend_usd": 0,
+  "runtime_sha256": {
+    "lib/brain/status_refresh.py": "3cdf47cf9f6f1c11828fab2a8c30cd0ed9a3e391476f99dfa35d4f9b36d5c158",
+    "lib/brain/status.py": "6ee31dd9512b5986553c24b92ab18625fa768d7dd34c66cbda8ff83bc95acc40",
+    "lib/brain/instance.py": "61bc37906311df94c359a3fb092893e3c45053b0a1880d44ee6473076e4b7454",
+    "lib/brain/common.py": "2481b78c28598d890a57b580c0310c394d82df50504163eba81cd9b9e9f91d7b",
+    "lib/brain/action_guard.py": "52ebfeffbb3279f10ead28f270cbc3d64ce08007ac90005569e02a6c015086b3",
+    "lib/brain/events.py": "7c88d8b83d2adefc948ac762204d90141bca7f81e84e2a2107e906f42a4034bd"
+  },
+  "process": {
+    "delegates_started": 0,
+    "pr": "https://github.com/HadiKhai/brain-core/pull/6",
+    "new_review_requested": false,
+    "review_findings_addressed": [
+      "hook-appends",
+      "hook-timeout-budget",
+      "invalid-retirement-state"
+    ],
+    "git_command_form": "git -C <assigned-worktree> ...; normal commits and fast-forward pushes only",
+    "cleanup": "owned baseline export and owned run-output folders removed; installed core unchanged",
+    "cancelled_intermediate_ci_run": "https://github.com/HadiKhai/brain-core/actions/runs/44672134516",
+    "followup_reason": "Configured hook capture also publishes typed inbox reminder receipts and transport output; exclude transport inputs and project reminder receipts for frozen inbox sources."
+  },
+  "declared_budgets": {
+    "REFRESH_LOCK_SECONDS": {
+      "seconds": 5.0,
+      "source": "lib/brain/instance.py:329"
+    },
+    "PRETOOL_LOCK_WAIT_SECONDS": {
+      "seconds": 1.0,
+      "source": "lib/brain/action_guard.py:24"
+    },
+    "adapter_timeouts_s": [
+      30
+    ]
+  },
+  "prior_affected_green": {
+    "count": 363,
+    "outcome": "passed",
+    "skipped": 2,
+    "duration_s": 325.54,
+    "files": [
+      "tests/test_status.py",
+      "tests/test_guard.py",
+      "tests/test_events.py"
+    ],
+    "workers": 3
+  }
+}

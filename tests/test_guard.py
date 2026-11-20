@@ -1442,6 +1442,91 @@ if __name__ == "__main__":
 
 
 class ForbiddenActions(Scenario):
+    def test_review_contended_pretool_denies_records_and_preserves_allowance(self):
+        root = self.init('alice')
+        (root / 'AGENTS.md').write_text('## Forbidden actions\n- tool:FixtureTool\n')
+        inst = self.m.Instance(root)
+        node = inst.node('root')
+        payload = {'cwd': str(root), 'tool_name': 'FixtureTool', 'tool_input': {}}
+        action = self.m.action_fingerprint(self.m.tool_action(payload))
+        state = self.m.allowance_state(inst, node)
+        state['allowances'][action] = {'policy': self.m.action_fingerprint({'rules': ['tool:FixtureTool']})}
+        self.m.save_allowances(inst, node, state)
+        path = self.m.allowance_path(inst, node)
+        before = path.read_bytes()
+        started = time.monotonic()
+        with self.m.brain_lock(inst):
+            try:
+                child = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'hook', 'pretool'],
+                    cwd=root, input=json.dumps(payload), env={**self.env, 'BRAIN_NO_REEXEC': '1',
+                                                            'BRAIN_PRETOOL_LOCK_WAIT_SECONDS': '.15'},
+                    capture_output=True, text=True, timeout=3)
+            except subprocess.TimeoutExpired:
+                self.fail('contended pretool outlived its hook lock-wait budget')
+            self.assertEqual(child.returncode, 0, child.stderr)
+            decision = json.loads(child.stdout)['hookSpecificOutput']
+            self.assertEqual(decision['permissionDecision'], 'deny')
+            self.assertIn('instance is busy', decision['permissionDecisionReason'])
+            self.assertIn('--once', decision['permissionDecisionReason'])
+            self.assertEqual(path.read_bytes(), before)
+            rows = [json.loads(line) for line in (root / '.brain/hook-decisions.jsonl').read_text().splitlines()]
+            self.assertEqual(rows[-1]['decision'], 'deny')
+            self.assertEqual(rows[-1]['reason'], 'instance-lock-contention')
+            self.assertEqual(rows[-1]['action'], action)
+            print('pretool-lock-proof: ' + json.dumps({'elapsed_s': time.monotonic() - started,
+                                                       'lock_wait_s': rows[-1]['wait_s']}))
+            other = {**payload, 'tool_name': 'UnmatchedFixtureTool'}
+            harmless = subprocess.run([sys.executable, '-B', str(CORE / 'bin/brain'), 'hook', 'pretool'],
+                cwd=root, input=json.dumps(other), env={**self.env, 'BRAIN_NO_REEXEC': '1',
+                                                     'BRAIN_PRETOOL_LOCK_WAIT_SECONDS': 'invalid'},
+                capture_output=True, text=True, timeout=3)
+            self.assertEqual(harmless.returncode, 0, harmless.stderr)
+            self.assertEqual(harmless.stdout, '')
+        self.assertIsNone(self.m.pretool_decision(inst, node, payload))
+        self.assertNotIn(action, self.m.allowance_state(inst, node)['allowances'])
+
+    def test_busy_forbidden_action_stays_denied_when_audit_write_fails(self):
+        root = self.init('alice')
+        (root / 'AGENTS.md').write_text('## Forbidden actions\n- tool:FixtureTool\n')
+        inst = self.m.Instance(root)
+        module = self.m._owners['pretool_decision']
+        events = __import__('importlib').import_module(module.__package__ + '.events')
+        with mock.patch.object(module._m_instance, 'brain_lock', side_effect=module._m_instance.LockTimeout()), \
+                mock.patch.object(events, 'append_line', side_effect=OSError('fixture audit unavailable')):
+            reason = self.m.pretool_decision(inst, inst.node('root'),
+                {'cwd': str(root), 'tool_name': 'FixtureTool', 'tool_input': {}})
+        self.assertIn('instance is busy', reason)
+
+    def test_hook_budgets_follow_adapter_declarations_and_measurements(self):
+        module = self.m._owners['pretool_decision']
+        budgets = __import__('importlib').import_module(module.__package__ + '.hook_budget')
+        core = self.tmp / 'budget-core'
+        folder = core / 'adapters/runtimes'
+        folder.mkdir(parents=True)
+        adapter = folder / 'fixture-hooks.json'
+        def declare(pretool, stop):
+            adapter.write_text(json.dumps({'hooks': {
+                'PreToolUse': [{'hooks': [{'timeout': pretool}]}],
+                'Stop': [{'hooks': [{'timeout': stop}]}]}}))
+        measured = folder / 'hook-budget.json'
+        measured.write_text(json.dumps({'version': 1, 'runtime_samples_s': [1.25, 2.5]}))
+        declare(10, 7)
+        with mock.patch.object(budgets.common, 'CORE', core), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(budgets.seconds('pretool'), 7.5)
+            self.assertEqual(budgets.seconds('refresh'), 4.5)
+            declare(6, 7)
+            self.assertEqual(budgets.seconds('pretool'), 3.5)
+            measured.write_text(json.dumps({'version': 1, 'runtime_samples_s': [3.0]}))
+            self.assertEqual(budgets.seconds('refresh'), 3.0)
+            with mock.patch.dict(os.environ, {'BRAIN_PRETOOL_LOCK_WAIT_SECONDS': '.2'}):
+                self.assertEqual(budgets.seconds('pretool'), .2)
+            with mock.patch.dict(os.environ, {'BRAIN_REFRESH_LOCK_SECONDS': '100'}):
+                with self.assertRaises(ValueError):
+                    budgets.seconds('refresh')
+            measured.unlink()
+            with self.assertRaises(ValueError):
+                budgets.seconds('pretool')
+
     def setUp(self):
         super().setUp()
         self.m = core_loader.SourceFileLoader('action_guard_fixture', str(CORE / 'bin/brain')).load_module()

@@ -202,14 +202,26 @@ class Instance:
                 return n
         _m_common.die(f"no node '{nid}'")
 
-    def items(self):
-        out = []
+    def library_directories(self):
+        """Discover libraries without entering native execution artifacts.
+
+        A run may contain a copied instance/library or continually written logs;
+        neither is instance knowledge, even when its basename is `library`.
+        Attempt state is read by its ledger-derived JSON path separately.
+        """
         for d, subdirs, _ in os.walk(self.root):  # never into .git (git may be writing there), core or .brain
             subdirs[:] = sorted(s for s in subdirs if s not in (".git", ".brain") and
-                                not (s == "core" and Path(d) == self.root))
-            if Path(d).name != "library":
-                continue
-            for f in sorted(Path(d).glob("*.md")):
+                                not (s == "core" and Path(d) == self.root) and
+                                not (s in ('full-gates', 'spec-runs', 'job-attempts', 'job-handbacks',
+                                           'job-trains', 'handback-queue') and
+                                     not (Path(d).name == 'nodes' and (Path(d) / s / 'node.md').is_file())))
+            if Path(d).name == "library":
+                yield Path(d)
+
+    def items(self):
+        out = []
+        for directory in self.library_directories():
+            for f in sorted(directory.glob("*.md")):
                 if f.name.lower() == "readme.md":
                     continue
                 fm, _ = _m_common.read_fm(f)
@@ -316,16 +328,35 @@ _LOCK = {"depth": 0, "fh": None}
 LOCK_WAIT = int(os.environ.get("BRAIN_LOCK_WAIT") or 300)  # seconds a command waits for another before giving up
 
 
+class LockTimeout(TimeoutError):
+    """An explicitly bounded caller could not obtain instance ownership."""
+
+
+def refresh_lock_remaining():
+    started = _LOCK.get('hold_started')
+    if not holding() or _LOCK['fh'] is None or started is None:
+        return None
+    remaining = _LOCK['held_budget'] - (time.perf_counter() - started)
+    if remaining <= 0:
+        _m_common.die('status refresh lock ownership deadline expired; retry from fresh state')
+    return remaining
+
+
+def check_refresh_deadline():
+    refresh_lock_remaining()
+
+
 class brain_lock:
     """Several coordinators may run `brain` at once: every command that changes something runs under one lock
     per instance (machine-local, in .brain/, never deleted: a lock on a deleted file isn't a lock for the next
     process). The holder writes its pid into the file and says so in BRAIN_LOCK_HELD, so a brain command it
     starts itself (git runs hooks inside our commit) goes on without waiting for it, and only while it holds it."""
 
-    def __init__(self, inst_or_root):
+    def __init__(self, inst_or_root, *, timeout=None):
         root = inst_or_root.root if isinstance(inst_or_root, Instance) else inst_or_root  # (a Path's .root is "/")
         self.path = Path(root) / ".brain" / "lock"
         self.key = str(Path(root).resolve())
+        self.timeout = timeout
 
     def owner_is_running_us(self):
         held = os.environ.get("BRAIN_LOCK_HELD", "")
@@ -348,17 +379,20 @@ class brain_lock:
             if os.fstat(fh.fileno()).st_nlink > 1 or self.path.is_symlink():
                 fh.close()
                 _m_common.die(f"{_m_common.tilde(self.path)} is linked to another file; brain won't write it (remove it)")
-            deadline = time.time() + LOCK_WAIT
+            wait = LOCK_WAIT if self.timeout is None else min(LOCK_WAIT, self.timeout)
+            deadline = time.monotonic() + wait
             while True:
                 try:
                     fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if time.time() > deadline:
+                    if time.monotonic() >= deadline:
                         fh.close()
+                        if self.timeout is not None:
+                            raise LockTimeout('instance lock wait expired')
                         _m_common.die(f"another brain command has held this instance's lock for {LOCK_WAIT // 60} minutes; "
                             f"try again (lock: {_m_common.tilde(self.path)})")
-                    time.sleep(0.05)
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
             try:
                 os.fchmod(fh.fileno(), 0o600)
             except OSError:
@@ -392,16 +426,23 @@ def settings(inst):
 
 @contextlib.contextmanager
 def held(root):
-    """Retain final-attempt admission policy; projections still release ownership.
+    """Retain final-attempt admission policy and physical writer ownership.
 
     Settings are frozen before the attempt loads any: an editor outside the
     lock may change them, and a held refresh then refuses as before.
     """
+    from . import hook_budget
+    try:
+        budget = hook_budget.seconds('refresh')
+    except ValueError as error:
+        _m_common.die(str(error))
+    _LOCK["held_budget"] = budget
     _LOCK["hold"], _LOCK["held_root"], _LOCK["held_settings"] = True, root, settings(Instance(root))
     try:
         yield
     finally:
         _LOCK["hold"], _LOCK["held_root"], _LOCK["held_settings"] = False, None, None
+        _LOCK.pop('held_budget', None)
 
 
 def unlock():
@@ -622,9 +663,9 @@ def released(inst, node=None, extra=(), local_keys=(), retry=False, projection=F
     Readers, hook descendants and nested unlocked scopes retain main's lock-free
     behavior. Only the enclosing writer owns validation and the binding reload.
     """
-    # Even a contended refresh must prepare read-only projections without
-    # physical writer ownership. Its caller still fences and bounds retries.
-    if _LOCK["fh"] is None or (_LOCK.get("hold") and not projection):
+    # Ordinary projections release ownership. A final contended status refresh
+    # retains it, so cooperating writers cannot starve publication indefinitely.
+    if _LOCK["fh"] is None or _LOCK.get("hold"):
         yield
         return
     with brain_lock(inst):
