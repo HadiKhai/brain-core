@@ -23,6 +23,7 @@ sign-outs. Every CLI, routing and dashboard usage presentation carries the actua
 verification state and safe error. Signed-out or unavailable capacity is distinguished
 from confirmed stop-line exhaustion. No instance configuration changes are needed.
 Refresh once with `brain usage --refresh`, or let the poller refresh.
+
 ## 2026-11-20: Machine admission tolerates an unavailable passwd database
 
 Machine holds and admission audit records identify the numeric kernel uid when the
@@ -40,6 +41,12 @@ measured disk value, reserve, machine policy owner and admission command. The da
 page shows free disk against its policy reserve and the active admission's floor, owner and expiry.
 Admissions can only loosen the effective base reserve. Grants recheck expiry under the queue lock
 after sampling. No configuration change is required; existing machine policy and defaults remain in force.
+
+## 2026-11-20: Instruction capture accepts UTC Git commit timestamps
+
+Instruction capture parses both Z and numeric UTC offsets in Git's strict ISO
+commit dates on Python 3.9. An unconverted standing instruction still blocks;
+a qualifying same-turn rule commit still clears it. No configuration is needed.
 
 ## 2026-11-20: Hook refusal sources and clock-stamped messages
 
@@ -371,6 +378,7 @@ folder name in the root node's `t3_worktree_keep` (comma-separated). To remove
 worktrees of threads T3 settles by itself (scheduled runs), set
 `t3_worktree_reap: on` on the root node; each due tick then removes what it can
 in 10 seconds. See docs/t3-worktrees.md.
+
 ## 2026-10-28: Restart at the third compaction; budgets stay soft
 
 Due and the dashboard retain one blocking restart item per running-job episode
@@ -381,6 +389,7 @@ After upgrading: legacy token-only restart episodes clear when a known
 compaction count is below three. Unknown legacy evidence stays pending until
 it can be classified or the job is relaunched or closed. Existing compaction
 episodes keep their identity; no worker is stopped by reading due.
+
 ## 2026-10-28: Explicit thread settlement targets and attestations
 
 `brain settle <node> --job <key>` prints one exact `t3_thread_organize` call per
@@ -392,6 +401,7 @@ repeating `--thread <id>` for every exported thread, including bound workers,
 reviewers and descendants. The same per-thread flags are required for `--all-closed`.
 Fresh exhaustive export validation remains required; missing bound threads refuse
 before evidence or ledger writes. See the host adapter for discovery and safety checks.
+
 ## 2026-10-28: Exact-head focused spec runs
 
 Set a node's `verify_spec` to its focused runner argument prefix once. Workers can
@@ -399,6 +409,7 @@ then use `brain spec-run <node> --head <full-sha> -- <spec ids>` from a clean
 registered job worktree. It reuses native heavy admission, cleanup and scrubbed
 logs, supplies an owned temporary directory and records focused receipts only.
 The explicit `--branch ... --command ...` form remains supported.
+
 ## 2026-10-28: Run heavy commands under owned machine slots
 
 Use `brain heavy run --node <node> -- <command...>` for FIFO execution in the
@@ -630,6 +641,7 @@ After upgrading:
 - Run `brain ui --open` again to replace an older dashboard. No setup is needed.
 - If a legacy dashboard has no identity record, stop it in its own terminal first;
   a working directory or process command cannot prove which instance it serves.
+
 ## 2026-10-24: Stable job reminder identities and quiet Docker reports
 
 Merged-ledger and lesson-outcome needs ignore hand-back wording. Job advice latches each
@@ -776,6 +788,7 @@ After upgrading: configure `land_check=<command>` where needed and use `brain la
 before each supported outward step. Missing settings add no check or permission. Receipts
 do not establish readiness or consent; arbitrary external pushes and host publication
 enforcement remain outside core's supported-path boundary.
+
 ## 2026-10-24: M8 answer inbox request episodes and report weekly age
 
 rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
@@ -856,6 +869,7 @@ For agents:
 After upgrading:
 - No migration is required. Initial briefs do not reset budgets; restart baselines
   are bounded machine-local receipts. Automatic worker termination remains outside scope.
+
 ## 2026-10-24: M5 explicit hand-back summaries and questions
 
 rehearsal evidence waived (release 1 waiver pattern; rehearse sandbox self-check refuses)
