@@ -74,7 +74,7 @@ def main():
             payload = json.dumps({'cwd': str(root), 'session_id': 'fixture-coordinator',
                                   'tool_name': tool, 'tool_input': args}).encode()
             return json.loads(cli(['hook', 'pretool'], payload))['hookSpecificOutput']
-        args = {'threadId': 'fixture-child', 'mode': 'queue',
+        args = {'threadId': 'fixture-coordinator', 'mode': 'auto',
                 'message': marked_message(body, AGENT_MESSAGE_PREFIX, sent_at='2000-01-01T00:00:00+00:00'),
                 'clientRequestId': 'fixture-stable'}
         hook_before = datetime.datetime.now(ZoneInfo('Asia/Kathmandu')).replace(microsecond=0)
@@ -84,9 +84,43 @@ def main():
         hook_stamp = metadata(rewritten['message'])['sent_at']
         assert hook_before <= datetime.datetime.fromisoformat(hook_stamp) <= hook_after
         assert 'permissionDecision' not in output
+        assert rewritten['mode'] == 'queue'
         assert unmarked_message(rewritten['message'], AGENT_MESSAGE_PREFIX) == body
-        assert {k: v for k, v in rewritten.items() if k != 'message'} == {
-            k: v for k, v in args.items() if k != 'message'}
+        assert {k: v for k, v in rewritten.items() if k not in ('message', 'mode')} == {
+            k: v for k, v in args.items() if k not in ('message', 'mode')}
+        # Exercise the actual native bridge process path against a local busy-host
+        # contract fixture. This is transport proof, not a live T3 runtime claim.
+        state_path = root / 'busy-host.json'
+        state_path.write_text(json.dumps({'active_call': 'running', 'cancelled': [], 'queue': []}))
+        bridge = root / 'bridge.py'
+        bridge.write_text('''import json, pathlib, sys
+state_path = pathlib.Path(__file__).with_name('busy-host.json')
+state = json.loads(state_path.read_text())
+assert sys.argv[1:3] == ['acp-mcp-call', 't3_thread_send']
+args = json.loads(sys.argv[3])
+if args.get('mode', 'auto') == 'queue':
+    state['queue'].append(args)
+    delivery = 'queued'
+else:
+    state['cancelled'].append('fixture-mid-tool-call')
+    state['active_call'] = 'cancelled'
+    delivery = 'steered'
+state_path.write_text(json.dumps(state))
+print(json.dumps({'structuredContent': {'delivery': delivery}}))
+''')
+        bridge_env = {**env, 'PYTHONPATH': str(CORE / 'lib'), 'T3_ACP_MCP_NODE': sys.executable,
+                      'T3_ACP_MCP_ENTRYPOINT': str(bridge)}
+        deliveries = []
+        for payload in (rewritten, args):
+            result = subprocess.run([sys.executable, '-B', '-c',
+                "import json,sys; from brain.host_rpc import call; print(json.dumps(call('t3_thread_send', json.load(sys.stdin))))"],
+                cwd=root, env=bridge_env, input=json.dumps(payload).encode(), capture_output=True)
+            assert result.returncode == 0, result.stderr
+            deliveries.append(json.loads(result.stdout)['delivery'])
+        busy = json.loads(state_path.read_text())
+        assert deliveries == ['queued', 'queued']
+        assert busy['active_call'] == 'running' and busy['cancelled'] == []
+        assert len(busy['queue']) == len(deliveries)
         (root / 'AGENTS.md').write_text('## Forbidden actions\n- tool: *t3_thread_send\n')
         denied = hook('mcp__t3_code__t3_thread_send', args)
         assert denied['permissionDecision'] == 'deny'
@@ -98,6 +132,8 @@ def main():
             'hook_clock_window': [hook_before.isoformat(), hook_after.isoformat()],
             'denial': denied, 'body_bytes_preserved': True, 'other_arguments_preserved': True,
             'operator_remainder_not_hidden': True, 'permission_not_granted': True,
+            'busy_bridge_fixture': {'deliveries': deliveries, 'active_call': busy['active_call'],
+                                    'cancelled': busy['cancelled'], 'queued_count': len(busy['queue'])},
             'concurrent_commands': len(commands), 'elapsed_s': round(time.monotonic() - started, 6),
         }, indent=2))
 

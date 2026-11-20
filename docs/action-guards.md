@@ -39,7 +39,11 @@ carry that hook's decision. See the coordinator role's cancellation guidance.
 
 Allowed `t3_thread_send` calls receive a clock-stamped message envelope through
 `hookSpecificOutput.updatedInput`. The complete input object is retained apart
-from `message`; the hook returns no `allow` or `ask` decision. Runtime permissions
+from `message` and the delivery mode: omitted/`auto` becomes `queue`, so a busy
+recipient finishes its active call. Only explicit `steer` or `restart` requests
+interrupt it. Brain's native send bridge enforces the same default even without a
+runtime hook. Mode is never inferred from body text. The hook returns no `allow`
+or `ask` decision. Runtime permissions
 continue to apply. This uses the runtime's documented [PreToolUse input rewrite
 contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
 Runtimes without input rewriting use the immediately prepared `brain agent-message`

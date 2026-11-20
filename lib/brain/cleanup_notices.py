@@ -45,7 +45,7 @@ def cleanup_notice(inst, n, job_key, identity, workspace, rpc):
         data = dict(version=1, binding=binding, state='sending', client_request_id='cleanup-' + key)
         _m_common.atomic_write(record, json.dumps(data, sort_keys=True) + '\n', private=True)
         try:
-            reply = rpc('t3_thread_send', dict(threadId=identity, mode='auto',
+            reply = rpc('t3_thread_send', dict(threadId=identity, mode='queue',
                 clientRequestId=data['client_request_id'],
                 message=_m_messages.agent_message(
                     'This job is closed and its checkout is awaiting cleanup. Return any final hand-back now; '

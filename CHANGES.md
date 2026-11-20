@@ -13,6 +13,12 @@ actual operator message. The coordinator role explains how to distinguish a hook
 denial, an unanswered permission prompt, a host guard and a stream cancelled by an
 incoming message. Stock refusal wording alone does not identify who refused it.
 
+Routine agent reports, hand-backs and questions now use host send `mode: queue`.
+Brain's send hook and native bridge convert omitted/`auto` modes to `queue`,
+so a busy recipient completes its active call and turn. Only explicit `steer`
+or `restart` choices interrupt it; message text never selects delivery mode.
+Set `queue` yourself when runtime hooks cannot rewrite input.
+
 `brain agent-message` and `brain msg` put `sent_at` in the byte-bounded envelope,
 using the instance clock and timezone (local system time outside an instance).
 The send PreToolUse hook refreshes that field through `updatedInput`, retaining

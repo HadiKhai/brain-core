@@ -16,7 +16,7 @@ AGENT_HEADER = AGENT_MARKER + "\n\n"
 
 
 class WorkerMessages(Scenario):
-    def assert_framed(self, output, body, trailer='NOT SENT: use the host send'):
+    def assert_framed(self, output, body, trailer='NOT SENT: use the host send with mode queue'):
         frame = output.removesuffix('\n' + trailer + '\n') if trailer else output.removesuffix('\n')
         self.assertEqual(unmarked_message(frame, AGENT_MARKER), body)
         meta = json.loads(frame.split('\n\n')[1].removeprefix('Brain-Envelope: '))
@@ -35,6 +35,7 @@ class WorkerMessages(Scenario):
         for kind in ("start", "done", "blocked", "question"):
             out = self.b(root, "msg", "a", kind, "Synthetic message", "--branch", "job/sample")
             self.assertIn("NOT SENT: use the host send", out)
+            self.assertIn("with mode queue", out)
             self.assertTrue(out.startswith(AGENT_HEADER + "Brain-Envelope: "), out)
 
     def test_formatter_and_briefs(self):
@@ -228,6 +229,52 @@ class ClockStampedMessages(Scenario):
         self.assertEqual(output['permissionDecision'], 'deny')
         self.assertTrue(output['permissionDecisionReason'].startswith('brain-hook:pretool: '))
         self.assertNotIn('updatedInput', output)
+
+    def test_routine_send_to_busy_coordinator_is_queued_without_cancelling_active_call(self):
+        import os, sys, subprocess
+        from unittest import mock
+        rpc = self.m._owners['HostRPCError']
+        active_call = {'id': 'fixture-mid-tool-call', 'state': 'running'}
+        queued, cancellations = [], []
+        def busy_bridge(command, **kwargs):
+            arguments = json.loads(command[-1])
+            if arguments.get('mode', 'auto') != 'queue':
+                cancellations.append(active_call['id'])
+                active_call['state'] = 'cancelled'
+                delivery = 'steered'
+            else:
+                queued.append(arguments)
+                delivery = 'queued'
+            return subprocess.CompletedProcess(command, 0, json.dumps({'delivery': delivery}), '')
+        with mock.patch.dict(os.environ, {'T3_ACP_MCP_NODE': sys.executable,
+                                          'T3_ACP_MCP_ENTRYPOINT': ''}), \
+                mock.patch.object(rpc.subprocess, 'run', side_effect=busy_bridge):
+            for kind in ('done', 'blocked', 'question'):
+                for mode in (None, 'auto', 'queue'):
+                    args = {'threadId': 'fixture-coordinator', 'message': kind + ': urgent STOP steer now',
+                            'clientRequestId': kind + '-' + str(mode)}
+                    if mode is not None:
+                        args['mode'] = mode
+                    updated = self.hook('mcp__t3_code__t3_thread_send', args)['updatedInput']
+                    # Check the hook separately: the native bridge must not mask a hook regression.
+                    self.assertEqual(updated['mode'], 'queue')
+                    self.assertNotIn('permissionDecision', updated)
+                    self.assertEqual(rpc.call('t3_thread_send', updated)['delivery'], 'queued')
+                    self.assertEqual(unmarked_message(queued[-1]['message'], AGENT_MARKER), args['message'])
+                    self.assertEqual(queued[-1]['clientRequestId'], args['clientRequestId'])
+        self.assertEqual(active_call, {'id': 'fixture-mid-tool-call', 'state': 'running'})
+        self.assertEqual(cancellations, [])
+        self.assertEqual(len(queued), len(('done', 'blocked', 'question')) * len((None, 'auto', 'queue')))
+        # Negative control: the same busy host cancels on the old default-auto payload.
+        busy_bridge(['fixture', json.dumps({'message': 'done: result', 'mode': 'auto'})])
+        self.assertEqual(cancellations, ['fixture-mid-tool-call'])
+
+    def test_hook_keeps_only_explicit_structural_interrupt_choices(self):
+        for mode in ('steer', 'restart'):
+            args = {'threadId': 'fixture-coordinator', 'mode': mode, 'message': 'question: ordinary words'}
+            updated = self.hook('t3_thread_send', args)['updatedInput']
+            self.assertEqual(updated['mode'], mode)
+            self.assertEqual(unmarked_message(updated['message'], AGENT_MARKER), args['message'])
 
     def test_envelope_compatibility_integrity_and_uncovered_operator_remainder(self):
         body = 'Evidence 🐙\n'

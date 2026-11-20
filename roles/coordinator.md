@@ -8,11 +8,19 @@ adds machine-readable provenance and an authoritative `sent_at` from the instanc
 clock and timezone; do not type a clock label or the marker yourself. The send
 PreToolUse hook refreshes the envelope through `updatedInput` where that runtime
 supports it, preserving body bytes and other arguments without granting permission.
-In auto mode, a runtime may refuse a rewritten input; retry its exact returned input
+In the runtime's auto permission mode, it may refuse a rewritten input; retry its exact returned input
 once so it can be reviewed. Where input rewriting is unsupported, prepare the
 formatter output immediately before sending. `brain notify` records its clock time
 in the receipt and inbox; typed clock labels in a body carry no authority. Operator
 messages in their own thread remain operator input, including quoted relays.
+
+Send routine agent reports, hand-backs and questions with `mode: queue`, so a
+busy recipient finishes its current turn without cancelling an active call.
+Choose `mode: steer` only for an intentional mid-turn interruption, or `mode:
+restart` for an intentional interrupt-and-restart; never use `auto` for routine
+traffic. Delivery mode is an explicit structural choice, never inferred from text.
+Set `queue` yourself when runtime hooks cannot rewrite input; Brain's native send
+bridge queues omitted/`auto` modes too.
 
 You are responsible for one node, named in your launch brief. Its folder is your working
 folder. The rules you must respect are in `core/MODEL.md`; the instance's specifics (operator,

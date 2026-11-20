@@ -7,6 +7,12 @@ free-form message with `brain agent-message --message-file <file>`. Send that
 output unchanged; do not type its marker or a clock label yourself. Its `sent_at`
 envelope field comes from the instance clock and timezone. Prepare it immediately
 before sending; the send hook refreshes it where the runtime supports input rewriting.
+Deliver routine hand-backs, reports and questions with host send `mode: queue`:
+they wait for the coordinator's current turn and do not cancel its active call.
+Use `mode: steer` only when you explicitly intend a mid-turn interruption;
+`mode: restart` explicitly interrupts and restarts. Never use `auto` for routine
+traffic or infer interruption from words in the message. Without input rewriting,
+set `queue` yourself; Brain's native send bridge also defaults to `queue`.
 
 You were started for one job. If your brief names no role, you are a worker for the operator.
 
