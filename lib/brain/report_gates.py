@@ -80,6 +80,7 @@ CLAIM_SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['i
 # Declared policy, inert by default: how many later turns a refused send stays covered
 # by the order of the turn that refused it (0 keeps every order inside its own turn).
 HELD_TURNS_SETTING = 'report_gate_held_turns'
+ORDER_POLICY_SETTING = 'report_gate_order_policy'
 
 SEND_TOOLS = ('t3_thread_send',)
 LAUNCH_TOOLS = ('t3_thread_launch', 'create_threads', 'delegate_task', 'schedule_task')
@@ -620,6 +621,30 @@ def held_turns(inst, n):
         return 0
 
 
+def warn_orders(inst, n):
+    """Only a declared warning policy changes the existing order refusal."""
+    return n['fm'].get(ORDER_POLICY_SETTING, inst.cfg.get(ORDER_POLICY_SETTING)) == 'warn'
+
+
+def order_warning(inst, n, data, claims, items, facts, prior, started):
+    doubts = [c['quote'] for c in claims if c['kind'] == 'work_order'
+              and order_problem(c, (items or []) + (prior['items'] if prior else []),
+                                turn_messages(facts) + (prior['messages'] if prior else []))]
+    if started and not doubts:
+        doubts = [shell_text(data.get('tool_input', {})) or 'worker launch']
+    quoted = '; '.join(json.dumps(q, ensure_ascii=False) for q in dict.fromkeys(doubts))
+    scope = held_scope(n, data, data.get('tool_name'), data.get('tool_input', {}), quoted)
+    marker = '<!-- order-gate-warning:' + hashlib.sha256(json.dumps(
+        [scope, facts.get('head_at')], sort_keys=True).encode()).hexdigest() + ' -->'
+    body = _m_nodes.import_text(quoted, _m_guard.never_terms(n))
+    line = ('- ' + inst.now() + ' from ' + n['id'] + ': Order check doubted ' + body +
+            '; the send was allowed by the declared warn policy. ' + marker + '\n')
+    try:
+        _m_capture.hook_inbox_append(inst.node('root'), line, marker)
+    except (Exception, SystemExit) as error:
+        _unavailable(error)  # warning persistence must never turn warn into refusal
+
+
 def held_scope(n, data, name, args, text):
     """What a held order is bound to (structure): node, runtime session, tool, recipient,
     transcript and the exact outgoing text. Nothing else may reuse it."""
@@ -725,6 +750,10 @@ def pretool_reason(inst, n, data):
         claims = [c for c in claims if c['kind'] in relevant]
     problems = gate_problems(facts, claims, items, started=started, prior=prior)
     refused = any(p.startswith('A question or complaint') for p in problems)
+    if refused and warn_orders(inst, n):
+        order_warning(inst, n, data, claims, items, facts, prior, started)
+        problems = [p for p in problems if not p.startswith('A question or complaint')]
+        refused = False
     if scope and refused and not cancelled:
         hold(inst, scope, facts, items)
     elif prior and not refused:

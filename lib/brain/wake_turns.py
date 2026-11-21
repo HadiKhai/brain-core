@@ -34,6 +34,52 @@ def wake_turn_enabled(n):
     return True  # consumption fencing is mandatory, including legacy routes
 
 
+def wake_route_stale(inst, n):
+    path = _m_hosts.wake_directory(inst, n) / 'turn.json'
+    if not path.exists():
+        return False
+    old = json.loads(path.read_text())
+    old = wake_turn_read(path, old['binding'])  # validate the retired receipt too
+    binding = wake_turn_binding(inst, n)
+    command = _m_hosts.wake_configured_route(inst, n)[1]
+    return bool(old and old['binding'] != binding and command.startswith(('https://', 'http://'))
+                and old.get('route_binding') == _m_hosts.wake_binding(command)
+                and n['local'].get('wake_verified_binding') != binding)
+
+
+def wake_command_result(inst, n, reason):
+    """Report only this request's bound consumption, never infer a run from HTTP 2xx."""
+    target, command = _m_hosts.wake_configured_route(inst, n)
+    thread = target['local'].get('coordinator')
+    destination = target['id'] + ' thread ' + str(thread or '(unbound)')
+    if _m_hosts.wake_route_disabled(inst, n, target):
+        return False, 'wake: nothing delivered to ' + destination + ': route disabled on this machine'
+    if not command or not thread:
+        return False, 'wake: nothing delivered to ' + destination + ': no bound coordinator transport'
+    directory = _m_hosts.wake_directory(inst, target)
+    key = _m_hosts.wake_request_key(inst, n, reason)
+    try:
+        if wake_route_stale(inst, target):
+            return False, ('wake: nothing delivered to ' + destination +
+                           ': wake route stale after coordinator rotation; re-provision current binding; source work retained')
+        receipt = directory / (key + '.sent')
+        _m_common.safe_target(receipt)
+        consumed = receipt.exists() and receipt.read_text() == 'consumed\n'
+        value = wake_turn_read(directory / 'turn.json', wake_turn_binding(inst, target))
+        if consumed or value and value['consumed'] and key + '.pending' in value['paths']:
+            return True, ('wake: delivered request ' + key[:12] + ' to ' + destination +
+                          '; coordinator consumed it with brain due')
+        diagnostic = _m_hosts.wake_diagnostic(inst, n)
+        if diagnostic:
+            return False, 'wake: nothing confirmed delivered to ' + destination + ': ' + diagnostic
+        accepted = bool(value and value['sent'] and key + '.pending' in value['paths'])
+        detail = ('transport accepted request ' + key[:12] + '; no coordinator run confirmed'
+                  if accepted else 'request queued; no coordinator run started for this request')
+        return False, 'wake: ' + destination + ': ' + detail + '; source work retained'
+    except (OSError, ValueError, KeyError, TypeError):
+        return False, 'wake: nothing confirmed delivered to ' + destination + ': receipt unavailable; source work retained'
+
+
 def wake_turn_session_binding(n):
     sessions = n['local'].get('coordinator_sessions', [])
     selected = sessions[-1] if isinstance(sessions, list) and sessions else ''
@@ -148,11 +194,7 @@ def wake_turn_prepare(inst, n, pending, refs):
             binding = wake_turn_binding(inst, n)
             value = wake_turn_read(path, binding)
             if value is None and path.exists():
-                retired_value = json.loads(path.read_text())
-                command = _m_hosts.wake_configured_route(inst, n)[1]
-                if (command.startswith(('https://', 'http://')) and
-                        retired_value.get('route_binding') == _m_hosts.wake_binding(command) and
-                        n['local'].get('wake_verified_binding') != binding):
+                if wake_route_stale(inst, n):
                     return 'stale', None  # the same webhook may still target the retired coordinator
                 # A valid retired binding is not authority for this coordinator.
                 # Preserve its exact receipt before reserving the replacement.

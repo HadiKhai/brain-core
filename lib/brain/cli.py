@@ -841,6 +841,14 @@ def _main():
         else:
             ap.error("unrecognized arguments: " + " ".join(extra))
     handler = getattr(a, 'f', None)
+    if (handler and handler.__name__ in ('cmd_now', 'cmd_show', 'cmd_inbox', 'cmd_due', 'cmd_status')
+            and not writes(a)):
+        root = _m_nodes.try_find_root()
+        if root:
+            try:
+                _m_status_refresh.retry_stops(_m_instance.Instance(root))
+            except (Exception, SystemExit):
+                pass  # a queued display refresh cannot hold a quiet command
     local_source_registration = handler and handler.__name__ == 'cmd_spend' and a.add_source
     _m_timings.select_command(a.cmd or 'dashboard', persist=bool(handler) and
                              not local_source_registration and
@@ -950,6 +958,8 @@ REFRESH_WRITER_WAIT = 120  # one deadline across all live-owner waits and admiss
 
 def refresh_with_retry(attempt, root):
     with _m_status_refresh.invocation():
+        if os.environ.get('BRAIN_STOP_REFRESH_CHILD'):
+            return attempt()  # the detached stop worker owns the whole-call deadline
         return _refresh_with_retry(attempt, root)
 
 

@@ -1,0 +1,23 @@
+$ worktree/bin/brain status root --refresh
+exit=1 seconds=0.338 stdout='' stderr="brain: another brain command has held this instance's lock for 0 minutes; try again (lock: /private/var/folders/gq/clml1v4n7q3bylx2j0g5d4bh0000gn/T/brain-turn-holds-proof-jjkqgth_/instance/.brain/lock)\n"
+$ worktree/bin/brain hook stop
+exit=0 seconds=0.458 stdout='' stderr=''
+contended stop retained: {"node": "root", "at": "2026-11-21 18:54 +00:00", "reason": "inbox: 1 pending entry changed after facts; run brain status root --refresh"}
+$ worktree/bin/brain now
+exit=0 seconds=0.265 stdout='2026-11-21 18:54 +00:00\n' stderr=''
+quiet-command refresh finished; stale mark cleared: True
+$ worktree/bin/brain hook pretool
+exit=0 seconds=0.667 stdout='{"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"threadId": "fixture-destination", "message": "Agent message: sent by another agent, not the operator.\\n\\nBrain-Envelope: {\\"bytes\\": 27, \\"sent_at\\": \\"2026-11-21T18:54:53+00:00\\", \\"sha256\\": \\"ba30d62fec9e3296e18e12e04e5e499ac3aadf54a65e3001068435c6168fa1db\\"}\\n\\nContinue the fixture trial.", "mode": "queue"}}}\n' stderr=''
+synthetic send sink received: fixture-destination
+- 2026-11-21 18:54 +00:00 from root: Order check doubted "Continue the fixture trial."; the send was allowed by the declared warn policy. <!-- order-gate-warning:b97b35cadfc2b93d41e37f2dd708c8108c6c0bf29c71861d28659a342ef103e1 -->
+$ worktree/bin/brain wake disabled synthetic-proof-disabled
+exit=2 seconds=0.288 stdout='' stderr='wake: nothing delivered to disabled thread fixture-disabled: route disabled on this machine\n'
+$ worktree/bin/brain wake unconfirmed synthetic-proof-unconfirmed
+exit=2 seconds=0.363 stdout='' stderr='wake: unconfirmed thread fixture-unconfirmed: transport accepted request d9b3580905ed; no coordinator run confirmed; source work retained\n'
+$ worktree/bin/brain wake confirmed synthetic-proof-confirmed
+exit=0 seconds=2.815 stdout='wake: delivered request 65edc6410831 to confirmed thread fixture-confirmed; coordinator consumed it with brain due\n' stderr=''
+$ worktree/bin/brain hook stop
+exit=0 seconds=29.311 stdout='' stderr=''
+capture provider attempts: 2
+- 2026-11-21 18:55 +00:00 from runtime: Instruction capture gap: operator message 2026-01-01T12:30:00Z beginning "Preserve every original fixture source." was not captured because the provider timed out (timeout). Evidence: .brain/instruction-capture/gaps/73021adb4840f3fa575ee57e63b231603815c03eb0d2faa293a17cafea17f496.json <!-- instruction-capture-gap:1dd253a4e67d7c601673be878ce9fc591e91c43886043282e8b07754f8176b91 -->
+scratch instance and synthetic transports removed; provider spend $0

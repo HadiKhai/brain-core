@@ -452,6 +452,52 @@ class WakeConfirmation(Scenario):
                 self.m.cmd_wake(args)
         self.assertNotEqual(result.exception.code, 0)
 
+    def cli(self, reason='fixture-cli'):
+        args = argparse.Namespace(id='app', drain=False, retry=False, reason=reason)
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                self.m.cmd_wake(args)
+                code = 0
+            except SystemExit as error:
+                code = error.code
+        return code, out.getvalue() + err.getvalue()
+
+    def test_cli_disabled_route_is_nonzero_and_names_thread(self):
+        self.configure('wake_enabled=off')
+        code, output = self.cli()
+        self.assertEqual(code, 2)
+        self.assertIn('fixture-current', output)
+        self.assertIn('route disabled', output)
+
+    def test_cli_transport_acceptance_without_consumption_is_not_a_started_run(self):
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            code, output = self.cli()
+        send.assert_called_once()
+        self.assertEqual(code, 2)
+        self.assertIn('transport accepted', output)
+        self.assertIn('no coordinator run confirmed', output)
+
+    def test_cli_reports_consumed_request_and_thread(self):
+        def send(*args, **kwargs):
+            self.assertIsNotNone(self.m.wake_turn_consume(self.inst, self.n))
+            return True
+        with mock.patch.object(self.m, 'wake_send', side_effect=send):
+            code, output = self.cli()
+        self.assertEqual(code, 0, output)
+        self.assertIn('delivered request', output)
+        self.assertIn('app thread fixture-current', output)
+
+    def test_cli_stale_route_is_nonzero_with_reprovision_reason(self):
+        self.configure('wake=https://fixture.invalid/hook')
+        self.enqueue()
+        self.drain()
+        self.configure('coordinator=fixture-replacement')
+        code, output = self.cli()
+        self.assertEqual(code, 2)
+        self.assertIn('stale', output)
+        self.assertIn('fixture-replacement', output)
+
     def test_child_disabled_after_acceptance_does_not_hold_root_forever(self):
         self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')
         self.configure('coordinator=', 'wake=')

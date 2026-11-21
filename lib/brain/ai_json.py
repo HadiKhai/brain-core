@@ -93,16 +93,16 @@ def json_request(system, data, schema, model='claude-haiku-5-5'):
             'output_config': {'format': {'type': 'json_schema', 'schema': schema}}}
 
 
-def ai_json(system, data, schema, model='claude-haiku-5-5'):
+def ai_json(system, data, schema, model='claude-haiku-5-5', timeout=20):
     if not os.environ.get('ANTHROPIC_API_KEY'):
-        return cli_json(system, data, schema, model)
+        return cli_json(system, data, schema, model, timeout=timeout)
     request = json_request(system, data, schema, model)
     started = time.monotonic()
     try:
         result = subprocess.run([sys.executable, '-I', '-c', _REQUEST], input=json.dumps(request),
                                 cwd=Path(__file__).resolve().parent,
                                 env={'ANTHROPIC_API_KEY': os.environ['ANTHROPIC_API_KEY']},
-                                text=True, capture_output=True, timeout=20, check=False)
+                                text=True, capture_output=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         raise AIUnavailable('timeout') from None
     except OSError:
@@ -121,7 +121,7 @@ def ai_json(system, data, schema, model='claude-haiku-5-5'):
         raise AIResponseInvalid('invalid or incomplete AI response') from None
 
 
-def cli_json(system, data, schema, model):
+def cli_json(system, data, schema, model, timeout=20):
     """Keep subscription auth, but load no parent session or customization.
 
     Safe mode preserves OAuth/keychain access (unlike --bare). Empty setting
@@ -144,7 +144,7 @@ def cli_json(system, data, schema, model):
         with tempfile.TemporaryDirectory(prefix='brain-capture-', dir='/tmp') as cwd:
             result = subprocess.run(argv, input=json.dumps(data, ensure_ascii=False).encode('utf-8'),
                                     cwd=cwd, env=env, capture_output=True,
-                                    timeout=20, check=False)
+                                    timeout=timeout, check=False)
     except subprocess.TimeoutExpired as error:
         raise AIUnavailable('timeout', cli_detail('timeout', started, error=error)) from None
     except OSError as error:

@@ -37,6 +37,109 @@ def requested(inst):
     return any(op.command == 'status' and op.inst.root == inst.root for op in events._CURRENT)
 
 
+def stop_pending(inst, n):
+    return inst.root / '.brain/stop-refresh' / (hashlib.sha256(n['id'].encode()).hexdigest() + '.json')
+
+
+def defer_stop(inst, n, reason):
+    """A committed record never waits for display maintenance at stop time.
+
+    The local receipt survives contention; under immediate admission the facts
+    block also carries its stale time. No source facts or judgement are changed.
+    """
+    from . import status
+    if common.outward_links(inst.root):
+        return
+    pending = stop_pending(inst, n)
+    if not pending.exists():
+        common.atomic_write(pending, json.dumps({'node': n['id'], 'at': inst.now(), 'reason': reason}) + '\n',
+                            private=True, create=True)
+    try:
+        with instance.brain_lock(inst, timeout=0):
+            record = json.loads(pending.read_text())
+            status.mark_generated_stale(n)
+            path = n['dir'] / 'status.md'
+            text = path.read_text()
+            block = status.FACTS_RE.search(text)
+            if block and 'Facts stale since: ' not in block.group():
+                text = text[:block.start()] + block.group().replace(
+                    status.FACTS_STALE, status.FACTS_STALE + '\nFacts stale since: ' + record['at'], 1) + text[block.end():]
+                common.atomic_write(path, text)
+    except instance.LockTimeout:
+        pass  # the timestamped local receipt remains authoritative until quiet
+
+
+def retry_stops(inst):
+    """A quiet command starts one bounded worker and never waits for it."""
+    import subprocess
+    import sys
+    if os.environ.get('BRAIN_STOP_REFRESH_CHILD') or not list((inst.root / '.brain/stop-refresh').glob('*.json')):
+        return
+    if common.outward_links(inst.root):
+        return
+    try:
+        with instance.brain_lock(inst, timeout=0):
+            pass
+    except instance.LockTimeout:
+        return  # this command was not quiet; preserve the request
+    env = dict(os.environ, BRAIN_ROOT=str(inst.root), BRAIN_NO_REEXEC='1', BRAIN_STOP_REFRESH_CHILD='1',
+               BRAIN_LOCK_WAIT='0')
+    env.pop('BRAIN_LOCK_HELD', None)
+    code = ('import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); '
+            'from brain import status_refresh, instance; '
+            'status_refresh.drain_stop(instance.Instance(Path(sys.argv[2])))')
+    subprocess.Popen([sys.executable, '-B', '-c', code, str(common.CORE / 'lib'), str(inst.root)],
+                     cwd=inst.root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+
+
+def drain_stop(inst):
+    """Retry the oldest stop request once, using the existing measured hook bound."""
+    import fcntl
+    import signal
+    import subprocess
+    import sys
+    from . import hook_budget
+    directory = inst.root / '.brain/stop-refresh'
+    lock = directory / 'worker.lock'
+    common.safe_target(lock)
+    with lock.open('a+') as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        pending = sorted(directory.glob('*.json'), key=lambda p: p.stat().st_mtime_ns)
+        if not pending:
+            return
+        path = pending[0]
+        common.safe_target(path)
+        before = path.read_bytes()
+        record = json.loads(before)
+        n = inst.node(record['node'])
+        defer_stop(inst, n, record['reason'])  # materialize a mark previously blocked by a writer
+        env = dict(os.environ, BRAIN_ROOT=str(inst.root), BRAIN_NO_REEXEC='1',
+                   BRAIN_STOP_REFRESH_CHILD='1', BRAIN_LOCK_WAIT='0')
+        env.pop('BRAIN_LOCK_HELD', None)
+        log = path.with_suffix('.log')
+        with common.directory_target(log, private=True) as target:
+            output = os.fdopen(target.open(os.O_WRONLY | os.O_CREAT | os.O_TRUNC), 'w')
+        with output:
+            process = subprocess.Popen([sys.executable, str(common.ENTRY_POINT), 'status', n['id'], '--refresh'],
+                                       cwd=inst.root, env=env, stdin=subprocess.DEVNULL, stdout=output,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                process.wait(timeout=hook_budget.seconds('refresh'))
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+                defer_stop(inst, n, 'refresh passed its bound')
+                return
+        if process.returncode == 0 and path.read_bytes() == before:
+            path.unlink()
+        elif process.returncode != 0:
+            defer_stop(inst, n, 'refresh failed; retry at the next quiet command')
+
+
 _INBOX_PREFIXES = ContextVar('brain_refresh_inbox_prefixes', default=None)
 
 

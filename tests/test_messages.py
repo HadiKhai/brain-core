@@ -705,6 +705,29 @@ class ReportGates(Scenario):
     """
     fixture_init_in_process = True
 
+    def test_declared_warn_policy_allows_send_and_files_one_quoted_doubt(self):
+        self.operator('Could we continue the trial?')
+        self.claims = [self.claim('work_order')]
+        self.inst.cfg['report_gate_order_policy'] = 'warn'
+        # The real pre-tool path reloads policy from instance.md.
+        instance_file = self.root / 'instance.md'
+        instance_file.write_text(instance_file.read_text().replace('---\n',
+            '---\nreport_gate_order_policy: warn\n', 1))
+        text = 'Continue the trial and report its result.'
+        for _ in range(2):
+            self.assertIsNone(self.pretool('t3_thread_send', {'threadId': 'child-thread', 'message': text}))
+        inbox = (self.root / 'inbox.md').read_text()
+        self.assertEqual(inbox.count('<!-- order-gate-warning:'), 1)
+        self.assertIn('Order check doubted "' + text + '"', inbox)
+        self.assertIn('send was allowed', inbox)
+
+    def test_order_warning_policy_defaults_to_existing_refusal(self):
+        self.operator('Could we continue the trial?')
+        self.claims = [self.claim('work_order')]
+        reason = self.pretool('t3_thread_send', {'threadId': 'child-thread', 'message': 'Continue the trial.'})
+        self.assertIn('A question or complaint is not an order', reason)
+        self.assertNotIn('order-gate-warning', (self.root / 'inbox.md').read_text())
+
     def setUp(self):
         import core_loader
         super().setUp()
