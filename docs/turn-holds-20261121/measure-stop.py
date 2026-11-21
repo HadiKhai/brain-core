@@ -21,6 +21,11 @@ BASE = '6c716deda35684ee186fcc6c7e75b54c5b7b087a'
 
 def measure(samples):
     head = subprocess.check_output(['git', '-C', str(CORE), 'rev-parse', 'HEAD'], text=True).strip()
+    source_trees = {key: subprocess.check_output(
+        ['git', '-C', str(CORE), 'rev-parse', head + ':' + key], text=True).strip()
+        for key in ('lib', 'bin', 'adapters')}
+    assert not subprocess.check_output(['git', '-C', str(CORE), 'diff', 'HEAD', '--',
+                                       'lib', 'bin', 'adapters']), 'runtime sources must be committed'
     with tempfile.TemporaryDirectory(prefix='brain-stop-before-after-') as temporary:
         folder = Path(temporary).resolve()
         baseline = folder / 'baseline-core'
@@ -119,7 +124,8 @@ def measure(samples):
                     'median_hook_wall_seconds': statistics.median(r['hook_wall_seconds'] for r in selected),
                     'blocked': sum(r['hook_blocked'] for r in selected),
                     'median_refresh_wall_seconds': statistics.median(r['refresh_wall_seconds'] for r in selected)})
-        return {'before_sha': BASE, 'after_implementation_sha': head, 'python': sys.version,
+        return {'before_sha': BASE, 'after_implementation_sha': head, 'source_trees': source_trees,
+                'python': sys.version,
                 'same_instance': True, 'restored_before_every_sample': True,
                 'sample_order': 'conditions serial; before/after order alternates per repeat',
                 'concurrency': 1, 'serial_reason': 'Each pair must exclusively own the same restored scratch instance.',

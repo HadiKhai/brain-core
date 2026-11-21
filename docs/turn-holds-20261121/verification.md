@@ -76,16 +76,17 @@ stop/wake command paths in `cli.py`. Other builders stay out of these paths.
 the requested target is 2026-11-21 22:15 +02:00.
 
 Real launcher measurement: baseline main `6c716deda35684ee186fcc6c7e75b54c5b7b087a` versus
-implementation `994a13a1642d7d159e235dc61674da83b390b095`. The initial ownership/evidence addition
-changed only docs. A subsequent nonblocking consumption API changes `wake_turns.py`;
-its paired stop measurements are refreshed before the next handback.
+implementation `b47bae0b4f01c5174fb914408834708c3ce49c20` including the nonblocking
+consumption API. The final evidence commit changes only docs; measured `lib/`,
+`bin/` and `adapters/` Git tree identities are retained in the JSON and match
+the handback head.
 
 | Refresh condition | Version | N | Median stop wall seconds | Blocked stops |
 | --- | --- | ---: | ---: | ---: |
-| quiet | before | 5 | 0.394510 | 0/5 |
-| quiet | after | 5 | 0.394527 | 0/5 |
-| contended | before | 5 | 0.384009 | 5/5 |
-| contended | after | 5 | 0.421520 | 0/5 |
+| quiet | before | 5 | 0.745254 | 0/5 |
+| quiet | after | 5 | 0.723683 | 0/5 |
+| contended | before | 5 | 0.846032 | 5/5 |
+| contended | after | 5 | 0.917761 | 0/5 |
 
 All samples use one scratch instance identity at one absolute path. Exact tracked
 and private state plus mtimes are restored before each sample. Both versions run
@@ -107,7 +108,8 @@ Reproduce with `python3 -B docs/turn-holds-20261121/measure-stop.py --samples 5
 --output <result.json>`. Raw timings, refresh outcomes, hook decisions and stale
 receipts: [stop-before-after.json](stop-before-after.json). Console output:
 [stop-before-after.txt](stop-before-after.txt). Scratch cleanup completed; paid
-provider spend remains $0. No new runtime code or `status.py` edits were needed.
+provider spend remains $0. This timing refresh adds evidence only; the runtime API
+addition is described below. No `status.py` edit was needed.
 
 ## Coordinator addition: nonblocking receipt reads
 
