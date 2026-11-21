@@ -225,16 +225,15 @@ def _autoarchive(inst, nodes):
             with instance.brain_lock(inst):
                 if before != instance.state_signature(inst, nodes, extra=inputs):
                     continue
-                try:
-                    # Persist episode identities before removing source bytes;
-                    # a busy lifecycle writer defers maintenance, never delivery.
-                    with _m_reminders.lifecycle_store(inst, blocking=False) as current:
-                        if current != initial:
-                            continue
-                        current.clear()
-                        current.update(data)
-                except BlockingIOError:
-                    continue
+                # Persist identities before removing source bytes. A busy writer
+                # skips this optional archive immediately, without replanning.
+                with _m_reminders.lifecycle_store(inst, optional=True) as current:
+                    if current is None:
+                        return 0
+                    if current != initial:
+                        continue
+                    current.clear()
+                    current.update(data)
                 try:
                     for n, plan, final in plans:
                         try:

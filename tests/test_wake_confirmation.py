@@ -66,6 +66,58 @@ class WakeConfirmation(Scenario):
             self.m.wake_drain(self.inst, self.n, once=True)
         return send
 
+    def due_pending(self, number):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        path = self.directory / (format(number, '064x') + '.pending')
+        identity = self.m.watch_digest(['due-episode'])[:16] + format(number, '048x')
+        path.write_text(json.dumps({'items': [{'id': identity, 'kind': 'question', 'question': True}],
+                                    'explicit_kinds': True}))
+        return path
+
+    def test_drain_scans_due_inventory_once_for_twelve_pending_files(self):
+        pending = [self.due_pending(i) for i in range(1, 13)]
+        with mock.patch.object(self.m, 'watch_groups', wraps=self.m.watch_groups) as scans:
+            send = self.drain()
+        send.assert_not_called()
+        self.assertEqual(scans.call_count, 1)
+        self.assertTrue(all(not p.exists() for p in pending))
+        # The next run must observe anew, including when the same instance is reused.
+        next_pending = self.due_pending(13)
+        with mock.patch.object(self.m, 'watch_groups', wraps=self.m.watch_groups) as scans:
+            self.drain()
+        self.assertEqual(scans.call_count, 1)
+        self.assertFalse(next_pending.exists())
+
+    def test_changed_sources_or_receipts_keep_pending_without_repeating_scan(self):
+        sources = [self.n['dir'] / 'inbox.md', self.r / '.brain/wake/lifecycle.json',
+                   self.r / '.brain/wake/due-episodes.json']
+        for number, source in enumerate(sources, 1):
+            with self.subTest(source=source.name):
+                first = self.due_pending(number * 2)
+                second = self.due_pending(number * 2 + 1)
+                with self.m.wake_read_scope(self.inst), \
+                        mock.patch.object(self.m, 'watch_groups', wraps=self.m.watch_groups) as scans:
+                    self.assertFalse(self.m.wake_actionable_pending(self.inst, first))
+                    original = source.read_bytes() if source.exists() else None
+                    source.write_bytes((original or b'') + b'\n')
+                    self.assertTrue(self.m.wake_actionable_pending(self.inst, second))
+                    self.assertTrue(second.exists())
+                    self.assertEqual(scans.call_count, 1)
+                if original is None:
+                    source.unlink()
+                else:
+                    source.write_bytes(original)
+                second.unlink()
+
+    def test_unknown_due_inventory_keeps_all_pending_and_scans_only_once(self):
+        pending = [self.due_pending(i) for i in range(1, 4)]
+        unknown = self.m.WatchGroups({}, None, stale=True)
+        with self.m.wake_read_scope(self.inst), \
+                mock.patch.object(self.m, 'watch_groups', return_value=unknown) as scans:
+            self.assertTrue(all(self.m.wake_actionable_pending(self.inst, p) for p in pending))
+        self.assertEqual(scans.call_count, 1)
+        self.assertTrue(all(p.exists() for p in pending))
+
     def test_known_noop_is_disabled_without_transport_or_acknowledgement(self):
         for command in ('/usr/bin/true', '/bin/true', 'true', ':'):
             with self.subTest(command=command):

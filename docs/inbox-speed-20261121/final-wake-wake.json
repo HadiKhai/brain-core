@@ -1,0 +1,95 @@
+{
+  "label": "final-wake",
+  "command": "wake",
+  "seconds": 19.655258417000002,
+  "inventory": 12,
+  "output_bytes": 0,
+  "result": [
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false,
+    false
+  ],
+  "rows": [
+    {
+      "file": "reminders.py",
+      "line": 48,
+      "function": "lifecycle_json_parse",
+      "primitive_calls": 8,
+      "calls": 8,
+      "own_seconds": 1.3791e-05,
+      "cumulative_seconds": 0.035972374
+    },
+    {
+      "file": "decoder.py",
+      "line": 343,
+      "function": "raw_decode",
+      "primitive_calls": 69141,
+      "calls": 69141,
+      "own_seconds": 0.21159654200000003,
+      "cumulative_seconds": 0.21161595800000002
+    },
+    {
+      "file": "hosts.py",
+      "line": 626,
+      "function": "wake_actionable_pending",
+      "primitive_calls": 12,
+      "calls": 12,
+      "own_seconds": 0.0023118820000000003,
+      "cumulative_seconds": 19.623811043
+    },
+    {
+      "file": "status.py",
+      "line": 943,
+      "function": "due_items",
+      "primitive_calls": 13,
+      "calls": 13,
+      "own_seconds": 0.006342087000000001,
+      "cumulative_seconds": 9.912532543000001
+    },
+    {
+      "file": "status.py",
+      "line": 960,
+      "function": "_due_items",
+      "primitive_calls": 13,
+      "calls": 13,
+      "own_seconds": 0.00010666400000000001,
+      "cumulative_seconds": 9.513795043
+    },
+    {
+      "file": "status.py",
+      "line": 819,
+      "function": "<genexpr>",
+      "primitive_calls": 132911,
+      "calls": 132911,
+      "own_seconds": 0.027114531,
+      "cumulative_seconds": 0.027114531
+    },
+    {
+      "file": "watch.py",
+      "line": 847,
+      "function": "watch_groups",
+      "primitive_calls": 1,
+      "calls": 1,
+      "own_seconds": 0.00013021000000000002,
+      "cumulative_seconds": 18.128396958
+    },
+    {
+      "file": "reminders.py",
+      "line": 48,
+      "function": "lifecycle_read",
+      "primitive_calls": 76,
+      "calls": 76,
+      "own_seconds": 0.0007366320000000001,
+      "cumulative_seconds": 0.280094538
+    }
+  ]
+}

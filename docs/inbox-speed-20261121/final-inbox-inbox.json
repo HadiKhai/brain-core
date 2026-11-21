@@ -1,0 +1,46 @@
+{
+  "label": "final-inbox",
+  "command": "inbox",
+  "seconds": 2.219873917,
+  "inventory": null,
+  "output_bytes": 1110296,
+  "result": null,
+  "rows": [
+    {
+      "file": "reminders.py",
+      "line": 48,
+      "function": "lifecycle_json_parse",
+      "primitive_calls": 6,
+      "calls": 6,
+      "own_seconds": 7.459e-06,
+      "cumulative_seconds": 0.033571791000000004
+    },
+    {
+      "file": "decoder.py",
+      "line": 343,
+      "function": "raw_decode",
+      "primitive_calls": 21,
+      "calls": 21,
+      "own_seconds": 0.042860457000000005,
+      "cumulative_seconds": 0.042873582
+    },
+    {
+      "file": "status.py",
+      "line": 1900,
+      "function": "shortest_ids",
+      "primitive_calls": 1,
+      "calls": 1,
+      "own_seconds": 0.001278082,
+      "cumulative_seconds": 0.001769666
+    },
+    {
+      "file": "reminders.py",
+      "line": 48,
+      "function": "lifecycle_read",
+      "primitive_calls": 1700,
+      "calls": 1700,
+      "own_seconds": 0.008196832000000001,
+      "cumulative_seconds": 0.24619827100000002
+    }
+  ]
+}

@@ -31,6 +31,7 @@ _m_status = _m_common.LazyModule(__package__, 'status')
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_upgrade = _m_common.LazyModule(__package__, 'upgrade')
 _m_wake_turns = _m_common.LazyModule(__package__, 'wake_turns')
+_m_wake_reads = _m_common.LazyModule(__package__, 'wake_reads')
 
 
 # Wake state belongs to the instance, never to an external home. Only opaque reason
@@ -619,11 +620,7 @@ def wake_actionable_pending(inst, path, terminal_quarantine=False):
     protected = ('inbox', 'rotate')
     if any(i['kind'] not in protected and i['id'].startswith(prefix) for i in allowed):
         try:
-            groups = _m_watch.watch_groups(_m_instance.Instance(inst.root))
-            # A stale scan (sources moved, or a newer scan reconciled) proves nothing closed.
-            current = ({i['id'] for group in groups.values() for i in group['items']}
-                       if not getattr(groups, 'stale', False)
-                       and all(g.get('episodes_known', True) for g in groups.values()) else None)
+            current = _m_wake_reads.wake_current_due_ids(inst)
         except (Exception, SystemExit):
             current = None  # unknown state cannot discard a real need
         if current is not None:
@@ -928,6 +925,11 @@ def wake_retry(inst, n):
 
 
 def wake_drain(inst, n, once=False):
+    with _m_wake_reads.wake_read_scope(inst):
+        return _wake_drain(inst, n, once=once)
+
+
+def _wake_drain(inst, n, once=False):
     """A short-lived stdlib worker delivers only while the rate window is open.
 
     A closed window ends the drain at once; after the delivery lock is released,

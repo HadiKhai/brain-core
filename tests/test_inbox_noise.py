@@ -749,8 +749,51 @@ class InboxNoise(Scenario):
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with mock.patch.object(notices, 'archive_plan', wraps=plan) as planned:
                 self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
-                self.assertEqual(planned.call_count, 3)
+                self.assertEqual(planned.call_count, 1)
         self.assertIn(line, source.read_text())
+
+    def test_optional_lifecycle_maintenance_skips_busy_archive_and_keeps_blocking_writes(self):
+        import fcntl
+        notices = self.m._owners['terminal_notice']
+        reminders = self.m._owners['lifecycle_read']
+        n = self.inst.node('root')
+        source = self.root / 'inbox.md'
+        line = '- 2020-01-01T00:00Z from worker: FYI: available\n'
+        source.write_text(line)
+        with reminders.lifecycle_store(self.inst) as data:
+            data['usage']['fixture'] = {'value': 'before'}
+        state = self.root / '.brain/wake/lifecycle.json'
+        before = state.read_bytes()
+        lock_path = self.root / '.brain/wake/lifecycle.lock'
+        flock, modes = fcntl.flock, []
+        def observed(lock, mode):
+            fd = lock if isinstance(lock, int) else lock.fileno()
+            if reminders._m_history.history_fd_path(fd) == str(lock_path):
+                modes.append(mode)
+            return flock(lock, mode)
+        with lock_path.open('a+') as held:
+            flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(fcntl, 'flock', side_effect=observed), \
+                    mock.patch.object(notices, 'publish_archive') as publish, \
+                    mock.patch.object(notices, 'archive_plan', wraps=notices.archive_plan) as plan:
+                with reminders.lifecycle_store(self.inst, optional=True) as data:
+                    self.assertIsNone(data)
+                self.assertEqual(notices.autoarchive(self.inst, [n]), 0)
+                publish.assert_not_called()
+                self.assertEqual(plan.call_count, 1)
+                self.assertEqual(modes, [fcntl.LOCK_EX | fcntl.LOCK_NB] * 2)
+            self.assertEqual(state.read_bytes(), before)
+            self.assertEqual(source.read_text(), line)
+            self.assertFalse((self.root / 'inbox-archive.md').exists())
+        with mock.patch.object(fcntl, 'flock', side_effect=observed):
+            with reminders.lifecycle_store(self.inst) as data:
+                data['usage']['fixture']['value'] = 'ordinary'
+            self.assertEqual(modes[-1], fcntl.LOCK_EX)
+            with reminders.lifecycle_store(self.inst, optional=True) as data:
+                self.assertIsNotNone(data)
+                data['usage']['fixture']['value'] = 'maintenance'
+            self.assertEqual(modes[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertEqual(reminders.lifecycle_read(self.inst)['usage']['fixture']['value'], 'maintenance')
 
     def test_autoarchive_does_not_wait_for_busy_source_append_lock(self):
         import fcntl
@@ -811,14 +854,14 @@ class InboxNoise(Scenario):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.m.inbox_append(n['dir'], old, nonblocking=True)
         @contextlib.contextmanager
-        def lifecycle(inst, readonly=False, blocking=True):
+        def lifecycle(inst, readonly=False, blocking=True, *, optional=False):
             if held:
                 self.assertTrue(blocking)
                 self.assertIsNone(instance._LOCK['fh'])
                 checked.append(True)
                 fcntl.flock(held[0], fcntl.LOCK_UN)
                 held.pop().close()
-            with store(inst, readonly=readonly, blocking=blocking) as data:
+            with store(inst, readonly=readonly, blocking=blocking, optional=optional) as data:
                 yield data
         try:
             with mock.patch.object(notices, 'publish_archive', side_effect=busy_after_publish), \

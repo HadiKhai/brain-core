@@ -1898,9 +1898,21 @@ def cmd_proposals(a):
 
 
 def shortest_ids(ids):
-    return {key: next((key[:size] for size in range(6, len(key) + 1)
-                       if all(other == key or not other.startswith(key[:size]) for other in ids)), key)
-            for key in ids}
+    # In lexical order, only the two neighbours can share the longest prefix.
+    # Identical IDs are the same item, as in the original pairwise check.
+    ordered = sorted(set(ids))
+    out = {}
+    for index, key in enumerate(ordered):
+        size = 6
+        for other in ordered[max(0, index - 1):index] + ordered[index + 1:index + 2]:
+            common = 0
+            for left, right in zip(key, other):
+                if left != right:
+                    break
+                common += 1
+            size = max(size, common + 1)
+        out[key] = key[:size]
+    return out
 
 
 def cmd_stale(a):

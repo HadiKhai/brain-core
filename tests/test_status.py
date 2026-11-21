@@ -2445,6 +2445,16 @@ with instance.brain_lock(Path(sys.argv[2])):
 
 
 class AutonomyInbox(Scenario):
+    def test_shortest_ids_matches_pairwise_reference_for_collisions_and_duplicates(self):
+        m = core_loader.SourceFileLoader('prefix_fixture', str(CORE / 'bin/brain')).load_module()
+        ids = ['abcdef' + format(i, '018x') for i in range(300)]
+        ids += ['abcdef', '', 'abcdef000000000000000000', 'fedcba1234567890']
+        expected = {key: next((key[:size] for size in range(6, len(key) + 1)
+                              if all(other == key or not other.startswith(key[:size]) for other in ids)), key)
+                    for key in ids}
+        self.assertEqual(m.shortest_ids(ids), expected)
+        self.assertEqual(m.shortest_ids([]), {})
+
     def items(self, r, *args):
         return json.loads(self.b(r, 'inbox', '--json', *args))
 
