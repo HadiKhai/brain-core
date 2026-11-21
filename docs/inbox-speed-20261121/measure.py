@@ -48,6 +48,10 @@ def main():
     sys.addaudithook(audit)
     os.chdir(root)
     from brain import command_reads, hosts, instance, nodes, status, tasks, watch
+    try:
+        from brain import wake_reads
+    except ImportError:
+        wake_reads = None  # the baseline has no drain-local reuse helper
     inst = instance.Instance(root)
     target = inst.node('root')
     profile = cProfile.Profile()
@@ -78,7 +82,8 @@ def main():
             def action():
                 # The public drain calls this same read side for each queue file.
                 # A single scope is supplied by the implementation after the fix.
-                scope = getattr(hosts, 'wake_read_scope', contextlib.nullcontext)
+                scope = (wake_reads.wake_read_scope if wake_reads is not None else
+                         getattr(hosts, 'wake_read_scope', contextlib.nullcontext))
                 with scope(inst):
                     return [hosts.wake_actionable_pending(inst, p) for p in pending]
         started = time.perf_counter()
