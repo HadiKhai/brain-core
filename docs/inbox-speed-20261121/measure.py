@@ -96,6 +96,12 @@ def main():
         if function in selected or (filename.endswith('status.py') and function == '<genexpr>' and calls > 10000):
             rows.append(dict(file=Path(filename).name, line=line, function=function,
                              primitive_calls=primitive, calls=calls, own_seconds=own, cumulative_seconds=total))
+        if function == 'loads' and filename.endswith('/json/__init__.py'):
+            for (caller_file, caller_line, caller), values in stats.stats[(filename, line, function)][4].items():
+                if caller == 'lifecycle_read' and caller_file.endswith('/reminders.py'):
+                    rows.append(dict(file='reminders.py', line=caller_line, function='lifecycle_json_parse',
+                                     primitive_calls=values[0], calls=values[1], own_seconds=values[2],
+                                     cumulative_seconds=values[3]))
     report = dict(label=args.label, command=args.command, seconds=elapsed, inventory=inventory,
                   output_bytes=len(output.getvalue()), result=result if args.command == 'wake' else None,
                   rows=rows)

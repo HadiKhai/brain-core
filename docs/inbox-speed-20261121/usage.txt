@@ -1,0 +1,7 @@
+Account-wide subscription usage · default stop line 85% · this machine's share: unavailable
+claude-rami: signed out · last read 2026-11-18 18:02 +02:00 / 75 h 6 m ago
+runtime  label          stop line  5h used / reset  weekly used / reset            reading / age                  source  brains
+codex    codex          85%        none             91% / 2026-11-26 01:21 +02:00  2026-11-21 21:05 +02:00 / 4 m  lookup  every brain
+claude   claude (main)  85%        none             81% / 2026-11-24 19:00 +02:00  2026-11-21 21:05 +02:00 / 4 m  lookup  every brain
+  claude-rami: Signed out; last read 2026-11-18 18:02 +02:00. No stored Claude OAuth token
+  claude (main) · weekly model Fable: 27% / 2026-11-24 19:00 +02:00

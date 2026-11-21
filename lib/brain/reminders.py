@@ -34,6 +34,17 @@ def lifecycle_empty():
             'reminders': {}, 'reminders_retired': {}, 'usage': {}}
 
 
+def lifecycle_equal(left, right):
+    """JSON value equality, including scalar types, independent of object aliases."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(lifecycle_equal(left[k], right[k]) for k in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(lifecycle_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def lifecycle_read(inst, *, shared=False):
     """Parse each file generation once; ordinary callers get detached snapshots.
 
@@ -103,7 +114,7 @@ def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None, usag
             raise ValueError('unsafe lifecycle lock')
         fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         data = lifecycle_read(inst)
-        # This is only an in-memory change detector; no pickle is read or kept.
+        # This is only an in-memory change detector; no pickle is read from or written to disk.
         # Most observations do not change receipts, so avoid encoding their
         # entire JSON ledger twice on every job/node observation.
         # Restart observations can mutate only their own usage record. Comparing
@@ -112,7 +123,11 @@ def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None, usag
             return data if usage_key is None else data['usage'].get(usage_key)
         before = pickle.dumps(observed(), protocol=4)
         yield data
-        if before != pickle.dumps(observed(), protocol=4):
+        # Reconciliation can replace equal keys/dicts with different aliases or
+        # insertion order. Pickle detects real changes cheaply, but a mismatch
+        # must compare values before publishing an otherwise identical ledger.
+        if (before != pickle.dumps(observed(), protocol=4) and
+                not lifecycle_equal(pickle.loads(before), observed())):
             after = json.dumps(data, sort_keys=True)
             if len(after.encode()) > LIFECYCLE_BYTES:
                 raise ValueError('lifecycle state exceeds its bound; retain history for review')

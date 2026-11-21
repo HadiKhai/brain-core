@@ -1,0 +1,13 @@
+F
+======================================================================
+FAIL: test_inbox_run_parses_unchanged_lifecycle_once (test_due_lifecycle.DueLifecycle)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/hadikhai/WebstormProjects/brain-core-work/worktrees/inbox-speed-20261121/tests/test_due_lifecycle.py", line 60, in test_inbox_run_parses_unchanged_lifecycle_once
+    self.assertEqual(len(parses), 1)
+AssertionError: 2 != 1
+
+----------------------------------------------------------------------
+Ran 1 test in 2.950s
+
+FAILED (failures=1)

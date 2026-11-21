@@ -57,7 +57,7 @@ class DueLifecycle(Scenario):
                 contextlib.redirect_stdout(io.StringIO()):
             parser.loads.side_effect = counted
             self.m.cmd_inbox(argparse.Namespace(id='root', new=False, json=True, weekly=False, add=None))
-        self.assertEqual(len(parses), 1)
+        self.assertEqual(len(parses), 1, [(len(text), sorted(loads(text))) for text in parses])
 
     def test_lifecycle_cache_detaches_readers_and_invalidates_after_write(self):
         with self.m.lifecycle_store(self.inst) as data:
@@ -103,6 +103,24 @@ class DueLifecycle(Scenario):
                 data['usage']['fixture']['value'] = 'after'
                 raise RuntimeError('fixture failure')
         self.assertEqual(self.m.lifecycle_read(self.inst)['usage']['fixture']['value'], 'before')
+
+    def test_lifecycle_noop_reconciliation_keeps_generation_but_scalar_type_changes_publish(self):
+        lines = ['- fixture question %s' % i for i in range(30)]
+        with self.m.lifecycle_store(self.inst) as data:
+            self.m.reconcile_requests(self.inst, self.n, lines, data)
+            data['usage']['fixture'] = {'value': True}
+        path = self.root / '.brain/wake/lifecycle.json'
+        generation = path.stat().st_mtime_ns
+        with mock.patch.object(self.m, 'machine_publish', wraps=self.m.machine_publish) as publish:
+            for _ in range(3):
+                with self.m.lifecycle_store(self.inst) as data:
+                    self.m.reconcile_requests(self.inst, self.n, lines, data)
+            publish.assert_not_called()
+            self.assertEqual(path.stat().st_mtime_ns, generation)
+            with self.m.lifecycle_store(self.inst) as data:
+                data['usage']['fixture']['value'] = 1
+            publish.assert_called_once()
+        self.assertIs(type(self.m.lifecycle_read(self.inst)['usage']['fixture']['value']), int)
 
     def test_cheap_due_observes_inbox_resolution_and_reappearance(self):
         inbox = self.root / 'inbox.md'

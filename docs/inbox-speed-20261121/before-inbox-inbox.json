@@ -41,6 +41,15 @@
       "calls": 1700,
       "own_seconds": 0.027201226000000002,
       "cumulative_seconds": 9.929087313
+    },
+    {
+      "file": "reminders.py",
+      "line": 36,
+      "function": "lifecycle_json_parse",
+      "primitive_calls": 1700,
+      "calls": 1700,
+      "own_seconds": 0.0027279490000000003,
+      "cumulative_seconds": 9.090538149
     }
   ]
 }
