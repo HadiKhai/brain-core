@@ -1,0 +1,771 @@
+{
+  "protocol_sha256": "42a0a32a438bb4a30a30f03aabfa308ce63246fc024416f337a821df5c66e67d",
+  "model": "claude-haiku-5-5",
+  "retry_of_sha256": "e9e600f4fb0877bcdc02702a7209b0d6a4dd2d543bfd8b5c52b64a36af6b6a11",
+  "recorded_at": "2026-11-21T18:59:48.367262+00:00",
+  "seconds": 19.215785125,
+  "runs": [
+    {
+      "case": "79-merge",
+      "repeat": 1,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "yes",
+          "speaker": "operator",
+          "speaker_evidence": "yes",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "yes and go ahead lets nerge everything"
+        },
+        {
+          "kind": "one_off",
+          "quote": "go ahead lets nerge everything",
+          "speaker": "operator",
+          "speaker_evidence": "go ahead lets nerge everything",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "yes and go ahead lets nerge everything"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Merge both approved PRs and verify the result.",
+            "support": [],
+            "operator_quote": "yes and go ahead lets nerge everything"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2859,
+            "output_tokens": 455,
+            "output_tokens_details": {
+              "thinking_tokens": 287
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 3.31871825
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2373,
+            "output_tokens": 348,
+            "output_tokens_details": {
+              "thinking_tokens": 208
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 2.842318042
+        }
+      ],
+      "passed": true,
+      "seconds": 6.161515416
+    },
+    {
+      "case": "79-merge",
+      "repeat": 2,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "yes",
+          "speaker": "operator",
+          "speaker_evidence": "yes and go ahead lets nerge everything",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "yes and go ahead lets nerge everything"
+        },
+        {
+          "kind": "one_off",
+          "quote": "go ahead lets nerge everything",
+          "speaker": "operator",
+          "speaker_evidence": "yes and go ahead lets nerge everything",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "yes and go ahead lets nerge everything"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Merge both approved PRs and verify the result.",
+            "support": [],
+            "operator_quote": "yes and go ahead lets nerge everything"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 332,
+            "cache_read_input_tokens": 2859,
+            "output_tokens": 522,
+            "output_tokens_details": {
+              "thinking_tokens": 339
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 332,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 3.57337675
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2373,
+            "output_tokens": 350,
+            "output_tokens_details": {
+              "thinking_tokens": 210
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 2.7895040829999997
+        }
+      ],
+      "passed": true,
+      "seconds": 6.363542541999999
+    },
+    {
+      "case": "79-merge",
+      "repeat": 3,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "yes",
+          "speaker": "operator",
+          "speaker_evidence": "yes",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "yes and go ahead lets nerge everything"
+        },
+        {
+          "kind": "one_off",
+          "quote": "go ahead lets nerge everything",
+          "speaker": "operator",
+          "speaker_evidence": "go ahead lets nerge everything",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "yes and go ahead lets nerge everything"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Merge both approved PRs and verify the result.",
+            "support": [],
+            "operator_quote": "yes and go ahead lets nerge everything"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2859,
+            "output_tokens": 489,
+            "output_tokens_details": {
+              "thinking_tokens": 329
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 3.489547125
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 679,
+            "cache_read_input_tokens": 5079,
+            "output_tokens": 526,
+            "output_tokens_details": {
+              "thinking_tokens": 311
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 679,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 5.335293458000001
+        }
+      ],
+      "passed": true,
+      "seconds": 8.825304458
+    },
+    {
+      "case": "79-setup",
+      "repeat": 2,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "kets set up from 0",
+          "speaker": "operator",
+          "speaker_evidence": "kets set up from 0",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "kets set up from 0, i dont understand why we need to fund it, woiuld a user from mobile need that?"
+        },
+        {
+          "kind": "question",
+          "quote": "i dont understand why we need to fund it",
+          "speaker": "operator",
+          "speaker_evidence": "i dont understand why we need to fund it",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "kets set up from 0, i dont understand why we need to fund it, woiuld a user from mobile need that?"
+        },
+        {
+          "kind": "question",
+          "quote": "woiuld a user from mobile need that?",
+          "speaker": "operator",
+          "speaker_evidence": "woiuld a user from mobile need that?",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "kets set up from 0, i dont understand why we need to fund it, woiuld a user from mobile need that?"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Set up a fresh test identity from zero.",
+            "support": [],
+            "operator_quote": "kets set up from 0"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2887,
+            "output_tokens": 726,
+            "output_tokens_details": {
+              "thinking_tokens": 498
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 4.326322375
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 708,
+            "cache_read_input_tokens": 5126,
+            "output_tokens": 463,
+            "output_tokens_details": {
+              "thinking_tokens": 265
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 708,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 4.700370542000001
+        }
+      ],
+      "passed": true,
+      "seconds": 9.027392084
+    },
+    {
+      "case": "79-setup",
+      "repeat": 3,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "kets set up from 0",
+          "speaker": "operator",
+          "speaker_evidence": "kets set up from 0",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "kets set up from 0, i dont understand why we need to fund it, woiuld a user from mobile need that?"
+        },
+        {
+          "kind": "question",
+          "quote": "i dont understand why we need to fund it",
+          "speaker": "operator",
+          "speaker_evidence": "i dont understand why we need to fund it",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "kets set up from 0, i dont understand why we need to fund it, woiuld a user from mobile need that?"
+        },
+        {
+          "kind": "question",
+          "quote": "woiuld a user from mobile need that?",
+          "speaker": "operator",
+          "speaker_evidence": "woiuld a user from mobile need that?",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "kets set up from 0, i dont understand why we need to fund it, woiuld a user from mobile need that?"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Set up a fresh test identity from zero.",
+            "support": [],
+            "operator_quote": "kets set up from 0"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 334,
+            "cache_read_input_tokens": 2887,
+            "output_tokens": 876,
+            "output_tokens_details": {
+              "thinking_tokens": 648
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 334,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 4.983231709000001
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 819,
+            "cache_read_input_tokens": 5125,
+            "output_tokens": 575,
+            "output_tokens_details": {
+              "thinking_tokens": 377
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 819,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 5.761597917
+        }
+      ],
+      "passed": true,
+      "seconds": 10.745360583000002
+    },
+    {
+      "case": "79-study",
+      "repeat": 1,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "i neeed you to fully understand how honor and attestation work",
+          "speaker": "operator",
+          "speaker_evidence": "i neeed you to fully understand how honor and attestation work",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "i neeed you to fully understand how honor and attestation work we can't go into it not understanding everything"
+        },
+        {
+          "kind": "other",
+          "quote": "we can't go into it not understanding everything",
+          "speaker": "operator",
+          "speaker_evidence": "we can't go into it not understanding everything",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "i neeed you to fully understand how honor and attestation work we can't go into it not understanding everything"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Study honor and attestation and record the findings.",
+            "support": [],
+            "operator_quote": "i neeed you to fully understand how honor and attestation work"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 332,
+            "cache_read_input_tokens": 2849,
+            "output_tokens": 544,
+            "output_tokens_details": {
+              "thinking_tokens": 344
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 332,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 3.541025167
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2375,
+            "output_tokens": 485,
+            "output_tokens_details": {
+              "thinking_tokens": 342
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 3.8316935
+        }
+      ],
+      "passed": true,
+      "seconds": 7.373478457999999
+    },
+    {
+      "case": "79-study",
+      "repeat": 2,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "i neeed you to fully understand how honor and attestation work",
+          "speaker": "operator",
+          "speaker_evidence": "i neeed you to fully understand how honor and attestation work",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "i neeed you to fully understand how honor and attestation work we can't go into it not understanding everything"
+        },
+        {
+          "kind": "other",
+          "quote": "we can't go into it not understanding everything",
+          "speaker": "operator",
+          "speaker_evidence": "we can't go into it not understanding everything",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "i neeed you to fully understand how honor and attestation work we can't go into it not understanding everything"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Study honor and attestation and record the findings.",
+            "support": [],
+            "operator_quote": "i neeed you to fully understand how honor and attestation work"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 332,
+            "cache_read_input_tokens": 2849,
+            "output_tokens": 744,
+            "output_tokens_details": {
+              "thinking_tokens": 544
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 332,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 4.50651725
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2375,
+            "output_tokens": 485,
+            "output_tokens_details": {
+              "thinking_tokens": 342
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 3.6787810420000007
+        }
+      ],
+      "passed": true,
+      "seconds": 8.185705041
+    },
+    {
+      "case": "79-study",
+      "repeat": 3,
+      "items": [
+        {
+          "kind": "one_off",
+          "quote": "i neeed you to fully understand how honor and attestation work",
+          "speaker": "operator",
+          "speaker_evidence": "i neeed you to fully understand how honor and attestation work",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "i neeed you to fully understand how honor and attestation work we can't go into it not understanding everything"
+        },
+        {
+          "kind": "other",
+          "quote": "we can't go into it not understanding everything",
+          "speaker": "operator",
+          "speaker_evidence": "we can't go into it not understanding everything",
+          "id": "0",
+          "at": "2026-11-21T20:38:00+02:00",
+          "source_text": "i neeed you to fully understand how honor and attestation work we can't go into it not understanding everything"
+        }
+      ],
+      "answer": {
+        "items": [
+          {
+            "kind": "work_order",
+            "quote": "Study honor and attestation and record the findings.",
+            "support": [],
+            "operator_quote": "i neeed you to fully understand how honor and attestation work"
+          }
+        ],
+        "prior_cancelled": false
+      },
+      "usage": [
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 2,
+            "cache_creation_input_tokens": 333,
+            "cache_read_input_tokens": 2849,
+            "output_tokens": 618,
+            "output_tokens_details": {
+              "thinking_tokens": 418
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 333,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 4.143044124999999
+        },
+        {
+          "transport": "claude_cli",
+          "model": "claude-haiku-5-5",
+          "usage": {
+            "input_tokens": 6,
+            "cache_creation_input_tokens": 901,
+            "cache_read_input_tokens": 5084,
+            "output_tokens": 667,
+            "output_tokens_details": {
+              "thinking_tokens": 447
+            },
+            "server_tool_use": {
+              "web_search_requests": 0,
+              "web_fetch_requests": 0
+            },
+            "service_tier": "standard",
+            "cache_creation": {
+              "ephemeral_1h_input_tokens": 901,
+              "ephemeral_5m_input_tokens": 0
+            },
+            "inference_geo": "global",
+            "iterations": [],
+            "speed": "standard",
+            "fallback_credit": null
+          },
+          "latency_seconds": 6.023367624999999
+        }
+      ],
+      "passed": true,
+      "seconds": 10.166819209
+    }
+  ]
+}

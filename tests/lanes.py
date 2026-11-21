@@ -68,7 +68,7 @@ LANE_TESTS.update({
     'jobs': ('test_jobs.py', 'test_train_ejection.py', 'test_handback_queue.py', 'test_queue_priority.py', 'test_forecasts.py', 'test_gate_forecasts.py', 'test_throughput.py', 'test_job_adoption.py', 'test_host_lifecycle.py', 'test_worker_lifecycle.py'),
     'knowledge': ('test_knowledge.py', 'test_semantic_recall.py', 'test_recurrence.py', 'test_learning_loop.py', 'test_feedback.py', 'test_teach.py'),
     'status': ('test_status.py', 'test_inbox_noise.py', 'test_status_projection.py', 'test_coordinator_startup.py'),
-    'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py', 'test_instruction_capture_repair.py'),
+    'reminders': ('test_due_lifecycle.py', 'test_conversation_answers.py', 'test_instruction_capture_repair.py', 'test_order_judge.py'),
     'worktrees': ('test_worktrees.py', 'test_t3_worktrees.py', 'test_prune_orphans.py', 'test_prune_states.py', 'test_prune_thread_targets.py', 'test_job_env.py', 'test_lock_sites.py', 'test_atomic_durability.py'),
     'rehearse': ('test_rehearse.py', 'test_rehearse_frozen.py', 'test_rehearse_external.py'),
     'ui': ('test_ui.py', 'test_ui_idle.py', 'test_ui_review.py', 'test_ui_status.py', 'test_digest.py', 'test_ui_fill.py'),
@@ -97,7 +97,7 @@ SUPPORT = ('scenario.py', 'core_loader.py', 'conftest.py', 'tempdirs.py', 'lanes
 # Only these modules have separately audited dispatch/call selection. The gate
 # requires all remaining core modules in every lane, even after import refactors.
 SELECTIVE_MODULES = ('train',)
-EXTRA_INPUTS = {'check': ('tools/check_rule_index.py',), 'watch': ('tools/watcher_approval.py', 'tools/check_watcher_approval.py'), 'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py'), 'reminders': ('tests/fixtures/claude-cli/**',)}
+EXTRA_INPUTS = {'check': ('tools/check_rule_index.py',), 'watch': ('tools/watcher_approval.py', 'tools/check_watcher_approval.py'), 'diagnostics': ('tools/write_queue_*.py',), 'rehearse': ('tests/nightly_rehearse.py',), 'ui': ('tests/live.py', 'tests/ui-checks.js', 'tests/ui-fitness.js', 'tests/dashboard_acceptance.py'), 'reminders': ('tests/fixtures/claude-cli/**', 'docs/order-judge-replays-20261121.json', 'docs/order-judge-timeout-retry-20261121.json')}
 # Mirror the development node's existing documentation/image skip policy.
 OUTSIDE_INPUTS = ('README.md', 'docs/**', 'ui/**/*.png', 'LICENSE')
 SHARED_INPUTS = (
