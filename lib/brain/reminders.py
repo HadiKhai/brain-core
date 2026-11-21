@@ -21,6 +21,7 @@ _m_spend = _m_common.LazyModule(__package__, 'spend')
 
 
 _USAGE_NOT_OBSERVED = object()
+_LIFECYCLE_CACHE = {}
 
 LIFECYCLE_LIMIT = 2000
 LIFECYCLE_BYTES = 2 * 1024 * 1024
@@ -33,19 +34,36 @@ def lifecycle_empty():
             'reminders': {}, 'reminders_retired': {}, 'usage': {}}
 
 
-def lifecycle_read(inst):
+def lifecycle_read(inst, *, shared=False):
+    """Parse each file generation once; ordinary callers get detached snapshots.
+
+    Only non-mutating episode lookups use the shared decoded value. The pickle
+    is an in-memory copy of JSON we just validated, never input read from disk.
+    Keep one generation so long-lived readers cannot retain an unbounded ledger.
+    """
     path = inst.root / '.brain/wake/lifecycle.json'
     if path.parent.resolve() != inst.root.resolve() / '.brain/wake':
         raise ValueError('unsafe lifecycle state directory')
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except FileNotFoundError:
+        _LIFECYCLE_CACHE.clear()
         return lifecycle_empty()
     with os.fdopen(fd) as stream:
-        if (os.fstat(stream.fileno()).st_nlink != 1 or
+        info = os.fstat(stream.fileno())
+        if (info.st_nlink != 1 or
                 _m_history.history_fd_path(stream.fileno()) != str(path.absolute())):
             raise ValueError('unsafe lifecycle state')
+        key = (str(path.absolute()), info.st_mtime_ns, info.st_size,
+               info.st_dev, info.st_ino, info.st_ctime_ns)
+        cached = _LIFECYCLE_CACHE.get(key)
+        if cached is not None:
+            return cached[0] if shared else pickle.loads(cached[1])
         text = stream.read(LIFECYCLE_BYTES + 1)
+        after = os.fstat(stream.fileno())
+        if (after.st_mtime_ns, after.st_size, after.st_ctime_ns, after.st_nlink) != (
+                info.st_mtime_ns, info.st_size, info.st_ctime_ns, 1):
+            raise ValueError('lifecycle state changed during read')
     if len(text) > LIFECYCLE_BYTES:
         raise ValueError('lifecycle state exceeds its bound')
     data = json.loads(text)
@@ -54,7 +72,10 @@ def lifecycle_read(inst):
             not isinstance(data.get('answers'), list) or not isinstance(data.get('inbox_retired', {}), dict) or
             not isinstance(data.get('reminders_retired', {}), dict)):
         raise ValueError('invalid lifecycle state; retain it for repair')
-    return data
+    cached = (data, pickle.dumps(data, protocol=4))
+    _LIFECYCLE_CACHE.clear()
+    _LIFECYCLE_CACHE[key] = cached
+    return data if shared else pickle.loads(cached[1])
 
 
 @contextlib.contextmanager
@@ -95,6 +116,7 @@ def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None, usag
             after = json.dumps(data, sort_keys=True)
             if len(after.encode()) > LIFECYCLE_BYTES:
                 raise ValueError('lifecycle state exceeds its bound; retain history for review')
+            _LIFECYCLE_CACHE.clear()
             _m_machine.machine_publish(inst, folder / 'lifecycle.json', after + '\n')
 
 
@@ -302,7 +324,7 @@ def request_lines(inst, n, lines, readonly=False, lifecycle_data=None):
 def request_episode_id(inst, n, line, lifecycle_data=None):
     key = inbox_source_id(n, line)
     try:
-        data = lifecycle_data if lifecycle_data is not None else lifecycle_read(inst)
+        data = lifecycle_data if lifecycle_data is not None else lifecycle_read(inst, shared=True)
         record = data['inbox'].get(n['id'], {}).get(key, {})
         return record['id'] if record else next_request_id(n, key, data)
     except (OSError, ValueError, AttributeError):

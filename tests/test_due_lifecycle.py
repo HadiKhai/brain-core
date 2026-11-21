@@ -35,6 +35,75 @@ class DueLifecycle(Scenario):
         return {**dict.fromkeys(self.m.JOB_COLS, ''), 'Job': 'job/palette',
                 'Started': '2026-01-15T08:00Z', **fields}
 
+    def test_inbox_run_parses_unchanged_lifecycle_once(self):
+        inbox = self.root / 'inbox.md'
+        inbox.write_text(''.join('- 2026-01-15 11:00 +00:00 from fixture: Question %s\n' % i
+                                 for i in range(80)))
+        self.m.inbox_lines(self.n)
+        with self.m.lifecycle_store(self.inst) as data:
+            data['usage']['parse-count-fixture'] = {}
+        module = sys.modules[self.m.lifecycle_read.__module__]
+        # Start with a cold process cache, as a new CLI command would.
+        if hasattr(module, '_LIFECYCLE_CACHE'):
+            module._LIFECYCLE_CACHE.clear()
+        loads = json.loads
+        parses = []
+        def counted(text, *args, **kwargs):
+            if isinstance(text, str) and 'parse-count-fixture' in text:
+                parses.append(text)
+            return loads(text, *args, **kwargs)
+        with mock.patch.object(module, 'json', wraps=json) as parser, \
+                mock.patch.object(self.m, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()):
+            parser.loads.side_effect = counted
+            self.m.cmd_inbox(argparse.Namespace(id='root', new=False, json=True, weekly=False, add=None))
+        self.assertEqual(len(parses), 1)
+
+    def test_lifecycle_cache_detaches_readers_and_invalidates_after_write(self):
+        with self.m.lifecycle_store(self.inst) as data:
+            data['usage']['fixture'] = {'value': 'before'}
+        before = self.m.lifecycle_read(self.inst)
+        before['usage']['fixture']['value'] = 'uncommitted'
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage']['fixture']['value'], 'before')
+        with self.m.lifecycle_store(self.inst, readonly=True) as data:
+            data['usage']['fixture']['value'] = 'readonly'
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage']['fixture']['value'], 'before')
+        with self.m.lifecycle_store(self.inst) as data:
+            data['usage']['fixture']['value'] = 'after'
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage']['fixture']['value'], 'after')
+        self.assertEqual(before['usage']['fixture']['value'], 'uncommitted')
+
+    def test_lifecycle_cache_detects_external_replacement_and_rechecks_link_safety(self):
+        with self.m.lifecycle_store(self.inst) as data:
+            data['usage']['fixture'] = {'value': 'before'}
+        path = self.root / '.brain/wake/lifecycle.json'
+        self.m.lifecycle_read(self.inst)
+        stamp = path.stat()
+        replacement = path.with_suffix('.replacement')
+        replacement.write_bytes(path.read_bytes().replace(b'before', b'after!'))
+        os.utime(replacement, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        replacement.replace(path)
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage']['fixture']['value'], 'after!')
+        linked = path.with_suffix('.hardlink')
+        os.link(path, linked)
+        with self.assertRaisesRegex(ValueError, 'unsafe lifecycle state'):
+            self.m.lifecycle_read(self.inst)
+        linked.unlink()
+        path.unlink()
+        self.assertEqual(self.m.lifecycle_read(self.inst), self.m.lifecycle_empty())
+        path.symlink_to(replacement)
+        with self.assertRaises(OSError):
+            self.m.lifecycle_read(self.inst)
+
+    def test_lifecycle_cache_does_not_publish_a_failed_transaction(self):
+        with self.m.lifecycle_store(self.inst) as data:
+            data['usage']['fixture'] = {'value': 'before'}
+        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+            with self.m.lifecycle_store(self.inst) as data:
+                data['usage']['fixture']['value'] = 'after'
+                raise RuntimeError('fixture failure')
+        self.assertEqual(self.m.lifecycle_read(self.inst)['usage']['fixture']['value'], 'before')
+
     def test_cheap_due_observes_inbox_resolution_and_reappearance(self):
         inbox = self.root / 'inbox.md'
         def notices():
