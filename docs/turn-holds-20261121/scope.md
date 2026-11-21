@@ -17,3 +17,17 @@ Proof scripts and captured output belong in this folder. No edits to `status.py`
 `inbox_notices.py`, `command_reads.py`, or refresh computation internals. Batch 2,
 semantic classification changes, release, installation and merge remain outside
 this builder's authority. No delegates are launched by this implementation child.
+
+## Coordinator addition: exclusive ownership
+
+This builder owns `report_gates.py`, `instruction_capture.py`, `hosts.py:70-106`,
+`wake_turns.py` delivery and exit codes, `events.py`'s `RefreshBlocked` and
+`defer_status_refresh`, and the stop/wake command paths in `cli.py`. Other builders
+stay out of these paths. No `status.py` change is needed or made by this builder.
+`status_refresh.py` remains limited to the stop deferral/retry contract above.
+The PR is first in the merge order. Target: 2026-11-21 22:15 +02:00.
+
+Before/after evidence compares main `6c716ded` and this branch's implementation on
+one restored scratch instance, with separate quiet and contended refresh cases,
+reported N and medians. The current implementation was already locally green and
+pushed before this addition; only ownership/evidence artifacts are added here.

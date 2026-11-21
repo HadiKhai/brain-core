@@ -65,3 +65,46 @@ that gate is still open; it does not claim installation or an independent review
 Independent review, cloud Full suite completion, coordinator release/installation,
 and a check on the originally failing instance remain required. No merge, tag,
 upgrade, batch 2 work, or private-instance edit was performed.
+
+## Coordinator addition: ownership and paired stop measurement
+
+Exclusive ownership is recorded in `scope.md:21`: `report_gates.py`,
+`instruction_capture.py`, `hosts.py:70-106`, wake delivery/exit paths in
+`wake_turns.py`, `RefreshBlocked` / `defer_status_refresh` in `events.py`, and
+stop/wake command paths in `cli.py`. Other builders stay out of these paths.
+**`status.py`: no change needed or made.** This PR is first in the merge order;
+the requested target is 2026-11-21 22:15 +02:00.
+
+Real launcher measurement: baseline main `6c716deda35684ee186fcc6c7e75b54c5b7b087a` versus
+implementation `994a13a1642d7d159e235dc61674da83b390b095`. This evidence addition
+changes only docs; the measured `lib/`, `bin/` and `adapters/` Git tree identities
+are retained in the JSON and unchanged at the handback head.
+
+| Refresh condition | Version | N | Median stop wall seconds | Blocked stops |
+| --- | --- | ---: | ---: | ---: |
+| quiet | before | 5 | 0.394510 | 0/5 |
+| quiet | after | 5 | 0.394527 | 0/5 |
+| contended | before | 5 | 0.384009 | 5/5 |
+| contended | after | 5 | 0.421520 | 0/5 |
+
+All samples use one scratch instance identity at one absolute path. Exact tracked
+and private state plus mtimes are restored before each sample. Both versions run
+as the bound coordinator on the same synthetic automated turn, without AI calls.
+Before/after order alternates per repeat. Concurrency is one because each pair
+must exclusively own and restore that same instance.
+
+Quiet means the real `status root --refresh` succeeded before invoking the hook.
+Contended means the harness held the instance lock through the real refresh
+refusal and hook invocation; `BRAIN_LOCK_WAIT=0` makes that refusal immediate.
+The timer measures only the hook process, including Python startup, not the
+preceding refresh or the later work a baseline block would require. The baseline
+hook returned quickly but blocked every contended stop. The new hook allowed
+every contended stop and retained a timestamped stale receipt. Both versions
+allowed every quiet stop. This does not measure the large failing instance or
+claim a refresh-compute speedup.
+
+Reproduce with `python3 -B docs/turn-holds-20261121/measure-stop.py --samples 5
+--output <result.json>`. Raw timings, refresh outcomes, hook decisions and stale
+receipts: [stop-before-after.json](stop-before-after.json). Console output:
+[stop-before-after.txt](stop-before-after.txt). Scratch cleanup completed; paid
+provider spend remains $0. No new runtime code or `status.py` edits were needed.
