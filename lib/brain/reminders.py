@@ -90,8 +90,14 @@ def lifecycle_read(inst, *, shared=False):
 
 
 @contextlib.contextmanager
-def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None, usage_only=False):
-    """Serialize scans with updates; publishing pins the actual private directory."""
+def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None, usage_only=False,
+                    optional=False):
+    """Serialize updates; optional maintenance yields None instead of waiting.
+
+    Callers using optional=True must skip their maintenance when None is yielded.
+    Ordinary writes retain blocking ownership, including durable retirement after
+    an archive has already published its source changes.
+    """
     from . import ui_readmodel
     view = ui_readmodel.projection(inst.root)
     if usage_only and not readonly:
@@ -112,7 +118,13 @@ def lifecycle_store(inst, readonly=False, blocking=True, *, usage_key=None, usag
         if (os.fstat(lock.fileno()).st_nlink != 1 or
                 _m_history.history_fd_path(lock.fileno()) != str(path.absolute())):
             raise ValueError('unsafe lifecycle lock')
-        fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if optional or not blocking else 0))
+        except BlockingIOError:
+            if not optional:
+                raise
+            yield None
+            return
         data = lifecycle_read(inst)
         # This is only an in-memory change detector; no pickle is read from or written to disk.
         # Most observations do not change receipts, so avoid encoding their

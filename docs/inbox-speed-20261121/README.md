@@ -2,7 +2,7 @@
 
 Builder D, based on `6c716deda35684ee186fcc6c7e75b54c5b7b087a` (7.5.57).
 Production changes are reminders.py, shortest_ids in status.py, wake_reads.py,
-and minimal hosts.py wiring. No storage
+minimal hosts.py wiring, and the optional archive call in inbox_notices.py. No storage
 format, command_reads.py, status_refresh.py, transport delivery or exit-code changes.
 
 The private Brain was cloned with macOS `cp -cR` before profiling. Each command
@@ -151,5 +151,31 @@ shortest_ids; inbox_items is also authorized but unchanged. All due_* and
 machine_* functions remain byte-for-byte unchanged. Wake read reuse lives in
 new module lib/brain/wake_reads.py, functions wake_read_scope and
 wake_current_due_ids. Batch 1 retains wake_turns.py and its delivery/exit code.
-The existing archive-maintenance seam already passes blocking=False to
-lifecycle_store and catches BlockingIOError; this move does not change it.
+The archive-maintenance seam now uses lifecycle_store(optional=True), as
+described below; it returns immediately on contention instead of replanning.
+
+Optional-maintenance API (coordinator follow-up):
+
+- reminders.py:93 adds keyword-only optional=False. With optional=True, ownership
+  is attempted using LOCK_EX | LOCK_NB. Contention yields None; no lifecycle read
+  or write is attempted, and callers skip their optional operation.
+- inbox_notices.py:230 opts the read-triggered archive into this API and returns
+  zero immediately on None. This is the only additional production file touched.
+- Ordinary writes retain LOCK_EX blocking behavior. Durable retirement after an
+  archive has already published source changes remains an ordinary write.
+- tests/test_inbox_noise.py:755 adds one regression test using a real held flock.
+  It checks immediate skip, unchanged ledger/source, no archive publication, and
+  the lock modes for ordinary and optional uncontended writes. Two existing
+  archive tests were adapted to the one-attempt skip and new keyword.
+- The new test and both adapted tests passed: 3 tests in 5.551 s, one process;
+  see optional-maintenance-tests.txt. No wider local suite was run on battery.
+  The earlier performance profiles precede this small API addition.
+
+Caller contract for the refresh builder:
+
+```python
+with reminders.lifecycle_store(inst, optional=True) as data:
+    if data is None:
+        return 0  # skip optional maintenance; serve the read
+    # Apply the optional maintenance using this owned snapshot.
+```
