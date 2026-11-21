@@ -1,35 +1,42 @@
 {
-  "runs": [
-    {
-      "session_finish": [
-        {
-          "collected": 135,
-          "event": "session_finish",
-          "exitstatus": 1,
-          "failed": 1,
-          "incomplete": []
-        }
-      ],
-      "summary": "1 failed, 134 passed, 33 warnings in 219.95s (0:03:39)",
-      "command": "python3 -B -m pytest -q -p no:cacheprovider -n 4 tests/test_messages.py tests/test_conversation_answers.py tests/test_order_judge.py tests/test_repo_lanes.py"
-    },
-    {
-      "session_finish": [
-        {
-          "collected": 6,
-          "event": "session_finish",
-          "exitstatus": 0,
-          "failed": 0,
-          "incomplete": []
-        }
-      ],
-      "summary": "6 passed in 0.40s",
-      "command": "python3 -B -m pytest -q -p no:cacheprovider -n 4 tests/test_order_judge.py"
-    }
-  ],
-  "unique_tests": 136,
-  "latest_outcomes": {
-    "passed": 136
+  "scope": "prepared modules only; active hook/release-lane wiring held by coordinator",
+  "current_module_tests": {
+    "command": "python3 -B -m pytest -q -p no:cacheprovider -n 4 -o \"markers=model: retained real-model protocol evidence\" tests/test_order_judge.py",
+    "summary": "7 passed in 0.33s"
   },
-  "lanes": "lane coverage: {\"lanes\": 39, \"outside_job_lanes\": {\"live.py\": \"real runtime/model calls; separate live verification\", \"nightly_rehearse.py\": \"strict real-core rehearsal diagnostic; explicit optional/nightly verification\", \"ui-checks.js\": \"browser assertions; separate browser verification\", \"ui-fitness.js\": \"browser layout assertions; separate browser verification\"}, \"unit_files\": 120}"
+  "historical_before_file_ownership_change": {
+    "runs": [
+      {
+        "session_finish": [
+          {
+            "collected": 135,
+            "event": "session_finish",
+            "exitstatus": 1,
+            "failed": 1,
+            "incomplete": []
+          }
+        ],
+        "summary": "1 failed, 134 passed, 33 warnings in 219.95s (0:03:39)",
+        "command": "python3 -B -m pytest -q -p no:cacheprovider -n 4 tests/test_messages.py tests/test_conversation_answers.py tests/test_order_judge.py tests/test_repo_lanes.py"
+      },
+      {
+        "session_finish": [
+          {
+            "collected": 6,
+            "event": "session_finish",
+            "exitstatus": 0,
+            "failed": 0,
+            "incomplete": []
+          }
+        ],
+        "summary": "6 passed in 0.40s",
+        "command": "python3 -B -m pytest -q -p no:cacheprovider -n 4 tests/test_order_judge.py"
+      }
+    ],
+    "unique_tests": 136,
+    "latest_outcomes": {
+      "passed": 136
+    },
+    "lanes": "lane coverage: {\"lanes\": 39, \"outside_job_lanes\": {\"live.py\": \"real runtime/model calls; separate live verification\", \"nightly_rehearse.py\": \"strict real-core rehearsal diagnostic; explicit optional/nightly verification\", \"ui-checks.js\": \"browser assertions; separate browser verification\", \"ui-fitness.js\": \"browser layout assertions; separate browser verification\"}, \"unit_files\": 120}"
+  }
 }

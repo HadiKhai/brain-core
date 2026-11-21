@@ -1,87 +1,69 @@
-# Sentence order judge and capture input selection (2026-11-21)
+# Sentence judge modules awaiting batch-1 wiring (2026-11-21)
 
-Items 7 and 8 of the speed-and-gates order. Implementation in the assigned
-`fix/judge-orders-20261121` worktree, based on main `6c716ded` (release-7.5.57).
-The builder runtime is Codex gpt-6.1-sol, high. No child agents were started.
+PR #8 contains new files only relative to main `6c716ded`. The coordinator's
+File ownership instruction is applied: existing report/capture hooks, tests,
+pytest configuration and lane ownership are restored byte-for-byte to that base.
+No runtime hook imports these new modules yet. Wait for the coordinator's batch-1
+merge notification, then add one small wiring commit on the new main.
 
-## Changes and ownership
+## New files and responsibilities
 
-- `lib/brain/report_gates.py`: sentence/clause order protocol, definitions and
-  examples; sentence schema descriptions; exact-span parsing shared with capture;
-  protocol-qualified order cache; report prompt excludes non-page assertions.
-- `lib/brain/instruction_capture.py`: structural input selection only: agent
-  frames and headers, harness resume notices, previous-assistant quote lines,
-  bounded prior-assistant context across the stop cursor, original-span checks.
-- `tests/test_order_judge.py`: repeated real-model runner and canonical release
-  tests for retained verdicts, source hashes and structural selection.
-- `tests/test_messages.py`, `tests/test_conversation_answers.py`: update input
-  expectations and preserve operator-remainder and parent-sender safeguards.
-- `tests/lanes.py`, `pytest.ini`: reminders lane ownership and model marker.
-- `docs/order-judge-replays-20261121.json`: final real-model outputs and usage.
-- `docs/order-judge-attempt1-20261121.json`: first attempt, including its misses.
-- `docs/order-judge-timeout-retry-20261121.json`: one bounded retry per transport timeout, bound to the original artifact SHA.
-- `docs/order-judge-test-results-20261121.json`: affected-test counts and durations.
-- `docs/order-judge-20261121.md`: this evidence and rule audit.
+- `lib/brain/order_judge_prompt.py`: sentence/clause order instructions, report
+  prompt definitions, schemas, exact-span judge parsing and protocol-qualified
+  order cache. Shared gate comparisons are read-only imports from the existing
+  report module; the active report implementation is unchanged.
+- `lib/brain/capture_selection.py`: capture instruction/schema constants,
+  structural agent-frame/header and harness-resume filtering, exact previous-
+  assistant quote selection, bounded prior context across the stop cursor,
+  classification entry point and original-substring validation. Structural
+  provenance helpers and exception identities are read-only imports from capture.
+- `tests/test_order_judge.py`: explicitly imports the two prepared modules for
+  standalone proof. It is not assigned to `tests/lanes.py` until wiring is allowed.
+- `docs/order-judge-attempt1-20261121.json`: original prompt's full real outputs.
+- `docs/order-judge-replays-20261121.json`: final prompt's full real outputs.
+- `docs/order-judge-timeout-retry-20261121.json`: one bounded transport retry,
+  bound to the original artifact SHA; no semantic miss may be retried away.
+- `docs/order-judge-test-results-20261121.json`: current module-only test result
+  and explicitly historical earlier integration results.
+- `docs/order-judge-20261121.md`: this handback and ownership/wiring plan.
 
-The stop-refresh policy and capture retry/gap failure paths remain owned by
-`fix/turn-holds-20261121`. That branch was absent and main was still `6c716ded`
-at the remote check on 2026-11-21 20:52 +02:00. Check again before the push.
+## Wiring after the coordinator's notification
 
-## Model/release verification contract
+1. Rebase onto the new main, retaining batch 1's warn policy, stop-refresh and
+   capture retry/gap behavior.
+2. Delegate report order classification/cache and claim judging to the new order
+   module; delegate capture input selection/snapshot/classification to the new
+   capture module. Keep active hook entry points and existing error identities.
+3. Assign the replay file and receipt inputs in `tests/lanes.py`, register the
+   model marker, and adapt existing input-selection expectations in the two
+   affected test files. These existing-file edits are intentionally not present.
+4. Run affected tests and the exact-head cloud full suite. The current modules'
+   proof establishes the prepared protocol, not active hook or release integration.
 
-The real runner invokes the production `judge_orders` and `judge_claims` with
-`claude-haiku-5-5`, then the production gate comparison. Operator message bytes
-come from the failure rows. Preceding replies and outgoing work are reconstructed
-context except where the failure file quotes them; row 61 also has a derived
-quote-plus-order variant. No semantic regex, keyword classifier, replacement
-model or postprocessing judge is used. Four independent replay lanes run at once;
-each lane performs its classification and claim comparison in dependency order.
-
-`python3 -B tests/test_order_judge.py --live --repeats 3` refreshes real proof.
-The `model`-marked canonical test belongs to the reminders release lane. Cloud
-and release checks replay retained real outputs, validate every quoted span,
-recompute every outcome, and require the current prompt/schema/parser/case hash.
-They make no fresh paid calls on cloud CI. This distinction is intentional:
-retained provider proof is not described as a fresh cloud-model run.
-
-The first attempt ran 32 cases three times: 31 cases passed all repetitions;
-row 54's question-shaped test request failed all three. Both models sometimes
-read it as information-seeking. The second protocol defines action requests
-phrased as questions and allocation of already ordered testing explicitly.
-The original failed outputs remain in the attempt-1 artifact. Rows 74/80 add
-report-claim checks for thread status, operator instructions and quoted drafts.
-
-## Boundaries and machine
-
-Only the assigned worktree was edited. No main checkout, installed core,
-`~/Brain`, deployment, merge, tag or upgrade was written or performed. Git calls
-use `git -C`. Before local tests, `brain machine` reported heavy work allowed,
-22.1 GB free memory and load 0.41/0.33/0.25. Local pytest uses `-n 4` and
-`-p no:cacheprovider`; no local full suite runs. `brain usage` reported Codex 90%
-(reading 20:45 +02:00), below this order's 93% clean-push stop line.
-
-Release/installation and the inaccessible other laptop are coordinator/operator
-work after this PR. This handback establishes source, affected-test and local
-real-model proof; it does not claim the installed failure is fixed.
+The extracted prompt, schema, selected inputs and parser source fingerprint is
+identical to the retained real-model run. The standalone gate verifies that
+identity and all 105 completed judgments. No additional provider calls were
+made for this move. Four lanes were used for real calls and local affected tests.
+The unchanged deployment model remains `claude-haiku-5-5`.
 
 ## Rules that apply: audit
 
-| Rule | Pass/fail | Evidence and boundary |
+| Rule | Pass/fail | Evidence / limit |
 | --- | --- | --- |
-| Core non-opinionated, declared policy inert by default | PASS | `lib/brain/report_gates.py:98`: general sentence definitions, no named operator policy or default enforcement change. |
-| R14/R19 provider and model | PASS | This report:5; builder is Codex gpt-6.1-sol high, no delegates. Final usage reading recorded below. |
-| R76 no lexical meaning classifier | PASS | `lib/brain/report_gates.py:157`, `lib/brain/instruction_capture.py:363`: model verdicts; code validates structural spans only. |
-| R80 system instructions, user data | PASS | `lib/brain/report_gates.py:164`, `lib/brain/report_gates.py:500`; unchanged `lib/brain/ai_json.py:89`. |
-| R94 instruction failures first | PASS | `lib/brain/report_gates.py:110`: clarified action-shaped questions after row 54 failed; first raw run retained. |
-| R86 one small PR, one review, cloud CI | FAIL (review pending) | One PR covers items 7/8; independent review is coordinator-owned, not performed by this implementation sub-agent. Cloud run linked in handback. |
-| R73 independent work in parallel | PASS | `tests/test_order_judge.py:152`: four model lanes; local affected pytest files use `-n 4`. |
-| R96 list touched files before parallel builders | PASS | User brief names the two shared files and owners; this report lists every touched file. No builder was launched here. |
-| R87 no unauthorized cuts/parking | PASS | All cases remain in the release gate, including the timeout rows. No case removed, skip added, timeout raised, or bad result rewritten. |
-| R10 clock-time forecasts | PASS | No duration-based delivery forecast made; absolute deadline 2026-11-21 23:45 +02:00. Push time in handback. |
-| R79 read the source/diff | PASS | Both production diffs were read before reporting changes; final diff checked with `git diff --check`. |
-| R79 released, installed and checked where it failed | FAIL (outside builder authority) | No merge/tag/upgrade authorized. Other laptop is unreachable. This remains implementation proof, not a shipped fix. |
-| Budget: stop at Codex 93% on a clean push | PASS | Observed Codex weekly 91% (20:55 reading), with 2026-11-26 01:21 +02:00 reset. No further builders/reviewers started. |
-| R32 machine before local heavy work; full suite in cloud | PASS | Machine allowed before both affected runs; at most four local workers; canonical cloud full-suite branch is `ci/fix/judge-orders-20261121`. |
+| Core non-opinionated, declared policy inert by default | PASS | New order module has general sentence definitions; no operator-specific policy or default enforcement change. |
+| R14/R19 provider and model | PASS | Codex gpt-6.1-sol high builder; no child agent; Codex 91% at the 21:05 +02:00 reading. |
+| R76 no word lists/regex for meaning | PASS | `lib/brain/order_judge_prompt.py:151`, `lib/brain/capture_selection.py:274`: model verdicts and structural enum/span/protocol checks only. |
+| R80 system instructions, user data | PASS | `lib/brain/order_judge_prompt.py:151`, `lib/brain/order_judge_prompt.py:177`; unchanged `lib/brain/ai_json.py:89`. |
+| R94 instruction failures first | PASS | Order definitions/examples address row 54's question-shaped action request; failed first outputs retained. |
+| R86 one PR/review/cloud CI | FAIL (awaiting wiring/review) | Same PR, independent review pending; lane registration/full integration are explicitly held by the coordinator. |
+| R73 independent work in parallel | PASS | Replay pool has four workers; standalone tests run with `-n 4`. |
+| R96 file ownership and file list | PASS | PR net diff contains added files only; active report/capture and all existing configuration/test files equal base. |
+| R87 no unauthorized cuts/parking | PASS | All cases and behaviors retained in new modules; wiring waits by explicit coordinator instruction. |
+| R10 clock-time forecasts | PASS | New-file push remains before 2026-11-21 23:45 +02:00. No builder-hour estimate. |
+| R79 source read | PASS | Extracted source and restored-file diff inspected before handback. |
+| R79 released/installed/checked where it failed | FAIL (not authorized yet) | No active hook wiring, merge, tag, upgrade or other-laptop proof. |
+| Budget stop at 93% | PASS | Codex 91%; no extra paid model rerun for extraction. |
+| R32 local machine and cloud full suite | FAIL (full gate awaits wiring) | Machine allowed at 21:05; only seven standalone tests, at most four workers. Full integration gate waits for authorized wiring. |
 
 ## Final repeated real-run proof
 
@@ -90,7 +72,7 @@ successful judgments each). The initial final-prompt run had eight transport
 timeouts; each was retried exactly once under R88. All eight retries passed.
 The initial 105 attempts plus eight retries give 105/113 successful invocations
 at the case-pair level. Every original timeout remains in its immutable artifact;
-the retry artifact cites its SHA. The gate rejects a semantic miss, a second
+the retry artifact cites its SHA. The prepared module test rejects a semantic miss, a second
 transport retry, a changed protocol or a retry against another source artifact.
 
 The second full attempt took 219.446 seconds. Retry duration and exact usage are
@@ -153,8 +135,21 @@ All retained transports are subscription `claude_cli`, not API-key calls. The
 client does not expose an invoice dollar total; no guessed dollar amount is
 reported. Codex weekly usage was 91% at the 20:55 +02:00 reading, below 93%.
 
-## Affected local checks
 
-`python3 -B -m pytest -q -p no:cacheprovider -n 4 tests/test_messages.py tests/test_conversation_answers.py tests/test_order_judge.py tests/test_repo_lanes.py`: 134 passed, one retained-model failure while transport retry evidence was incomplete, 219.95 seconds.
+## Current module checks and ownership proof
 
-After the one bounded transport retry and retry-guard test, `python3 -B -m pytest -q -p no:cacheprovider -n 4 tests/test_order_judge.py`: 6 passed in 0.40s. The combined latest results cover 136 unique affected tests, all passing, with no local full suite. `tests/check_lanes.py` passed: 39 lanes, 120 canonical unit files. Raw model evidence and the machine-readable test summary remain under docs.
+`python3 -B -m pytest -q -p no:cacheprovider -n 4 -o "markers=model: retained real-model protocol evidence" tests/test_order_judge.py`: 7 passed in 0.33s.
+
+Existing files restored to base (current bytes equal `git show 6c716ded:<path>`):
+
+| Existing file | SHA-256 | Equal to base |
+| --- | --- | --- |
+| `lib/brain/report_gates.py` | `af0506405e759538a905465edcb5dd8af91381e37a6b70078d9ca336a15e39bd` | PASS |
+| `lib/brain/instruction_capture.py` | `62a716772eca66e8b60ec269115c6c4a7cda837e92912aa07fe43d3a4a31e3c7` | PASS |
+| `tests/test_messages.py` | `e60247ce19c2751bd8c49bba684dd63648ef3e459363e62341ff087b8c898255` | PASS |
+| `tests/test_conversation_answers.py` | `923ba5553e962ee3eda77cff1361690bcdce25660b96998c4b4d19a920f730fc` | PASS |
+| `tests/lanes.py` | `d2faf77751c9dd6aa01c92c1f1187c5a7721ab36bba797260142438742429bdd` | PASS |
+| `pytest.ini` | `bde23fc9f13d14ea8a74ee137bfec4c037c907186f71251fb543bf9605252383` | PASS |
+
+The prior 136-test integrated result is historical for commit `93766d50`; it is
+not claimed for the current unwired head. No local full suite was run.

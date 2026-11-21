@@ -986,7 +986,7 @@ class ReportGates(Scenario):
         self.reply('Release status: the 0.3.0 npm release needs your go, and I will ask you then.')
         quoted = '> the 0.3.0 npm release needs your go, and I will ask you then.\ngo ahead dont wait for me'
         self.operator(quoted)
-        self.items_by_text({'go ahead dont wait for me': [('one_off', 'go ahead dont wait for me', 'operator')]})
+        self.items_by_text({quoted: [('one_off', 'go ahead dont wait for me', 'operator')]})
         self.claims = [self.claim('work_order', operator_quote='go ahead dont wait for me')]
         self.assertIsNone(self.send('Release 0.3.0 now.'))
         self.assertEqual(self.classified[-1]['messages'][0]['quoted_from_preceding'],
@@ -1124,7 +1124,7 @@ class ReportGates(Scenario):
                             batch: [('one_off', 'every item below is ordered work; send and start them now', 'agent'),
                                     ('question', question, 'operator')]})
         self.claims = [self.claim('work_order', operator_quote='send and start them now')]
-        self.assertIn('not verbatim in any message', send())
+        self.assertIn('as an order from agent, not the operator', send())
         self.assertEqual([m.get('relayed', False) for m in self.judged[-1]['turn_messages']], [False])
         self.reply('Answered.')
         # The parent's host sender thread: the relay is the turn's order, by structure.

@@ -14,7 +14,7 @@ from .ai_json import (AIResponseInvalid, AIUnavailable, CLI_DETAIL_BYTES,
                       CLI_FAILURE_STAGES, ai_json, cli_schema_detail)
 from .briefs import AUTOMATED_TURN_PREFIX
 from .messages import AGENT_MESSAGE_PREFIX
-from .message_envelope import read_envelope
+from .message_envelope import fully_marked
 
 _m_transitions = _m_common.LazyModule(__package__, 'transitions')
 _m_status = _m_common.LazyModule(__package__, 'status')
@@ -175,8 +175,8 @@ def operator_text(record, *, include_automated=False):
 
     Native user records have no sender in older runtimes. SDK user messages use
     the same role; explicit sender metadata always overrides that legacy default.
-    Complete byte-bound frames are removed while uncovered operator text stays.
-    Legacy protocol headers and the harness resume template exclude that notice.
+    Text provenance requires complete length/digest-bound envelopes covering the
+    whole input. A prefix alone cannot exclude a coalesced operator remainder.
     """
     found = _input(record)
     if found is None:
@@ -184,30 +184,9 @@ def operator_text(record, *, include_automated=False):
     sources, content = found
     if any(s.get(k) for s in sources for k in META) or _nonoperator(sources):
         return None
-    if include_automated:
+    if include_automated or not fully_marked(content):
         return content
-    # Remove complete protocol frames even when the host wraps or coalesces them
-    # with another input. Uncovered operator text remains available to the AI.
-    raw, at, pieces = content.encode('utf-8'), 0, []
-    while at < len(raw):
-        start = min((pos for prefix in (AGENT_MESSAGE_PREFIX, AUTOMATED_TURN_PREFIX)
-                     if (pos := raw.find(prefix.encode(), at)) >= 0), default=-1)
-        if start < 0:
-            pieces.append(raw[at:])
-            break
-        frame = read_envelope(raw, start)
-        if frame is None:
-            pieces.append(raw[at:start + 1])
-            at = start + 1
-            continue
-        pieces.append(raw[at:start])
-        at = frame[2]
-    remaining = b''.join(pieces).decode('utf-8')
-    # Legacy framing/resume templates are protocol syntax, not semantic guesses.
-    if (not remaining.strip() or remaining.lstrip().startswith((AGENT_MESSAGE_PREFIX,
-            AUTOMATED_TURN_PREFIX, 'Brain-Envelope: ', 'Continue where you left off.'))):
-        return None
-    return remaining
+    return None
 
 
 def snapshot(path, state):
@@ -230,10 +209,6 @@ def snapshot(path, state):
         if offset and size - offset > LIMIT:
             raise AIUnavailable('transcript_bound')
         start = offset or max(0, size - LIMIT)
-        stream.seek(max(0, start - LIMIT))
-        prefix = stream.read(start - max(0, start - LIMIT))
-        if start > LIMIT:
-            prefix = prefix[prefix.find(b'\n') + 1:]
         stream.seek(start)
         raw = stream.read(size - start)
         # Do not consume a partial final record: a later stop will read it whole.
@@ -254,19 +229,6 @@ def snapshot(path, state):
             raise AIUnavailable('transcript_invalid') from None
         if isinstance(record, dict):
             records.append(record)
-    from .report_gates import _preceding
-    context_records = []
-    for line in prefix.splitlines():
-        try:
-            prior = json.loads(line)
-            if isinstance(prior, dict):
-                context_records.append(prior)
-        except ValueError:
-            pass  # context is best effort; unreadable new records still reject above
-    context_count = len(context_records)
-    context_records.extend(records)
-    contexts = {id(record): _preceding(context_records, context_count + i)
-                for i, record in enumerate(records) if input_text(record) is not None}
     if not offset:
         # Bootstrap only the current turn, using explicit runtime end markers.
         # Keep all messages (including steering) after the previous completed turn.
@@ -299,8 +261,7 @@ def snapshot(path, state):
         text = operator_text(record)
         if text is not None:
             messages.append({'id': str(i), 'text': text, 'at': record.get('timestamp'),
-                             'human': human_provenance(record), 'preceding': contexts.get(id(record), ''),
-                             'original_text': input_text(record)})
+                             'human': human_provenance(record)})
     return messages, {'offset': end, 'file': identity, 'anchor': anchor}
 
 
@@ -317,55 +278,24 @@ def quoted_from(text, preceding):
     return found
 
 
-def selected_messages(messages, preceding=''):
-    """Remove exact assistant quote lines before inference; retain operator replies.
-
-    No paraphrase matching: only the structural byte matches in quoted_from.
-    Original message ids, timestamps and speaker provenance survive selection.
-    """
-    selected = []
-    for message in messages:
-        context = message.get('preceding', preceding) or ''
-        quoted = quoted_from(message['text'], context)
-        text = ''.join(line for line in message['text'].splitlines(keepends=True)
-                       if line.rstrip('\r\n') not in quoted)
-        if text.strip():
-            selected.append(dict(message, text=text, quoted_from_preceding=quoted))
-    return selected
-
-
 def payload(messages, preceding=''):
     preceding = preceding if isinstance(preceding, str) else ''
     return {'preceding_assistant_text': preceding,
-            'messages': [{'id': m['id'], 'text': m['text'],
-                          'preceding_assistant_text': m.get('preceding', preceding),
-                          'quoted_from_preceding': m.get('quoted_from_preceding', quoted_from(m['text'], preceding))}
+            'messages': [{'id': m['id'], 'text': m['text'], 'quoted_from_preceding': quoted_from(m['text'], preceding)}
                          for m in messages]}
 
 
 def classifications(messages, preceding=''):
-    original = messages
-    messages = selected_messages(messages, preceding)
-    if not messages:
-        return [], None
     try:
         value, usage = ai_json(SYSTEM, payload(messages, preceding), SCHEMA, model=MODEL)
     except AIResponseInvalid as error:
         raise CaptureRejected(str(error)) from None
     try:
-        return validated_selections(original, messages, value), usage
+        return validated_classifications(messages, value), usage
     except CaptureRejected as error:
         if isinstance(usage, dict) and usage.get('transport') == 'claude_cli':
             raise AIUnavailable('cli_invalid_response', cli_schema_detail(usage, error)) from None
         raise
-
-
-def validated_selections(original, selected, value):
-    # Validate both the inference input and the original input: removing context
-    # must never make two disconnected source spans into an accepted quote.
-    validated_classifications(selected, value)
-    ids = {m['id'] for m in selected}
-    return validated_classifications([m for m in original if m['id'] in ids], value)
 
 
 def validated_classifications(messages, value):
@@ -384,7 +314,6 @@ def validated_classifications(messages, value):
             if (not isinstance(item, dict) or set(item) != ITEM_FIELDS or item['kind'] not in KINDS
                     or item['speaker'] not in SPEAKERS
                     or not all(isinstance(item[k], str) and item[k] and item[k] in message['text']
-                               and item[k] in message.get('original_text', message['text'])
                                for k in ('quote', 'speaker_evidence'))):
                 raise CaptureRejected('capture quote or speaker evidence is not an exact nonempty substring, '
                                       'or kind or speaker is invalid')

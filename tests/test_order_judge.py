@@ -1,8 +1,9 @@
-"""Real-model order replays, retained exact-protocol proof in the release lane.
+"""Real-model order replays, retained exact-protocol proof awaiting release wiring.
 
 Refresh explicitly: python3 -B tests/test_order_judge.py --live --repeats 3
-The normal cloud/release lane revalidates every retained verdict and rejects
-stale protocol/source hashes. It does not pretend to make fresh provider calls.
+Run this file directly until batch 1 merges. The later wiring commit assigns
+it to the release lane. It rejects stale protocol/source hashes and makes no
+fresh provider calls unless explicitly invoked with --live.
 """
 import concurrent.futures
 import datetime
@@ -20,7 +21,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'lib'))
-from brain import instruction_capture as capture, report_gates as gates
+from brain import capture_selection as capture, order_judge_prompt as gates
 
 RECEIPT = ROOT / 'docs/order-judge-replays-20261121.json'
 RETRIES = ROOT / 'docs/order-judge-timeout-retry-20261121.json'
@@ -227,6 +228,19 @@ class OrderJudge(unittest.TestCase):
                     items = capture.validated_classifications(facts_for(c)['operator'], raw)
                     answer = gates.validated_claims(c['outgoing'], row['answer'])
                     self.assertTrue(assess(c, items, answer))
+
+    def test_prepared_order_cache_calls_new_judge_without_wiring_hooks(self):
+        from types import SimpleNamespace
+        receipt = json.loads(RECEIPT.read_text())
+        row = next(r for r in completed_rows(receipt) if r['case'] == '52')
+        with tempfile.TemporaryDirectory(prefix='brain-order-cache-') as folder:
+            inst = SimpleNamespace(root=Path(folder).resolve())
+            facts = facts_for(CASES[0])
+            with mock.patch.object(gates, 'judge_orders', return_value=(row['items'], None)) as judge:
+                first = gates.operator_items(inst, facts)
+                self.assertTrue(any(i['kind'] == 'one_off' for i in first))
+                self.assertEqual(gates.operator_items(inst, facts), first)
+                judge.assert_called_once()
 
     def test_retry_cannot_hide_a_semantic_miss_or_change_protocol(self):
         receipt = json.loads(RECEIPT.read_text())
