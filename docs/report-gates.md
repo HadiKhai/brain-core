@@ -21,6 +21,11 @@ It returns zero only when this request's receipt was consumed by that coordinato
 disabled, stale, failed and queued routes also return nonzero with their reason.
 Pending work remains durable. Internal `--drain` and `--retry` remain worker modes.
 
+`wake_turn_consume(..., blocking=False)` tries the receipt lock with `LOCK_NB`.
+A busy lock returns `None` without changing the receipt or pending work. Omitting
+the option keeps the existing blocking behavior. This is available to callers
+that must serve a read without waiting on wake bookkeeping.
+
 Capture retries a failed classification once. If the retry fails, it consumes the
 failed transcript batch, allows the stop and files a readable gap naming the
 message's timestamp and first words. Exact diagnostic and reconciliation records

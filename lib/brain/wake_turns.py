@@ -13,7 +13,7 @@ _m_hosts = _m_common.LazyModule(__package__, 'hosts')
 
 
 @contextlib.contextmanager
-def wake_turn_lock(directory):
+def wake_turn_lock(directory, *, blocking=True):
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / 'turn.lock'
     _m_common.safe_target(path)
@@ -21,7 +21,7 @@ def wake_turn_lock(directory):
     with os.fdopen(fd, 'a+') as stream:
         if os.fstat(stream.fileno()).st_nlink != 1:
             raise OSError('linked wake turn lock')
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         yield directory / 'turn.json'
 
 
@@ -238,8 +238,8 @@ def wake_turn_finish(inst, n, token, sent):
         pass  # successful transport is never repeated to repair bookkeeping
 
 
-def wake_turn_consume(inst, n, consume=True, shown=None, recover=False):
-    """Consume only this binding's captured reasons; later arrivals stay queued."""
+def wake_turn_consume(inst, n, consume=True, shown=None, recover=False, *, blocking=True):
+    """Consume this binding's reasons; a nonblocking busy lock retains the receipt."""
     if _m_hosts.wake_route_disabled(inst, n):
         return None
     if consume or recover:
@@ -251,7 +251,7 @@ def wake_turn_consume(inst, n, consume=True, shown=None, recover=False):
         inst, n = fresh, current
     directory = _m_hosts.wake_directory(inst, n)
     try:
-        with wake_turn_lock(directory) as path:
+        with wake_turn_lock(directory, blocking=blocking) as path:
             try:
                 value = wake_turn_read(path, wake_turn_binding(inst, n))
             except (OSError, ValueError, KeyError, TypeError):

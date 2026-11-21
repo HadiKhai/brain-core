@@ -31,3 +31,11 @@ Before/after evidence compares main `6c716ded` and this branch's implementation 
 one restored scratch instance, with separate quiet and contended refresh cases,
 reported N and medians. The current implementation was already locally green and
 pushed before this addition; only ownership/evidence artifacts are added here.
+
+## Nonblocking consumption API addition
+
+Files: `lib/brain/wake_turns.py` (optional nonblocking lock acquisition and consume
+parameter), `tests/test_wake_confirmation.py` (one real-contention regression),
+and this handback's documentation. The default remains blocking. This API is the
+refresh builder's integration point after this PR merges; no read-path callers
+or `status.py` changes are part of this addition.

@@ -8,7 +8,7 @@ The file ownership note was written before source edits: [scope.md](scope.md).
 | --- | --- | --- |
 | 1. Stops and refresh | `lib/brain/hosts.py:1796` accepts committed records without requiring fresh generated facts. `lib/brain/status_refresh.py:44` retains the first stale timestamp and marks the facts block under immediate admission. If contended, the private receipt retains the timestamp until admission is available. `lib/brain/cli.py:844` starts maintenance at a quiet read; `lib/brain/status_refresh.py:96` bounds one detached refresh with the existing measured hook allowance. Its last output stays in the instance, and failed requests remain retryable. No refresh compute internals changed. | `tests/test_turn_holds.py:46`, `:54`, `:65`, `:82`: committed stop, contended stop, killed slow worker, real next-command refresh. |
 | 2. Order warning | `lib/brain/report_gates.py:624` reads `report_gate_order_policy` from the node or instance, following the existing settings pattern. Only `warn` changes order refusals. `:629` files one quoted doubt line through the existing nonblocking root inbox path; `:753` allows the order. Without the setting, existing behavior remains. | `tests/test_messages.py:708`, `:724`: native pre-tool allow and deduplication, default refusal. |
-| 3. Wake outcome | `lib/brain/hosts.py:1122` attempts the explicit request once and prints the result. `lib/brain/wake_turns.py:50` names the destination and returns success only for this request's bound consumption receipt. Disabled, stale, queued, failed, or accepted-but-unconfirmed requests return nonzero and retain their source work. Transport acceptance alone does not establish a started coordinator run. | `tests/test_wake_confirmation.py:466`, `:473`, `:481`, `:491`: disabled, accepted without consumption, consumed, stale after rotation. |
+| 3. Wake outcome | `lib/brain/hosts.py:1122` attempts the explicit request once and prints the result. `lib/brain/wake_turns.py:50` names the destination and returns success only for this request's bound consumption receipt. Disabled, stale, queued, failed, or accepted-but-unconfirmed requests return nonzero and retain their source work. Transport acceptance alone does not establish a started coordinator run. | `tests/test_wake_confirmation.py:482`, `:489`, `:497`, `:507`: disabled, accepted without consumption, consumed, stale after rotation. |
 | 4. Capture failure | `lib/brain/instruction_capture.py:509` retries classification once and records a gap instead of blocking on timeout, invalid answer or provider failure. `:288` adds verbatim-quote guidance to the retry's system prompt. `:398` names the message time and first words in one readable inbox line, with full evidence local. `lib/brain/ai_json.py:96` accepts an optional transport bound; two stop attempts fit the existing adapter allowance. Valid standing instructions retain their existing evidence requirement. | `tests/test_conversation_answers.py:247`, `:283`, `:294`, `:515`: invented quotes remain rejected, timeout/retry/gap, provider recovery, invalid retry/gap. |
 
 Local validation: 301 passed, 0 failed in 307.58 seconds across only the five affected
@@ -76,9 +76,9 @@ stop/wake command paths in `cli.py`. Other builders stay out of these paths.
 the requested target is 2026-11-21 22:15 +02:00.
 
 Real launcher measurement: baseline main `6c716deda35684ee186fcc6c7e75b54c5b7b087a` versus
-implementation `994a13a1642d7d159e235dc61674da83b390b095`. This evidence addition
-changes only docs; the measured `lib/`, `bin/` and `adapters/` Git tree identities
-are retained in the JSON and unchanged at the handback head.
+implementation `994a13a1642d7d159e235dc61674da83b390b095`. The initial ownership/evidence addition
+changed only docs. A subsequent nonblocking consumption API changes `wake_turns.py`;
+its paired stop measurements are refreshed before the next handback.
 
 | Refresh condition | Version | N | Median stop wall seconds | Blocked stops |
 | --- | --- | ---: | ---: | ---: |
@@ -108,3 +108,21 @@ Reproduce with `python3 -B docs/turn-holds-20261121/measure-stop.py --samples 5
 receipts: [stop-before-after.json](stop-before-after.json). Console output:
 [stop-before-after.txt](stop-before-after.txt). Scratch cleanup completed; paid
 provider spend remains $0. No new runtime code or `status.py` edits were needed.
+
+## Coordinator addition: nonblocking receipt reads
+
+`lib/brain/wake_turns.py:241` adds keyword-only `blocking=True` to
+`wake_turn_consume`. It passes the option into `wake_turn_lock` (`:16`, `:254`),
+which adds `fcntl.LOCK_NB` only for `blocking=False`. A busy flock raises
+`BlockingIOError`, handled by the existing `OSError` fail-open return: no receipt
+read, mutation, consumption, or wait follows the failed acquisition. Existing
+callers retain blocking acquisition by default. No read-path caller or `status.py`
+was edited; the refresh builder can opt in after this PR merges.
+
+One new regression, `tests/test_wake_confirmation.py:99`, holds a real flock,
+checks that nonblocking consumption returns `None` with receipt/pending bytes
+unchanged and no sent marker, then releases the lock and verifies the default
+call consumes normally. The affected wake test file passed: **49 passed, 0 failed
+in 82.79 seconds**, at `-n 4`, cache provider disabled. See
+[nonblocking-wake-tests.txt](nonblocking-wake-tests.txt). The machine admitted the
+run before it started. No local full suite, new model calls, merge or upgrade.

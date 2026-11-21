@@ -1,6 +1,7 @@
 """Mocked transport/consumption regressions; never contact a host or webhook."""
 import argparse
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -94,6 +95,21 @@ class WakeConfirmation(Scenario):
                 status.cmd_due(args)
         self.assertFalse(pending.exists())
         self.assertFalse(self.m.wake_turn_outstanding(self.inst, self.n))
+
+    def test_nonblocking_consume_busy_lock_retains_receipt_then_default_consumes(self):
+        pending = self.enqueue()
+        self.drain()
+        receipt = self.directory / 'turn.json'
+        before_receipt, before_pending = receipt.read_bytes(), pending.read_bytes()
+        with (self.directory / 'turn.lock').open('a+') as owner:
+            fcntl.flock(owner, fcntl.LOCK_EX)
+            self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n, blocking=False))
+            self.assertEqual(receipt.read_bytes(), before_receipt)
+            self.assertEqual(pending.read_bytes(), before_pending)
+            self.assertFalse(pending.with_suffix('.sent').exists())
+        consumed = self.m.wake_turn_consume(self.inst, self.n)
+        self.assertTrue(consumed['consumed'])
+        self.assertFalse(pending.exists())
 
     def test_disabled_route_keeps_new_requests_and_prevents_consumption_or_fallback(self):
         pending = self.enqueue()
