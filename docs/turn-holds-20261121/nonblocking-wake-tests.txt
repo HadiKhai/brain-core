@@ -1,0 +1,5 @@
+Command: python -B -m pytest -p no:cacheprovider -n 4 tests/test_wake_confirmation.py -q
+49 passed in 82.79s; 0 failed; no incomplete tests.
+tests/test_wake_confirmation.py::WakeConfirmation::test_nonblocking_consume_busy_lock_retains_receipt_then_default_consumes: passed in 5.364182s
+Real flock contention preserved receipt/pending bytes; default consumption succeeded after release.
+Machine checked before run: heavy work allowed; 21.7 GB memory, 87 GB disk, 0/2 verifies.

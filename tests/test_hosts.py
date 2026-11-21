@@ -481,7 +481,8 @@ if projection:
                 p.kill()
                 p.communicate()
                 self.fail("request waited for a lock")
-            self.assertEqual(p.returncode, 0, out + err)
+            self.assertEqual(p.returncode, 2, out + err)
+            self.assertIn('no coordinator run started', err)
             self.assertEqual(len(list(directory.glob("*.pending"))), 1)
 
 

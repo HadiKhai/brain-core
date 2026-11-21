@@ -1,0 +1,61 @@
+{
+  "command": "python -B -m pytest -p no:cacheprovider -n 4 tests/test_turn_holds.py tests/test_wake_confirmation.py tests/test_conversation_answers.py tests/test_messages.py tests/test_hosts.py -q",
+  "passed": 301,
+  "failed": 0,
+  "wall_seconds": 307.58,
+  "files": {
+    "tests/test_conversation_answers.py": {
+      "passed": 68,
+      "failed": 0,
+      "summed_test_seconds": 183.568
+    },
+    "tests/test_hosts.py": {
+      "passed": 127,
+      "failed": 0,
+      "summed_test_seconds": 662.774
+    },
+    "tests/test_messages.py": {
+      "passed": 53,
+      "failed": 0,
+      "summed_test_seconds": 220.56
+    },
+    "tests/test_turn_holds.py": {
+      "passed": 5,
+      "failed": 0,
+      "summed_test_seconds": 11.089
+    },
+    "tests/test_wake_confirmation.py": {
+      "passed": 48,
+      "failed": 0,
+      "summed_test_seconds": 123.386
+    }
+  },
+  "strengthened_native_quiet_command": {
+    "passed": 1,
+    "failed": 0,
+    "wall_seconds": 11.22,
+    "nodeid": "tests/test_turn_holds.py::StopRefreshContract::test_real_quiet_command_retries_the_pending_refresh",
+    "note": "Replaces the earlier mocked worker-launch test; real launcher, queued refresh and cleared stale mark verified."
+  },
+  "initial_red": {
+    "passed": 297,
+    "failed": 4,
+    "wall_seconds": 267.88,
+    "causes": [
+      "Two capture tests retained old refusal/JSON expectations.",
+      "A consumed wake may retire turn.json and leave only the bound consumed receipt.",
+      "A stale route must be diagnosed even when the rate window prevents another transport attempt."
+    ]
+  },
+  "local_full_suite_run": false,
+  "provider_spend_usd": 0,
+  "nonblocking_wake_api": {
+    "command": "python -B -m pytest -p no:cacheprovider -n 4 tests/test_wake_confirmation.py -q",
+    "passed": 49,
+    "failed": 0,
+    "wall_seconds": 82.79,
+    "new_test": "tests/test_wake_confirmation.py::WakeConfirmation::test_nonblocking_consume_busy_lock_retains_receipt_then_default_consumes",
+    "new_test_seconds": 5.364182000000007,
+    "blocking_default_preserved": true
+  }
+}

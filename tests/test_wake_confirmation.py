@@ -1,6 +1,7 @@
 """Mocked transport/consumption regressions; never contact a host or webhook."""
 import argparse
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -94,6 +95,21 @@ class WakeConfirmation(Scenario):
                 status.cmd_due(args)
         self.assertFalse(pending.exists())
         self.assertFalse(self.m.wake_turn_outstanding(self.inst, self.n))
+
+    def test_nonblocking_consume_busy_lock_retains_receipt_then_default_consumes(self):
+        pending = self.enqueue()
+        self.drain()
+        receipt = self.directory / 'turn.json'
+        before_receipt, before_pending = receipt.read_bytes(), pending.read_bytes()
+        with (self.directory / 'turn.lock').open('a+') as owner:
+            fcntl.flock(owner, fcntl.LOCK_EX)
+            self.assertIsNone(self.m.wake_turn_consume(self.inst, self.n, blocking=False))
+            self.assertEqual(receipt.read_bytes(), before_receipt)
+            self.assertEqual(pending.read_bytes(), before_pending)
+            self.assertFalse(pending.with_suffix('.sent').exists())
+        consumed = self.m.wake_turn_consume(self.inst, self.n)
+        self.assertTrue(consumed['consumed'])
+        self.assertFalse(pending.exists())
 
     def test_disabled_route_keeps_new_requests_and_prevents_consumption_or_fallback(self):
         pending = self.enqueue()
@@ -451,6 +467,52 @@ class WakeConfirmation(Scenario):
             with self.assertRaises(SystemExit) as result:
                 self.m.cmd_wake(args)
         self.assertNotEqual(result.exception.code, 0)
+
+    def cli(self, reason='fixture-cli'):
+        args = argparse.Namespace(id='app', drain=False, retry=False, reason=reason)
+        with mock.patch.object(self.m, 'load', return_value=self.inst), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                self.m.cmd_wake(args)
+                code = 0
+            except SystemExit as error:
+                code = error.code
+        return code, out.getvalue() + err.getvalue()
+
+    def test_cli_disabled_route_is_nonzero_and_names_thread(self):
+        self.configure('wake_enabled=off')
+        code, output = self.cli()
+        self.assertEqual(code, 2)
+        self.assertIn('fixture-current', output)
+        self.assertIn('route disabled', output)
+
+    def test_cli_transport_acceptance_without_consumption_is_not_a_started_run(self):
+        with mock.patch.object(self.m, 'wake_send', return_value=True) as send:
+            code, output = self.cli()
+        send.assert_called_once()
+        self.assertEqual(code, 2)
+        self.assertIn('transport accepted', output)
+        self.assertIn('no coordinator run confirmed', output)
+
+    def test_cli_reports_consumed_request_and_thread(self):
+        def send(*args, **kwargs):
+            self.assertIsNotNone(self.m.wake_turn_consume(self.inst, self.n))
+            return True
+        with mock.patch.object(self.m, 'wake_send', side_effect=send):
+            code, output = self.cli()
+        self.assertEqual(code, 0, output)
+        self.assertIn('delivered request', output)
+        self.assertIn('app thread fixture-current', output)
+
+    def test_cli_stale_route_is_nonzero_with_reprovision_reason(self):
+        self.configure('wake=https://fixture.invalid/hook')
+        self.enqueue()
+        self.drain()
+        self.configure('coordinator=fixture-replacement')
+        code, output = self.cli()
+        self.assertEqual(code, 2)
+        self.assertIn('stale', output)
+        self.assertIn('fixture-replacement', output)
 
     def test_child_disabled_after_acceptance_does_not_hold_root_forever(self):
         self.b(self.r, 'set', 'root', 'coordinator=fixture-root', 'wake=fixture-root-send')

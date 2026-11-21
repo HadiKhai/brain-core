@@ -285,9 +285,11 @@ def payload(messages, preceding=''):
                          for m in messages]}
 
 
-def classifications(messages, preceding=''):
+def classifications(messages, preceding='', *, retry=False, timeout=20):
     try:
-        value, usage = ai_json(SYSTEM, payload(messages, preceding), SCHEMA, model=MODEL)
+        system = SYSTEM + ('\nThis is the one retry after a failed capture. Copy quotes and speaker evidence '
+                           'verbatim from each input; do not repair spelling or whitespace.\n' if retry else '')
+        value, usage = ai_json(system, payload(messages, preceding), SCHEMA, model=MODEL, timeout=timeout)
     except AIResponseInvalid as error:
         raise CaptureRejected(str(error)) from None
     try:
@@ -393,7 +395,7 @@ def rule_committed(inst, n, item, baseline=None):
     return False
 
 
-def capture_gap(inst, n, key, code, items=None, detail=None):
+def capture_gap(inst, n, key, code, items=None, detail=None, messages=None):
     """Visible, structured and deduplicated; no raw transcript/provider body."""
     if _m_common.outward_links(inst.root):
         raise OSError('unsafe instance links')
@@ -412,13 +414,23 @@ def capture_gap(inst, n, key, code, items=None, detail=None):
         if type(detail.get('returncode')) is int:
             record['returncode'] = detail['returncode']
     marker = '<!-- instruction-capture-gap:' + hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest() + ' -->'
-    if items:
-        # Preserve escaped instructions locally for reconciliation, while the
-        # inbox carries only an opaque reference and no private quoted text.
-        evidence = inst.root / '.brain/instruction-capture/gaps' / (key + '.json')
-        _m_common.atomic_write(evidence, json.dumps(dict(record, items=items), ensure_ascii=False) + '\n',
-                               private=True, create=True)
-    line = '- ' + inst.now() + ' from runtime: ' + json.dumps(record, sort_keys=True) + ' ' + marker + '\n'
+    evidence = inst.root / '.brain/instruction-capture/gaps' / (key + '.json')
+    _m_common.atomic_write(evidence, json.dumps(dict(record, items=items or [], messages=messages or []),
+                                               ensure_ascii=False) + '\n', private=True, create=True)
+    sources = messages or items or []
+    named = '; '.join(str(m.get('at') or 'unknown time') + ' beginning ' +
+                      json.dumps(' '.join(m.get('text', m.get('source_text', m.get('quote', ''))).split())[:80],
+                                 ensure_ascii=False) for m in sources)
+    from . import guard, nodes
+    named = nodes.import_text(named, guard.never_terms(n))
+    cause = {'timeout': 'the provider timed out', 'cli_invalid_response': 'the answer was invalid',
+             'invalid_answer': 'the answer was invalid', 'provider_or_network': 'the provider failed',
+             'transport': 'the provider could not be reached', 'missing_key': 'provider access was unavailable'}
+    explanation = cause.get(code, 'capture evidence was unavailable')
+    line = ('- ' + inst.now() + ' from runtime: Instruction capture gap: ' +
+            ('operator message ' + named if named else 'operator message could not be read') +
+            ' was not captured because ' + explanation + ' (' + code + '). Evidence: ' +
+            evidence.relative_to(inst.root).as_posix() + ' ' + marker + '\n')
     hook_inbox_append(n, line, marker)
 
 
@@ -436,10 +448,10 @@ def hook_inbox_append(n, line, marker):
         return path
 
 
-def best_effort_gap(inst, n, key, code, items=None, detail=None):
+def best_effort_gap(inst, n, key, code, items=None, detail=None, messages=None):
     """Never turn a failed gap write into a silent outer cmd_hook exception."""
     try:
-        capture_gap(inst, n, key, code, items, detail)
+        capture_gap(inst, n, key, code, items, detail, messages)
     except (Exception, SystemExit):
         # An unsafe/unwritable inbox cannot be written through. Runtime hook
         # diagnostics remain visible without exposing transcript/provider text.
@@ -504,15 +516,29 @@ def capture_stop(inst, n, data):
     if _m_common.outward_links(inst.root):
         best_effort_gap(inst, n, key, 'unsafe_instance_links')
         return 'Instruction capture cannot record evidence: repair unsafe instance links.'
-    state, cursor, pending = {}, None, []
+    state, cursor, pending, messages = {}, None, [], []
     try:
         state = capture_state(path)
         if state.get('rejected'):
-            return 'Instruction capture rejected structurally: ' + state['rejected']
+            # Older cores retained a rejected batch for a second blocking stop.
+            # Resume its cursor after recording the gap instead.
+            best_effort_gap(inst, n, key, 'invalid_answer')
+            state = dict(state.get('rejected_cursor') or {}, head=state.get('head'), pending=[])
+            save_state(path, state)
         if not isinstance(data.get('transcript_path'), str):
             raise AIUnavailable('transcript_path_unavailable')
         messages, cursor = snapshot(data['transcript_path'], state)
-        items, usage = classifications(messages) if messages else ([], None)
+        if messages:
+            from . import hook_budget
+            # Two attempts fit inside the declared Stop timeout, reserving the
+            # measured bookkeeping headroom rather than adding a new allowance.
+            timeout = min(20, hook_budget.derivation('refresh')['default_s'] / 2)
+            try:
+                items, usage = classifications(messages, timeout=timeout)
+            except (AIUnavailable, CaptureRejected, subprocess.TimeoutExpired):
+                items, usage = classifications(messages, retry=True, timeout=timeout)
+        else:
+            items, usage = [], None
         # Another agent's or the host's words never wait for a rule commit; the operator's
         # and any whose speaker the AI could not tell stay pending until converted.
         pending = state.get('pending', []) + [i for i in items if i['kind'] == 'standing_instruction'
@@ -526,20 +552,13 @@ def capture_stop(inst, n, data):
         if missing:
             return 'Capture standing instructions before stopping; missing same-turn citing rule commit and/or Gate line: ' + '; '.join(
                 json.dumps(i['quote'], ensure_ascii=False) for i in missing)
-    except CaptureRejected as error:
-        # Invalid AI structure is a refusal, distinct from provider unavailability.
-        state.update(rejected=str(error), rejected_cursor=cursor)
-        try:
-            save_state(path, state)
-        except (Exception, SystemExit):
-            best_effort_gap(inst, n, key, 'rejected_state_unavailable')
-        return 'Instruction capture rejected structurally: ' + str(error)
     except (Exception, SystemExit) as error:
-        code = str(error) if isinstance(error, AIUnavailable) else 'capture_evidence_unavailable'
-        episode = key if code == 'missing_key' else hashlib.sha256(
+        code = (str(error) if isinstance(error, AIUnavailable) else 'invalid_answer' if isinstance(error, CaptureRejected)
+                else 'timeout' if isinstance(error, subprocess.TimeoutExpired) else 'capture_evidence_unavailable')
+        episode = hashlib.sha256(
             (key + json.dumps(cursor or {}, sort_keys=True)).encode()).hexdigest()
         best_effort_gap(inst, n, episode, code, pending,
-                        error.detail if isinstance(error, AIUnavailable) else None)
+                        error.detail if isinstance(error, AIUnavailable) else None, messages=messages)
         try:
             if cursor is not None:
                 # A visible gap consumes the skipped batch; no automatic paid replay.

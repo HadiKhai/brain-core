@@ -245,7 +245,10 @@ class InstructionCapture(Scenario):
                 self.assertIsNone(self.stop(kind))
 
     def test_invented_quote_is_structurally_rejected(self):
-        self.assertIn('exact nonempty substring', self.stop(quote='An invented instruction.'))
+        self.assertIsNone(self.stop(quote='An invented instruction.'))
+        self.assertIn('(invalid_answer)', (self.root / 'inbox.md').read_text())
+        gap = next((self.root / '.brain/instruction-capture/gaps').glob('*.json'))
+        self.assertEqual(json.loads(gap.read_text())['items'], [])
 
     def test_all_messages_and_mixed_items_checked_in_one_call(self):
         self.message('How many rows?')
@@ -273,9 +276,28 @@ class InstructionCapture(Scenario):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         inbox = (self.root / 'inbox.md').read_text()
-        self.assertEqual(inbox.count('"kind": "instruction-capture-gap"'), 1)
-        self.assertIn('"code": "missing_key"', inbox)
-        self.assertNotIn(self.quote, inbox)
+        self.assertEqual(inbox.count('<!-- instruction-capture-gap:'), 1)
+        self.assertIn('(missing_key)', inbox)
+        self.assertIn(self.quote, inbox)
+
+    def test_timeout_retries_once_then_files_one_readable_gap_without_blocking_stop(self):
+        with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('timeout')) as call:
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        self.assertEqual(call.call_count, 2)
+        self.assertIn('one retry', call.call_args_list[1].args[0])
+        inbox = (self.root / 'inbox.md').read_text()
+        self.assertEqual(inbox.count('<!-- instruction-capture-gap:'), 1)
+        self.assertIn('2020-01-01T00:00:00Z beginning "Always preserve original evidence."', inbox)
+        self.assertIn('provider timed out', inbox)
+
+    def test_provider_failure_retry_can_capture_a_valid_answer(self):
+        answers = [self.capture.AIUnavailable('provider_or_network'), self.answer(
+            {'messages': [{'id': '0', 'text': self.quote}]}, 'one_off')]
+        with mock.patch.object(self.capture, 'ai_json', side_effect=answers) as call:
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+        self.assertEqual(call.call_count, 2)
+        self.assertNotIn('instruction-capture-gap', (self.root / 'inbox.md').read_text())
 
     def test_busy_inbox_queues_gap_for_existing_drain(self):
         with mock.patch.object(self.capture._m_transitions, 'inbox_append', side_effect=BlockingIOError), \
@@ -283,7 +305,7 @@ class InstructionCapture(Scenario):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         rows = list(self.m.hook_question_queue(self.n).glob('*.json'))
         self.assertEqual(len(rows), 1)
-        self.assertIn('"code": "timeout"', json.loads(rows[0].read_text())['line'])
+        self.assertIn('(timeout)', json.loads(rows[0].read_text())['line'])
 
     def test_worker_identity_is_not_gated_even_in_node_folder(self):
         with mock.patch.object(self.capture, 'ai_json', side_effect=AssertionError('worker called AI')):
@@ -490,22 +512,23 @@ class InstructionCapture(Scenario):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, active))
         self.assertIn('second_stop_evidence_unavailable', stderr.getvalue())
 
-    def test_rejected_batch_is_not_retried_and_second_stop_records_unclassified_gap(self):
+    def test_rejected_batch_retries_once_records_gap_and_never_blocks(self):
         with mock.patch.object(self.capture, 'ai_json', side_effect=lambda system, data, schema, **kw:
                                self.answer(data, quote='invented')) as call:
-            self.assertIn('rejected structurally', self.capture.capture_stop(self.inst, self.n, self.data))
-            self.assertIn('rejected structurally', self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
+            self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, {**self.data, 'stop_hook_active': True}))
-        call.assert_called_once()
-        self.assertIn('second_stop_unclassified', (self.root / 'inbox.md').read_text())
+        self.assertEqual(call.call_count, 2)
+        self.assertIn('(invalid_answer)', (self.root / 'inbox.md').read_text())
+        self.assertIn('2020-01-01T00:00:00Z beginning', (self.root / 'inbox.md').read_text())
 
-    def test_missing_key_deduplicates_across_turns_and_does_not_create_note_event(self):
+    def test_missing_key_records_each_message_once_and_does_not_create_note_event(self):
         with mock.patch.object(self.capture, 'ai_json', side_effect=self.capture.AIUnavailable('missing_key')):
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
             self.message('How many rows?')
             self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
         inbox = (self.root / 'inbox.md').read_text()
-        self.assertEqual(inbox.count('"kind": "instruction-capture-gap"'), 1)
+        self.assertEqual(inbox.count('<!-- instruction-capture-gap:'), 2)
         events = self.m.hook_note_events(self.n)
         self.assertFalse(any(e['label'].startswith('inbox:') for e in events.values()))
 
@@ -842,13 +865,13 @@ class InstructionCapture(Scenario):
                         mock.patch.object(client.subprocess, 'run', side_effect=run):
                     self.assertIsNone(self.capture.capture_stop(self.inst, self.n, self.data))
                 inbox = (self.root / 'inbox.md').read_text()
-                self.assertIn('"code": "' + code + '"', inbox)
-                self.assertNotIn(self.quote, inbox)
+                self.assertIn('(' + code + ')', inbox)
+                self.assertIn(self.quote, inbox)
                 self.assertNotIn('private', inbox)
-                line = inbox.split('from runtime: ')[-1].split(' <!--')[0]
-                record = json.loads(line)
+                evidence = inbox.split('Evidence: ')[-1].split(' <!--')[0]
+                record = json.loads((self.root / evidence).read_text())
                 self.assertEqual(record['cause'], stage)
-                self.assertEqual(set(record) - {'returncode'},
+                self.assertEqual(set(record) - {'returncode', 'items', 'messages'},
                                  {'kind', 'code', 'node', 'capture', 'cause', 'diagnostic'})
                 path = self.root / '.brain/instruction-capture' / record['diagnostic']
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)

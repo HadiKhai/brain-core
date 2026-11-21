@@ -636,7 +636,7 @@ def wake_actionable_pending(inst, path, terminal_quarantine=False):
     return True
 
 
-def request_wake(inst, n, reason, items=None, explicit=False):
+def request_wake(inst, n, reason, items=None, explicit=False, start=True):
     """Fail open, enqueue then detach; never run a transport in the hook's process."""
     try:
         target, command = wake_configured_route(inst, n)
@@ -690,7 +690,7 @@ def request_wake(inst, n, reason, items=None, explicit=False):
             _m_common.atomic_write(pending, json.dumps({'items': refs, 'source': wake_binding(n['id']),
                               'binding': _m_wake_turns.wake_turn_binding(inst, target),
                               **({'explicit_kinds': True} if explicit else {})}) + '\n', private=True)
-        if not disabled:
+        if not disabled and start:
             wake_start(inst, target)
         return True
     except (Exception, SystemExit):
@@ -1130,8 +1130,15 @@ def cmd_wake(a):
         if not wake_configured_route(inst, n)[1]:
             print('wake unavailable: no transport configured; no request queued; configure before retrying', file=sys.stderr)
             sys.exit(2)
-        if not request_wake(inst, n, a.reason):
+        if not request_wake(inst, n, a.reason, start=False):
             _m_common.die('wake request not queued; source work remains retryable')
+        target, _ = wake_configured_route(inst, n)
+        if not wake_route_disabled(inst, n, target):
+            wake_drain(inst, target, once=True)
+        delivered, detail = _m_wake_turns.wake_command_result(inst, n, a.reason)
+        print(detail, file=sys.stdout if delivered else sys.stderr)
+        if not delivered:
+            sys.exit(2)
     else:
         _m_common.die('usage: brain wake <node> "<reason>"')
 
@@ -1786,6 +1793,26 @@ def hook_stop(a):
     previous = event_cache.get(node_key)
     previous = previous if isinstance(previous, dict) else {}
     why = notes_lag(inst, n, events, previous)
+    # Committed records are the stop requirement. Display freshness is retried
+    # by the next quiet CLI command, even if a refresh failed or was killed.
+    refresh_only = [w for w in why if ' changed after facts; run brain status ' in w
+                    or w.startswith('changed after status.md:')]
+    status_path = n['dir'] / 'status.md'
+    refresh_pending = refresh_only or ([event['label'] + ' changed after facts' for event in events.values()
+                                       if event['mtime'] > status_path.stat().st_mtime]
+                                      if status_path.exists() else [])
+    record_paths = [n['dir'] / 'inbox.md', n['dir'] / _m_jobs.JOBS_FILE, n['dir'] / 'job-handbacks']
+    records = (_m_common.git('status', '--porcelain', '--',
+                            *[str(p.relative_to(inst.root)) for p in record_paths], cwd=inst.root)
+               if refresh_pending else None)
+    if (refresh_pending and not any(w.startswith('not committed:') for w in why)
+            and records.returncode == 0 and not records.stdout.strip()):
+        from . import status_refresh
+        try:
+            status_refresh.defer_stop(inst, n, '; '.join(refresh_pending))
+        except (Exception, SystemExit):
+            pass  # display bookkeeping never holds a committed turn
+        why = [w for w in why if w not in refresh_only]
     now = inst.now_dt()
     last = state.get(sid)
     last = inst.parse_time(last) if isinstance(last, str) else None
@@ -1832,8 +1859,8 @@ def hook_stop(a):
     reason = (f"Before you stop, node `{n['id']}`: " + (upgrade + ". Also: " if upgrade else "") +
               f"{'; '.join(why)}. If you are this node's coordinator, record "
               f"what this conversation decided, started, finished or blocked (decisions.md; status.md and its "
-              f"Updated line; timestamps from `core/bin/brain now`; preserve the generated facts block and run "
-              f"`core/bin/brain status {n['id']} --refresh`), then commit `{n['id']}: <what changed>`. If you are a worker, don't edit those files: append anything "
+              f"Updated line; timestamps from `core/bin/brain now`; preserve the generated facts block), "
+              f"then commit `{n['id']}: <what changed>`. Facts refresh separately at the next quiet command. If you are a worker, don't edit those files: append anything "
               f"the coordinator should know to inbox.md. If this conversation changed nothing here (you only read "
               f"this node, or it isn't yours), record nothing and end with `relay only`; the stop hook accepts "
               f"that short reply without another notes check.")
